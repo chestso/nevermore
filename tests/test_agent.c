@@ -191,7 +191,14 @@ static void cap_state(NmAgentState state, void *userdata)
 /* Fixture                                                           */
 /* ---------------------------------------------------------------- */
 
+#ifdef _WIN32
+/* Forward slashes: they ride inside a JSON string (the tool-call
+ * arguments) and fopen on Windows accepts them as-is. Backslashes
+ * would need double-escaping in the SSE literal below. */
+#define FIXTURE "C:/Users/Public/nm-test-agent-file.txt"
+#else
 #define FIXTURE "/tmp/nm-test-agent-file.txt"
+#endif
 
 static void write_fixture(void)
 {

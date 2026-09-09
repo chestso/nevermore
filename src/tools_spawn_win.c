@@ -149,31 +149,91 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     nm_json_free(args); /* cmd copied */
 
     /* Shell semantics: cmd.exe /c cmd, combined capture. */
+    /* nm_spawn_capture_os wraps each argv element in quotes; a quoted
+     * "cmd.exe /c ..." line makes CreateProcessW look for an
+     * executable literally named "cmd.exe /c echo hi". Pass the
+     * command line as the application name instead — the W in
+     * CreateProcessW takes a raw command line. */
     char cmdline[8192];
-    snprintf(cmdline, sizeof(cmdline), "cmd.exe /c %s", cmd);
-    const char *argv[] = { cmdline, NULL };
-    char *output = NULL;
-    int code = -1;
-    /* nm_spawn_capture_os joins argv[0] quoted; build directly
-     * without extra quoting by passing the full command line. */
-    if (nm_spawn_capture_os(argv, &output, &code) != 0) {
-        free(cmd);
+    snprintf(cmdline, sizeof(cmdline), "cmd.exe /d /c %s", cmd);
+    wchar_t *wcmd = utf8_to_wide(cmdline);
+    free(cmd);
+    if (!wcmd)
+        return nm_tool_result_error("out of memory");
+
+    /* Pipe: child's stdout+stderr both write to the write end. */
+    HANDLE rpipe = NULL, wpipe = NULL;
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    if (!CreatePipe(&rpipe, &wpipe, &sa, 0)) {
+        LocalFree(wcmd);
         return nm_tool_result_error("failed to start command");
     }
-    free(cmd); /* cmdline copied the text; argv consumed already */
+    SetHandleInformation(rpipe, HANDLE_FLAG_INHERIT, 0);
 
-    size_t len = output ? strlen(output) : 0;
-    char *body = malloc(len + 64);
+    STARTUPINFOW si = { 0 };
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = wpipe;
+    si.hStdError = wpipe;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi = { 0 };
+    if (!CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si,
+                        &pi)) {
+        LocalFree(wcmd);
+        CloseHandle(rpipe);
+        CloseHandle(wpipe);
+        return nm_tool_result_error("failed to start command");
+    }
+    LocalFree(wcmd);
+    CloseHandle(wpipe); /* our copy; the child owns its inherit */
+
+    /* Read the child's output into one growable buffer. */
+    size_t cap = 4096, len = 0;
+    char *buf = malloc(cap + 1);
+    if (!buf) {
+        CloseHandle(rpipe);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        return nm_tool_result_error("out of memory");
+    }
+    for (;;) {
+        if (len + 4096 > cap) {
+            cap *= 2;
+            char *nb = realloc(buf, cap + 1);
+            if (!nb)
+                break;
+            buf = nb;
+        }
+        DWORD got = 0;
+        if (!ReadFile(rpipe, buf + len, (DWORD)(cap - len), &got, NULL) || got == 0)
+            break;
+        len += got;
+        if (len >= SPAWN_CAPTURE_MAX)
+            break;
+    }
+    CloseHandle(rpipe);
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    DWORD st = 0;
+    GetExitCodeProcess(pi.hProcess, &st);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    buf[len] = '\0';
+
+    size_t body_len = len + 64;
+    char *body = malloc(body_len);
     if (!body) {
-        free(output);
+        free(buf);
         return nm_tool_result_error("out of memory");
     }
     if (len)
-        snprintf(body, len + 64, "Output:\n%s", output);
+        snprintf(body, body_len, "Output:\n%s", buf);
     else
-        snprintf(body, 64, "Output: (empty)\n");
-    free(output);
-    NmToolResult r = { code == 0, body };
+        snprintf(body, body_len, "Output: (empty)\n");
+    free(buf);
+    NmToolResult r = { (int)st == 0, body };
     return r;
 }
 

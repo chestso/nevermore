@@ -113,10 +113,16 @@ static void test_read_file_byte_exact(void)
     fputs("alpha\nbeta\r\ngamma", f); /* mixed endings, no trailing LF */
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args), "{\"path\":\"%s\"}", path);
+    /* Build the args as a JSON tree — raw snprintf of a Windows path
+     * leaves the backslashes unescaped and the parser rejects the
+     * whole object ("bad escape"). */
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -135,11 +141,15 @@ static void test_read_file_line_numbers_and_window(void)
     fclose(f);
 
     NmToolset *ts = nm_toolset_new_defaults();
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"line_numbers\":true,\"offset\":2,\"limit\":2}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "line_numbers", nm_json_new_bool(1));
+    nm_json_set(jargs, "offset", nm_json_new_number(2));
+    nm_json_set(jargs, "limit", nm_json_new_number(2));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
     /* Lines 2-3 numbered; true file numbers (offset-relative). */
@@ -174,13 +184,15 @@ static void test_edit_file_unique_replace(void)
     fputs("int x = 1;\nint y = 2;\n", f);
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"old_string\":\"int x = 1;\","
-             "\"new_string\":\"int x = 42;\"}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("int x = 1;"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("int x = 42;"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
     /* Verify the file on disk. */
@@ -204,12 +216,15 @@ static void test_edit_file_ambiguous_fails_loudly(void)
     fputs("tok\ntok\ntok\n", f);
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"old_string\":\"tok\",\"new_string\":\"zap\"}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("tok"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("zap"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_FALSE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -236,13 +251,16 @@ static void test_edit_file_replace_all(void)
     fputs("tok\ntok\ntok\n", f);
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"old_string\":\"tok\","
-             "\"new_string\":\"zap\",\"replace_all\":true}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("tok"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("zap"));
+    nm_json_set(jargs, "replace_all", nm_json_new_bool(1));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
 
@@ -266,13 +284,15 @@ static void test_edit_file_no_match(void)
     fputs("content\n", f);
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"old_string\":\"not there\","
-             "\"new_string\":\"x\"}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("not there"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("x"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_FALSE(r.ok);
     ASSERT_TRUE(strstr(r.output, "no match") != NULL);
@@ -287,13 +307,16 @@ static void test_edit_file_multiline_literal(void)
     fputs("a\nb\nc\n", f);
     fclose(f);
 
-    char args[512];
     /* Multiline old_string with an embedded newline is one literal. */
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"old_string\":\"a\\nb\",\"new_string\":\"z\"}",
-             path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("a\nb"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("z"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
 
@@ -318,10 +341,13 @@ static void test_list_dir(void)
 {
     /* The scratch dir exists with at least one file in it by now. */
     char *dir = strdup(scratch_dir());
-    char args[512];
-    snprintf(args, sizeof(args), "{\"path\":\"%s\"}", dir);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(dir));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "list_dir", args, NULL);
+    free(args);
     free(dir);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -338,11 +364,14 @@ static void test_search_dir_literal(void)
     fputs("nothing here\nthe NEEDLE line\nlast\n", f);
     fclose(f);
 
-    char args[512];
-    snprintf(args, sizeof(args),
-             "{\"path\":\"%s\",\"needle\":\"NEEDLE\"}", scratch_dir());
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(scratch_dir()));
+    nm_json_set(jargs, "needle", nm_json_new_string("NEEDLE"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    free(args);
     free(path);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -358,6 +387,8 @@ static void test_search_dir_literal(void)
 static void test_run_command_exit_zero(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
+#ifdef _WIN32
+    /* cmd.exe: "echo hi" prints "hi"; no `>&2` on the stderr case. */
     NmToolResult r =
         nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
     ASSERT_TRUE(r.ok);
@@ -365,13 +396,28 @@ static void test_run_command_exit_zero(void)
     ASSERT_TRUE(strstr(r.output, "hi") != NULL);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
+#else
+    NmToolResult r =
+        nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "hi") != NULL);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+#endif
 }
 
 static void test_run_command_exit_nonzero(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
+#ifdef _WIN32
+    /* cmd.exe: "exit 3" after echo; stderr redirect syntax differs. */
+    NmToolResult r = nm_toolset_execute(
+        ts, "run_command", "{\"cmd\":\"echo err 1>&2 & exit 3\"}", NULL);
+#else
     NmToolResult r = nm_toolset_execute(
         ts, "run_command", "{\"cmd\":\"echo err >&2; exit 3\"}", NULL);
+#endif
     ASSERT_FALSE(r.ok);
     ASSERT_NOT_NULL(r.output);
     /* Combined capture: stderr text rides the same output. */
@@ -383,11 +429,17 @@ static void test_run_command_exit_nonzero(void)
 static void test_spawn_capture_api(void)
 {
     /* The raw seam: argv, capture, exit code. */
+#ifdef _WIN32
+    const char *argv[] = { "cmd.exe /d /c echo out& exit /b 5", NULL };
+    const char *expect = "out\r\n";
+#else
     const char *argv[] = { "sh", "-c", "printf out; exit 5", NULL };
+    const char *expect = "out";
+#endif
     char *output = NULL;
     int code = -1;
     ASSERT_EQ(nm_spawn_capture(argv, &output, &code), 0);
-    ASSERT_STR_EQ(output, "out");
+    ASSERT_STR_EQ(output, expect);
     ASSERT_EQ(code, 5);
     free(output);
 }
