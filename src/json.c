@@ -228,7 +228,8 @@ static char *parse_string_raw(Parser *p)
             }
         }
         arena_out_len = out_len;
-    }    size_t qend = i; /* index of the closing quote */
+    }
+    size_t qend = i; /* index of the closing quote */
     char *out = arena_alloc(p->arena, arena_out_len + 1);
     if (!out)
         return NULL;
@@ -242,15 +243,32 @@ static char *parse_string_raw(Parser *p)
                 break;
             char e = p->s[i];
             switch (e) {
-            case '"': out[o++] = '"'; break;
-            case '\\': out[o++] = '\\'; break;
-            case '/': out[o++] = '/'; break;
-            case 'b': out[o++] = '\b'; break;
-            case 'f': out[o++] = '\f'; break;
-            case 'n': out[o++] = '\n'; break;
-            case 'r': out[o++] = '\r'; break;
-            case 't': out[o++] = '\t'; break;
-            case 'u': {
+            case '"':
+                out[o++] = '"';
+                break;
+            case '\\':
+                out[o++] = '\\';
+                break;
+            case '/':
+                out[o++] = '/';
+                break;
+            case 'b':
+                out[o++] = '\b';
+                break;
+            case 'f':
+                out[o++] = '\f';
+                break;
+            case 'n':
+                out[o++] = '\n';
+                break;
+            case 'r':
+                out[o++] = '\r';
+                break;
+            case 't':
+                out[o++] = '\t';
+                break;
+            case 'u':
+            {
                 if (i + 4 >= p->len) {
                     if (p->err)
                         *p->err = "bad \\u escape";
@@ -265,8 +283,7 @@ static char *parse_string_raw(Parser *p)
                         return NULL;
                     }
                 }
-                unsigned cp = (unsigned)h[0] << 12 | (unsigned)h[1] << 8
-                              | (unsigned)h[2] << 4 | (unsigned)h[3];
+                unsigned cp = (unsigned)h[0] << 12 | (unsigned)h[1] << 8 | (unsigned)h[2] << 4 | (unsigned)h[3];
                 /* UTF-8 encode (no surrogate pairs — models never emit
                  * them, and unpaired surrogates are an error anyway). */
                 if (cp < 0x80) {
@@ -410,10 +427,7 @@ static NmJson *parse_number(Parser *p)
     size_t start = p->pos;
     if (p->pos < p->len && (p->s[p->pos] == '-' || p->s[p->pos] == '+'))
         p->pos++;
-    while (p->pos < p->len && ((p->s[p->pos] >= '0' && p->s[p->pos] <= '9')
-                                || p->s[p->pos] == '.' || p->s[p->pos] == 'e'
-                                || p->s[p->pos] == 'E' || p->s[p->pos] == '-'
-                                || p->s[p->pos] == '+'))
+    while (p->pos < p->len && ((p->s[p->pos] >= '0' && p->s[p->pos] <= '9') || p->s[p->pos] == '.' || p->s[p->pos] == 'e' || p->s[p->pos] == 'E' || p->s[p->pos] == '-' || p->s[p->pos] == '+'))
         p->pos++;
     char tmp[64];
     size_t n = p->pos - start;
@@ -451,7 +465,8 @@ static NmJson *parse_value(Parser *p)
         return parse_object(p);
     case '[':
         return parse_array(p);
-    case '"': {
+    case '"':
+    {
         NmJson *v = new_node(p, NM_JSON_STRING);
         if (!v)
             return NULL;
@@ -669,9 +684,61 @@ static void free_built(NmJson *v)
     free(v);
 }
 
+/* Deep-convert a parsed (arena-owned) subtree into a heap-owned
+ * built tree. Object/array children are copied recursively; string
+ * values and keys are strdup'd so nothing borrows arena memory.
+ * Used when grafting parsed nodes into a built tree — a built tree
+ * must be uniformly heap-owned, or free_built() bad-frees borrowed
+ * pointers. Returns the same node if already built. */
+static NmJson *clone_built(const NmJson *v)
+{
+    if (!v)
+        return NULL;
+    if (v->heap_owned)
+        return (NmJson *)v;
+    switch (v->type) {
+    case NM_JSON_OBJECT:
+    {
+        NmJson *o = build_new(NM_JSON_OBJECT);
+        if (!o)
+            return NULL;
+        for (size_t i = 0; i < v->u.obj.len; i++) {
+            NmJson *cv = clone_built(v->u.obj.members[i].val);
+            if (!cv)
+                continue; /* OOM: skip member rather than alias arena */
+            nm_json_set(o, v->u.obj.members[i].key, cv);
+        }
+        return o;
+    }
+    case NM_JSON_ARRAY:
+    {
+        NmJson *a = build_new(NM_JSON_ARRAY);
+        if (!a)
+            return NULL;
+        for (size_t i = 0; i < v->u.arr.len; i++) {
+            NmJson *cv = clone_built(v->u.arr.items[i]);
+            if (cv)
+                nm_json_push(a, cv);
+        }
+        return a;
+    }
+    case NM_JSON_STRING:
+        return nm_json_new_string(v->u.string);
+    case NM_JSON_NUMBER:
+        return nm_json_new_number(v->u.number);
+    case NM_JSON_BOOL:
+        return nm_json_new_bool(v->u.boolean);
+    default:
+        return nm_json_new_null();
+    }
+}
+
 void nm_json_set(NmJson *obj, const char *key, NmJson *v)
 {
     if (!obj || obj->type != NM_JSON_OBJECT || !key || !v)
+        return;
+    v = clone_built(v); /* parsed nodes become heap-owned on graft */
+    if (!v)
         return;
     for (size_t i = 0; i < obj->u.obj.len; i++) {
         if (strcmp(obj->u.obj.members[i].key, key) == 0) {
@@ -696,6 +763,9 @@ void nm_json_set(NmJson *obj, const char *key, NmJson *v)
 void nm_json_push(NmJson *arr, NmJson *v)
 {
     if (!arr || arr->type != NM_JSON_ARRAY || !v)
+        return;
+    v = clone_built(v); /* parsed nodes become heap-owned on graft */
+    if (!v)
         return;
     if (arr->u.arr.len == arr->u.arr.cap) {
         size_t nc = arr->u.arr.cap ? arr->u.arr.cap * 2 : 8;
@@ -759,7 +829,8 @@ static void dump_value(DumpBuf *b, const NmJson *v)
     case NM_JSON_BOOL:
         db_puts(b, v->u.boolean ? "true" : "false");
         break;
-    case NM_JSON_NUMBER: {
+    case NM_JSON_NUMBER:
+    {
         char tmp[64];
         /* Integral numbers serialize without a trailing .0 — the
          * wire format for counts and indices. */
@@ -771,19 +842,34 @@ static void dump_value(DumpBuf *b, const NmJson *v)
         db_puts(b, tmp);
         break;
     }
-    case NM_JSON_STRING: {
+    case NM_JSON_STRING:
+    {
         const char *s = v->u.string ? v->u.string : "";
         db_putc(b, '"');
         for (const char *p = s; *p; p++) {
             unsigned char c = (unsigned char)*p;
             switch (c) {
-            case '"': db_puts(b, "\\\""); break;
-            case '\\': db_puts(b, "\\\\"); break;
-            case '\b': db_puts(b, "\\b"); break;
-            case '\f': db_puts(b, "\\f"); break;
-            case '\n': db_puts(b, "\\n"); break;
-            case '\r': db_puts(b, "\\r"); break;
-            case '\t': db_puts(b, "\\t"); break;
+            case '"':
+                db_puts(b, "\\\"");
+                break;
+            case '\\':
+                db_puts(b, "\\\\");
+                break;
+            case '\b':
+                db_puts(b, "\\b");
+                break;
+            case '\f':
+                db_puts(b, "\\f");
+                break;
+            case '\n':
+                db_puts(b, "\\n");
+                break;
+            case '\r':
+                db_puts(b, "\\r");
+                break;
+            case '\t':
+                db_puts(b, "\\t");
+                break;
             default:
                 if (c < 0x20) {
                     char tmp[8];

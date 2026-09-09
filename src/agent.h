@@ -35,10 +35,16 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata);
 void nm_agent_free(NmAgent *a);
 
+/* Endpoint configuration: base URL override (NULL = provider default)
+ * and API key (NULL = none). The key is copied; the base URL is
+ * borrowed from the caller and must outlive the agent. */
+void nm_agent_set_endpoint(NmAgent *a, const char *base_url,
+                           const char *api_key);
+
 /* Register UI callbacks. */
-void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb);    /* text chunks */
-void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);       /* tool start/end */
-void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);      /* spinner state */
+void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
+void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */
+void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
 
 /* Run one user turn to completion: the full
  * stream -> tool-call -> execute -> stream cycle. Blocking; UI

@@ -99,10 +99,11 @@ typedef struct Capture
     size_t len;
 } Capture;
 
-static void capture_delta(const char *delta_text, const char *tool_call_json,
-                          void *userdata)
+static void capture_delta(const char *delta_text, const NmToolCall *tool_calls,
+                          size_t n_tool_calls, void *userdata)
 {
-    (void)tool_call_json;
+    (void)tool_calls;
+    (void)n_tool_calls;
     Capture *cap = userdata;
     if (delta_text && cap->len + strlen(delta_text) < sizeof(cap->text)) {
         memcpy(cap->text + cap->len, delta_text, strlen(delta_text));
@@ -127,7 +128,7 @@ static void test_chat_stream_end_to_end(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
                             "nevermore-test" };
-    NmMessage msg = { "user", "say hi" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { { 0 }, 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, "you are terse", NULL, -1, -1,
@@ -142,8 +143,7 @@ static void test_chat_stream_end_to_end(void)
 
     /* Validate the request the server actually received: model,
      * stream:true, system + user messages, auth header. */
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions HTTP/1.1")
-                != NULL);
+    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions HTTP/1.1") != NULL);
     ASSERT_TRUE(strstr(last_request, "Host: 127.0.0.1:") != NULL);
     ASSERT_TRUE(strstr(last_request, "Authorization: Bearer test-key") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"model\":\"gpt-oss:20b\"") != NULL);

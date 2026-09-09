@@ -38,38 +38,60 @@ typedef enum
 
 typedef struct NmModel
 {
-    const char *id;        /* wire model id, e.g. "qwen3-coder:latest" */
-    const char *label;    /* display label */
-    int vision;           /* accepts image content parts */
-    long context_length;  /* -1 = unknown */
+    const char *id;      /* wire model id, e.g. "qwen3-coder:latest" */
+    const char *label;   /* display label */
+    int vision;          /* accepts image content parts */
+    long context_length; /* -1 = unknown */
 } NmModel;
 
 typedef struct NmMessage
 {
     const char *role;    /* "system" | "user" | "assistant" | "tool" */
     const char *content; /* markdown text; NULL when only tool_calls present */
+    /* Tool-call round-trip (phase 3): an assistant message may carry
+     * its wire tool_calls array as pre-serialized JSON (one element
+     * per call, OpenAI shape), and a "tool" role message names the
+     * call it answers via tool_call_id. NULL otherwise. */
+    const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
+    const char *tool_call_id;    /* "tool" role: answered call id or NULL */
 } NmMessage;
+
+typedef struct NmToolCall
+{
+    char *id;        /* wire id, e.g. "call_q0lmpmk"; heap-owned */
+    char *name;      /* tool name; heap-owned */
+    char *args_json; /* assembled function arguments; heap-owned */
+    /* Assembly bookkeeping (openai_client); not part of the wire
+     * contract. args_json grows geometrically across chunks. */
+    size_t args_len;
+    size_t args_cap;
+} NmToolCall;
 
 /* Streaming callback. Called with delta text chunks as they arrive
  * over SSE; called once more with NULL content at stream completion.
- * tool_call_chunks is non-NULL when the delta carries tool arguments. */
+ * tool_calls is non-NULL when the completed stream carried function
+ * calls: n_tool_calls entries, heap-owned args_json freed with
+ * nm_tool_calls_free(). */
 typedef void (*NmStreamCallback)(const char *delta_text,
-                                 const char *tool_call_json, void *userdata);
+                                 const NmToolCall *tool_calls,
+                                 size_t n_tool_calls, void *userdata);
+
+void nm_tool_calls_free(NmToolCall *calls, size_t n);
 
 typedef enum
 {
     NM_CHAT_OK = 0,
     NM_CHAT_ERR_TRANSPORT,
-    NM_CHAT_ERR_HTTP,    /* non-2xx; http_status + error body filled in */
-    NM_CHAT_ERR_PARSE,   /* wire response wasn't valid JSON/SSE */
-    NM_CHAT_ERR_AUTH     /* 401/403 */
+    NM_CHAT_ERR_HTTP,  /* non-2xx; http_status + error body filled in */
+    NM_CHAT_ERR_PARSE, /* wire response wasn't valid JSON/SSE */
+    NM_CHAT_ERR_AUTH   /* 401/403 */
 } NmChatStatus;
 
 typedef struct NmChatResult
 {
     NmChatStatus status;
-    int http_status;      /* HTTP status code when status == NM_CHAT_ERR_HTTP */
-    char *error_body;    /* provider error text when HTTP failed; heap-owned */
+    int http_status;  /* HTTP status code when status == NM_CHAT_ERR_HTTP */
+    char *error_body; /* provider error text when HTTP failed; heap-owned */
 } NmChatResult;
 
 typedef struct NmChatRequest
@@ -77,10 +99,10 @@ typedef struct NmChatRequest
     const char *model;
     const NmMessage *messages;
     size_t n_messages;
-    const char *system;   /* optional system prompt, prepended by the client */
+    const char *system;     /* optional system prompt, prepended by the client */
     const char *tools_json; /* optional JSON array of tool schemas, or NULL */
-    double temperature;  /* -1 = provider default */
-    long max_tokens;      /* -1 = provider default */
+    double temperature;     /* -1 = provider default */
+    long max_tokens;        /* -1 = provider default */
     NmStreamCallback on_delta;
     void *userdata;
 } NmChatRequest;
@@ -89,7 +111,7 @@ typedef struct NmChatRequest
 struct NmProvider
 {
     NmProviderId id;
-    const char *name;      /* "hyper", "ollama", "openai", "openrouter" */
+    const char *name; /* "hyper", "ollama", "openai", "openrouter" */
     const char *default_base_url;
 
     /* Streaming chat completion. Blocking; on_delta fires from inside. */

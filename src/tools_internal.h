@@ -15,4 +15,7 @@ extern const NmTool nm_tool_edit_file;
 extern const NmTool nm_tool_list_dir;
 extern const NmTool nm_tool_search_dir;
 
+/* tools_spawn_posix.c / tools_spawn_win.c: run_command tool. */
+extern const NmTool nm_tool_run_command;
+
 #endif // NM_TOOLS_INTERNAL_H

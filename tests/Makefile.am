@@ -7,7 +7,10 @@ check_PROGRAMS = \
     test_provider \
     test_wire \
     test_openai_client \
-    test_tls
+    test_tls \
+    test_session \
+    test_tools \
+    test_agent
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -59,6 +62,27 @@ test_tls_SOURCES = test_tls.c ../src/transport.c ../src/transport_socket.c \
     ../src/tls_openssl.c
 test_tls_CFLAGS = $(TEST_CFLAGS) $(OPENSSL_CFLAGS)
 test_tls_LDADD = -lpthread $(OPENSSL_LIBS)
+
+# Session: transcript + context window (pure C, links session.c).
+test_session_SOURCES = test_session.c ../src/session.c
+test_session_CFLAGS = $(TEST_CFLAGS)
+
+# Tools: registry + schemas + file tools + spawn (canned temp files).
+test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
+    ../src/tools_spawn_posix.c ../src/json.c
+test_tools_CFLAGS = $(TEST_CFLAGS)
+test_tools_LDADD = -lpthread
+
+# Agent: the full stream -> tool -> stream loop against a canned
+# loopback SSE server (the openai vtable with a test endpoint).
+test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
+    ../src/tools.c ../src/tools_file.c ../src/tools_spawn_posix.c \
+    ../src/json.c ../src/sse.c ../src/openai_client.c \
+    ../src/transport.c ../src/transport_socket.c ../src/tls_openssl.c \
+    ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_openai.c ../src/provider_openrouter.c
+test_agent_CFLAGS = $(TEST_CFLAGS) $(OPENSSL_CFLAGS)
+test_agent_LDADD = -lpthread $(OPENSSL_LIBS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)

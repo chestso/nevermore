@@ -25,7 +25,7 @@
 #include "sse.h"
 #include "transport_internal.h"
 
-#define READ_BUF_CAP 16384
+#define READ_BUF_CAP   16384
 #define ERROR_BODY_MAX 2048 /* like quoth's openai error-body cap */
 
 /* ---------------------------------------------------------------- */
@@ -98,6 +98,23 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         nm_json_set(m, "role", nm_json_new_string(req->messages[i].role));
         nm_json_set(m, "content",
                     nm_json_new_string(req->messages[i].content));
+        /* Tool-call round-trip: an assistant message may carry its
+         * tool_calls array (pre-serialized JSON, embedded verbatim);
+         * a tool message names the call it answers. */
+        if (req->messages[i].tool_calls_json && *req->messages[i].tool_calls_json) {
+            const char *jerr = NULL;
+            NmJson *tcs = nm_json_parse(req->messages[i].tool_calls_json,
+                                        strlen(req->messages[i].tool_calls_json),
+                                        &jerr);
+            if (tcs) {
+                nm_json_set(m, "tool_calls", tcs);
+                nm_json_free(tcs); /* set() deep-copied it */
+            }
+            /* Malformed array: omit rather than fail the turn. */
+        }
+        if (req->messages[i].tool_call_id && *req->messages[i].tool_call_id)
+            nm_json_set(m, "tool_call_id",
+                        nm_json_new_string(req->messages[i].tool_call_id));
         nm_json_push(messages, m);
     }
     nm_json_set(body, "model", nm_json_new_string(req->model));
@@ -113,9 +130,10 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
     if (req->tools_json && *req->tools_json) {
         const char *err = NULL;
         NmJson *tools = nm_json_parse(req->tools_json,
-                                     strlen(req->tools_json), &err);
+                                      strlen(req->tools_json), &err);
         if (tools) {
             nm_json_set(body, "tools", tools);
+            nm_json_free(tools); /* set() deep-copied it */
             nm_json_set(body, "tool_choice", nm_json_new_string("auto"));
         }
         /* Malformed schema: omit tools rather than fail the turn —
@@ -135,12 +153,32 @@ typedef struct StreamState
 {
     NmSseParser *sse;
     const NmChatRequest *req;
-    int done;             /* [DONE] seen or fatal error */
-    NmChatStatus status;  /* final status */
+    int done;            /* [DONE] seen or fatal error */
+    NmChatStatus status; /* final status */
     int http_status;
-    char *error_body;    /* captured non-SSE error body, capped */
+    char *error_body; /* captured non-SSE error body, capped */
     size_t error_len;
+    /* Assembled tool calls (index-addressed, per-stream; buffers
+     * reused across chunks). Ownership moves to the on_delta
+     * receiver at the final NULL-content callback (freed by the
+     * receiver with nm_tool_calls_free); freed by the client when
+     * the stream dies or no receiver is registered. */
+    NmToolCall *tool_calls;
+    size_t n_tool_calls;
+    size_t tc_cap;
 } StreamState;
+
+void nm_tool_calls_free(NmToolCall *calls, size_t n)
+{
+    if (!calls)
+        return;
+    for (size_t i = 0; i < n; i++) {
+        free(calls[i].id);
+        free(calls[i].name);
+        free(calls[i].args_json);
+    }
+    free(calls);
+}
 
 /* Handle one complete SSE event's data payload (already JSON-parsed
  * arena tree `obj`, borrowed). Port of quoth's sse-extract-deltas +
@@ -182,7 +220,67 @@ static void handle_event(StreamState *st, const char *data, size_t len)
              * every reasoning chunk; emitting them would garble the
              * region boundaries. */
             if (content && *content && st->req->on_delta)
-                st->req->on_delta(content, NULL, st->req->userdata);
+                st->req->on_delta(content, NULL, 0, st->req->userdata);
+            /* Tool-call deltas: merge fragments by index (port of
+             * quoth's sse-merge-tool-calls). Arguments accumulate
+             * across chunks; assembled calls are delivered from
+             * finish_stream when the stream completes. */
+            NmJson *tcs = nm_json_get(delta, "tool_calls");
+            for (size_t i = 0; tcs && i < nm_json_len(tcs); i++) {
+                NmJson *tc = nm_json_at(tcs, i);
+                long idx = (long)nm_json_num(nm_json_get(tc, "index"));
+                if (idx < 0)
+                    continue;
+                while ((size_t)idx >= st->tc_cap) {
+                    size_t ncap = st->tc_cap ? st->tc_cap * 2 : 4;
+                    NmToolCall *nt =
+                        realloc(st->tool_calls, ncap * sizeof(*nt));
+                    if (!nt)
+                        continue;
+                    memset(nt + st->tc_cap, 0,
+                           (ncap - st->tc_cap) * sizeof(*nt));
+                    st->tool_calls = nt;
+                    st->tc_cap = ncap;
+                }
+                NmToolCall *slot = &st->tool_calls[idx];
+                if ((size_t)idx + 1 > st->n_tool_calls)
+                    st->n_tool_calls = (size_t)idx + 1;
+                NmJson *fn = nm_json_get(tc, "function");
+                if (fn) {
+                    const char *args =
+                        nm_json_str(nm_json_get(fn, "arguments"));
+                    if (args && *args) {
+                        /* Growable per-call args buffer, reused across
+                         * chunks (memory-reuse principle). */
+                        size_t alen = strlen(args);
+                        if (slot->args_len + alen + 1 > slot->args_cap) {
+                            size_t ncap = slot->args_cap ? slot->args_cap : 64;
+                            while (ncap < slot->args_len + alen + 1)
+                                ncap *= 2;
+                            char *nb = realloc(slot->args_json, ncap);
+                            if (nb) {
+                                slot->args_json = nb;
+                                slot->args_cap = ncap;
+                            }
+                        }
+                        if (slot->args_len + alen + 1 <= slot->args_cap) {
+                            memcpy(slot->args_json + slot->args_len, args,
+                                   alen);
+                            slot->args_len += alen;
+                            slot->args_json[slot->args_len] = '\0';
+                        }
+                    }
+                    /* id/name ride the first fragment for their index;
+                     * copied out of the per-event arena immediately
+                     * (the arena is freed below). */
+                    const char *name = nm_json_str(nm_json_get(fn, "name"));
+                    if (name && !slot->name)
+                        slot->name = strdup(name);
+                }
+                const char *id = nm_json_str(nm_json_get(tc, "id"));
+                if (id && !slot->id)
+                    slot->id = strdup(id);
+            }
         }
     }
     nm_json_free(obj);
@@ -225,6 +323,19 @@ static NmChatStatus stream_pump(NmConnection *conn, StreamState *st)
             break;
     }
     free(rbuf);
+
+    /* Stream complete: deliver assembled tool calls (if any) with
+     * the final NULL-content callback, exactly once. Ownership of
+     * the tool-call array moves to the receiver (freed there with
+     * nm_tool_calls_free); the client forgets the pointer. */
+    if (st->n_tool_calls > 0) {
+        if (st->req->on_delta) {
+            st->req->on_delta(NULL, st->tool_calls, st->n_tool_calls,
+                              st->req->userdata);
+            st->tool_calls = NULL;
+            st->n_tool_calls = 0;
+        }
+    }
     return st->status;
 }
 
@@ -294,9 +405,7 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     }
 
     const NmResponse *resp = nm_response(conn);
-    if (resp->status < 200 || resp->status >= 300
-        || !resp->content_type
-        || strncmp(resp->content_type, "text/event-stream", 17) != 0) {
+    if (resp->status < 200 || resp->status >= 300 || !resp->content_type || strncmp(resp->content_type, "text/event-stream", 17) != 0) {
         /* Non-SSE response: an error body. Capture (capped) for the
          * caller — like quoth's error-body accumulator. */
         char ebuf[ERROR_BODY_MAX];
@@ -337,6 +446,9 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
         free(r.error_body);
         r.error_body = NULL;
     }
+    /* Undelivered tool calls (no receiver registered): the client
+     * owns the free. */
+    nm_tool_calls_free(st.tool_calls, st.n_tool_calls);
     nm_sse_free(st.sse);
     nm_connection_close(conn);
     return r;
@@ -351,4 +463,3 @@ NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
         *err = "not yet implemented";
     return NULL; /* TODO(phase 2/5) */
 }
-

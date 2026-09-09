@@ -21,14 +21,14 @@ typedef struct NmTool NmTool;
 
 typedef struct NmToolResult
 {
-    int ok;             /* exit status / success flag */
-    char *output;       /* text the model sees; heap-owned */
+    int ok;       /* exit status / success flag */
+    char *output; /* text the model sees; heap-owned */
 } NmToolResult;
 
 typedef enum
 {
-    NM_TOOL_EVENT_START,   /* name + args visible */
-    NM_TOOL_EVENT_END     /* result ready */
+    NM_TOOL_EVENT_START, /* name + args visible */
+    NM_TOOL_EVENT_END    /* result ready */
 } NmToolEvent;
 
 typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
@@ -38,7 +38,7 @@ typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
 /* One tool: name, JSON schema for the provider, an executor. */
 typedef struct NmTool
 {
-    const char *name;           /* wire name, e.g. "read_file" */
+    const char *name;          /* wire name, e.g. "read_file" */
     const char *description;   /* what the model sees */
     const char *params_schema; /* JSON Schema for "parameters", or NULL */
     NmToolResult (*execute)(const NmTool *tool, const char *args_json,
@@ -57,8 +57,15 @@ const NmTool *nm_toolset_find(const NmToolset *ts, const char *name);
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                                 const char *args_json, void *userdata);
 
-/* Serialize the full toolset as the provider "tools" JSON array. */
-char *nm_toolset_to_json(const NmToolset *ts);
+/* Serialize the full toolset as the provider "tools" JSON array.
+ * Cached in the toolset (serialized once per registered set);
+ * returned pointer is borrowed from the toolset, valid until the
+ * next nm_toolset_add or nm_toolset_free. */
+const char *nm_toolset_to_json(const NmToolset *ts);
+
+/* Error / success result constructors (heap-owned output). */
+NmToolResult nm_tool_result_error(const char *message);
+NmToolResult nm_tool_result_text(const char *text);
 
 void nm_tool_result_free(NmToolResult *r);
 
@@ -66,9 +73,10 @@ void nm_tool_result_free(NmToolResult *r);
 /* Built-in tools (registered by nm_toolset_add_defaults())          */
 /* ---------------------------------------------------------------- */
 
-/* read_file(path), edit(path, find, replace), list_dir(path),
- * search_dir(path, needle) — character-level scan, no regex,
- * run_command(cmd) — portable spawn (posix_spawn / CreateProcessW) */
+/* read_file(path), edit_file(path, old_string, new_string),
+ * list_dir(path), search_dir(path, needle) — character-level scan,
+ * no regex; run_command(cmd) — portable spawn
+ * (posix_spawn / CreateProcessW) */
 NmToolset *nm_toolset_new_defaults(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report

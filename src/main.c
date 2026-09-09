@@ -20,6 +20,8 @@
 #include "nevermore.h"
 #include "agent.h"
 #include "provider.h"
+#include "session.h"
+#include "tools.h"
 #include "chat_app.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
@@ -46,13 +48,43 @@ static void usage(FILE *out)
             "  -v, --version         version\n");
 }
 
-static void ask_on_delta(const char *delta_text, const char *tool_call_json,
-                         void *userdata)
+/* ask-mode UI callbacks: deltas stream to stdout; tool activity
+ * renders as a compact status line (the -P pipeline shape). */
+
+static void ask_on_delta(const char *delta_text, const NmToolCall *calls,
+                         size_t n_calls, void *userdata)
 {
-    (void)tool_call_json;
+    (void)calls;
+    (void)n_calls;
     (void)userdata;
     if (delta_text)
         fputs(delta_text, stdout);
+}
+
+static const char *tool_event_name(int event)
+{
+    return event == NM_TOOL_EVENT_START ? "start" : "end";
+}
+
+static void ask_on_tool(const NmTool *tool, const char *args_json,
+                        NmToolEvent event, const NmToolResult *result,
+                        void *userdata)
+{
+    (void)userdata;
+    const char *name = tool ? tool->name : "?";
+    if (event == NM_TOOL_EVENT_START) {
+        fprintf(stderr, "[tool %s %s]\n", name, tool_event_name(event));
+        (void)args_json;
+    } else {
+        fprintf(stderr, "[tool %s %s ok=%d]\n", name, tool_event_name(event),
+                result ? result->ok : -1);
+    }
+}
+
+static void ask_on_state(NmAgentState state, void *userdata)
+{
+    (void)userdata;
+    (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
 }
 
 int main(int argc, char *argv[])
@@ -111,39 +143,43 @@ int main(int argc, char *argv[])
     }
 
     if (prompt) {
-        /* One-shot ask mode (phase 1): stream deltas to stdout. */
+        /* One-shot ask mode (phase 3): the full agent loop — stream,
+         * tool calls, file edits — with deltas on stdout and tool
+         * activity on stderr. */
         const char *api_key = getenv("OLLAMA_API_KEY"); /* provider-specific later */
-        if (!model) {
-            model = "gpt-oss:20b"; /* sane local default; phase 3 adds resolution */
-        }
-        NmMessage msg = { "user", prompt };
-        NmChatRequest req = {
-            model,
-            &msg,
-            1,
-            NULL,   /* system */
-            NULL,   /* tools_json */
-            -1,     /* temperature: provider default */
-            -1,     /* max_tokens: provider default */
-            ask_on_delta,
-            NULL    /* userdata */
-        };
-        setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
-        NmChatResult r = provider->chat(provider, &req, NULL, api_key);
-        if (r.status != NM_CHAT_OK) {
-            fprintf(stderr, "nevermore: chat failed (%s%s%s)\n",
-                    r.status == NM_CHAT_ERR_AUTH ? "auth: " : "",
-                    r.status == NM_CHAT_ERR_HTTP ? "http: " : "",
-                    r.error_body ? r.error_body : "transport/parse error");
-            nm_chat_result_free(&r);
+        if (!model)
+            model = "gpt-oss:20b"; /* sane local default */
+
+        NmToolset *tools = nm_toolset_new_defaults();
+        if (!tools) {
+            fprintf(stderr, "nevermore: out of memory\n");
             return 1;
         }
-        nm_chat_result_free(&r);
-        return 0;
+        NmAgent *agent = nm_agent_new(provider, model, tools, NULL);
+        if (!agent) {
+            nm_toolset_free(tools);
+            fprintf(stderr, "nevermore: out of memory\n");
+            return 1;
+        }
+        nm_agent_on_delta(agent, ask_on_delta);
+        nm_agent_on_tool(agent, ask_on_tool);
+        nm_agent_on_state(agent, ask_on_state);
+
+        setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
+        int rc = nm_agent_turn(agent, prompt);
+        if (rc != 0) {
+            const char *err = nm_agent_last_error(agent);
+            fprintf(stderr, "nevermore: %s\n", err ? err : "turn failed");
+        } else {
+            fputc('\n', stdout);
+        }
+        nm_agent_free(agent); /* session owned by the agent */
+        nm_toolset_free(tools);
+        return rc == 0 ? 0 : 1;
     }
 
-    /* interactive chat — boba TUI, phase 3 target */
-    fprintf(stderr, "nevermore: interactive chat not yet implemented (phase 3)\n");
+    /* interactive chat — boba TUI, phase 4 target */
+    fprintf(stderr, "nevermore: interactive chat not yet implemented (phase 4)\n");
     (void)nm_chat_app_new;
     (void)nm_chat_app_component;
     return 1;
