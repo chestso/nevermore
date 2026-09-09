@@ -76,13 +76,16 @@ static void *arena_alloc(Arena *a, size_t n)
 
 static void arena_free(Arena *a)
 {
+    /* Save the head before freeing: the Arena copy lives inside the
+     * root NmJson node, which itself is carved from the last chunk —
+     * after the final free(), `a` is dangling memory and writing
+     * a->head would be a use-after-free. */
     ArenaChunk *c = a->head;
     while (c) {
         ArenaChunk *next = c->next;
         free(c);
         c = next;
     }
-    a->head = NULL;
 }
 
 /* Arena-strdup: reserved for object keys that must outlive the
