@@ -95,10 +95,12 @@ struct NmProvider
                          const char *base_url, const char *api_key);
 
     /* Model catalog. Returns a NULL-terminated array of NmModel
-     * (heap-owned by the provider; freed via nm_provider_free_models).
+     * owned by the provider (static catalogs today; phase-5 wire
+     * catalogs get provider-owned reused buffers). Borrowed by the
+     * caller: valid until the next call into this provider.
      * Providers that must fetch catalogs over the wire (ollama native
-     * /api/tags + /api/show) do so here; static catalogs (hyper, openai,
-     * openrouter) are embedded from data/nm-*-models.json. */
+     * /api/tags + /api/show) do so here; static catalogs (hyper,
+     * openai, openrouter) are embedded from data/nm-*-models.json. */
     const NmModel *(*models)(const NmProvider *p, const char *base_url,
                              const char *api_key, size_t *n_out);
 

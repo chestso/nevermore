@@ -52,8 +52,12 @@ void nm_provider_list(const NmProvider **out, size_t *n_out)
 
 void nm_provider_free_models(const NmProvider *p, const NmModel *models)
 {
+    /* Model arrays are provider-owned (static catalogs; phase-5 wire
+     * catalogs will use per-provider-owned buffers). The caller never
+     * frees — this hook exists so a future wire-catalog provider can
+     * release without an API break. */
     (void)p;
-    free((void *)models);
+    (void)models;
 }
 
 void nm_chat_result_free(NmChatResult *r)
