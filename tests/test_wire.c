@@ -8,15 +8,23 @@
  * boundaries), 404 error head, connection-refused error path.
  */
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+/* MinGW shims: close() -> closesocket(), no SIGPIPE on Win32. */
+#define close(s) closesocket(s)
+#define usleep(us) Sleep((DWORD)((us) / 1000))
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "transport.h"
 #include "test_helpers.h"
@@ -224,7 +232,9 @@ int main(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
-    signal(SIGPIPE, SIG_IGN);
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
+#endif
     printf("test_wire:\n");
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_wire_chunked_sse);

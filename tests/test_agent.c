@@ -8,15 +8,22 @@
  * (house rule).
  */
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+/* MinGW shims: close() -> closesocket(), no SIGPIPE on Win32. */
+#define close(s) closesocket(s)
+#else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <signal.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
 
 #include "agent.h"
 #include "provider.h"
@@ -375,7 +382,9 @@ static void test_agent_unknown_tool_reports_error_result(void)
 
 int main(void)
 {
-    signal(SIGPIPE, SIG_IGN);
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
+#endif
     printf("test_agent:\n");
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_plain_answer_no_tools);
