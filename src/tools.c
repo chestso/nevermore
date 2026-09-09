@@ -81,9 +81,11 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
         /* An error result the model can adapt to (same convention as
          * quoth's unknown-tool result), never a silent no-op. */
         r.ok = 0;
-        r.output = malloc(64 + (name ? strlen(name) : 0));
+        size_t need = 64 + (name ? strlen(name) : 0);
+        r.output = malloc(need);
         if (r.output)
-            sprintf(r.output, "unknown tool: %s", name ? name : "(null)");
+            snprintf(r.output, need, "unknown tool: %s",
+                     name ? name : "(null)");
         return r;
     }
     return t->execute(t, args_json, userdata);

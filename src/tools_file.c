@@ -44,7 +44,8 @@ static char *clamp_output(const char *text)
     size_t o = 0;
     memcpy(out, text, head);
     o = head;
-    o += (size_t)sprintf(out + o, "\n... %zu bytes omitted ...\n", omitted);
+    o += (size_t)snprintf(out + o, 64, "\n... %zu bytes omitted ...\n",
+                          omitted);
     memcpy(out + o, text + len - tail, tail);
     o += tail;
     out[o] = '\0';
@@ -56,18 +57,18 @@ static char *clamp_output(const char *text)
 static NmToolResult format_result(const char *body, int exit_code)
 {
     char *clamped = body ? clamp_output(body) : NULL;
-    size_t len = 64 + (clamped ? strlen(clamped) : 0);
-    char *out = malloc(len);
+    size_t need = 64 + (clamped ? strlen(clamped) : 0);
+    char *out = malloc(need);
     if (!out) {
         NmToolResult r = { 0, NULL };
         return r;
     }
     if (!clamped)
-        sprintf(out, "Process exited with code %d\nOutput: (empty)\n",
-                exit_code);
+        snprintf(out, need, "Process exited with code %d\nOutput: (empty)\n",
+                 exit_code);
     else
-        sprintf(out, "Process exited with code %d\nOutput:\n%s", exit_code,
-                clamped);
+        snprintf(out, need, "Process exited with code %d\nOutput:\n%s",
+                 exit_code, clamped);
     free(clamped);
     NmToolResult r = { exit_code == 0, out };
     return r;
@@ -109,7 +110,8 @@ static char *resolve_path(NmJson *args, void *userdata)
         if (home) {
             full = malloc(strlen(home) + strlen(path + 1) + 2);
             if (full)
-                sprintf(full, "%s/%s", home, path + 1);
+                snprintf(full, strlen(home) + strlen(path + 1) + 2, "%s/%s",
+                         home, path + 1);
             return full;
         }
     }
@@ -122,7 +124,7 @@ static char *resolve_path(NmJson *args, void *userdata)
     full = malloc(strlen(base) + strlen(path) + 2);
     if (!full)
         return NULL;
-    sprintf(full, "%s/%s", base, path);
+    snprintf(full, strlen(base) + strlen(path) + 2, "%s/%s", base, path);
     return full;
 }
 
@@ -241,7 +243,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (!text) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "cannot read %s", path);
+            snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
         return (NmToolResult){ 0, msg };
@@ -249,7 +251,8 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (!utf8_valid((const unsigned char *)text, len)) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "file is not valid UTF-8: %s", path);
+            snprintf(msg, strlen(path) + 64, "file is not valid UTF-8: %s",
+                     path);
         free(text);
         free(path);
         nm_json_free(args);
@@ -268,7 +271,8 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (offset < 1) {
         char *msg = malloc(64);
         if (msg)
-            sprintf(msg, "offset must be a positive integer, got %ld", offset);
+            snprintf(msg, 64, "offset must be a positive integer, got %ld",
+                     offset);
         free(text);
         free(path);
         nm_json_free(args);
@@ -277,7 +281,8 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (jlim && limit < 1) {
         char *msg = malloc(64);
         if (msg)
-            sprintf(msg, "limit must be a positive integer, got %ld", limit);
+            snprintf(msg, 64, "limit must be a positive integer, got %ld",
+                     limit);
         free(text);
         free(path);
         nm_json_free(args);
@@ -309,8 +314,9 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (len > 0 && line < offset) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "offset %ld is past the last line (%ld)", offset,
-                    total_lines);
+            snprintf(msg, strlen(path) + 64,
+                     "offset %ld is past the last line (%ld)", offset,
+                     total_lines);
         free(text);
         free(path);
         nm_json_free(args);
@@ -351,7 +357,10 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             eol++;
         size_t line_len = (eol < len) ? eol - i + 1 : len - i;
         if (numbered) {
-            bo += (size_t)sprintf(body + bo, "%6ld\t", lineno);
+            /* 16: never truncates for any long line number — snprintf
+             * returns the would-be length, so a truncated write would
+             * skew bo past the bytes actually written. */
+            bo += (size_t)snprintf(body + bo, 16, "%6ld\t", lineno);
             memcpy(body + bo, text + i, line_len);
             bo += line_len;
             if (eol >= len)
@@ -458,7 +467,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     if (!text) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "cannot read %s", path);
+            snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
         return (NmToolResult){ 0, msg };
@@ -495,10 +504,10 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     if (nhits == 0) {
         char *msg = malloc(strlen(path) + 128);
         if (msg)
-            sprintf(msg,
-                    "no match for old_string in %s; read the file fresh "
-                    "before editing",
-                    path);
+            snprintf(msg, strlen(path) + 128,
+                     "no match for old_string in %s; read the file fresh "
+                     "before editing",
+                     path);
         free(hits);
         free(text);
         free(path);
@@ -510,17 +519,24 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         size_t need = strlen(path) + 128 + nhits * 12;
         char *msg = malloc(need);
         if (msg) {
-            char *p = msg + sprintf(msg,
-                                    "old_string occurs %zu times (lines ",
-                                    nhits);
-            for (size_t i = 0; i < nhits && i < 10; i++)
-                p += sprintf(p, "%s%ld", i ? ", " : "",
-                             line_at(text, hits[i]));
-            if (nhits > 10)
-                p += sprintf(p, ", ...");
-            sprintf(p,
-                    "); include surrounding lines to make it unique, or set "
-                    "replace_all");
+            size_t cap = strlen(path) + 128 + nhits * 12;
+            size_t used = 0;
+            char *p = msg + snprintf(msg, cap,
+                                     "old_string occurs %zu times (lines ",
+                                     nhits);
+            for (size_t i = 0; i < nhits && i < 10; i++) {
+                used = (size_t)(p - msg);
+                p += (size_t)snprintf(p, cap - used, "%s%ld", i ? ", " : "",
+                                      line_at(text, hits[i]));
+            }
+            if (nhits > 10) {
+                used = (size_t)(p - msg);
+                p += (size_t)snprintf(p, cap - used, ", ...");
+            }
+            used = (size_t)(p - msg);
+            snprintf(p, cap - used,
+                     "); include surrounding lines to make it unique, or set "
+                     "replace_all");
         }
         free(hits);
         free(text);
@@ -557,7 +573,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     if (!f) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "cannot write %s", path);
+            snprintf(msg, strlen(path) + 64, "cannot write %s", path);
         free(out);
         free(hits);
         free(text);
@@ -582,13 +598,23 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("out of memory");
     }
     char *p = body;
-    p += sprintf(p, "Edited %s: replaced %zu occurrence%s at line%s ",
-                 path, nhits, nhits == 1 ? "" : "s", nhits == 1 ? "" : "s");
-    for (size_t i = 0; i < nhits && i < 10; i++)
-        p += sprintf(p, "%s%ld", i ? ", " : "", line_at(text, hits[i]));
-    if (nhits > 10)
-        p += sprintf(p, ", ...");
-    p += sprintf(p, "\n");
+    size_t bcap = need;
+    size_t used = 0;
+    p += (size_t)snprintf(p, bcap, "Edited %s: replaced %zu occurrence%s at "
+                                   "line%s ",
+                          path, nhits, nhits == 1 ? "" : "s",
+                          nhits == 1 ? "" : "s");
+    for (size_t i = 0; i < nhits && i < 10; i++) {
+        used = (size_t)(p - body);
+        p += (size_t)snprintf(p, bcap - used, "%s%ld", i ? ", " : "",
+                              line_at(text, hits[i]));
+    }
+    if (nhits > 10) {
+        used = (size_t)(p - body);
+        p += (size_t)snprintf(p, bcap - used, ", ...");
+    }
+    used = (size_t)(p - body);
+    p += (size_t)snprintf(p, bcap - used, "\n");
     /* Mini diff: '-'-prefixed old lines, then '+'-prefixed new lines
      * (split on LF only, like quoth). */
     for (const char *q = old; *q;) {
@@ -685,7 +711,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         free(body);
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "cannot list %s", path);
+            snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
         return (NmToolResult){ 0, msg };
     }
@@ -710,7 +736,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         free(body);
         char *msg = malloc(strlen(path) + 64);
         if (msg)
-            sprintf(msg, "cannot list %s", path);
+            snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
         return (NmToolResult){ 0, msg };
     }
