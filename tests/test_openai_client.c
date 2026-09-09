@@ -9,12 +9,9 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-/* MinGW shims: close() -> closesocket(), no SIGPIPE on Win32. */
-#define close(s) closesocket(s)
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -24,6 +21,7 @@
 #include <string.h>
 
 #include "openai_client.h"
+#include "test_net_helpers.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -168,6 +166,10 @@ int main(int argc, char *argv[])
 #ifndef _WIN32
     signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
 #endif
+    if (test_wsa_init() != 0) {
+        fprintf(stderr, "  FAIL: WSAStartup\n");
+        return 1;
+    }
     printf("test_openai_client:\n");
     RUN_TEST(test_chat_stream_end_to_end);
     TEST_SUMMARY();

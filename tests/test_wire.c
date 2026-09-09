@@ -11,13 +11,9 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-/* MinGW shims: close() -> closesocket(), no SIGPIPE on Win32. */
-#define close(s) closesocket(s)
-#define usleep(us) Sleep((DWORD)((us) / 1000))
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
-#include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
@@ -27,6 +23,7 @@
 #include <string.h>
 
 #include "transport.h"
+#include "test_net_helpers.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -235,6 +232,10 @@ int main(int argc, char *argv[])
 #ifndef _WIN32
     signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
 #endif
+    if (test_wsa_init() != 0) {
+        fprintf(stderr, "  FAIL: WSAStartup\n");
+        return 1;
+    }
     printf("test_wire:\n");
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_wire_chunked_sse);

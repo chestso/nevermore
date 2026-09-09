@@ -40,9 +40,13 @@ static const char *scratch_dir(void)
 
 static char *scratch_path(const char *name)
 {
-    char *p = malloc(256);
+    char *p = malloc(512);
     if (p)
-        snprintf(p, 256, "%s/%s", scratch_dir(), name);
+#ifdef _WIN32
+        snprintf(p, 512, "%s\\%s", scratch_dir(), name);
+#else
+        snprintf(p, 512, "%s/%s", scratch_dir(), name);
+#endif
     return p;
 }
 

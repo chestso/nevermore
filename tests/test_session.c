@@ -132,7 +132,11 @@ static void test_session_save(void)
     nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]");
     nm_session_append_tool_result(s, "c1", "read_file", "content here");
 
+#ifdef _WIN32
+    const char *path = "C:\\Users\\Public\\nevermore-test-session.md";
+#else
     const char *path = "/tmp/nevermore-test-session.md";
+#endif
     ASSERT_EQ(nm_session_save(s, path), 0);
     FILE *f = fopen(path, "r");
     ASSERT_NOT_NULL(f);

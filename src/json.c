@@ -822,10 +822,46 @@ static void db_puts(DumpBuf *b, const char *s)
         db_putc(b, *s++);
 }
 
-static void db_putn(DumpBuf *b, const char *s, size_t n)
+/* Dump one JSON string value: quotes + escaping (control chars,
+ * quote, backslash; everything else rides through as UTF-8). */
+static void dump_string(DumpBuf *b, const char *s)
 {
-    for (size_t i = 0; i < n; i++)
-        db_putc(b, s[i]);
+    db_putc(b, '"');
+    for (const char *p = s ? s : ""; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        switch (c) {
+        case '"':
+            db_puts(b, "\\\"");
+            break;
+        case '\\':
+            db_puts(b, "\\\\");
+            break;
+        case '\b':
+            db_puts(b, "\\b");
+            break;
+        case '\f':
+            db_puts(b, "\\f");
+            break;
+        case '\n':
+            db_puts(b, "\\n");
+            break;
+        case '\r':
+            db_puts(b, "\\r");
+            break;
+        case '\t':
+            db_puts(b, "\\t");
+            break;
+        default:
+            if (c < 0x20) {
+                char tmp[8];
+                snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+                db_puts(b, tmp);
+            } else {
+                db_putc(b, (char)c);
+            }
+        }
+    }
+    db_putc(b, '"');
 }
 
 static void dump_value(DumpBuf *b, const NmJson *v)
@@ -857,42 +893,7 @@ static void dump_value(DumpBuf *b, const NmJson *v)
     case NM_JSON_STRING:
     {
         const char *s = v->u.string ? v->u.string : "";
-        db_putc(b, '"');
-        for (const char *p = s; *p; p++) {
-            unsigned char c = (unsigned char)*p;
-            switch (c) {
-            case '"':
-                db_puts(b, "\\\"");
-                break;
-            case '\\':
-                db_puts(b, "\\\\");
-                break;
-            case '\b':
-                db_puts(b, "\\b");
-                break;
-            case '\f':
-                db_puts(b, "\\f");
-                break;
-            case '\n':
-                db_puts(b, "\\n");
-                break;
-            case '\r':
-                db_puts(b, "\\r");
-                break;
-            case '\t':
-                db_puts(b, "\\t");
-                break;
-            default:
-                if (c < 0x20) {
-                    char tmp[8];
-                    snprintf(tmp, sizeof(tmp), "\\u%04x", c);
-                    db_puts(b, tmp);
-                } else {
-                    db_putc(b, (char)c);
-                }
-            }
-        }
-        db_putc(b, '"');
+        dump_string(b, s);
         break;
     }
     case NM_JSON_ARRAY:
@@ -909,10 +910,8 @@ static void dump_value(DumpBuf *b, const NmJson *v)
         for (size_t i = 0; i < v->u.obj.len; i++) {
             if (i)
                 db_putc(b, ',');
-            db_putc(b, '"');
-            db_putn(b, v->u.obj.members[i].key,
-                    strlen(v->u.obj.members[i].key));
-            db_puts(b, "\":");
+            dump_string(b, v->u.obj.members[i].key);
+            db_putc(b, ':');
             dump_value(b, v->u.obj.members[i].val);
         }
         db_putc(b, '}');
