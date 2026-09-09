@@ -428,13 +428,13 @@ static void test_run_command_exit_nonzero(void)
 
 static void test_spawn_capture_api(void)
 {
-    /* The raw seam: argv, capture, exit code. */
+    /* The raw seam: argv, capture, exit code. On Windows the helper
+     * joins argv into a command line with the first token as the
+     * application, so pass cmd.exe and its flags as separate tokens
+     * (a single "cmd.exe /c ..." element would get quoted whole and
+     * fail to start). POSIX keeps the classic argv shape. */
 #ifdef _WIN32
-    /* nm_spawn_capture_os joins+quotes argv; the quoted form is one
-     * application name for CreateProcessW, so the Windows contract is
-     * a single argv element = full command line. Use cmd's own exit
-     * code via a batch-compatible probe. */
-    const char *argv[] = { "cmd.exe /d /c exit /b 5", NULL };
+    const char *argv[] = { "cmd.exe", "/d", "/c", "exit", "/b", "5", NULL };
 #else
     const char *argv[] = { "sh", "-c", "exit 5", NULL };
 #endif
