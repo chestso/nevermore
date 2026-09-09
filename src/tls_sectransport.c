@@ -49,7 +49,7 @@ static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
     }
     if (n == 0) {
         *len = 0;
-        return errSSLEOF;
+        return errSSLClosedGraceful;
     }
     *len = (size_t)n;
     return noErr;
