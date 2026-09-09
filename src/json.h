@@ -42,8 +42,8 @@ const char *nm_json_key(const NmJson *obj, size_t i); /* iterate keys */
 
 /* Scalar access */
 const char *nm_json_str(const NmJson *v); /* NULL unless NM_JSON_STRING */
-int nm_json_bool(const NmJson *v);         /* 0 unless NM_JSON_BOOL */
-double nm_json_num(const NmJson *v);       /* 0 unless NM_JSON_NUMBER */
+int nm_json_bool(const NmJson *v);        /* 0 unless NM_JSON_BOOL */
+double nm_json_num(const NmJson *v);      /* 0 unless NM_JSON_NUMBER */
 
 /* Writer: build values, serialize. The returned string is heap-owned. */
 NmJson *nm_json_new_object(void);

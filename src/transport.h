@@ -26,7 +26,7 @@ typedef struct NmTransport NmTransport;
 typedef enum
 {
     NM_TRANSPORT_PLAIN = 0, /* http:// — zero deps on every platform */
-    NM_TRANSPORT_TLS = 1   /* https:// — requires a configured TLS backend */
+    NM_TRANSPORT_TLS = 1    /* https:// — requires a configured TLS backend */
 } NmTransportMode;
 
 typedef struct NmRequestHeader
@@ -38,8 +38,8 @@ typedef struct NmRequestHeader
 typedef enum
 {
     NM_TRANSPORT_OK = 0,
-    NM_TRANSPORT_ERR_SOCKET,    /* connect/socket failure */
-    NM_TRANSPORT_ERR_TLS,       /* handshake / cert failure */
+    NM_TRANSPORT_ERR_SOCKET,   /* connect/socket failure */
+    NM_TRANSPORT_ERR_TLS,      /* handshake / cert failure */
     NM_TRANSPORT_ERR_SEND,     /* write failure mid-request */
     NM_TRANSPORT_ERR_PROTOCOL, /* malformed response, bad chunked framing */
     NM_TRANSPORT_ERR_CLOSED,   /* peer closed before body complete */
@@ -72,7 +72,7 @@ NmTransportStatus nm_request(NmConnection *conn, const char *method,
 
 typedef struct NmResponse
 {
-    int status;             /* HTTP status code (200, 404, ...) */
+    int status;            /* HTTP status code (200, 404, ...) */
     char *content_type;    /* e.g. "text/event-stream"; heap, owned */
     int chunked;           /* Transfer-Encoding: chunked */
     long long content_len; /* Content-Length, -1 if absent */

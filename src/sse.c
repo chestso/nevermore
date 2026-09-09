@@ -57,9 +57,9 @@ struct NmSseParser
                        * at the start of the NEXT feed so the borrowed
                        * out->data pointer stays valid (per sse.h:
                        * valid until the next nm_sse_feed call). */
-    char *hold; /* unconsumed tail of the last feed (an event completed
-                 * mid-buffer); prepended to the next feed. Grown
-                 * geometrically, reused — never freed per event. */
+    char *hold;       /* unconsumed tail of the last feed (an event completed
+                       * mid-buffer); prepended to the next feed. Grown
+                       * geometrically, reused — never freed per event. */
     size_t hold_len;
     size_t hold_cap;
 };

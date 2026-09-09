@@ -127,8 +127,7 @@ static void *mbedtls_handshake(int fd, const char *host, const char **err)
     }
     c->fd = fd;
     mbedtls_ssl_init(&c->ssl);
-    if ((ret = mbedtls_ssl_setup(&c->ssl, &g_conf)) != 0
-        || (ret = mbedtls_ssl_set_hostname(&c->ssl, host)) != 0) {
+    if ((ret = mbedtls_ssl_setup(&c->ssl, &g_conf)) != 0 || (ret = mbedtls_ssl_set_hostname(&c->ssl, host)) != 0) {
         if (err)
             *err = mb_errstr(ret);
         mbedtls_close(c);
@@ -137,8 +136,7 @@ static void *mbedtls_handshake(int fd, const char *host, const char **err)
     mbedtls_ssl_set_bio(&c->ssl, c, mb_send, mb_recv, NULL);
 
     while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ
-            || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (err)
             *err = mb_errstr(ret);
@@ -158,8 +156,7 @@ static long mbedtls_write(void *ctx, const char *buf, size_t len,
     while (off < len) {
         int ret = mbedtls_ssl_write(&c->ssl, (const unsigned char *)buf + off,
                                     len - off);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ
-            || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (ret <= 0) {
             if (err)
@@ -178,8 +175,7 @@ static long mbedtls_read(void *ctx, char *buf, size_t len, const char **err)
         *err = NULL;
     for (;;) {
         int ret = mbedtls_ssl_read(&c->ssl, (unsigned char *)buf, len);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ
-            || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
             return 0;

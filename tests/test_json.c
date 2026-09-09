@@ -41,8 +41,7 @@ static void test_json_parse_escapes_and_unicode(void)
 {
     const char *err = NULL;
     NmJson *v = nm_json_parse(
-        "{\"esc\":\"a\\u0041\\n\\\\/\\t\",\"num\":[1,2.5,-3e2]}", strlen(
-                                                                "{\"esc\":\"a\\u0041\\n\\\\/\\t\",\"num\":[1,2.5,-3e2]}"),
+        "{\"esc\":\"a\\u0041\\n\\\\/\\t\",\"num\":[1,2.5,-3e2]}", strlen("{\"esc\":\"a\\u0041\\n\\\\/\\t\",\"num\":[1,2.5,-3e2]}"),
         &err);
     ASSERT_NOT_NULL(v);
     ASSERT_STR_EQ(nm_json_str(nm_json_get(v, "esc")), "aA\n\\/\t");

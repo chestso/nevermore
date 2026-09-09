@@ -49,11 +49,11 @@ typedef struct SchCtx
     DWORD token_len;
 
     /* Record layer: sizes fixed by the stream header, reused. */
-    BYTE *send_plain;  /* plaintext input to EncryptMessage */
+    BYTE *send_plain; /* plaintext input to EncryptMessage */
     size_t send_cap;
-    BYTE *send_crypt;  /* encrypted output buffer (header + data + trailer) */
+    BYTE *send_crypt; /* encrypted output buffer (header + data + trailer) */
     size_t send_crypt_cap;
-    BYTE *recv_crypt;  /* ciphertext read from the socket */
+    BYTE *recv_crypt; /* ciphertext read from the socket */
     size_t recv_crypt_cap;
     size_t recv_crypt_len;
     size_t recv_crypt_off;
@@ -109,10 +109,8 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
     SCHANNEL_CRED cred_desc;
     ZeroMemory(&cred_desc, sizeof(cred_desc));
     cred_desc.dwVersion = SCHANNEL_CRED_VERSION;
-    cred_desc.dwFlags = SCH_CRED_NO_DEFAULT_CREDS
-                        | SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
-    cred_desc.grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT
-                                      | SP_PROT_TLS1_3_CLIENT;
+    cred_desc.dwFlags = SCH_CRED_NO_DEFAULT_CREDS | SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
+    cred_desc.grbitEnabledProtocols = SP_PROT_TLS1_2_CLIENT | SP_PROT_TLS1_3_CLIENT;
     TimeStamp expiry;
     SECURITY_STATUS sec = AcquireCredentialsHandleA(
         NULL, (SEC_CHAR *)UNISP_NAME_A, SECPKG_CRED_OUTBOUND, NULL,
@@ -127,9 +125,7 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
     /* InitializeSecurityContext loop: each call yields a token to
      * send and may consume one; loop until SEC_E_OK. */
     DWORD flags_out = 0;
-    DWORD ctx_req = ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT
-                    | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY
-                    | ISC_REQ_STREAM | ISC_REQ_MANUAL_CRED_VALIDATION;
+    DWORD ctx_req = ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM | ISC_REQ_MANUAL_CRED_VALIDATION;
     DWORD in_flags = ctx_req;
     SecBufferDesc in_desc, out_desc;
     SecBuffer in_buf, out_buf;
@@ -236,8 +232,8 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
     if (!CertGetCertificateChain(NULL, cert, NULL, cert->hCertStore,
                                  &chain_query,
                                  CERT_CHAIN_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
-                                 NULL, &chain)
-        || !chain) {
+                                 NULL, &chain) ||
+        !chain) {
         if (err)
             *err = "certificate chain verification failed";
         CertFreeCertificateContext(cert);
@@ -248,8 +244,8 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
     ZeroMemory(&policy_status, sizeof(policy_status));
     policy_status.cbSize = sizeof(policy_status);
     if (!CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL, chain,
-                                          &chain_para, &policy_status)
-        || policy_status.dwError != ERROR_SUCCESS) {
+                                          &chain_para, &policy_status) ||
+        policy_status.dwError != ERROR_SUCCESS) {
         if (err)
             *err = "certificate policy check failed";
         CertFreeCertificateChain(chain);
@@ -270,8 +266,7 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
         return NULL;
     }
     c->send_cap = 16384;
-    c->send_crypt_cap = c->send_cap + c->sizes.cbHeader
-                        + c->sizes.cbTrailer;
+    c->send_crypt_cap = c->send_cap + c->sizes.cbHeader + c->sizes.cbTrailer;
     c->recv_crypt_cap = TLS_MAX_TOKEN * 4;
     c->send_plain = malloc(c->send_cap);
     c->send_crypt = malloc(c->send_crypt_cap);

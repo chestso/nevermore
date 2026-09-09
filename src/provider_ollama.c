@@ -18,7 +18,7 @@
 #include "openai_client.h"
 
 #define OLLAMA_LOCAL_DEFAULT "http://localhost:11434/v1"
-#define NEVERMORE_UA "nevermore (nevermore agent)"
+#define NEVERMORE_UA         "nevermore (nevermore agent)"
 
 /* Static fallback catalog (subset of data/nm-ollama-models.json;
  * phase 5 replaces this with /api/tags for local daemons). */
@@ -73,8 +73,7 @@ static int ollama_needs_auth(const NmProvider *p, const char *base_url)
 {
     (void)p;
     /* Local daemon needs no auth; anything else (cloud) does. */
-    if (base_url && *base_url
-        && strncmp(base_url, "http://localhost", 16) == 0)
+    if (base_url && *base_url && strncmp(base_url, "http://localhost", 16) == 0)
         return 0;
     if (base_url && *base_url && strncmp(base_url, "http://127.", 11) == 0)
         return 0;

@@ -86,7 +86,8 @@ static void test_wire_content_length(void)
     struct ServerCase sc = {
         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
         "Content-Length: 5\r\n\r\nhello",
-        0, 0, 0};
+        0, 0, 0
+    };
     sc.len = strlen(sc.response);
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -128,10 +129,11 @@ static void test_wire_chunked_sse(void)
     struct ServerCase sc = {
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
-        "f\r\ndata: {\"a\":1}\n\n\r\n"          /* 15 = 0xf */
-        "9\r\ndata: b\n\n\r\n"                   /* 9 */
+        "f\r\ndata: {\"a\":1}\n\n\r\n" /* 15 = 0xf */
+        "9\r\ndata: b\n\n\r\n"         /* 9 */
         "0\r\n\r\n",
-        0, 0, 0};
+        0, 0, 0
+    };
     sc.len = strlen(sc.response);
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -177,7 +179,8 @@ static void test_wire_http_error_status(void)
     struct ServerCase sc = {
         "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n"
         "Content-Length: 21\r\n\r\n{\"error\":\"not found\"}",
-        0, 0, 0};
+        0, 0, 0
+    };
     sc.len = strlen(sc.response);
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);

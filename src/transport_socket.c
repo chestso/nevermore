@@ -179,12 +179,12 @@ static int rb_printf(ReqBuf *b, const char *fmt, ...)
 /* Dechunk states (chunk_remaining holds the current chunk's bytes). */
 enum
 {
-    CHUNK_SIZE,     /* reading hex size (extensions skipped to EOL) */
-    CHUNK_SIZE_EXT, /* after ';' in the size line: eat to EOL */
-    CHUNK_DATA,     /* streaming chunk_remaining body bytes */
-    CHUNK_DATA_CRLF,/* CR LF after the chunk data */
-    CHUNK_TRAILER,  /* after the 0-chunk: lines until an empty one */
-    CHUNK_DONE      /* final blank line seen: stream complete */
+    CHUNK_SIZE,      /* reading hex size (extensions skipped to EOL) */
+    CHUNK_SIZE_EXT,  /* after ';' in the size line: eat to EOL */
+    CHUNK_DATA,      /* streaming chunk_remaining body bytes */
+    CHUNK_DATA_CRLF, /* CR LF after the chunk data */
+    CHUNK_TRAILER,   /* after the 0-chunk: lines until an empty one */
+    CHUNK_DONE       /* final blank line seen: stream complete */
 };
 
 static int parse_head(NmConnection *conn);
@@ -199,8 +199,7 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
         return NM_TRANSPORT_ERR_PROTOCOL;
 
     ReqBuf rb = { NULL, 0, 0 };
-    if (rb_printf(&rb, "%s %s HTTP/1.1\r\n", method, path) != 0
-        || rb_printf(&rb, "Host: %s\r\n", conn->host) != 0)
+    if (rb_printf(&rb, "%s %s HTTP/1.1\r\n", method, path) != 0 || rb_printf(&rb, "Host: %s\r\n", conn->host) != 0)
         goto fail;
     for (size_t i = 0; i < n_headers; i++) {
         if (rb_printf(&rb, "%s: %s\r\n", headers[i].name, headers[i].value) != 0)
@@ -261,7 +260,7 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
             return NM_TRANSPORT_ERR_PROTOCOL;
         }
         long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
-                             sizeof(conn->scratch) - conn->scratch_len);
+                              sizeof(conn->scratch) - conn->scratch_len);
         if (n <= 0) {
             conn->err = NM_TRANSPORT_ERR_CLOSED;
             return NM_TRANSPORT_ERR_CLOSED;
@@ -344,15 +343,13 @@ static int parse_head(NmConnection *conn)
             line[llen++] = s[i++];
         i++; /* past \n */
         /* strip trailing CR */
-        while (llen > 0 && (line[llen - 1] == '\r' || line[llen - 1] == ' '
-                           || line[llen - 1] == '\t'))
+        while (llen > 0 && (line[llen - 1] == '\r' || line[llen - 1] == ' ' || line[llen - 1] == '\t'))
             llen--;
         if (llen == 0)
             break; /* blank line: end of headers */
 
         /* Case-insensitive match helpers, character level. */
-        if (llen > 19 && strncasecmp(line, "Transfer-Encoding:", 18) == 0
-            && strncasecmp(line + 19, "chunked", 7) == 0) {
+        if (llen > 19 && strncasecmp(line, "Transfer-Encoding:", 18) == 0 && strncasecmp(line + 19, "chunked", 7) == 0) {
             conn->resp.chunked = 1;
         } else if (llen > 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
             long long cl = 0;
@@ -406,7 +403,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 return -1;
             }
             long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
-                                 sizeof(conn->scratch) - conn->scratch_len);
+                                  sizeof(conn->scratch) - conn->scratch_len);
             if (n <= 0) {
                 conn->err = NM_TRANSPORT_ERR_CLOSED;
                 return -1; /* head never completed */
@@ -417,8 +414,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
 
     /* -------- plain (content-length or EOF-delimited) -------- */
     if (!conn->resp.chunked) {
-        if (conn->resp.content_len >= 0
-            && conn->body_read >= conn->resp.content_len)
+        if (conn->resp.content_len >= 0 && conn->body_read >= conn->resp.content_len)
             return 0;
         if (conn->pending_len) {
             size_t take = conn->pending_len < buf_len ? conn->pending_len
@@ -438,8 +434,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
         if (n == 0) {
             /* EOF: complete only if content_len was satisfied (or was
              * absent — connection-close framing). */
-            if (conn->resp.content_len < 0
-                || conn->body_read >= conn->resp.content_len)
+            if (conn->resp.content_len < 0 || conn->body_read >= conn->resp.content_len)
                 return 0;
             conn->err = NM_TRANSPORT_ERR_CLOSED;
             return -1;
@@ -516,7 +511,8 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             memmove(conn->scratch, conn->scratch + 1, conn->pending_len);
 
         switch (conn->chunk_state) {
-        case CHUNK_SIZE: {
+        case CHUNK_SIZE:
+        {
             int v;
             if (c >= '0' && c <= '9')
                 v = c - '0';
@@ -524,11 +520,13 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 v = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F')
                 v = c - 'A' + 10;
-            else if (c == ';' && conn->chunk_remaining == 0)
-                { conn->chunk_state = CHUNK_SIZE_EXT; break; }
-            else if (c == ';' )
-                { conn->chunk_state = CHUNK_SIZE_EXT; break; }
-            else
+            else if (c == ';' && conn->chunk_remaining == 0) {
+                conn->chunk_state = CHUNK_SIZE_EXT;
+                break;
+            } else if (c == ';') {
+                conn->chunk_state = CHUNK_SIZE_EXT;
+                break;
+            } else
                 v = -1;
             if (v >= 0) {
                 conn->chunk_remaining = conn->chunk_remaining * 16 + v;

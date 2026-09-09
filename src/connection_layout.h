@@ -22,7 +22,7 @@ struct NmConnection
     void *tls_ctx; /* opaque backend context, or NULL for plain HTTP */
     const NmTlsBackend *tls;
     NmResponse resp;
-    char host[256]; /* Host header source, set at connect */
+    char host[256];   /* Host header source, set at connect */
     int body_started; /* response head fully parsed */
 
     /* Response-head accumulation: bytes arrive into scratch until the
@@ -32,11 +32,11 @@ struct NmConnection
      * practice; error pages larger than that are refused as protocol
      * errors — the head scan is bounded, not grown. */
     char scratch[4096];
-    size_t scratch_len;  /* head bytes accumulated (before parse) */
-    size_t pending_len;  /* body bytes buffered in scratch (after) */
+    size_t scratch_len; /* head bytes accumulated (before parse) */
+    size_t pending_len; /* body bytes buffered in scratch (after) */
 
     /* Body accounting */
-    long long body_read; /* decoded body bytes delivered so far */
+    long long body_read;   /* decoded body bytes delivered so far */
     NmTransportStatus err; /* last error, for diagnostics */
 
     /* chunked-transfer dechunk state machine (byte-at-a-time so the
