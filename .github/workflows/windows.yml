@@ -35,6 +35,7 @@ jobs:
         with:
           msystem: UCRT64
           update: false
+          release: false
           install: >-
             make
             autoconf
@@ -53,9 +54,12 @@ jobs:
           make -j && make install
 
       - name: Build (Schannel TLS — native, no deps)
-        env:
-          PKG_CONFIG_PATH: /home/runneradmin/.local/lib/pkgconfig
         run: |
+          # setup-msys2 does not pass PKG_CONFIG_PATH through to the
+          # MSYS2 environment (msys2/setup-msys2#98), and /etc/profile
+          # overwrites it on every login shell; export it here so
+          # pkgconf finds the boba.pc we just installed.
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
           ./autogen.sh
           mkdir build && cd build
           ../configure --prefix="$HOME/.local"

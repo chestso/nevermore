@@ -44,9 +44,8 @@ jobs:
           make -j"$(nproc)" && make install
 
       - name: Build
-        env:
-          PKG_CONFIG_PATH: $HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig
         run: |
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig"
           ./autogen.sh
           mkdir build && cd build
           ../configure --prefix="$HOME/.local"

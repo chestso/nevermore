@@ -41,9 +41,8 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)" && make install
 
       - name: Build (Secure Transport TLS — native, no deps)
-        env:
-          PKG_CONFIG_PATH: $HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig
         run: |
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
           ./autogen.sh
           mkdir build && cd build
           ../configure --prefix="$HOME/.local"
