@@ -27,7 +27,6 @@
 #include <unistd.h>
 
 #include <Security/SecureTransport.h>
-#include <Security/SecureTransportPriv.h> /* SSLSetSessionOption tiers */
 
 #include "transport_internal.h"
 
