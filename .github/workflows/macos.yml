@@ -1,0 +1,49 @@
+name: macOS
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    name: macOS (ARM64)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout nevermore
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout boba (dependency)
+        uses: actions/checkout@v5
+        with:
+          repository: chestso/boba
+          path: boba
+          fetch-depth: 0
+
+      - name: Build and install boba
+        run: |
+          cd boba
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j"$(sysctl -n hw.ncpu)" && make install
+
+      - name: Build (Secure Transport TLS — native, no deps)
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/.local/lib/pkgconfig
+        run: |
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j"$(sysctl -n hw.ncpu)"
+
+      - name: Run tests
+        run: make -C build check

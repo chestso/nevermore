@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: GNU/Linux
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout nevermore
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout boba (dependency)
+        uses: actions/checkout@v5
+        with:
+          repository: chestso/boba
+          path: boba
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool make pkg-config \
+            libmbedtls-dev
+
+      - name: Build and install boba
+        run: |
+          cd boba
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j"$(nproc)" && make install
+
+      - name: Build
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/.local/lib/pkgconfig
+        run: |
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j"$(nproc)"
+
+      - name: Run tests
+        run: make -C build check
+
+      - name: Upload test logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-logs-linux
+          path: build/tests/*.log
+          retention-days: 7
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout nevermore
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Build release tarball
+        run: |
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --enable-release
+          make dist
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/nevermore-*.tar.gz

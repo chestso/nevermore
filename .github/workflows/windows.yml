@@ -1,0 +1,64 @@
+name: Windows
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (MSYS2 UCRT64 x86_64)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout nevermore
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Checkout boba (dependency)
+        uses: actions/checkout@v5
+        with:
+          repository: chestso/boba
+          path: boba
+          fetch-depth: 0
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: >-
+            make
+            autoconf
+            automake
+            libtool
+            mingw-w64-ucrt-x86_64-toolchain
+            pkg-config
+
+      - name: Build and install boba
+        run: |
+          cd boba
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j && make install
+
+      - name: Build (Schannel TLS — native, no deps)
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/.local/lib/pkgconfig
+        run: |
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure --prefix="$HOME/.local"
+          make -j
+
+      - name: Run tests
+        run: make -C build check
