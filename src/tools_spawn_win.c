@@ -36,7 +36,11 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
     *output = NULL;
     *exit_code = -1;
 
-    /* Join argv into a command line (quoted per element). */
+    /* Join argv into a command line. CreateProcessW parses the first
+     * token as the application: quote it (paths can contain spaces),
+     * pass the rest through verbatim — cmd.exe's quoting rules differ
+     * from MSVCRT's and double-quoting every element breaks
+     * redirections and argument batching. */
     size_t total = 4;
     for (const char *const *a = argv; *a; a++)
         total += strlen(*a) + 4;
@@ -45,7 +49,15 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
         return -1;
     char *p = cmdline;
     for (const char *const *a = argv; *a; a++) {
-        p += sprintf(p, "%s\"%s\"", (a != argv) ? " " : "", *a);
+        if (a == argv) {
+            /* First element: quote only if it contains a space. */
+            if (strchr(*a, ' '))
+                p += sprintf(p, "\"%s\"", *a);
+            else
+                p += sprintf(p, "%s", *a);
+        } else {
+            p += sprintf(p, " %s", *a);
+        }
     }
 
     /* Pipe: child's stdout+stderr both write to the write end. */
