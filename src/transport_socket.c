@@ -115,7 +115,14 @@ NmConnection *nm_socket_connect(const char *host, int port,
     }
     conn->fd = fd;
     conn->resp.content_len = -1;
-    snprintf(conn->host, sizeof(conn->host), "%s", host ? host : "");
+    /* Host header value: host[:port] per RFC 7230 — the port must
+     * ride along for non-default ports (loopback test servers, local
+     * daemons on odd ports). */
+    if (port == 80)
+        snprintf(conn->host, sizeof(conn->host), "%s", host ? host : "");
+    else
+        snprintf(conn->host, sizeof(conn->host), "%s:%d", host ? host : "",
+                 port);
     return conn;
 }
 

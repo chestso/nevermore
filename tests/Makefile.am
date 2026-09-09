@@ -5,7 +5,8 @@ check_PROGRAMS = \
     test_sse \
     test_json \
     test_provider \
-    test_wire
+    test_wire \
+    test_openai_client
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -24,11 +25,13 @@ test_sse_CFLAGS = $(TEST_CFLAGS)
 test_json_SOURCES = test_json.c ../src/json.c
 test_json_CFLAGS = $(TEST_CFLAGS)
 
-# Provider registry (nevermore.c + the four provider stubs; no TLS
-# or sockets involved).
+# Provider registry (nevermore.c + the provider vtables; the ollama
+# vtable calls into the shared openai_client, so it links too).
 test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c
+    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/openai_client.c ../src/json.c ../src/sse.c \
+    ../src/transport.c ../src/transport_socket.c
 test_provider_CFLAGS = $(TEST_CFLAGS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
@@ -36,6 +39,16 @@ test_provider_CFLAGS = $(TEST_CFLAGS)
 test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c
 test_wire_CFLAGS = $(TEST_CFLAGS)
 test_wire_LDADD = -lpthread
+
+# End-to-end: the shared OpenAI-compatible client against a canned
+# chat/completions SSE server (request validation + delta assembly).
+test_openai_client_SOURCES = test_openai_client.c \
+    ../src/openai_client.c ../src/json.c ../src/sse.c \
+    ../src/transport.c ../src/transport_socket.c \
+    ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_openai.c ../src/provider_openrouter.c
+test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src
+test_openai_client_LDADD = -lpthread
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)

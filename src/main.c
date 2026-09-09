@@ -46,6 +46,15 @@ static void usage(FILE *out)
             "  -v, --version         version\n");
 }
 
+static void ask_on_delta(const char *delta_text, const char *tool_call_json,
+                         void *userdata)
+{
+    (void)tool_call_json;
+    (void)userdata;
+    if (delta_text)
+        fputs(delta_text, stdout);
+}
+
 int main(int argc, char *argv[])
 {
     const char *provider_name = getenv("NEVERMORE_PROVIDER");
@@ -102,12 +111,35 @@ int main(int argc, char *argv[])
     }
 
     if (prompt) {
-        /* one-shot mode — phase 1 target */
-        fprintf(stderr,
-                "nevermore: ask mode not yet implemented (phase 1)\n");
-        (void)model;
-        (void)nm_agent_new;
-        return 1;
+        /* One-shot ask mode (phase 1): stream deltas to stdout. */
+        const char *api_key = getenv("OLLAMA_API_KEY"); /* provider-specific later */
+        if (!model) {
+            model = "gpt-oss:20b"; /* sane local default; phase 3 adds resolution */
+        }
+        NmMessage msg = { "user", prompt };
+        NmChatRequest req = {
+            model,
+            &msg,
+            1,
+            NULL,   /* system */
+            NULL,   /* tools_json */
+            -1,     /* temperature: provider default */
+            -1,     /* max_tokens: provider default */
+            ask_on_delta,
+            NULL    /* userdata */
+        };
+        setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
+        NmChatResult r = provider->chat(provider, &req, NULL, api_key);
+        if (r.status != NM_CHAT_OK) {
+            fprintf(stderr, "nevermore: chat failed (%s%s%s)\n",
+                    r.status == NM_CHAT_ERR_AUTH ? "auth: " : "",
+                    r.status == NM_CHAT_ERR_HTTP ? "http: " : "",
+                    r.error_body ? r.error_body : "transport/parse error");
+            nm_chat_result_free(&r);
+            return 1;
+        }
+        nm_chat_result_free(&r);
+        return 0;
     }
 
     /* interactive chat — boba TUI, phase 3 target */
