@@ -202,6 +202,7 @@ static void test_wire_http_error_status(void)
     ASSERT_EQ(r->status, 404);
 
     char buf[256];
+    memset(buf, 0, sizeof(buf)); /* read returns bytes, not a C string */
     long n = nm_read_body(c, buf, sizeof(buf));
     ASSERT_EQ(n, 21);
     ASSERT_STR_EQ(buf, "{\"error\":\"not found\"}");
