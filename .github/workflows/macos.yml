@@ -50,3 +50,12 @@ jobs:
 
       - name: Run tests
         run: make -C build check
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-macos
+          path: build/tests/*.log
+          retention-days: 7
+          if-no-files-found: warn
