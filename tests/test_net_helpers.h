@@ -11,7 +11,7 @@
 #include <ws2tcpip.h>
 
 /* MinGW shims: close() -> closesocket(), usleep() -> Sleep(). */
-#define close(s) closesocket(s)
+#define close(s)   closesocket(s)
 #define usleep(us) Sleep((DWORD)((us) / 1000))
 
 /* Every socket call in the tests needs WSA initialized first. */

@@ -22,41 +22,47 @@ cd "$(dirname "$0")/.."
 
 cache=$HOME/.cache/nevermore-zig-macos-sdk
 
-command -v zig >/dev/null 2>&1 || { echo "zig not found (dnf install zig)"; exit 77; }
-command -v gh >/dev/null 2>&1 || { echo "gh not found (sdk staging uses it)"; exit 77; }
+command -v zig >/dev/null 2>&1 || {
+	echo "zig not found (dnf install zig)"
+	exit 77
+}
+command -v gh >/dev/null 2>&1 || {
+	echo "gh not found (sdk staging uses it)"
+	exit 77
+}
 
 # Stage the Apple-SDK shim once. Idempotent.
 if [ ! -f "$cache/.ready" ]; then
-    echo "staging macOS SDK shim into $cache ..."
-    rm -rf "$cache"
-    mkdir -p "$cache/usr/include"
-    mkdir -p "$cache/Security.framework/Headers"
-    curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/SecureTransport.h" \
-         -o "$cache/Security.framework/Headers/SecureTransport.h"
-    curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/CipherSuite.h" \
-         -o "$cache/Security.framework/Headers/CipherSuite.h"
-    for p in $(gh api "repos/apple-oss-distributions/Security/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "^header_symlinks/Security/.*\.h$"); do
-        curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/$p" \
-             -o "$cache/Security.framework/Headers/$(basename "$p")"
-    done
-    mkdir -p "$cache/CoreFoundation.framework/Headers"
-    for p in $(gh api "repos/apple-oss-distributions/CF/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "\.h$"); do
-        curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/CF/main/$p" \
-             -o "$cache/CoreFoundation.framework/Headers/$(basename "$p")"
-    done
-    # cssm chain (SecTrust.h → cssmtype.h → cssmconfig.h → x509defs.h)
-    for h in cssmtype.h cssmapi.h cssmerr.h cssmerrors.h cssmconfig.h x509defs.h; do
-        curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_cssm/lib/$h" \
-             -o "$cache/Security.framework/Headers/$h"
-    done
-    curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/cssm/cssmapple.h" \
-         -o "$cache/Security.framework/Headers/cssmapple.h"
-    echo done > "$cache/.ready"
+	echo "staging macOS SDK shim into $cache ..."
+	rm -rf "$cache"
+	mkdir -p "$cache/usr/include"
+	mkdir -p "$cache/Security.framework/Headers"
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/SecureTransport.h" \
+		-o "$cache/Security.framework/Headers/SecureTransport.h"
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/CipherSuite.h" \
+		-o "$cache/Security.framework/Headers/CipherSuite.h"
+	for p in $(gh api "repos/apple-oss-distributions/Security/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "^header_symlinks/Security/.*\.h$"); do
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/$p" \
+			-o "$cache/Security.framework/Headers/$(basename "$p")"
+	done
+	mkdir -p "$cache/CoreFoundation.framework/Headers"
+	for p in $(gh api "repos/apple-oss-distributions/CF/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "\.h$"); do
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/CF/main/$p" \
+			-o "$cache/CoreFoundation.framework/Headers/$(basename "$p")"
+	done
+	# cssm chain (SecTrust.h → cssmtype.h → cssmconfig.h → x509defs.h)
+	for h in cssmtype.h cssmapi.h cssmerr.h cssmerrors.h cssmconfig.h x509defs.h; do
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_cssm/lib/$h" \
+			-o "$cache/Security.framework/Headers/$h"
+	done
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/cssm/cssmapple.h" \
+		-o "$cache/Security.framework/Headers/cssmapple.h"
+	echo done >"$cache/.ready"
 fi
 
 # Neutralize the SDK annotations zig's bundled darwin libc does not
 # provide (Availability.h does not chain to os/availability.h here).
-cat > "$cache/nm-zig-shim.h" <<'SHIM'
+cat >"$cache/nm-zig-shim.h" <<'SHIM'
 #ifndef NM_ZIG_SHIM_H
 #define NM_ZIG_SHIM_H
 #undef CF_AVAILABLE
@@ -88,7 +94,7 @@ SHIM
 # libc headers don't chain them. Patch the staged copy once.
 cfav="$cache/CoreFoundation.framework/Headers/CFAvailability.h"
 if ! grep -q "NM_ZIG_STAGED" "$cfav" 2>/dev/null; then
-    python3 - "$cfav" <<'PY'
+	python3 - "$cfav" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -130,9 +136,9 @@ src += """
 open(path, 'w').write(src)
 print("patched", path)
 PY
-    # SecBase.h one-arg CF_ENUM(OSStatus) + nullability shims
-    secbase="$cache/Security.framework/Headers/SecBase.h"
-    python3 - "$secbase" <<'PY'
+	# SecBase.h one-arg CF_ENUM(OSStatus) + nullability shims
+	secbase="$cache/Security.framework/Headers/SecBase.h"
+	python3 - "$secbase" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -144,18 +150,18 @@ src = src.replace("CF_ENUM(OSStatus)\n{", "CF_ENUM(OSStatus, __nm_anon1)\n{")
 src = src.replace("CF_ENUM(OSStatus) {", "CF_ENUM(OSStatus, __nm_anon2) {")
 open(path, 'w').write(src)
 PY
-    csuite="$cache/Security.framework/Headers/CipherSuite.h"
-    python3 - "$csuite" <<'PY'
+	csuite="$cache/Security.framework/Headers/CipherSuite.h"
+	python3 - "$csuite" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
 src = src.replace("CF_ENUM(SSLCipherSuite)\n{", "CF_ENUM(SSLCipherSuite, __nm_css)\n{")
 open(path, 'w').write(src)
 PY
-    # API_* re-definitions in headers that include zig's Availability.h
-    for f in SecCertificate.h SecTrust.h SecItem.h SecPolicy.h SecKey.h CMSEncoder.h; do
-        p="$cache/Security.framework/Headers/$f"
-        [ -f "$p" ] && python3 - "$p" <<'PY'
+	# API_* re-definitions in headers that include zig's Availability.h
+	for f in SecCertificate.h SecTrust.h SecItem.h SecPolicy.h SecKey.h CMSEncoder.h; do
+		p="$cache/Security.framework/Headers/$f"
+		[ -f "$p" ] && python3 - "$p" <<'PY'
 import sys
 path = sys.argv[1]
 src = open(path).read()
@@ -172,37 +178,41 @@ src += """
 """
 open(path, 'w').write(src)
 PY
-    done
-    echo patched >> "$cache/.ready"
+	done
+	echo patched >>"$cache/.ready"
 fi
 
 fail=0
 for f in src/*.c; do
-    case "$f" in
-    src/tls_openssl.c|src/tls_schannel.c|src/tls_mbedtls.c)
-        echo "SKIP $f (backend not selected on macOS CI)"
-        continue ;;
-    src/tools_spawn_win.c|src/os_compat_win.c)
-        echo "SKIP $f (windows-only TU)"
-        continue ;;
-    src/tls_sectransport.c)
-        out=$(zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
-              -include "$cache/nm-zig-shim.h" \
-              -c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
-              -I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
-              -isysroot "$cache" -F "$cache" 2>&1 | grep -E "error:" | head -2) ;;
-    *)
-        out=$(zig cc -target aarch64-macos \
-              -c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
-              -I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" 2>&1 | grep -E "error:" | head -2) ;;
-    esac
-    if [ -n "$out" ]; then
-        echo "FAIL $f"
-        echo "$out"
-        fail=1
-    else
-        echo "OK   $f"
-    fi
+	case "$f" in
+	src/tls_openssl.c | src/tls_schannel.c | src/tls_mbedtls.c)
+		echo "SKIP $f (backend not selected on macOS CI)"
+		continue
+		;;
+	src/tools_spawn_win.c | src/os_compat_win.c)
+		echo "SKIP $f (windows-only TU)"
+		continue
+		;;
+	src/tls_sectransport.c)
+		out=$(zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
+			-include "$cache/nm-zig-shim.h" \
+			-c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
+			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
+			-isysroot "$cache" -F "$cache" 2>&1 | grep -E "error:" | head -2)
+		;;
+	*)
+		out=$(zig cc -target aarch64-macos \
+			-c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
+			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" 2>&1 | grep -E "error:" | head -2)
+		;;
+	esac
+	if [ -n "$out" ]; then
+		echo "FAIL $f"
+		echo "$out"
+		fail=1
+	else
+		echo "OK   $f"
+	fi
 done
 
 exit $fail

@@ -8,7 +8,7 @@
 #ifdef _WIN32
 #include <direct.h> /* _mkdir */
 #include <process.h>
-#define getpid _getpid
+#define getpid      _getpid
 #define mkdir(d, m) _mkdir(d)
 #else
 #include <unistd.h>
