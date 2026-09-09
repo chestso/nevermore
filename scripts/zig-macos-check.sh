@@ -32,30 +32,39 @@ command -v gh >/dev/null 2>&1 || {
 }
 
 # Stage the Apple-SDK shim once. Idempotent.
+#
+# Pinned upstream tags (NOT main): the headers are shimmed/patched per
+# exact content, so a moving main branch silently breaks the cache
+# (2026-09: main grew CF_ASSUME_NONNULL_* / new CF_ENUM forms that
+# main-branch CFAvailability.h no longer defines). Bump both tags
+# together after re-verifying the patch block below.
+STAG=Security-61901.101.4
+CTAG=CF-1153.18
+
 if [ ! -f "$cache/.ready" ]; then
 	echo "staging macOS SDK shim into $cache ..."
 	rm -rf "$cache"
 	mkdir -p "$cache/usr/include"
 	mkdir -p "$cache/Security.framework/Headers"
-	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/SecureTransport.h" \
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/$STAG/OSX/libsecurity_ssl/Security/SecureTransport.h" \
 		-o "$cache/Security.framework/Headers/SecureTransport.h"
-	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_ssl/Security/CipherSuite.h" \
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/$STAG/OSX/libsecurity_ssl/Security/CipherSuite.h" \
 		-o "$cache/Security.framework/Headers/CipherSuite.h"
-	for p in $(gh api "repos/apple-oss-distributions/Security/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "^header_symlinks/Security/.*\.h$"); do
-		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/$p" \
+	for p in $(gh api "repos/apple-oss-distributions/Security/git/trees/$STAG?recursive=1" --jq '.tree[].path' | grep -E "^header_symlinks/Security/.*\.h$"); do
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/$STAG/$p" \
 			-o "$cache/Security.framework/Headers/$(basename "$p")"
 	done
 	mkdir -p "$cache/CoreFoundation.framework/Headers"
-	for p in $(gh api "repos/apple-oss-distributions/CF/git/trees/main?recursive=1" --jq '.tree[].path' | grep -E "\.h$"); do
-		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/CF/main/$p" \
+	for p in $(gh api "repos/apple-oss-distributions/CF/git/trees/$CTAG?recursive=1" --jq '.tree[].path' | grep -E "\.h$"); do
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/CF/$CTAG/$p" \
 			-o "$cache/CoreFoundation.framework/Headers/$(basename "$p")"
 	done
 	# cssm chain (SecTrust.h → cssmtype.h → cssmconfig.h → x509defs.h)
 	for h in cssmtype.h cssmapi.h cssmerr.h cssmerrors.h cssmconfig.h x509defs.h; do
-		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/OSX/libsecurity_cssm/lib/$h" \
+		curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/$STAG/OSX/libsecurity_cssm/lib/$h" \
 			-o "$cache/Security.framework/Headers/$h"
 	done
-	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/main/cssm/cssmapple.h" \
+	curl -sL "https://raw.githubusercontent.com/apple-oss-distributions/Security/$STAG/cssm/cssmapple.h" \
 		-o "$cache/Security.framework/Headers/cssmapple.h"
 	echo done >"$cache/.ready"
 fi
@@ -65,6 +74,33 @@ fi
 cat >"$cache/nm-zig-shim.h" <<'SHIM'
 #ifndef NM_ZIG_SHIM_H
 #define NM_ZIG_SHIM_H
+/* Nullability auditing is a clang-source-tree feature the bundled
+ * headers rely on CoreFoundation to define; staged CFAvailability.h
+ * predates CF_ASSUME_NONNULL_*, so define the whole family here. */
+#ifndef CF_ASSUME_NONNULL_BEGIN
+#define CF_ASSUME_NONNULL_BEGIN
+#endif
+#ifndef CF_ASSUME_NONNULL_END
+#define CF_ASSUME_NONNULL_END
+#endif
+#ifndef CF_ASSUME_NONNULL_IMPL
+#define CF_ASSUME_NONNULL_IMPL
+#endif
+#ifndef CF_IMMPLICIT_BRIDGING_ENABLED
+#define CF_IMMPLICIT_BRIDGING_ENABLED
+#endif
+#ifndef CF_IMPLICIT_BRIDGING_ENABLED
+#define CF_IMPLICIT_BRIDGING_ENABLED
+#endif
+#ifndef CF_IMPLICIT_BRIDGING_DISABLED
+#define CF_IMPLICIT_BRIDGING_DISABLED
+#endif
+#ifndef CF_SWIFT_SENDABLE
+#define CF_SWIFT_SENDABLE
+#endif
+#ifndef CF_RETURNS_RETAINED
+#define CF_RETURNS_RETAINED
+#endif
 #undef CF_AVAILABLE
 #define CF_AVAILABLE(...)
 #undef CF_AVAILABLE_MAC
