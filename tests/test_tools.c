@@ -5,7 +5,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#ifdef _WIN32
+#include <direct.h> /* _mkdir */
+#include <process.h>
+#define getpid _getpid
+#define mkdir(d, m) _mkdir(d)
+#else
 #include <unistd.h>
+#endif
 
 #include "json.h"
 #include "tools.h"
@@ -19,7 +26,12 @@ static const char *scratch_dir(void)
     static char dir[128];
     static int made = 0;
     if (!made) {
+#ifdef _WIN32
+        snprintf(dir, sizeof(dir), "C:\\Users\\Public\\nm-test-tools-%d",
+                 (int)getpid());
+#else
         snprintf(dir, sizeof(dir), "/tmp/nm-test-tools-%d", (int)getpid());
+#endif
         mkdir(dir, 0755);
         made = 1;
     }

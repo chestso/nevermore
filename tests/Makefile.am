@@ -99,15 +99,21 @@ test_session_SOURCES = test_session.c ../src/session.c
 test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Tools: registry + schemas + file tools + spawn (canned temp files).
+# Same spawn split as src/Makefile.am — one file per OS.
+if HOST_WINDOWS
+TOOLS_SPAWN_SOURCE = ../src/tools_spawn_win.c ../src/os_compat_win.c
+else
+TOOLS_SPAWN_SOURCE = ../src/tools_spawn_posix.c
+endif
 test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
-    ../src/tools_spawn_posix.c ../src/json.c
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c
 test_tools_CFLAGS = $(TEST_CFLAGS)
 test_tools_LDADD = -lpthread
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
-    ../src/tools.c ../src/tools_file.c ../src/tools_spawn_posix.c \
+    ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
