@@ -9,7 +9,7 @@
 #ifndef NM_PROVIDER_INTERNAL_H
 #define NM_PROVIDER_INTERNAL_H
 
-#include "nevermore/provider.h"
+#include "provider.h"
 
 extern const struct NmProvider nm_hyper_provider;
 extern const struct NmProvider nm_ollama_provider;

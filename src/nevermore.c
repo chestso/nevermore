@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nevermore/provider.h"
+#include "provider.h"
 
 #include "provider_internal.h"
 

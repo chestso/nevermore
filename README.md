@@ -51,10 +51,10 @@ Provider keys come from the environment: `HYPER_API_KEY`,
 ## Layout
 
 ```
-include/nevermore/   public headers (nm_ prefix, Nm* types)
-src/                libnevermore.a: providers, wire client, transport,
-                    SSE, JSON, agent loop, tools, session
-cli/                the nevermore binary (modeled on ditty/cli/)
+src/                the nevermore binary: entry point, providers, wire
+                    client, transport, SSE, JSON, agent loop, tools,
+                    session, TUI (headers live alongside sources —
+                    CLI app, no library)
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
 docs/               wire specs ported from quoth + platform notes
 data/               static model catalogs

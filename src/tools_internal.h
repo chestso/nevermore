@@ -3,7 +3,7 @@
 #ifndef NM_TOOLS_INTERNAL_H
 #define NM_TOOLS_INTERNAL_H
 
-#include "nevermore/tools.h"
+#include "tools.h"
 
 /* Implemented once per OS: tools_spawn_posix.c (posix_spawn + pipe)
  * and tools_spawn_win.c (CreateProcessW + anonymous pipe). */

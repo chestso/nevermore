@@ -1,4 +1,4 @@
-/* main.c - nevermore CLI entry point (modeled on ditty/cli/main.c)
+/* main.c - nevermore entry point (modeled on portty/src/main.c)
  *
  * nevermore — an interactive coding agent in pure C.
  *
@@ -17,9 +17,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nevermore/nevermore.h"
-#include "nevermore/agent.h"
-#include "nevermore/provider.h"
+#include "nevermore.h"
+#include "agent.h"
+#include "provider.h"
 #include "chat_app.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */

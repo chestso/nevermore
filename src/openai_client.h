@@ -15,8 +15,8 @@
 #ifndef NM_OPENAI_CLIENT_H
 #define NM_OPENAI_CLIENT_H
 
-#include "nevermore/json.h"
-#include "nevermore/provider.h"
+#include "json.h"
+#include "provider.h"
 
 #ifdef __cplusplus
 extern "C" {

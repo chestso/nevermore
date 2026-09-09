@@ -9,12 +9,12 @@
 #ifndef NEVERMORE_H
 #define NEVERMORE_H
 
-#include "nevermore/provider.h"
-#include "nevermore/transport.h"
-#include "nevermore/sse.h"
-#include "nevermore/json.h"
-#include "nevermore/agent.h"
-#include "nevermore/tools.h"
-#include "nevermore/session.h"
+#include "provider.h"
+#include "transport.h"
+#include "sse.h"
+#include "json.h"
+#include "agent.h"
+#include "tools.h"
+#include "session.h"
 
 #endif // NEVERMORE_H

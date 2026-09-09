@@ -11,8 +11,8 @@
 #ifndef NM_AGENT_H
 #define NM_AGENT_H
 
-#include "nevermore/provider.h"
-#include "nevermore/tools.h"
+#include "provider.h"
+#include "tools.h"
 
 #ifdef __cplusplus
 extern "C" {

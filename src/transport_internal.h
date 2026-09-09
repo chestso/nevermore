@@ -9,7 +9,7 @@
 #ifndef NM_TRANSPORT_INTERNAL_H
 #define NM_TRANSPORT_INTERNAL_H
 
-#include "nevermore/transport.h"
+#include "transport.h"
 
 #ifdef __cplusplus
 extern "C" {

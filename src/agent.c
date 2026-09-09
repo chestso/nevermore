@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nevermore/agent.h"
+#include "agent.h"
 
 struct NmAgent
 {

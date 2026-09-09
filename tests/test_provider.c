@@ -2,7 +2,7 @@
 
 #include <stdio.h>
 
-#include "nevermore/provider.h"
+#include "provider.h"
 #include "test_helpers.h"
 
 static void test_provider_registry_complete(void)

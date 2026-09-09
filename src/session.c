@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nevermore/session.h"
+#include "session.h"
 
 NmSession *nm_session_new(const char *system_prompt)
 {
