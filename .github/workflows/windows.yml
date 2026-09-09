@@ -40,6 +40,7 @@ jobs:
             autoconf
             automake
             libtool
+            git
             mingw-w64-ucrt-x86_64-toolchain
             pkg-config
 
@@ -53,7 +54,7 @@ jobs:
 
       - name: Build (Schannel TLS — native, no deps)
         env:
-          PKG_CONFIG_PATH: ${{ github.workspace }}/.local/lib/pkgconfig
+          PKG_CONFIG_PATH: /home/runneradmin/.local/lib/pkgconfig
         run: |
           ./autogen.sh
           mkdir build && cd build

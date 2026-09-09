@@ -45,7 +45,7 @@ jobs:
 
       - name: Build
         env:
-          PKG_CONFIG_PATH: ${{ github.workspace }}/.local/lib/pkgconfig
+          PKG_CONFIG_PATH: $HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig
         run: |
           ./autogen.sh
           mkdir build && cd build
