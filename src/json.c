@@ -23,6 +23,13 @@
 
 #include "json.h"
 
+/* Silences -Wunused-function on helpers kept for upcoming phases. */
+#if defined(__GNUC__)
+#define NM_UNUSED __attribute__((unused))
+#else
+#define NM_UNUSED
+#endif
+
 /* ---------------------------------------------------------------- */
 /* Arena (chunked — pointers carved from it are stable for life)    */
 /* ---------------------------------------------------------------- */
@@ -78,7 +85,9 @@ static void arena_free(Arena *a)
     a->head = NULL;
 }
 
-static char *arena_strdup(Arena *a, const char *s, size_t len)
+/* Arena-strdup: reserved for object keys that must outlive the
+ * parse buffer (phase 4 tool schemas); currently unused. */
+static char NM_UNUSED *arena_strdup(Arena *a, const char *s, size_t len)
 {
     char *p = arena_alloc(a, len + 1);
     if (!p)

@@ -28,6 +28,13 @@
 #define READ_BUF_CAP   16384
 #define ERROR_BODY_MAX 2048 /* like quoth's openai error-body cap */
 
+/* Silences -Wunused-parameter on params kept for vtable symmetry. */
+#if defined(__GNUC__)
+#define NM_UNUSED __attribute__((unused))
+#else
+#define NM_UNUSED
+#endif
+
 /* ---------------------------------------------------------------- */
 /* URL / endpoint plumbing                                          */
 /* ---------------------------------------------------------------- */
@@ -81,7 +88,7 @@ static const char *url_path_prefix(const char *url)
 /* Build the chat/completions JSON body. One heap document, freed at
  * the end of nm_openai_chat — the request body is per-call by
  * nature, but it is ONE allocation tree, not per-message churn. */
-static char *compose_body(const NmOpenaiEndpoint *ep,
+static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
                           const NmChatRequest *req)
 {
     NmJson *body = nm_json_new_object();
