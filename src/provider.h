@@ -3,16 +3,18 @@
  * Four providers, one function-pointer interface (the portty backend
  * pattern):
  *
- *   hyper      Charm Hyper gateway (HTTP + SSE)
+ *   hyper      Charm Hyper gateway (OpenAI-compatible /v1 chat surface
+ *              plus OAuth device flow; docs/HYPER-API.md)
  *   ollama     local daemon (http://localhost:11434, no auth) and
  *              Ollama Cloud (https://ollama.com) — OpenAI-compatible
  *              chat surface plus the native /api catalog
  *   openai     OpenAI chat completions
  *   openrouter OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
  *
- * openai, ollama, and openrouter share one wire client (openai_client.h):
- * only base URL, auth headers, and model catalogs differ. hyper speaks
- * its own surface (docs/HYPER-API.md).
+ * All four share one wire client (openai_client.h); only base URL,
+ * auth headers, and model catalogs differ. provider_openai.c is the
+ * reference implementation. Provider-specific surfaces are narrow:
+ * hyper's OAuth device flow, ollama's native /api catalog.
  */
 
 #ifndef NM_PROVIDER_H

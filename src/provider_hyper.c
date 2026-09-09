@@ -1,8 +1,12 @@
 /* provider_hyper.c - Charm Hyper gateway provider (stub)
  *
- * Wire behavior specified in docs/HYPER-API.md (ported from quoth).
- * Phase 5 of the build plan: implement chat() over the Hyper SSE
- * surface; the model catalog is static (data/nm-hyper-models.json).
+ * Wire behavior specified in docs/HYPER-API.md (ported from quoth):
+ * the chat-completions surface under /v1 is OpenAI-compatible, so
+ * phase 5 implements chat() via the shared openai_client — only
+ * the endpoint (hyper.charm.land/v1, sk-hyper- auth) and the
+ * static model catalog (data/nm-hyper-models.json) differ from
+ * the openai reference provider. Hyper's own surface is just the
+ * OAuth device flow, which is not part of the vtable.
  */
 
 #include <stddef.h>
