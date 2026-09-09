@@ -626,6 +626,20 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
 
 #ifdef _WIN32
 #include <windows.h>
+
+/* UTF-8 -> UTF-16 for the W find APIs (heap via LocalAlloc, caller
+ * LocalFrees — same convention as tools_spawn_win.c). */
+static wchar_t *utf8_to_wide_path(const char *s)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0)
+        return NULL;
+    wchar_t *w = LocalAlloc(LMEM_FIXED, (size_t)n * sizeof(wchar_t));
+    if (!w)
+        return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
+    return w;
+}
 #else
 #include <dirent.h>
 #endif
@@ -652,10 +666,21 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
     }
     int nentries = 0;
 #ifdef _WIN32
-    char pat[1024];
-    snprintf(pat, sizeof(pat), "%s\\*", path);
+    /* FindFirstFileW is the only find API on MinGW that sees UTF-8
+     * paths correctly; convert (LocalFree pattern from
+     * tools_spawn_win.c). */
+    wchar_t *wpath = utf8_to_wide_path(path);
+    if (!wpath) {
+        free(body);
+        free(path);
+        return nm_tool_result_error("out of memory");
+    }
+    wchar_t wpat[1024];
+    _snwprintf(wpat, 1024, L"%s\\*", wpath);
+    wpat[1023] = L'\0';
+    LocalFree(wpath);
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pat, &fd);
+    HANDLE h = FindFirstFileW(wpat, &fd);
     if (h == INVALID_HANDLE_VALUE) {
         free(body);
         char *msg = malloc(strlen(path) + 64);
@@ -731,7 +756,6 @@ static void search_file(const char *path, const char *needle,
         free(text);
         return;
     }
-    size_t nlen = strlen(needle);
     long lineno = 1;
     size_t line_start = 0;
     for (size_t i = 0; i <= len; i++) {
@@ -766,10 +790,15 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
         return;
     /* Skip VCS/build noise: .git, node_modules, build dirs. */
 #ifdef _WIN32
-    char pat[1024];
-    snprintf(pat, sizeof(pat), "%s\\*", dir);
+    wchar_t *wdir = utf8_to_wide_path(dir);
+    if (!wdir)
+        return;
+    wchar_t wpat[1024];
+    _snwprintf(wpat, 1024, L"%s\\*", wdir);
+    wpat[1023] = L'\0';
+    LocalFree(wdir);
     WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pat, &fd);
+    HANDLE h = FindFirstFileW(wpat, &fd);
     if (h == INVALID_HANDLE_VALUE)
         return;
     do {
