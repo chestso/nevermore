@@ -4,7 +4,8 @@
 check_PROGRAMS = \
     test_sse \
     test_json \
-    test_provider
+    test_provider \
+    test_wire
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -29,6 +30,12 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
 test_provider_CFLAGS = $(TEST_CFLAGS)
+
+# Transport wire tests (dummy threaded localhost servers, canned
+# responses; loopback only, never real APIs). POSIX threads.
+test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c
+test_wire_CFLAGS = $(TEST_CFLAGS)
+test_wire_LDADD = -lpthread
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
