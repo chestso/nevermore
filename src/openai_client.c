@@ -34,8 +34,8 @@
 
 /* Parse "http(s)://host[:port]" out of base_url. Writes host/port.
  * Returns 0 on success. Character-level, no regex. */
-static int split_base_url(const char *url, char *host, size_t host_cap,
-                          int *port, NmTransportMode *mode)
+int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
+                             int *port, NmTransportMode *mode)
 {
     *mode = NM_TRANSPORT_PLAIN;
     *port = 80;
@@ -242,7 +242,7 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     char host[256];
     int port;
     NmTransportMode mode;
-    if (split_base_url(ep->base_url, host, sizeof(host), &port, &mode) != 0) {
+    if (nm_openai_split_base_url(ep->base_url, host, sizeof(host), &port, &mode) != 0) {
         r.status = NM_CHAT_ERR_TRANSPORT;
         return r;
     }
@@ -309,11 +309,13 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
                 break;
         }
         ebuf[elen] = '\0';
+        /* Read the response fields BEFORE closing: resp points into
+         * the connection, freed by nm_connection_close. */
+        int status = resp->status;
         nm_connection_close(conn);
-        r.status = (resp->status == 401 || resp->status == 403)
-                       ? NM_CHAT_ERR_AUTH
-                       : NM_CHAT_ERR_HTTP;
-        r.http_status = resp->status;
+        r.status = (status == 401 || status == 403) ? NM_CHAT_ERR_AUTH
+                                                    : NM_CHAT_ERR_HTTP;
+        r.http_status = status;
         r.error_body = strdup(ebuf);
         return r;
     }

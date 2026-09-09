@@ -6,7 +6,8 @@ check_PROGRAMS = \
     test_json \
     test_provider \
     test_wire \
-    test_openai_client
+    test_openai_client \
+    test_tls
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -31,24 +32,33 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c
-test_provider_CFLAGS = $(TEST_CFLAGS)
+    ../src/transport.c ../src/transport_socket.c ../src/tls_openssl.c
+test_provider_CFLAGS = $(TEST_CFLAGS) $(OPENSSL_CFLAGS)
+test_provider_LDADD = $(OPENSSL_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
-test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c
-test_wire_CFLAGS = $(TEST_CFLAGS)
-test_wire_LDADD = -lpthread
+test_wire_SOURCES = test_wire.c ../src/transport.c     ../src/transport_socket.c ../src/tls_openssl.c
+test_wire_CFLAGS = $(TEST_CFLAGS) $(OPENSSL_CFLAGS)
+test_wire_LDADD = -lpthread $(OPENSSL_LIBS)
 
 # End-to-end: the shared OpenAI-compatible client against a canned
 # chat/completions SSE server (request validation + delta assembly).
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c \
+    ../src/transport.c ../src/transport_socket.c ../src/tls_openssl.c \
     ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
-test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src
-test_openai_client_LDADD = -lpthread
+test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(OPENSSL_CFLAGS)
+test_openai_client_LDADD = -lpthread $(OPENSSL_LIBS)
+
+# TLS: negative handshake over loopback with the committed self-signed
+# cert (system trust must reject it). Live probe is manual
+# (NM_LIVE_TLS=1), never in make check.
+test_tls_SOURCES = test_tls.c ../src/transport.c ../src/transport_socket.c \
+    ../src/tls_openssl.c
+test_tls_CFLAGS = $(TEST_CFLAGS) $(OPENSSL_CFLAGS)
+test_tls_LDADD = -lpthread $(OPENSSL_LIBS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
@@ -56,7 +66,7 @@ TESTS = $(check_PROGRAMS)
 # Verbose logging flag convention: pass -v to any test binary.
 TESTS_ENVIRONMENT =
 
-EXTRA_DIST = test_helpers.h
+EXTRA_DIST = test_helpers.h tls/test-cert.pem tls/test-key.pem tls/README.md
 
 # Wire tests (dummy local servers, no real network) — separate target,
 # like quoth's `make test-wire`.

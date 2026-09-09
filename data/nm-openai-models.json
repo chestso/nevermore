@@ -1,1 +1,50 @@
-[]
+[
+  {
+    "id": "gpt-5.2",
+    "label": "GPT-5.2",
+    "vision": 1,
+    "context_length": 400000
+  },
+  {
+    "id": "gpt-5.2-mini",
+    "label": "GPT-5.2 mini",
+    "vision": 1,
+    "context_length": 400000
+  },
+  {
+    "id": "gpt-5.1",
+    "label": "GPT-5.1",
+    "vision": 1,
+    "context_length": 400000
+  },
+  {
+    "id": "gpt-5",
+    "label": "GPT-5",
+    "vision": 1,
+    "context_length": 128000
+  },
+  {
+    "id": "gpt-4.1",
+    "label": "GPT-4.1",
+    "vision": 1,
+    "context_length": 1047576
+  },
+  {
+    "id": "gpt-4o",
+    "label": "GPT-4o",
+    "vision": 1,
+    "context_length": 128000
+  },
+  {
+    "id": "gpt-4o-mini",
+    "label": "GPT-4o mini",
+    "vision": 1,
+    "context_length": 128000
+  },
+  {
+    "id": "o3",
+    "label": "o3 reasoning",
+    "vision": 1,
+    "context_length": 200000
+  }
+]

@@ -17,6 +17,7 @@
 
 #include "json.h"
 #include "provider.h"
+#include "transport.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -35,6 +36,12 @@ typedef struct NmOpenaiEndpoint
  * Blocking; returns the final status. */
 NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
                             const NmChatRequest *req);
+
+/* Split "http(s)://host[:port]" into host/port/mode (shared with the
+ * providers' catalog fetches). Writes into caller buffers. 0 on
+ * success. */
+int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
+                             int *port, NmTransportMode *mode);
 
 /* Fetch GET {base_url}/models (OpenAI + OpenRouter catalogs). */
 NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err);

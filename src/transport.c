@@ -9,6 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef HAVE_CONFIG_H
+#include "config.h" /* NM_TLS_* — configure-time backend selection */
+#endif
+
 #include "transport.h"
 
 #include "transport_internal.h"

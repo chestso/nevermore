@@ -96,9 +96,11 @@ nevermore_SOURCES = \
 nevermore_CPPFLAGS = \
     -I$(top_builddir) \
     -I$(top_srcdir)/src \
-    $(BOBA_CFLAGS)
+    $(BOBA_CFLAGS) \
+    $(OPENSSL_CFLAGS) \
+    $(MBEDTLS_CFLAGS)
 
-nevermore_LDADD = $(BOBA_LIBS)
+nevermore_LDADD = $(BOBA_LIBS) $(OPENSSL_LIBS) $(MBEDTLS_LIBS)
 
 # Windows resource file — embed application icon into the .exe via windres.
 if HAVE_WINDRES
