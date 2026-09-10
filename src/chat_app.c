@@ -669,18 +669,23 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
 /* ---------------------------------------------------------------- */
 
 /* Slash-command completion: filter the command list by the word at
- * the cursor; one match inserts directly, several open the popup. */
+ * the cursor; one match inserts directly, several open the popup.
+ * Tab on a non-slash word (boba emits TAB_COMPLETE for every word)
+ * or with no prefix at all is a no-op. */
 static void complete_commands(NmChatApp *app, const char *prefix, int word_start)
 {
+    (void)word_start;
     static const char *const commands[] = {
         "/help", "/model", "/models", "/provider", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
+    if (!prefix || prefix[0] != '/')
+        return;
     size_t plen = strlen(prefix);
-    for (int i = 0; i < (int)(sizeof(commands) / sizeof(commands[0])) &&
-                    n_matches < 16;
-         i++) {
+    /* commands[] is NULL-terminated: iterate the sentinel, never
+     * sizeof/sizeof (that counts the NULL and strncmp's it). */
+    for (int i = 0; commands[i] && n_matches < 16; i++) {
         if (strncmp(commands[i], prefix, plen) == 0)
             matches[n_matches++] = commands[i];
     }
@@ -851,7 +856,9 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         if (r.cmd->type == TUI_CMD_TAB_COMPLETE) {
             char *prefix = r.cmd->payload.tab_complete.prefix;
             int ws = r.cmd->payload.tab_complete.word_start;
-            if (prefix && prefix[0] == '/')
+            /* prefix is a borrowed pointer: complete_commands runs
+             * first, then the free — never the other way around. */
+            if (prefix)
                 complete_commands(app, prefix, ws);
             tui_cmd_free(r.cmd);
             return;

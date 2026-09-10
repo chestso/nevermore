@@ -687,6 +687,76 @@ static void test_tool_round_prints_panels(void)
     close(sc.fd);
 }
 
+static void test_tab_on_slash_prefix_opens_commands_popup(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Regression (TUI crash): Tab after "/m" matches several slash
+     * commands (/model, /models), so the commands popup opens with
+     * the filter applied. The old loop strncmp'd the array's NULL
+     * sentinel here. */
+    harness_type(h, "/m");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "/model") != NULL);
+    ASSERT_TRUE(strstr(frame, "/models") != NULL);
+    /* The input text is unchanged (several matches: popup, no insert). */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "/m");
+
+    /* Escape dismisses the popup. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "/model") == NULL);
+
+    harness_free(h);
+}
+
+static void test_tab_single_match_inserts_completion(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* "/he" matches exactly one command: Tab completes to "/help". */
+    harness_type(h, "/he");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "/help");
+    /* No popup for a unique match. */
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "/models") == NULL);
+
+    harness_free(h);
+}
+
+static void test_tab_on_plain_word_is_a_noop(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Regression (TUI crash): Tab after a NON-slash word emitted
+     * TAB_COMPLETE and the app matched against garbage — ASan/UBSan:
+     * "null pointer passed as argument 1" in strncmp. */
+    harness_type(h, "he");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+
+    /* No popup, text untouched, app still alive and idle. */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "he");
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    /* Tab at empty input (prefix NULL): same no-op. */
+    tui_textinput_clear(nm_chat_app_textinput(h->app));
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    harness_free(h);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -705,6 +775,9 @@ int main(void)
     RUN_TEST(test_models_popup_selects_model);
     RUN_TEST(test_provider_command_switches_provider);
     RUN_TEST(test_help_command_lists_commands);
+    RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);
+    RUN_TEST(test_tab_single_match_inserts_completion);
+    RUN_TEST(test_tab_on_plain_word_is_a_noop);
     RUN_TEST(test_cancel_midstream_returns_to_idle);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_tool_round_prints_panels);
