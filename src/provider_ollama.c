@@ -54,6 +54,22 @@ static NmChatResult ollama_chat(const NmProvider *p, const NmChatRequest *req,
     return nm_openai_chat(&ep, req);
 }
 
+/* Event-driven split (phase 4): same endpoint shape, step API. */
+static NmChatStream *ollama_chat_begin(const NmProvider *p,
+                                       const NmChatRequest *req,
+                                       const char *base_url,
+                                       const char *api_key, NmChatResult *err)
+{
+    (void)p;
+    NmOpenaiEndpoint ep = {
+        ollama_base(base_url, api_key),
+        "Bearer %s", /* ignored for local: no key, no header */
+        api_key,
+        NEVERMORE_UA
+    };
+    return nm_openai_chat_begin(&ep, req, err);
+}
+
 static const NmModel *ollama_models(const NmProvider *p, const char *base_url,
                                     const char *api_key, size_t *n_out)
 {
@@ -85,6 +101,10 @@ const struct NmProvider nm_ollama_provider = {
     "ollama",
     OLLAMA_LOCAL_DEFAULT,
     ollama_chat,
+    ollama_chat_begin,
+    nm_openai_chat_step,
+    nm_openai_stream_fd,
+    nm_openai_chat_end,
     ollama_models,
     ollama_needs_auth,
 };

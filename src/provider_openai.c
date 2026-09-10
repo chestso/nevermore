@@ -53,6 +53,22 @@ static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
     return nm_openai_chat(&ep, req);
 }
 
+/* Event-driven split (phase 4): same endpoint shape, step API. */
+static NmChatStream *openai_chat_begin(const NmProvider *p,
+                                       const NmChatRequest *req,
+                                       const char *base_url,
+                                       const char *api_key, NmChatResult *err)
+{
+    (void)p;
+    NmOpenaiEndpoint ep = {
+        (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE,
+        "Bearer %s",
+        api_key,
+        "nevermore (nevermore agent)"
+    };
+    return nm_openai_chat_begin(&ep, req, err);
+}
+
 /* GET {base}/models -> data[] -> cache as NmModel[]. One-shot fetch:
  * on failure the caller gets the static fallback. */
 static void openai_fetch_catalog(const char *base_url, const char *api_key)
@@ -194,6 +210,10 @@ const struct NmProvider nm_openai_provider = {
     "openai",
     OPENAI_DEFAULT_BASE,
     openai_chat,
+    openai_chat_begin,
+    nm_openai_chat_step,
+    nm_openai_stream_fd,
+    nm_openai_chat_end,
     openai_models,
     openai_needs_auth,
 };

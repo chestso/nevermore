@@ -41,8 +41,14 @@ static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
 const struct NmProvider nm_openrouter_provider = {
     NM_PROVIDER_OPENROUTER,
     "openrouter",
-    "https://api.openroutercharm.dev",
+    "https://openrouter.ai/api/v1",
     openrouter_chat,
+    /* Step API (phase 4): NULL until chat goes live over the shared
+     * openai_client in phase 5. */
+    NULL, /* chat_begin */
+    NULL, /* chat_step */
+    NULL, /* chat_stream_fd */
+    NULL, /* chat_end */
     openrouter_models,
     openrouter_needs_auth,
 };

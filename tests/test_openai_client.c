@@ -102,6 +102,7 @@ typedef struct Capture
 {
     char text[256];
     size_t len;
+    int n_deltas;
 } Capture;
 
 static void capture_delta(const char *delta_text, const NmToolCall *tool_calls,
@@ -114,6 +115,7 @@ static void capture_delta(const char *delta_text, const NmToolCall *tool_calls,
         memcpy(cap->text + cap->len, delta_text, strlen(delta_text));
         cap->len += strlen(delta_text);
         cap->text[cap->len] = '\0';
+        cap->n_deltas++;
     }
 }
 
@@ -159,6 +161,159 @@ static void test_chat_stream_end_to_end(void)
     ASSERT_TRUE(strstr(last_request, "say hi") != NULL);
 }
 
+/* ---------------------------------------------------------------- */
+/* Step API (phase 4 event loop)                                     */
+/* ---------------------------------------------------------------- */
+
+/* Dribbling server: three SSE events with stalls between them, so
+ * the client's chat_step must return PENDING between rounds and the
+ * deltas surface one at a time. */
+static void *dribble_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n";
+    static const char ev1[] =
+        "31\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n\r\n";
+    static const char ev2[] =
+        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"lo ag\"}}]}\n\n\r\n";
+    static const char ev3[] =
+        "32\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"ain!\"}}]}\n\n\r\n";
+    static const char fin[] =
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    send(cfd, head, sizeof(head) - 1, 0);
+    send(cfd, ev1, sizeof(ev1) - 1, 0);
+    usleep(150 * 1000); /* stall: client must PENDING here */
+    send(cfd, ev2, sizeof(ev2) - 1, 0);
+    usleep(150 * 1000);
+    send(cfd, ev3, sizeof(ev3) - 1, 0);
+    usleep(150 * 1000);
+    send(cfd, fin, sizeof(fin) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_chat_step_pending_between_events(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, dribble_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { { 0 }, 0, 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        capture_delta, &cap
+    };
+
+    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
+    ASSERT_NOT_NULL(h);
+    int fd = nm_openai_stream_fd(h);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Drive from "the event loop": poll the fd readable, step until
+     * the step goes PENDING, repeat. Bounded spins, no hang. */
+    fd_set fds;
+    int saw_pending = 0;
+    int saw_delta_before_pending = 0;
+    NmChatStatus st = NM_CHAT_PENDING;
+    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    for (int spin = 0; spin < 500 && st == NM_CHAT_PENDING; spin++) {
+        struct timeval tv = { 0, 10 * 1000 };
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        select(fd + 1, &fds, NULL, NULL, &tv);
+        int deltas_before = cap.n_deltas;
+        st = nm_openai_chat_step(h, &result);
+        if (st == NM_CHAT_PENDING && cap.n_deltas > deltas_before)
+            saw_delta_before_pending = 1;
+        if (st == NM_CHAT_PENDING)
+            saw_pending = 1;
+    }
+    ASSERT_EQ(st, NM_CHAT_OK);
+    ASSERT_TRUE(saw_pending);
+    ASSERT_TRUE(saw_delta_before_pending);
+    ASSERT_STR_EQ(cap.text, "Hello again!");
+
+    /* fd accessor must be closed/-1 after the stream completes. */
+    ASSERT_EQ(nm_openai_stream_fd(h), -1);
+    nm_openai_chat_end(h);
+    nm_chat_result_free(&result);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* Cancel mid-stream: chat_end tears the connection down without
+ * waiting for [DONE] or EOF. */
+static void *slow_start_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
+    usleep(300 * 1000); /* nothing sent yet */
+    close(cfd);
+    return NULL;
+}
+
+static void test_chat_step_cancel_mid_stream(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, slow_start_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+    };
+
+    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
+    ASSERT_NOT_NULL(h);
+
+    /* Step once (no bytes yet): PENDING. Then cancel — chat_end must
+     * free the stream mid-flight without hanging or leaking. */
+    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    ASSERT_EQ(nm_openai_chat_step(h, &result), NM_CHAT_PENDING);
+    nm_openai_chat_end(h);
+    nm_chat_result_free(&result);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -172,5 +327,7 @@ int main(int argc, char *argv[])
     }
     printf("test_openai_client:\n");
     RUN_TEST(test_chat_stream_end_to_end);
+    RUN_TEST(test_chat_step_pending_between_events);
+    RUN_TEST(test_chat_step_cancel_mid_stream);
     TEST_SUMMARY();
 }

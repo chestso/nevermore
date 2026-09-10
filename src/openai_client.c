@@ -25,6 +25,14 @@
 #include "sse.h"
 #include "transport_internal.h"
 
+/* Blocking-pump wait (nm_openai_chat): one 10ms readiness poll. */
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/select.h>
+#include <sys/time.h>
+#endif
+
 #define READ_BUF_CAP   16384
 #define ERROR_BODY_MAX 2048 /* like quoth's openai error-body cap */
 
@@ -156,8 +164,14 @@ static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
 /* SSE delta dispatch                                                */
 /* ---------------------------------------------------------------- */
 
-typedef struct StreamState
+/* Stream handle: the StreamState + connection + reused read buffer.
+ * One allocation per chat call (memory-reuse principle: the SSE
+ * parser, read buffer, and tool-call array live here for the
+ * stream's whole life; per-event values are borrowed pointers). */
+struct NmChatStream
 {
+    NmConnection *conn;
+    char rbuf[READ_BUF_CAP];
     NmSseParser *sse;
     const NmChatRequest *req;
     int done;            /* [DONE] seen or fatal error */
@@ -165,15 +179,17 @@ typedef struct StreamState
     int http_status;
     char *error_body; /* captured non-SSE error body, capped */
     size_t error_len;
-    /* Assembled tool calls (index-addressed, per-stream; buffers
-     * reused across chunks). Ownership moves to the on_delta
-     * receiver at the final NULL-content callback (freed by the
-     * receiver with nm_tool_calls_free); freed by the client when
-     * the stream dies or no receiver is registered. */
+    int head_checked; /* SSE/content-type validation done */
+    int error_mode;   /* non-SSE response: draining the error body */
+    /* Assembled tool calls (index-addressed; buffers reused across
+     * chunks). Ownership moves to the on_delta receiver at the final
+     * NULL-content callback (freed by the receiver with
+     * nm_tool_calls_free); freed by the client when the stream dies
+     * or no receiver is registered. */
     NmToolCall *tool_calls;
     size_t n_tool_calls;
     size_t tc_cap;
-} StreamState;
+};
 
 void nm_tool_calls_free(NmToolCall *calls, size_t n)
 {
@@ -191,7 +207,7 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n)
  * arena tree `obj`, borrowed). Port of quoth's sse-extract-deltas +
  * merge-tool-calls; tool_calls are reported through on_delta as
  * complete JSON strings when finish_reason arrives. */
-static void handle_event(StreamState *st, const char *data, size_t len)
+static void handle_event(NmChatStream *st, const char *data, size_t len)
 {
     if (strcmp(data, "[DONE]") == 0) {
         st->done = 1;
@@ -293,91 +309,113 @@ static void handle_event(StreamState *st, const char *data, size_t len)
     nm_json_free(obj);
 }
 
-/* Pump: pull bytes, feed SSE, dispatch events until done or EOF.
- * Returns final status via st. */
-static NmChatStatus stream_pump(NmConnection *conn, StreamState *st)
+/* Stream completion: deliver assembled tool calls (if any) with the
+ * final NULL-content callback, exactly once. Ownership of the
+ * tool-call array moves to the receiver (freed there with
+ * nm_tool_calls_free); the client forgets the pointer. */
+static void stream_finish(NmChatStream *st)
 {
-    char *rbuf = malloc(READ_BUF_CAP);
+    if (st->n_tool_calls > 0 && st->req->on_delta) {
+        st->req->on_delta(NULL, st->tool_calls, st->n_tool_calls,
+                          st->req->userdata);
+        st->tool_calls = NULL;
+        st->n_tool_calls = 0;
+    }
+}
+
+/* Teardown: release the connection + SSE parser. The handle stays
+ * alive (error/result fields) until chat_end frees it. Idempotent. */
+static void stream_teardown(NmChatStream *h)
+{
+    if (!h)
+        return;
+    if (h->conn) {
+        nm_connection_close(h->conn);
+        h->conn = NULL;
+    }
+    if (h->sse) {
+        nm_sse_free(h->sse);
+        h->sse = NULL;
+    }
+}
+
+/* One pull: read what's ready, feed SSE, dispatch events.
+ * Returns NM_CHAT_PENDING (call again later — would-block or head
+ * incomplete), NM_CHAT_OK (stream complete), or an error. */
+static NmChatStatus stream_one_step(NmChatStream *st)
+{
     NmSseEvent ev;
-    if (!rbuf)
+    long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
+    if (n == NM_READ_WOULD_BLOCK)
+        return NM_CHAT_PENDING;
+    if (n < 0)
         return NM_CHAT_ERR_TRANSPORT;
+    if (n == 0)
+        return NM_CHAT_OK; /* EOF: stream complete (or truncated; the
+                              caller's status check flags it) */
 
-    for (;;) {
-        long n = nm_read_body(conn, rbuf, READ_BUF_CAP);
-        if (n < 0) {
-            free(rbuf);
-            return NM_CHAT_ERR_TRANSPORT;
-        }
-        if (n == 0)
-            break; /* EOF: stream complete (or truncated; caller sees status) */
-
-        /* nm_sse_feed consumes the whole buffer each call (an unconsumed
-         * tail is stashed inside the parser); each call emits at most
-         * one event. Feed, then drain the stashed tail with empty
-         * feeds until no more events come out. */
-        int r = nm_sse_feed(st->sse, rbuf, (size_t)n, &ev);
-        while (r == 1) {
-            handle_event(st, ev.data, strlen(ev.data));
-            if (st->done)
-                break;
-            r = nm_sse_feed(st->sse, "", 0, &ev);
-        }
-        if (r < 0) {
-            free(rbuf);
-            return NM_CHAT_ERR_PARSE;
-        }
+    /* nm_sse_feed consumes the whole buffer each call (an unconsumed
+     * tail is stashed inside the parser); each call emits at most
+     * one event. Feed, then drain the stashed tail with empty feeds
+     * until no more events come out. */
+    int r = nm_sse_feed(st->sse, st->rbuf, (size_t)n, &ev);
+    while (r == 1) {
+        handle_event(st, ev.data, strlen(ev.data));
         if (st->done)
             break;
+        r = nm_sse_feed(st->sse, "", 0, &ev);
     }
-    free(rbuf);
-
-    /* Stream complete: deliver assembled tool calls (if any) with
-     * the final NULL-content callback, exactly once. Ownership of
-     * the tool-call array moves to the receiver (freed there with
-     * nm_tool_calls_free); the client forgets the pointer. */
-    if (st->n_tool_calls > 0) {
-        if (st->req->on_delta) {
-            st->req->on_delta(NULL, st->tool_calls, st->n_tool_calls,
-                              st->req->userdata);
-            st->tool_calls = NULL;
-            st->n_tool_calls = 0;
-        }
-    }
-    return st->status;
+    if (r < 0)
+        return NM_CHAT_ERR_PARSE;
+    if (st->done)
+        return NM_CHAT_OK;
+    return NM_CHAT_PENDING;
 }
 
 /* ---------------------------------------------------------------- */
 /* Public: chat + models                                            */
 /* ---------------------------------------------------------------- */
 
-NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
-                            const NmChatRequest *req)
+NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
+                                   const NmChatRequest *req, NmChatResult *err)
 {
-    NmChatResult r = { NM_CHAT_OK, 0, NULL };
-    if (!ep || !req || !req->model)
-        return r.status = NM_CHAT_ERR_PARSE, r;
+    if (err) {
+        err->status = NM_CHAT_OK;
+        err->http_status = 0;
+        free(err->error_body);
+        err->error_body = NULL;
+    }
+    if (!ep || !req || !req->model) {
+        if (err)
+            err->status = NM_CHAT_ERR_PARSE;
+        return NULL;
+    }
 
     char host[256];
     int port;
     NmTransportMode mode;
     if (nm_openai_split_base_url(ep->base_url, host, sizeof(host), &port, &mode) != 0) {
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        return r;
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
+        return NULL;
     }
 
-    /* Compose + connect + send. */
+    /* Compose + connect + send (the blocking part — documented
+     * deferral). The stream handle owns the connection from here. */
     char *body = compose_body(ep, req);
     if (!body) {
-        r.status = NM_CHAT_ERR_PARSE;
-        return r;
+        if (err)
+            err->status = NM_CHAT_ERR_PARSE;
+        return NULL;
     }
 
     NmTransportStatus tst;
     NmConnection *conn = nm_connect(host, port, mode, &tst);
     if (!conn) {
         free(body);
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        return r;
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
+        return NULL;
     }
 
     /* Headers: Content-Type, auth, User-Agent (nevermore as itself;
@@ -387,8 +425,8 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     hdrs[nh].name = "Content-Type";
     hdrs[nh].value = "application/json";
     nh++;
+    char authbuf[512];
     if (ep->auth_header && ep->api_key && *ep->api_key) {
-        static char authbuf[512];
         snprintf(authbuf, sizeof(authbuf), ep->auth_header, ep->api_key);
         hdrs[nh].name = "Authorization";
         hdrs[nh].value = authbuf;
@@ -402,62 +440,218 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     snprintf(path, sizeof(path), "%s/chat/completions",
              url_path_prefix(ep->base_url));
 
-    NmTransportStatus rs = nm_request(conn, "POST", path, hdrs, nh, body,
-                                      strlen(body));
+    NmChatStream *st = calloc(1, sizeof(*st));
+    if (!st) {
+        free(body);
+        nm_connection_close(conn);
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
+        return NULL;
+    }
+    st->conn = conn;
+    st->req = req;
+    st->status = NM_CHAT_OK;
+
+    /* Send only — the response head arrives through chat_step's
+     * read_body pulls (resumable head parser), then flip the socket
+     * non-blocking for the streamed phase. */
+    NmTransportStatus rs = nm_request_send(conn, "POST", path, hdrs, nh,
+                                           body, strlen(body));
     free(body);
-    if (rs != NM_TRANSPORT_OK) {
+    if (rs != NM_TRANSPORT_OK || nm_connection_set_nonblocking(conn) != NM_TRANSPORT_OK) {
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
         nm_connection_close(conn);
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        return r;
+        free(st);
+        return NULL;
     }
+    st->sse = nm_sse_new();
+    if (!st->sse) {
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
+        nm_connection_close(conn);
+        free(st);
+        return NULL;
+    }
+    return st;
+}
 
-    const NmResponse *resp = nm_response(conn);
-    if (resp->status < 200 || resp->status >= 300 || !resp->content_type || strncmp(resp->content_type, "text/event-stream", 17) != 0) {
-        /* Non-SSE response: an error body. Capture (capped) for the
-         * caller — like quoth's error-body accumulator. */
-        char ebuf[ERROR_BODY_MAX];
-        size_t elen = 0;
-        long n;
-        while ((n = nm_read_body(conn, ebuf + elen,
-                                 sizeof(ebuf) - 1 - elen)) > 0) {
-            elen += (size_t)n;
-            if (elen >= sizeof(ebuf) - 1)
-                break;
+/* Error-body drain (non-SSE response): pull what's ready into the
+ * capped error buffer. Returns 1 while more bytes may follow (the
+ * caller reports PENDING), 0 when the body is complete/capped. */
+static int error_drain_step(NmChatStream *h)
+{
+    for (;;) {
+        long n = nm_read_body(h->conn, h->rbuf, READ_BUF_CAP);
+        if (n == NM_READ_WOULD_BLOCK)
+            return 1;
+        if (n <= 0)
+            return 0;
+        if (h->error_len < ERROR_BODY_MAX - 1) {
+            size_t take = (size_t)n;
+            if (take > ERROR_BODY_MAX - 1 - h->error_len)
+                take = ERROR_BODY_MAX - 1 - h->error_len;
+            if (h->error_len == 0) {
+                h->error_body = malloc(ERROR_BODY_MAX);
+                if (!h->error_body)
+                    return 0;
+            }
+            memcpy(h->error_body + h->error_len, h->rbuf, take);
+            h->error_len += take;
         }
-        ebuf[elen] = '\0';
-        /* Read the response fields BEFORE closing: resp points into
-         * the connection, freed by nm_connection_close. */
-        int status = resp->status;
-        nm_connection_close(conn);
-        r.status = (status == 401 || status == 403) ? NM_CHAT_ERR_AUTH
-                                                    : NM_CHAT_ERR_HTTP;
-        r.http_status = status;
-        r.error_body = strdup(ebuf);
+        if (h->error_len >= ERROR_BODY_MAX - 1)
+            return 0;
+    }
+}
+
+/* Finish the error result: NULL-terminate, publish to `result`,
+ * tear the stream down, return the status. */
+static NmChatStatus error_result(NmChatStream *h, NmChatResult *result)
+{
+    if (h->error_body)
+        h->error_body[h->error_len] = '\0';
+    h->done = 1;
+    if (result) {
+        result->status = h->status;
+        result->http_status = h->http_status;
+        result->error_body = h->error_body ? strdup(h->error_body) : NULL;
+    }
+    stream_teardown(h);
+    return h->status;
+}
+
+NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
+{
+    if (result) {
+        result->status = NM_CHAT_OK;
+        result->http_status = 0;
+        free(result->error_body);
+        result->error_body = NULL;
+    }
+    if (!h)
+        return result->status = NM_CHAT_ERR_PARSE, NM_CHAT_ERR_PARSE;
+    if (h->done)
+        return result->status = h->status, h->status;
+
+    /* Error-body drain (non-SSE response): continue where the first
+     * step left off; would-block means the rest arrives later. */
+    if (h->error_mode) {
+        if (error_drain_step(h))
+            return NM_CHAT_PENDING;
+        return error_result(h, result);
+    }
+
+    /* First step: the response head. It may still be incomplete
+     * (PENDING until the blank line lands); once complete, validate
+     * status + content-type, and on non-SSE switch to error mode. */
+    if (!h->head_checked && h->conn) {
+        const NmResponse *resp = nm_response(h->conn);
+        if (resp->status == 0) {
+            /* Head not parsed yet: pull bytes into the head scanner
+             * (this is what nm_read_body does pre-body_started). */
+            NmChatStatus s = stream_one_step(h);
+            if (s != NM_CHAT_PENDING)
+                return s == NM_CHAT_OK && !h->done ? NM_CHAT_ERR_TRANSPORT
+                                                   : s;
+            resp = nm_response(h->conn);
+            if (resp->status == 0)
+                return NM_CHAT_PENDING; /* head still incomplete */
+        }
+        h->head_checked = 1;
+        if (resp->status < 200 || resp->status >= 300 ||
+            !resp->content_type ||
+            strncmp(resp->content_type, "text/event-stream", 17) != 0) {
+            h->error_mode = 1;
+            h->status = (resp->status == 401 || resp->status == 403)
+                            ? NM_CHAT_ERR_AUTH
+                            : NM_CHAT_ERR_HTTP;
+            h->http_status = resp->status;
+            if (error_drain_step(h))
+                return NM_CHAT_PENDING;
+            return error_result(h, result);
+        }
+    }
+
+    /* SSE body: pull what's ready. */
+    NmChatStatus s = stream_one_step(h);
+    if (s == NM_CHAT_OK) {
+        /* [DONE] or EOF. EOF before [DONE] is a truncated stream:
+         * deliver what arrived but flag the transport condition. */
+        if (!h->done)
+            h->status = NM_CHAT_ERR_TRANSPORT;
+        stream_finish(h);
+        if (result) {
+            result->status = h->status;
+            result->http_status = h->http_status;
+            result->error_body = h->error_body ? strdup(h->error_body)
+                                               : NULL;
+        }
+        stream_teardown(h);
+        return h->status;
+    }
+    if (s != NM_CHAT_PENDING) {
+        /* Fatal mid-stream error. */
+        h->done = 1;
+        h->status = s;
+        if (result) {
+            result->status = s;
+            result->http_status = h->http_status;
+            result->error_body = h->error_body ? strdup(h->error_body)
+                                               : NULL;
+        }
+        stream_teardown(h);
+    }
+    return s;
+}
+
+int nm_openai_stream_fd(NmChatStream *h)
+{
+    return h && h->conn ? nm_connection_fd(h->conn) : -1;
+}
+
+void nm_openai_chat_end(NmChatStream *h)
+{
+    if (!h)
+        return;
+    stream_teardown(h);
+    /* Cancelled or already-torn-down: tool calls still owned by the
+     * client (never delivered) are freed here. */
+    nm_tool_calls_free(h->tool_calls, h->n_tool_calls);
+    free(h->error_body);
+    free(h);
+}
+
+NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
+                            const NmChatRequest *req)
+{
+    NmChatResult r = { NM_CHAT_OK, 0, NULL };
+    NmChatStream *h = nm_openai_chat_begin(ep, req, &r);
+    if (!h)
         return r;
-    }
 
-    /* SSE stream: pump until done. */
-    StreamState st = { 0 };
-    st.sse = nm_sse_new();
-    st.req = req;
-    st.status = NM_CHAT_OK;
-    NmChatStatus status = stream_pump(conn, &st);
-
-    r.status = status;
-    r.http_status = st.http_status;
-    r.error_body = st.error_body; /* ownership moves to result */
-    if (!st.done && status == NM_CHAT_OK) {
-        /* EOF before [DONE]: truncated stream, still deliver text but
-         * flag the transport condition. */
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        free(r.error_body);
-        r.error_body = NULL;
+    /* Blocking pump over the step seam: keep stepping while the
+     * response head is incomplete or bytes are pending. Head reads
+     * pre-non-blocking are already inside begin; the step loop's
+     * PENDING returns would spin on a non-blocking socket, so block
+     * it back off for the pump. (A blocking pump on a non-blocking
+     * fd would busy-loop.) */
+    for (;;) {
+        NmChatStatus s = nm_openai_chat_step(h, &r);
+        if (s != NM_CHAT_PENDING)
+            break;
+        /* PENDING: wait for readability, then step again. The socket
+         * is non-blocking; a 10ms poll keeps this simple and bounded
+         * (ask mode is a one-shot process, not a UI loop). */
+        int fd = nm_openai_stream_fd(h);
+        if (fd < 0)
+            break; /* torn down mid-step (error path) */
+        fd_set fds;
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        struct timeval tv = { 0, 10 * 1000 };
+        select(fd + 1, &fds, NULL, NULL, &tv);
     }
-    /* Undelivered tool calls (no receiver registered): the client
-     * owns the free. */
-    nm_tool_calls_free(st.tool_calls, st.n_tool_calls);
-    nm_sse_free(st.sse);
-    nm_connection_close(conn);
+    nm_openai_chat_end(h);
     return r;
 }
 

@@ -33,9 +33,30 @@ typedef struct NmOpenaiEndpoint
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas
  * (choices[0].delta.content / .tool_calls) and drives req->on_delta.
- * Blocking; returns the final status. */
+ * Blocking; returns the final status. Implemented as chat_begin +
+ * a step pump over the event-driven seam below — one implementation,
+ * two drive styles. */
 NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
                             const NmChatRequest *req);
+
+/* Event-driven split (phase 4; see NmProvider.chat_begin in
+ * provider.h for the drive contract). begin connects and sends the
+ * request (blocking connect/send — documented transport.h
+ * deferral), then the caller steps from its event loop:
+ *
+ *   fd = nm_openai_stream_fd(h)      // -1 while none open
+ *   readable -> nm_openai_chat_step  // -> NM_CHAT_PENDING (keep
+ *                                     //    stepping later), OK
+ *                                     //    (complete), ERR_* (fatal)
+ *   nm_openai_chat_end(h)            // free; cancel any time
+ *
+ * on_delta fires from inside chat_step exactly as from chat. */
+NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
+                                   const NmChatRequest *req,
+                                   NmChatResult *err);
+NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result);
+int nm_openai_stream_fd(NmChatStream *h);
+void nm_openai_chat_end(NmChatStream *h);
 
 /* Split "http(s)://host[:port]" into host/port/mode (shared with the
  * providers' catalog fetches). Writes into caller buffers. 0 on

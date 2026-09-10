@@ -81,6 +81,7 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n);
 typedef enum
 {
     NM_CHAT_OK = 0,
+    NM_CHAT_PENDING,  /* step API: no progress yet, call again (see chat_begin) */
     NM_CHAT_ERR_TRANSPORT,
     NM_CHAT_ERR_HTTP,  /* non-2xx; http_status + error body filled in */
     NM_CHAT_ERR_PARSE, /* wire response wasn't valid JSON/SSE */
@@ -93,6 +94,10 @@ typedef struct NmChatResult
     int http_status;  /* HTTP status code when status == NM_CHAT_ERR_HTTP */
     char *error_body; /* provider error text when HTTP failed; heap-owned */
 } NmChatResult;
+
+/* Event-driven stream handle (chat_begin/step/end below). Opaque;
+ * provider-internal. */
+typedef struct NmChatStream NmChatStream;
 
 typedef struct NmChatRequest
 {
@@ -117,6 +122,30 @@ struct NmProvider
     /* Streaming chat completion. Blocking; on_delta fires from inside. */
     NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,
                          const char *base_url, const char *api_key);
+
+    /* Event-driven split of chat (phase 4): begin opens a connection
+     * and puts the request on the wire (blocking connect + send; TLS
+     * handshakes block too — documented transport.h deferral), then
+     * the caller drives the stream from its event loop:
+     *
+     *   fd = chat_stream_fd(h)          // -1 while none open
+     *   on readable: chat_step(h)       // pumps what's available
+     *     -> NM_CHAT_PENDING  more bytes may follow; keep stepping
+     *        on readability (or poll fd first)
+     *     -> NM_CHAT_OK       stream complete; result delivered
+     *     -> NM_CHAT_ERR_*    fatal; result carries the error
+     *   chat_end(h)                     // frees the stream (cancel ok
+     *                                    // at any point mid-stream)
+     *
+     * on_delta fires from inside chat_step exactly as it did from
+     * chat. The blocking chat() is implemented as begin + step-pump
+     * over this seam, so both paths share one implementation. */
+    NmChatStream *(*chat_begin)(const NmProvider *p, const NmChatRequest *req,
+                                const char *base_url, const char *api_key,
+                                NmChatResult *err);
+    NmChatStatus (*chat_step)(NmChatStream *h, NmChatResult *result);
+    int (*chat_stream_fd)(NmChatStream *h);
+    void (*chat_end)(NmChatStream *h);
 
     /* Model catalog. Returns a NULL-terminated array of NmModel
      * owned by the provider (static catalogs today; phase-5 wire

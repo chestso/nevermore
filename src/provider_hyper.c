@@ -45,8 +45,15 @@ static int hyper_needs_auth(const NmProvider *p, const char *base_url)
 const struct NmProvider nm_hyper_provider = {
     NM_PROVIDER_HYPER,
     "hyper",
-    "https://api.hypercharm.dev",
+    "https://hyper.charm.land/v1",
     hyper_chat,
+    /* Step API (phase 4): NULL until chat goes live over the shared
+     * openai_client in phase 5 — the registry only routes through it
+     * when the provider has implemented chat for real. */
+    NULL, /* chat_begin */
+    NULL, /* chat_step */
+    NULL, /* chat_stream_fd */
+    NULL, /* chat_end */
     hyper_models,
     hyper_needs_auth,
 };
