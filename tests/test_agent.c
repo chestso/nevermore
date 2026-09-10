@@ -14,7 +14,9 @@
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 #include <pthread.h>
@@ -385,6 +387,179 @@ static void test_agent_unknown_tool_reports_error_result(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Step API (phase 4: boba drives the agent from callbacks)         */
+/* ---------------------------------------------------------------- */
+
+/* Drive one turn to completion the way boba will: poll the agent's
+ * fd, step, repeat. Bounded spins; no blocking read anywhere. */
+static int agent_drive(NmAgent *agent, int max_spins)
+{
+    for (int spin = 0; spin < max_spins; spin++) {
+        int fd = nm_agent_fd(agent);
+        if (fd >= 0) {
+            fd_set fds;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            select(fd + 1, &fds, NULL, NULL, &tv);
+        } else {
+            usleep(10 * 1000); /* between rounds: brief yield */
+        }
+        if (nm_agent_step(agent) != 0)
+            return -1; /* fatal step error */
+        if (nm_agent_state(agent) == NM_AGENT_DONE)
+            return 0;
+        if (nm_agent_state(agent) == NM_AGENT_ERROR)
+            return -1;
+    }
+    return -1; /* spin budget exhausted: hung */
+}
+
+static void test_agent_step_driven_full_loop(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"edit_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
+        "\\\"slow red\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"stepped \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"edit ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Start: no fd before, an fd while the first round streams. */
+    ASSERT_EQ(nm_agent_fd(agent), -1);
+    ASSERT_EQ(nm_agent_start(agent, "change quick to slow"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_STREAMING);
+    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
+
+    /* Drive the whole tool-round -> answer cycle step-wise. */
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "stepped edit ok");
+    ASSERT_EQ(g_tool_starts, 1);
+    ASSERT_EQ(g_tool_ends, 1);
+    ASSERT_EQ(g_final_state, (int)NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_fd(agent), -1); /* no stream open at DONE */
+
+    /* The edit really happened, and both rounds hit the wire with
+     * the tool result riding round 2. */
+    char content[128];
+    read_fixture(content, sizeof(content));
+    ASSERT_STR_EQ(content, "the slow red fox\n");
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_1\"") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
+static void test_agent_cancel_then_next_turn_works(void)
+{
+    reset_capture();
+    write_fixture();
+
+    /* Round 1 stalls (no bytes), so we can cancel mid-stream; the
+     * cancel tears the connection down, then a fresh turn runs the
+     * full 2-round script against the second + third connections. */
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = ""; /* stalling round: server sends nothing */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"edit_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
+        "\\\"fast red\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Turn 1: start, confirm the stream is open, cancel mid-stream.
+     * The server thread's round-1 accept() gets the teardown. */
+    ASSERT_EQ(nm_agent_start(agent, "first, get cancelled"), 0);
+    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
+    nm_agent_cancel(agent);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
+    ASSERT_EQ(nm_agent_fd(agent), -1);
+    ASSERT_EQ(g_tool_starts, 0);
+
+    /* Turn 2 on the same agent + session: full tool loop works. */
+    ASSERT_EQ(nm_agent_start(agent, "change quick to fast"), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "after cancel");
+    ASSERT_EQ(g_tool_starts, 1);
+    ASSERT_EQ(g_tool_ends, 1);
+
+    char content[128];
+    read_fixture(content, sizeof(content));
+    ASSERT_STR_EQ(content, "the fast red fox\n");
+    /* Three requests hit the wire: the cancelled round 1 (torn down
+     * before any bytes came back) + turn 2's two rounds. Round 3
+     * (index 2) carries the tool result. */
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_TRUE(strstr(g_requests[2], "\"tool_call_id\":\"call_2\"") != NULL);
+    /* The cancelled turn's user message still rode the turn-2
+     * transcript (session persists across cancel). */
+    ASSERT_TRUE(strstr(g_requests[1], "first, get cancelled") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -398,5 +573,7 @@ int main(void)
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_plain_answer_no_tools);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
+    RUN_TEST(test_agent_step_driven_full_loop);
+    RUN_TEST(test_agent_cancel_then_next_turn_works);
     TEST_SUMMARY();
 }

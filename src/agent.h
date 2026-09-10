@@ -51,6 +51,29 @@ void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
  * callbacks fire from inside. Returns 0 on success. */
 int nm_agent_turn(NmAgent *a, const char *user_input);
 
+/* Event-driven split of nm_agent_turn (phase 4; boba owns the loop):
+ *
+ *   nm_agent_start(a, input)   append the user message, open the
+ *                              round-1 stream (blocking connect+send)
+ *   fd = nm_agent_fd(a)        the active stream's socket, for the
+ *                              event loop's poll set; -1 when idle
+ *   nm_agent_step(a)           one pull: deltas/tool events fire from
+ *                              inside; a completed round transitions
+ *                              the state machine (tool execution is
+ *                              synchronous inside the step). Returns
+ *                              0 = keep going (more steps later),
+ *                              -1 = fatal (state ERROR). The caller
+ *                              re-checks state/fd each step.
+ *   nm_agent_cancel(a)         abort the in-flight turn (user C-c);
+ *                              tears the stream down, state IDLE
+ *
+ * nm_agent_turn is start + a step pump over this seam; both drives
+ * share one implementation. */
+int nm_agent_start(NmAgent *a, const char *user_input);
+int nm_agent_step(NmAgent *a);
+int nm_agent_fd(NmAgent *a);
+void nm_agent_cancel(NmAgent *a);
+
 NmAgentState nm_agent_state(const NmAgent *a);
 const char *nm_agent_last_error(const NmAgent *a);
 

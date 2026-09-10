@@ -173,7 +173,11 @@ struct NmChatStream
     NmConnection *conn;
     char rbuf[READ_BUF_CAP];
     NmSseParser *sse;
-    const NmChatRequest *req;
+    /* Callback context, copied at begin: the NmChatRequest itself is
+     * only valid during chat_begin (compose reads it); the stream's
+     * lifetime outlives the caller's request object. */
+    NmStreamCallback on_delta;
+    void *userdata;
     int done;            /* [DONE] seen or fatal error */
     NmChatStatus status; /* final status */
     int http_status;
@@ -242,8 +246,8 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
             /* quoth drops empty content deltas: ollama puts "" on
              * every reasoning chunk; emitting them would garble the
              * region boundaries. */
-            if (content && *content && st->req->on_delta)
-                st->req->on_delta(content, NULL, 0, st->req->userdata);
+            if (content && *content && st->on_delta)
+                st->on_delta(content, NULL, 0, st->userdata);
             /* Tool-call deltas: merge fragments by index (port of
              * quoth's sse-merge-tool-calls). Arguments accumulate
              * across chunks; assembled calls are delivered from
@@ -315,9 +319,9 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
  * nm_tool_calls_free); the client forgets the pointer. */
 static void stream_finish(NmChatStream *st)
 {
-    if (st->n_tool_calls > 0 && st->req->on_delta) {
-        st->req->on_delta(NULL, st->tool_calls, st->n_tool_calls,
-                          st->req->userdata);
+    if (st->n_tool_calls > 0 && st->on_delta) {
+        st->on_delta(NULL, st->tool_calls, st->n_tool_calls,
+                     st->userdata);
         st->tool_calls = NULL;
         st->n_tool_calls = 0;
     }
@@ -449,7 +453,8 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         return NULL;
     }
     st->conn = conn;
-    st->req = req;
+    st->on_delta = req->on_delta;
+    st->userdata = req->userdata;
     st->status = NM_CHAT_OK;
 
     /* Send only — the response head arrives through chat_step's
