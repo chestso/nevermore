@@ -555,12 +555,46 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
             /* Head not parsed yet: pull bytes into the head scanner
              * (this is what nm_read_body does pre-body_started). */
             NmChatStatus s = stream_one_step(h);
-            if (s != NM_CHAT_PENDING)
-                return s == NM_CHAT_OK && !h->done ? NM_CHAT_ERR_TRANSPORT
-                                                   : s;
-            resp = nm_response(h->conn);
-            if (resp->status == 0)
-                return NM_CHAT_PENDING; /* head still incomplete */
+            if (s == NM_CHAT_PENDING) {
+                resp = nm_response(h->conn);
+                if (resp->status == 0)
+                    return NM_CHAT_PENDING; /* head still incomplete */
+            } else if (s == NM_CHAT_OK) {
+                /* The whole response (head + body) rode one read —
+                 * normal on loopback and whenever the server wins
+                 * the race. Fall through to the shared completion
+                 * path below instead of returning early: an early
+                 * return here would skip stream_finish() and lose
+                 * the assembled tool calls, turning a tool round
+                 * into a silent empty answer. */
+                resp = nm_response(h->conn);
+                if (resp->status == 0) {
+                    /* EOF before a parsable head: dead connection. */
+                    h->done = 1;
+                    h->status = NM_CHAT_ERR_TRANSPORT;
+                    if (result) {
+                        result->status = NM_CHAT_ERR_TRANSPORT;
+                        result->http_status = 0;
+                        result->error_body = NULL;
+                    }
+                    stream_teardown(h);
+                    return NM_CHAT_ERR_TRANSPORT;
+                }
+            } else {
+                /* Fatal during the head pull: same treatment as the
+                 * SSE body path below (fill result, teardown). */
+                h->done = 1;
+                h->status = s;
+                if (result) {
+                    result->status = s;
+                    result->http_status = h->http_status;
+                    result->error_body = h->error_body
+                                             ? strdup(h->error_body)
+                                             : NULL;
+                }
+                stream_teardown(h);
+                return s;
+            }
         }
         h->head_checked = 1;
         if (resp->status < 200 || resp->status >= 300 ||

@@ -103,14 +103,22 @@ typedef struct Capture
     char text[256];
     size_t len;
     int n_deltas;
+    /* Tool calls delivered by the final NULL-content callback;
+     * OWNERSHIP moves here (free with nm_tool_calls_free). */
+    NmToolCall *tool_calls;
+    size_t n_tool_calls;
 } Capture;
 
 static void capture_delta(const char *delta_text, const NmToolCall *tool_calls,
                           size_t n_tool_calls, void *userdata)
 {
-    (void)tool_calls;
-    (void)n_tool_calls;
     Capture *cap = userdata;
+    if (!delta_text && tool_calls) {
+        /* Final callback: take ownership of the delivered array. */
+        cap->tool_calls = (NmToolCall *)tool_calls;
+        cap->n_tool_calls = n_tool_calls;
+        return;
+    }
     if (delta_text && cap->len + strlen(delta_text) < sizeof(cap->text)) {
         memcpy(cap->text + cap->len, delta_text, strlen(delta_text));
         cap->len += strlen(delta_text);
@@ -136,7 +144,7 @@ static void test_chat_stream_end_to_end(void)
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
                             "nevermore-test" };
     NmMessage msg = { "user", "say hi", NULL, NULL };
-    Capture cap = { { 0 }, 0, 0 };
+    Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, "you are terse", NULL, -1, -1,
         capture_delta, &cap
@@ -222,7 +230,7 @@ static void test_chat_step_pending_between_events(void)
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
                             "nevermore-test" };
     NmMessage msg = { "user", "say hi", NULL, NULL };
-    Capture cap = { { 0 }, 0, 0 };
+    Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
         capture_delta, &cap
@@ -268,6 +276,104 @@ static void test_chat_step_pending_between_events(void)
 
 /* Cancel mid-stream: chat_end tears the connection down without
  * waiting for [DONE] or EOF. */
+/* Deterministic regression server for the buffered-response bug:
+ * head + tool-call SSE events + [DONE] in ONE send, so the client's
+ * FIRST chat_step pulls the whole response (head + body) in a single
+ * read. The step API must still deliver the assembled tool calls —
+ * the early return on the head-check path used to skip
+ * stream_finish(), losing the calls and turning a tool round into a
+ * silent empty answer (CI failed test_agent/test_chat_app because
+ * slow VMs always lose this race; fast dev boxes only sometimes). */
+static void *allatonce_tool_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    /* Chunked: one tool-call event, then [DONE], then terminator.
+     * First chunk length: 141 bytes = 0x8d. */
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "8d\r\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"edit_file\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(resp) - 1) {
+        long n = send(cfd, resp + off, sizeof(resp) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, allatonce_tool_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        capture_delta, &cap
+    };
+
+    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
+    ASSERT_NOT_NULL(h);
+
+    /* Pump chat_step until it stops pending — every byte is already
+     * in the socket, so the FIRST call gets head + body + [DONE]. */
+    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    NmChatStatus st = NM_CHAT_PENDING;
+    int steps = 0;
+    for (; steps < 500 && st == NM_CHAT_PENDING; steps++) {
+        st = nm_openai_chat_step(h, &result);
+    }
+    ASSERT_EQ(st, NM_CHAT_OK);
+    ASSERT_EQ(result.status, NM_CHAT_OK);
+    /* The tool call MUST be delivered with the final NULL-content
+     * callback even when the whole response rode one read. */
+    ASSERT_EQ(cap.n_tool_calls, (size_t)1);
+    ASSERT_STR_EQ(cap.tool_calls[0].id, "call_1");
+    ASSERT_STR_EQ(cap.tool_calls[0].name, "edit_file");
+    ASSERT_STR_EQ(cap.tool_calls[0].args_json, "{}");
+    /* And the stream must be complete: fd gone, handle teardown-safe. */
+    ASSERT_EQ(nm_openai_stream_fd(h), -1);
+
+    nm_tool_calls_free(cap.tool_calls, cap.n_tool_calls);
+    nm_openai_chat_end(h);
+    nm_chat_result_free(&result);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void *slow_start_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -328,6 +434,7 @@ int main(int argc, char *argv[])
     printf("test_openai_client:\n");
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_step_pending_between_events);
+    RUN_TEST(test_chat_step_whole_response_in_first_read_delivers_tools);
     RUN_TEST(test_chat_step_cancel_mid_stream);
     TEST_SUMMARY();
 }
