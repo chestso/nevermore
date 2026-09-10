@@ -541,10 +541,26 @@ static void test_provider_command_switches_provider(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
     ASSERT_TRUE(strstr(harness_read(h), "openai") != NULL);
 
-    /* Unknown provider is refused, current stays. */
+    /* Bare /provider lists every registered provider (the names
+     * /provider accepts), current first with a marker. */
+    harness_type(h, "/provider");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "providers:") != NULL);
+    ASSERT_TRUE(strstr(out, "openai") != NULL);
+    ASSERT_TRUE(strstr(out, "openrouter") != NULL);
+    ASSERT_TRUE(strstr(out, "hyper") != NULL);
+    ASSERT_TRUE(strstr(out, "ollama") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+
+    /* Unknown provider is refused, current stays; the error lists
+     * the valid names. */
     harness_type(h, "/provider nope");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "unknown provider 'nope'") != NULL);
+    ASSERT_TRUE(strstr(out, "openrouter") != NULL);
 
     harness_free(h);
 }

@@ -539,7 +539,7 @@ static void print_help(NmChatApp *app)
     pend_str(app, "  /help              this list\r\n");
     pend_str(app, "  /model [id]        show or set the model\r\n");
     pend_str(app, "  /models            pick from the catalog (popup)\r\n");
-    pend_str(app, "  /provider [name]   show or switch the provider (fresh session)\r\n");
+    pend_str(app, "  /provider [name]   list providers, or switch (fresh session)\r\n");
     pend_str(app, "  /quit              leave (Ctrl+C twice works too)\r\n");
 }
 
@@ -571,12 +571,35 @@ static void open_models_popup(NmChatApp *app)
 /* Rebuild the agent on a new provider: the session (owned by the
  * agent) goes with the old one — a provider switch is a fresh chat,
  * stated in the command's reply. */
+/* List every registered provider name — the vocabulary /provider
+ * accepts. Current first, marked. */
+static void list_providers(NmChatApp *app)
+{
+    const NmProvider *providers[16];
+    size_t n = 0;
+    nm_provider_list(providers, &n);
+    pend_str(app, "providers:\r\n");
+    for (size_t i = 0; i < n && i < 16; i++) {
+        if (providers[i] == app->provider)
+            pend_printf(app, "  * %s (current)\r\n", providers[i]->name);
+        else
+            pend_printf(app, "  %s\r\n", providers[i]->name);
+    }
+}
+
 static void switch_provider(NmChatApp *app, const char *name)
 {
     const NmProvider *p = nm_provider_by_name(name);
     if (!p) {
-        pend_printf(app, SGR_CORAL "nevermore: unknown provider '%s'" SGR_TEXT_RESET "\r\n",
+        /* The error carries the vocabulary: list the valid names. */
+        const NmProvider *providers[16];
+        size_t n = 0;
+        nm_provider_list(providers, &n);
+        pend_printf(app, SGR_CORAL "nevermore: unknown provider '%s' — one of:" SGR_TEXT_RESET,
                     name);
+        for (size_t i = 0; i < n && i < 16; i++)
+            pend_printf(app, " %s", providers[i]->name);
+        pend_str(app, "\r\n");
         return;
     }
     build_agent(app, p);
@@ -622,7 +645,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
     }
     if (NAME_IS("provider")) {
         if (!*arg) {
-            pend_printf(app, "provider: %s\r\n", app->provider->name);
+            /* Bare /provider: list every registered provider. */
+            list_providers(app);
             return;
         }
         switch_provider(app, arg);
