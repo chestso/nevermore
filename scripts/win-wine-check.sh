@@ -68,6 +68,8 @@ run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	-lws2_32 -lpthread
 
+run_build test_spinner tests/test_spinner.c src/spinner.c
+
 echo "=== running under wine ==="
 fail=0
 for exe in "$OUT"/*.exe; do

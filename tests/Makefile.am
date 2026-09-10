@@ -10,7 +10,8 @@ check_PROGRAMS = \
     test_tls \
     test_session \
     test_tools \
-    test_agent
+    test_agent \
+    test_spinner
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -121,6 +122,12 @@ test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
+
+# Spinner: pure model — frames per agent state (braille streaming,
+# charset tool tier), cycle + stop semantics. No terminal I/O here;
+# chat_app wires the ticks to boba's on_tick.
+test_spinner_SOURCES = test_spinner.c ../src/spinner.c
+test_spinner_CFLAGS = $(TEST_CFLAGS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
