@@ -366,6 +366,7 @@ static void test_wire_nonblocking_head_resume(void)
     char body[64];
     size_t total = 0;
     int saw_body = 0;
+    memset(body, 0, sizeof(body)); /* NUL-terminate for STR_EQ below */
     for (int spin = 0; spin < 500; spin++) {
         long n2 = nm_read_body(c, body + total, sizeof(body) - total);
         if (n2 == NM_READ_WOULD_BLOCK) {

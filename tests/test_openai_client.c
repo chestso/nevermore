@@ -136,7 +136,7 @@ static void test_chat_stream_end_to_end(void)
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
                             "nevermore-test" };
     NmMessage msg = { "user", "say hi", NULL, NULL };
-    Capture cap = { { 0 }, 0 };
+    Capture cap = { { 0 }, 0, 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, "you are terse", NULL, -1, -1,
         capture_delta, &cap
