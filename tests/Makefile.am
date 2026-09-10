@@ -11,7 +11,8 @@ check_PROGRAMS = \
     test_session \
     test_tools \
     test_agent \
-    test_spinner
+    test_spinner \
+    test_history
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -128,6 +129,13 @@ test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
 # chat_app wires the ticks to boba's on_tick.
 test_spinner_SOURCES = test_spinner.c ../src/spinner.c
 test_spinner_CFLAGS = $(TEST_CFLAGS)
+
+# History: escape/unescape + real save/load against a temp file via
+# the path-override seam. Links boba's textinput (the history ring +
+# Up/Down navigation are boba's; nevermore only persists them).
+test_history_SOURCES = test_history.c ../src/history.c
+test_history_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
+test_history_LDADD = $(BOBA_LIBS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)

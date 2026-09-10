@@ -70,6 +70,14 @@ run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 
 run_build test_spinner tests/test_spinner.c src/spinner.c
 
+# test_history needs boba's textinput. No MinGW-built boba exists on
+# this box (boba has no Windows CI of its own; nevermore's MSYS2
+# workflow builds it natively at CI time). Wine can't link the Linux
+# ELF boba, so this binary is CI-verified, not wine-verified —
+# plain-model parts of history (escape/unescape) are exercised by
+# test_history under Linux + macOS pre-flights.
+echo "SKIP: test_history.exe (needs MinGW boba; MSYS2 CI covers it)"
+
 echo "=== running under wine ==="
 fail=0
 for exe in "$OUT"/*.exe; do
