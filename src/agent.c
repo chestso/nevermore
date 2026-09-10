@@ -57,8 +57,8 @@ struct NmAgent
      * round buffer below is reused across rounds of the same turn
      * (memory-reuse principle: grown, not reallocated per delta). */
     NmChatStream *stream;
-    int round;         /* rounds started this turn */
-    char *text;        /* this round's accumulated answer text */
+    int round;  /* rounds started this turn */
+    char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
     NmToolCall *calls; /* delivered tool calls (owned between rounds) */

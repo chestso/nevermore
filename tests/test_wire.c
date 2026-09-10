@@ -286,7 +286,7 @@ static void test_wire_nonblocking_read_would_block(void)
  * mid-head with nothing dropped. */
 struct DribbleCase
 {
-    const char *first;  /* bytes sent immediately */
+    const char *first; /* bytes sent immediately */
     size_t first_len;
     const char *second; /* bytes sent after the stall */
     size_t second_len;

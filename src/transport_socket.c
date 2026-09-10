@@ -191,10 +191,10 @@ enum
 static int parse_head(NmConnection *conn);
 
 NmTransportStatus nm_socket_request_send(NmConnection *conn, const char *method,
-                                        const char *path,
-                                        const NmRequestHeader *headers,
-                                        size_t n_headers, const char *body,
-                                        size_t body_len)
+                                         const char *path,
+                                         const NmRequestHeader *headers,
+                                         size_t n_headers, const char *body,
+                                         size_t body_len)
 {
     if (!conn || conn->fd < 0 || !method || !path)
         return NM_TRANSPORT_ERR_PROTOCOL;

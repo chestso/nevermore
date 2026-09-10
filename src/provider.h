@@ -81,7 +81,7 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n);
 typedef enum
 {
     NM_CHAT_OK = 0,
-    NM_CHAT_PENDING,  /* step API: no progress yet, call again (see chat_begin) */
+    NM_CHAT_PENDING, /* step API: no progress yet, call again (see chat_begin) */
     NM_CHAT_ERR_TRANSPORT,
     NM_CHAT_ERR_HTTP,  /* non-2xx; http_status + error body filled in */
     NM_CHAT_ERR_PARSE, /* wire response wasn't valid JSON/SSE */
