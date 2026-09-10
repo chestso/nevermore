@@ -226,6 +226,173 @@ static void test_wire_refused(void)
     ASSERT_EQ(st, NM_TRANSPORT_ERR_SOCKET);
 }
 
+/* ---------------------------------------------------------------- */
+/* Non-blocking reads (phase 4: boba polls the socket readable)      */
+/* ---------------------------------------------------------------- */
+
+/* Server: accept, drain the request, then stall — no bytes sent.
+ * The client must observe WOULD_BLOCK, not block. */
+struct StallCase
+{
+    int port;
+    int fd; /* listen socket */
+};
+
+static void *stall_server_thread(void *arg)
+{
+    struct StallCase *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
+    /* Hold the connection open, send nothing. */
+    usleep(500 * 1000);
+    close(cfd);
+    return NULL;
+}
+
+static void test_wire_nonblocking_read_would_block(void)
+{
+    struct StallCase sc = { 0, 0 };
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, stall_server_thread, &sc);
+
+    NmTransportStatus st;
+    NmConnection *c =
+        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+    ASSERT_NOT_NULL(c);
+
+    /* Event-driven contract: send the request, don't wait for the
+     * response head — it arrives through nm_read_body steps. */
+    ASSERT_EQ(nm_request_send(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+    ASSERT_EQ(nm_connection_set_nonblocking(c), NM_TRANSPORT_OK);
+
+    char buf[64];
+    long n = nm_read_body(c, buf, sizeof(buf));
+    ASSERT_EQ(n, (long)NM_READ_WOULD_BLOCK);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Server: accepts, drains, then sends the response head in two
+ * flushes with a gap — the non-blocking read must be resumable
+ * mid-head with nothing dropped. */
+struct DribbleCase
+{
+    const char *first;  /* bytes sent immediately */
+    size_t first_len;
+    const char *second; /* bytes sent after the stall */
+    size_t second_len;
+    int port;
+    int fd;
+};
+
+static void *dribble_server_thread(void *arg)
+{
+    struct DribbleCase *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
+    send(cfd, sc->first, sc->first_len, 0);
+    usleep(200 * 1000); /* stall: client must WOULD_BLOCK here */
+    send(cfd, sc->second, sc->second_len, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_wire_nonblocking_head_resume(void)
+{
+    /* Head split mid-header-value: first flush is a partial head, the
+     * rest (incl. the blank line + chunked body) lands after a
+     * stall. */
+    static const char first[] = "HTTP/1.1 200 OK\r\nContent-Type: "
+                                "text/event-stream\r\nTransfer-E";
+    static const char second[] =
+        "ncoding: chunked\r\n\r\n"
+        "5\r\nhello\r\n"
+        "0\r\n\r\n";
+    struct DribbleCase sc = { first, sizeof(first) - 1, second,
+                              sizeof(second) - 1, 0, 0 };
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, dribble_server_thread, &sc);
+
+    NmTransportStatus st;
+    NmConnection *c =
+        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request_send(c, "POST", "/v1/chat/completions", NULL, 0,
+                              "{}", 2),
+              NM_TRANSPORT_OK);
+    ASSERT_EQ(nm_connection_set_nonblocking(c), NM_TRANSPORT_OK);
+
+    /* First read: WOULD_BLOCK (head bytes incomplete; the partial
+     * head must be retained, nothing dropped). */
+    char buf[64];
+    long n = nm_read_body(c, buf, sizeof(buf));
+    ASSERT_EQ(n, (long)NM_READ_WOULD_BLOCK);
+
+    /* The connection must report no response yet (head incomplete). */
+    const NmResponse *r = nm_response(c);
+    ASSERT_EQ(r->status, 0);
+
+    /* Wait for the server's second flush: poll the socket (this is
+     * exactly what boba's on_external_ready will do). Bounded, no
+     * infinite hang. */
+    int cfd = nm_connection_fd(c);
+    ASSERT_TRUE(cfd >= 0);
+    fd_set fds;
+    for (int spin = 0; spin < 200; spin++) {
+        struct timeval tv = { 0, 10 * 1000 }; /* 10ms per poll */
+        FD_ZERO(&fds);
+        FD_SET(cfd, &fds);
+        if (select(cfd + 1, &fds, NULL, NULL, &tv) > 0)
+            break;
+    }
+
+    /* Step until the full body is consumed. WOULD_BLOCK is a normal
+     * "call again later"; 0 = complete; <0 = error. */
+    char body[64];
+    size_t total = 0;
+    int saw_body = 0;
+    for (int spin = 0; spin < 500; spin++) {
+        long n2 = nm_read_body(c, body + total, sizeof(body) - total);
+        if (n2 == NM_READ_WOULD_BLOCK) {
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&fds);
+            FD_SET(cfd, &fds);
+            select(cfd + 1, &fds, NULL, NULL, &tv);
+            continue;
+        }
+        if (n2 == 0)
+            break;
+        if (n2 < 0) {
+            ASSERT_TRUE(0 && "read error mid-body");
+            break;
+        }
+        total += (size_t)n2;
+        saw_body = 1;
+    }
+    ASSERT_EQ(total, 5);
+    ASSERT_STR_EQ(body, "hello");
+    ASSERT_TRUE(saw_body);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -242,5 +409,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_http_error_status);
     RUN_TEST(test_wire_refused);
+    RUN_TEST(test_wire_nonblocking_read_would_block);
+    RUN_TEST(test_wire_nonblocking_head_resume);
     TEST_SUMMARY();
 }

@@ -86,6 +86,16 @@ NmTransportStatus nm_request(NmConnection *conn, const char *method,
                              body_len);
 }
 
+NmTransportStatus nm_request_send(NmConnection *conn, const char *method,
+                                  const char *path,
+                                  const NmRequestHeader *headers,
+                                  size_t n_headers, const char *body,
+                                  size_t body_len)
+{
+    return nm_socket_request_send(conn, method, path, headers, n_headers,
+                                  body, body_len);
+}
+
 const NmResponse *nm_response(NmConnection *conn)
 {
     return conn ? &conn->resp : NULL;
@@ -94,4 +104,14 @@ const NmResponse *nm_response(NmConnection *conn)
 long nm_read_body(NmConnection *conn, char *buf, size_t buf_len)
 {
     return nm_socket_read_body(conn, buf, buf_len);
+}
+
+NmTransportStatus nm_connection_set_nonblocking(NmConnection *conn)
+{
+    return nm_socket_set_nonblocking(conn);
+}
+
+int nm_connection_fd(NmConnection *conn)
+{
+    return nm_socket_fd(conn);
 }

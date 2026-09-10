@@ -26,6 +26,14 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
                                     const NmRequestHeader *headers,
                                     size_t n_headers, const char *body,
                                     size_t body_len);
+NmTransportStatus nm_socket_request_send(NmConnection *conn,
+                                         const char *method,
+                                         const char *path,
+                                         const NmRequestHeader *headers,
+                                         size_t n_headers, const char *body,
+                                         size_t body_len);
+NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn);
+int nm_socket_fd(NmConnection *conn);
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len);
 void nm_socket_shutdown(int fd);
 

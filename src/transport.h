@@ -70,6 +70,18 @@ NmTransportStatus nm_request(NmConnection *conn, const char *method,
                              const char *path, const NmRequestHeader *headers,
                              size_t n_headers, const char *body, size_t body_len);
 
+/* Event-driven split of nm_request (phase 4): send only. Returns
+ * once the request bytes are on the wire — the response head is NOT
+ * read. The head then arrives through nm_read_body() steps (the
+ * head parser is resumable; nm_response() fields fill in as bytes
+ * land). Callers may switch to non-blocking reads after this
+ * returns; set_nonblocking after request_send is the expected order. */
+NmTransportStatus nm_request_send(NmConnection *conn, const char *method,
+                                  const char *path,
+                                  const NmRequestHeader *headers,
+                                  size_t n_headers, const char *body,
+                                  size_t body_len);
+
 typedef struct NmResponse
 {
     int status;            /* HTTP status code (200, 404, ...) */
@@ -82,8 +94,31 @@ const NmResponse *nm_response(NmConnection *conn);
 
 /* Stream the body. Returns chunk size > 0, 0 = complete, -1 = error.
  * For chunked responses the de-chunking is transparent: the caller sees
- * a plain byte stream. */
+ * a plain byte stream.
+ *
+ * Non-blocking mode (phase 4, event-driven): call
+ * nm_connection_set_nonblocking() after nm_request() returns OK, then
+ * nm_read_body() becomes a "pull what's ready" step: it additionally
+ * returns NM_READ_WOULD_BLOCK (-2) when the socket has no bytes
+ * pending. Reads are resumable at any boundary (mid response-head,
+ * mid chunk header, mid chunk data) — all parse state lives in the
+ * connection, nothing is dropped between calls. */
 long nm_read_body(NmConnection *conn, char *buf, size_t buf_len);
+
+#define NM_READ_WOULD_BLOCK (-2) /* socket would block: call again later */
+
+/* Flip the connection's socket to non-blocking for the body-streaming
+ * phase. Call AFTER nm_request() (the request send + response-head
+ * wait are the blocking phase; the body stream is the event-driven
+ * one). Only plain sockets: TLS backends block today (documented
+ * phase-4 deferral) — returns NM_TRANSPORT_ERR_TLS for TLS
+ * connections. */
+NmTransportStatus nm_connection_set_nonblocking(NmConnection *conn);
+
+/* The OS socket fd, for an event loop's poll set (boba's
+ * get_external_fd). -1 if not connected. TLS connections still expose
+ * the underlying fd, but reads must go through nm_read_body. */
+int nm_connection_fd(NmConnection *conn);
 
 /* ---------------------------------------------------------------- */
 /* TLS backend interface (internal — implemented per OS)            */

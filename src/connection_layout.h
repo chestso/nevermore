@@ -24,6 +24,7 @@ struct NmConnection
     NmResponse resp;
     char host[256];   /* Host header source, set at connect */
     int body_started; /* response head fully parsed */
+    int nonblocking; /* 1 = socket flipped non-blocking (read phase) */
 
     /* Response-head accumulation: bytes arrive into scratch until the
      * blank line; afterwards scratch holds only body bytes pending

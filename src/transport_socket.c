@@ -35,6 +35,7 @@
 #include <ws2tcpip.h>
 #else
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -189,11 +190,11 @@ enum
 
 static int parse_head(NmConnection *conn);
 
-NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
-                                    const char *path,
-                                    const NmRequestHeader *headers,
-                                    size_t n_headers, const char *body,
-                                    size_t body_len)
+NmTransportStatus nm_socket_request_send(NmConnection *conn, const char *method,
+                                        const char *path,
+                                        const NmRequestHeader *headers,
+                                        size_t n_headers, const char *body,
+                                        size_t body_len)
 {
     if (!conn || conn->fd < 0 || !method || !path)
         return NM_TRANSPORT_ERR_PROTOCOL;
@@ -229,10 +230,9 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
     }
     free(rb.s);
 
-    /* Reset response state for the new exchange, then pull bytes
-     * until the response head is complete — nm_request's contract
-     * (transport.h): the caller may inspect nm_response() as soon as
-     * nm_request returns OK. */
+    /* Reset response state for the new exchange. The response head
+     * is NOT read here — it arrives through nm_read_body steps (the
+     * head parser is resumable; phase-4 event loop feeds it). */
     conn->body_started = 0;
     conn->scratch_len = 0;
     conn->pending_len = 0;
@@ -246,7 +246,28 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
     conn->resp.status = 0;
     conn->resp.chunked = 0;
     conn->resp.content_len = -1;
+    return NM_TRANSPORT_OK;
 
+fail:
+    free(rb.s);
+    return NM_TRANSPORT_ERR_SEND;
+}
+
+NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
+                                    const char *path,
+                                    const NmRequestHeader *headers,
+                                    size_t n_headers, const char *body,
+                                    size_t body_len)
+{
+    /* Blocking wrapper: send, then pump the resumable head parser
+     * until the response head is complete — nm_request's contract
+     * (transport.h): the caller may inspect nm_response() as soon as
+     * nm_request returns OK. */
+    NmTransportStatus rs =
+        nm_socket_request_send(conn, method, path, headers, n_headers, body,
+                               body_len);
+    if (rs != NM_TRANSPORT_OK)
+        return rs;
     for (;;) {
         int r = parse_head(conn);
         if (r == 0)
@@ -267,10 +288,33 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
         }
         conn->scratch_len += (size_t)n;
     }
+}
 
-fail:
-    free(rb.s);
-    return NM_TRANSPORT_ERR_SEND;
+NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn)
+{
+    if (!conn || conn->fd < 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+    if (conn->tls_ctx)
+        return NM_TRANSPORT_ERR_TLS; /* TLS backends block today (phase-4
+                                        deferral, documented in transport.h) */
+#ifdef _WIN32
+    u_long mode = 1;
+    if (ioctlsocket(conn->fd, FIONBIO, &mode) != 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+#else
+    int fl = fcntl(conn->fd, F_GETFL, 0);
+    if (fl < 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+    if (fcntl(conn->fd, F_SETFL, fl | O_NONBLOCK) < 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+#endif
+    conn->nonblocking = 1;
+    return NM_TRANSPORT_OK;
+}
+
+int nm_socket_fd(NmConnection *conn)
+{
+    return conn ? conn->fd : -1;
 }
 
 /* ---------------------------------------------------------------- */
@@ -404,6 +448,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             }
             long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
                                   sizeof(conn->scratch) - conn->scratch_len);
+            if (n == NM_READ_WOULD_BLOCK) {
+                /* Head incomplete, no bytes pending. The partial head
+                 * stays in scratch; resume on the next call. */
+                return NM_READ_WOULD_BLOCK;
+            }
             if (n <= 0) {
                 conn->err = NM_TRANSPORT_ERR_CLOSED;
                 return -1; /* head never completed */
@@ -427,6 +476,8 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             return (long)take;
         }
         long n = nm_conn_read(conn, buf, buf_len);
+        if (n == NM_READ_WOULD_BLOCK)
+            return NM_READ_WOULD_BLOCK;
         if (n < 0) {
             conn->err = NM_TRANSPORT_ERR_CLOSED;
             return -1;
@@ -459,6 +510,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                     return (long)out; /* deliver what we have */
                 long n = nm_conn_read(conn, conn->scratch,
                                       sizeof(conn->scratch));
+                if (n == NM_READ_WOULD_BLOCK) {
+                    /* No bytes pending mid-chunk; decode state is all
+                     * in conn fields — resumable at the next call. */
+                    return NM_READ_WOULD_BLOCK;
+                }
                 if (n <= 0) {
                     conn->err = NM_TRANSPORT_ERR_CLOSED;
                     return -1;
@@ -498,6 +554,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             if (out > 0)
                 return (long)out; /* deliver partial data first */
             long n = nm_conn_read(conn, conn->scratch, 1);
+            if (n == NM_READ_WOULD_BLOCK) {
+                /* Mid chunk header/trailer, no byte pending; the state
+                 * machine resumes on the next call. */
+                return NM_READ_WOULD_BLOCK;
+            }
             if (n <= 0) {
                 conn->err = NM_TRANSPORT_ERR_CLOSED;
                 return -1;
@@ -624,5 +685,14 @@ long nm_conn_read(NmConnection *conn, char *buf, size_t len)
     do {
         n = recv(conn->fd, buf, (int)len, 0);
     } while (n < 0 && errno == EINTR);
+#ifdef _WIN32
+    if (n < 0 && conn->nonblocking &&
+        (WSAGetLastError() == WSAEWOULDBLOCK))
+        return NM_READ_WOULD_BLOCK;
+#else
+    if (n < 0 && conn->nonblocking &&
+        (errno == EAGAIN || errno == EWOULDBLOCK))
+        return NM_READ_WOULD_BLOCK;
+#endif
     return n;
 }
