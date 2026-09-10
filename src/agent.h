@@ -41,6 +41,10 @@ void nm_agent_free(NmAgent *a);
 void nm_agent_set_endpoint(NmAgent *a, const char *base_url,
                            const char *api_key);
 
+/* Change the model id; the next round/turn uses it. Session and
+ * in-flight state are untouched. */
+void nm_agent_set_model(NmAgent *a, const char *model);
+
 /* Register UI callbacks. */
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */

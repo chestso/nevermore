@@ -22,10 +22,17 @@
 #include "provider.h"
 #include "session.h"
 #include "tools.h"
+#include "history.h"
 #include "chat_app.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
+
+#ifndef _WIN32
+#include <unistd.h> /* isatty */
+#else
+#include <io.h> /* _isatty */
+#endif
 
 static void print_version(void)
 {
@@ -87,6 +94,107 @@ static void ask_on_state(NmAgentState state, void *userdata)
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
 }
 
+/* ---------------------------------------------------------------- */
+/* Interactive chat (phase 4): boba runtime + the chat_app component */
+/* ---------------------------------------------------------------- */
+
+/* Per-provider API key env (chat + ask both resolve this way). */
+static const char *provider_env_key(const char *name)
+{
+    if (!name)
+        return NULL;
+    if (strcmp(name, "hyper") == 0)
+        return getenv("HYPER_API_KEY");
+    if (strcmp(name, "ollama") == 0)
+        return getenv("OLLAMA_API_KEY");
+    if (strcmp(name, "openai") == 0)
+        return getenv("OPENAI_API_KEY");
+    if (strcmp(name, "openrouter") == 0)
+        return getenv("OPENROUTER_API_KEY");
+    return NULL;
+}
+
+/* TuiRuntimeConfig event callbacks (event_data = the app). The app's
+ * step pump is the agent's fd; the tick animates the spinner. */
+static int chat_get_external_fd(void *userdata)
+{
+    return nm_chat_app_fd(userdata);
+}
+
+static void chat_external_ready(void *userdata)
+{
+    nm_chat_app_step(userdata);
+}
+
+static void chat_tick(void *userdata)
+{
+    nm_chat_app_tick(userdata);
+}
+
+static int chat_tick_timeout(void *userdata)
+{
+    return nm_chat_app_tick_ms(userdata);
+}
+
+static int stdin_is_tty(void)
+{
+#ifdef _WIN32
+    return _isatty(_fileno(stdin));
+#else
+    return isatty(0);
+#endif
+}
+
+static int run_interactive(const char *provider_name, const char *model)
+{
+    if (!stdin_is_tty()) {
+        fprintf(stderr,
+                "nevermore: interactive chat needs a terminal "
+                "(use `nevermore ask \"prompt\"` for pipes)\n");
+        return 1;
+    }
+
+    NmChatApp *app = nm_chat_app_new(provider_name, model);
+    if (!app) {
+        fprintf(stderr, "nevermore: failed to initialize the chat\n");
+        return 1;
+    }
+    nm_chat_app_set_endpoint(app, NULL, provider_env_key(provider_name));
+
+    TuiRuntimeConfig cfg = { 0 };
+    cfg.raw_mode = 1;
+    cfg.output = stdout;
+    cfg.get_external_fd = chat_get_external_fd;
+    cfg.on_external_ready = chat_external_ready;
+    cfg.on_tick = chat_tick;
+    cfg.get_tick_timeout_ms = chat_tick_timeout;
+    cfg.event_data = app;
+
+    TuiRuntime *rt = tui_runtime_create(
+        (TuiComponent *)nm_chat_app_component(app), app, &cfg);
+    if (!rt) {
+        nm_chat_app_free(app);
+        fprintf(stderr, "nevermore: failed to create the TUI runtime\n");
+        return 1;
+    }
+    nm_chat_app_set_runtime(app, rt);
+
+    nm_history_load(nm_chat_app_textinput(app));
+
+    printf("nevermore %s — %s · %s\n"
+           "Type a prompt; %s/help%s for commands, %s/quit%s to leave.\n\n",
+           NEVERMORE_VERSION, nm_chat_app_provider(app),
+           nm_chat_app_model(app) ? nm_chat_app_model(app) : "(no model)",
+           "\033[1m", "\033[1m", "\033[1m", "\033[0m");
+
+    int rc = tui_runtime_run(rt);
+
+    tui_runtime_finish_inline(rt); /* prompt lands in the scrollback */
+    nm_history_save(nm_chat_app_textinput(app));
+    tui_runtime_free(rt); /* frees the app (component->free) */
+    return rc == 0 ? 0 : 1;
+}
+
 int main(int argc, char *argv[])
 {
     const char *provider_name = getenv("NEVERMORE_PROVIDER");
@@ -146,7 +254,7 @@ int main(int argc, char *argv[])
         /* One-shot ask mode (phase 3): the full agent loop — stream,
          * tool calls, file edits — with deltas on stdout and tool
          * activity on stderr. */
-        const char *api_key = getenv("OLLAMA_API_KEY"); /* provider-specific later */
+        const char *api_key = provider_env_key(provider_name);
         if (!model)
             model = "gpt-oss:20b"; /* sane local default */
 
@@ -178,9 +286,7 @@ int main(int argc, char *argv[])
         return rc == 0 ? 0 : 1;
     }
 
-    /* interactive chat — boba TUI, phase 4 target */
-    fprintf(stderr, "nevermore: interactive chat not yet implemented (phase 4)\n");
-    (void)nm_chat_app_new;
-    (void)nm_chat_app_component;
-    return 1;
+    /* Interactive chat: boba owns the event loop; the agent streams
+     * through the app's fd/step/tick callbacks. */
+    return run_interactive(provider_name, model);
 }

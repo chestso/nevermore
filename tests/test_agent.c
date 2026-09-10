@@ -560,6 +560,45 @@ static void test_agent_cancel_then_next_turn_works(void)
     remove(FIXTURE);
 }
 
+static void test_agent_set_model_changes_wire_model(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "first-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    /* Change the model on a live agent; the next turn rides the new
+     * id and the session survives. */
+    nm_agent_set_model(agent, "second-model");
+    ASSERT_EQ(nm_agent_turn(agent, "hello"), 0);
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "\"model\":\"second-model\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "first-model") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -575,5 +614,6 @@ int main(void)
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_cancel_then_next_turn_works);
+    RUN_TEST(test_agent_set_model_changes_wire_model);
     TEST_SUMMARY();
 }

@@ -12,7 +12,8 @@ check_PROGRAMS = \
     test_tools \
     test_agent \
     test_spinner \
-    test_history
+    test_history \
+    test_chat_app
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
@@ -136,6 +137,22 @@ test_spinner_CFLAGS = $(TEST_CFLAGS)
 test_history_SOURCES = test_history.c ../src/history.c
 test_history_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_history_LDADD = $(BOBA_LIBS)
+
+# Chat app: the inline TUI component, driven through boba without a
+# terminal (runtime over tmpfile output, hand-fed messages) against
+# canned SSE servers. The full source stack rides along: the app owns
+# an agent (provider + openai_client + transport) and prints the
+# transcript through tui_runtime_clear_inline (new in boba).
+test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
+    ../src/agent.c ../src/session.c ../src/tools.c ../src/tools_file.c \
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
+    ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
+    $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/provider_hyper.c \
+    ../src/provider_ollama.c ../src/provider_openai.c \
+    ../src/provider_openrouter.c
+test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)

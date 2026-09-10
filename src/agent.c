@@ -121,6 +121,16 @@ void nm_agent_set_endpoint(NmAgent *a, const char *base_url, const char *api_key
     a->api_key = api_key ? strdup(api_key) : NULL;
 }
 
+/* Change the model id on a live agent: subsequent rounds (and turns)
+ * ride the new id; the session survives. Used by the TUI's /model. */
+void nm_agent_set_model(NmAgent *a, const char *model)
+{
+    if (!a || !model || !*model)
+        return;
+    free(a->model);
+    a->model = strdup(model);
+}
+
 NmAgentState nm_agent_state(const NmAgent *a)
 {
     return a ? a->state : NM_AGENT_IDLE;
