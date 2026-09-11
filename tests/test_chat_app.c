@@ -527,6 +527,168 @@ static void test_models_popup_selects_model(void)
     harness_free(h);
 }
 
+static void test_models_popup_pre_filters_by_query(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* /models with a query: the popup opens pre-filtered (boba's
+     * filter-as-view; the query is the stable interface). */
+    harness_type(h, "/models gpt");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "gpt-oss:20b") != NULL);
+    ASSERT_TRUE(strstr(frame, "llama3.2") == NULL); /* filtered out */
+    ASSERT_TRUE(strstr(frame, "\"gpt\"") != NULL);  /* query in title */
+
+    /* Escape dismisses; model untouched. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
+
+    harness_free(h);
+}
+
+static void test_models_popup_enter_applies_first_match(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/models llama");
+    harness_enter(h);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+    ASSERT_TRUE(strstr(harness_read(h), "llama3.2") != NULL);
+
+    harness_free(h);
+}
+
+static void test_models_popup_no_match_prints_nothing(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* No match: no popup; a note prints instead; model unchanged. */
+    harness_type(h, "/models zzz-no-such-model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "gpt-oss") == NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
+    ASSERT_TRUE(strstr(harness_read(h), "no models") != NULL);
+
+    harness_free(h);
+}
+
+static void test_provider_popup_composes_into_input(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* /provider with no arg opens the registry popup; Enter
+     * COMPOSES "/provider <name>" into the input (selection =
+     * composition, submit = commit: switching rebuilds the agent
+     * and wipes the session, so a modal apply is a fat-finger
+     * session killer). */
+    harness_type(h, "/provider");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "openai") != NULL);
+    ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    /* The input now holds the composed command, unsubmitted. */
+    const char *text = tui_textinput_text(nm_chat_app_textinput(h->app));
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(strncmp(text, "/provider ", 10) == 0);
+    /* Copy the composed name: the borrowed text dies with the submit. */
+    char name[32] = { 0 };
+    snprintf(name, sizeof(name), "%s", text + 10);
+    /* Provider NOT switched yet (selection = composition). */
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+
+    /* Submit commits the switch to exactly the composed name. */
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), name);
+    ASSERT_NOT_NULL(nm_provider_by_name(name));
+    harness_free(h);
+}
+
+static void test_provider_popup_query_pre_filters(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/provider openr");
+    /* openr is an unknown provider NAME but a valid query: the popup
+     * pre-filters the registry; Enter composes openrouter. */
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+    ASSERT_TRUE(strstr(frame, "\"openr\"") != NULL);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
+
+    harness_free(h);
+}
+
+static void test_providers_alias_lists_providers(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* /providers [q] is the alias of the /provider picker: bare
+     * form opens the registry popup, same keys. */
+    harness_type(h, "/providers");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "openai") != NULL);
+    ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+
+    /* Escape dismisses without switching. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+
+    harness_free(h);
+}
+
+static void test_model_validation_refuses_unknown_id(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Not in the catalog: refuse, name /models, agent untouched. */
+    harness_type(h, "/model zzz-no-such");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "unknown model 'zzz-no-such'") != NULL);
+    ASSERT_TRUE(strstr(out, "/models") != NULL);
+
+    /* In the catalog: set. */
+    harness_type(h, "/model qwen3-coder");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "qwen3-coder");
+
+    harness_free(h);
+}
+
+static void test_model_exact_escape_hatch(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Exact-set escape hatch: "! " prefix sets any id without
+     * catalog validation (a local daemon may run private models
+     * the static catalog doesn't know — offline homebrew rigs). */
+    harness_type(h, "/model ! my-private-finetune");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "my-private-finetune");
+    ASSERT_TRUE(strstr(harness_read(h), "my-private-finetune") != NULL);
+
+    harness_free(h);
+}
+
 static void test_provider_command_switches_provider(void)
 {
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
@@ -541,26 +703,24 @@ static void test_provider_command_switches_provider(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
     ASSERT_TRUE(strstr(harness_read(h), "openai") != NULL);
 
-    /* Bare /provider lists every registered provider (the names
-     * /provider accepts), current first with a marker. */
+    /* Bare /provider opens the registry picker popup (the same
+     * truth the router reads). */
     harness_type(h, "/provider");
     harness_enter(h);
-    const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "providers:") != NULL);
-    ASSERT_TRUE(strstr(out, "openai") != NULL);
-    ASSERT_TRUE(strstr(out, "openrouter") != NULL);
-    ASSERT_TRUE(strstr(out, "hyper") != NULL);
-    ASSERT_TRUE(strstr(out, "ollama") != NULL);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "ollama") != NULL);
+    ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+    ASSERT_TRUE(strstr(frame, "hyper") != NULL);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
-    /* Unknown provider is refused, current stays; the error lists
-     * the valid names. */
+    /* A query that matches nothing: no popup, a printed note, and
+     * the provider stays (typo can't silently switch anything). */
     harness_type(h, "/provider nope");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
-    out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "unknown provider 'nope'") != NULL);
-    ASSERT_TRUE(strstr(out, "openrouter") != NULL);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "no providers match 'nope'") != NULL);
 
     harness_free(h);
 }
@@ -789,7 +949,15 @@ int main(void)
     RUN_TEST(test_quit_command_quits);
     RUN_TEST(test_model_command_sets_model);
     RUN_TEST(test_models_popup_selects_model);
+    RUN_TEST(test_models_popup_pre_filters_by_query);
+    RUN_TEST(test_models_popup_enter_applies_first_match);
+    RUN_TEST(test_models_popup_no_match_prints_nothing);
     RUN_TEST(test_provider_command_switches_provider);
+    RUN_TEST(test_provider_popup_composes_into_input);
+    RUN_TEST(test_provider_popup_query_pre_filters);
+    RUN_TEST(test_providers_alias_lists_providers);
+    RUN_TEST(test_model_validation_refuses_unknown_id);
+    RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
     RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);
     RUN_TEST(test_tab_single_match_inserts_completion);
