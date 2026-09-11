@@ -404,8 +404,11 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         return NULL;
     }
 
-    /* Compose + connect + send (the blocking part — documented
-     * deferral). The stream handle owns the connection from here. */
+    /* Compose + queue (the async transport seam, N2): non-blocking
+     * connect in flight, request serialized into the connection's
+     * owned buffer. NO blocking before returning — the connect/send
+     * phases are driven by chat_step, which the event loop calls on
+     * writability. The stream handle owns the connection from here. */
     char *body = compose_body(ep, req);
     if (!body) {
         if (err)
@@ -414,7 +417,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     }
 
     NmTransportStatus tst;
-    NmConnection *conn = nm_connect(host, port, mode, &tst);
+    NmConnection *conn = nm_connect_async(host, port, mode, &tst);
     if (!conn) {
         free(body);
         if (err)
@@ -457,13 +460,25 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     st->userdata = req->userdata;
     st->status = NM_CHAT_OK;
 
-    /* Send only — the response head arrives through chat_step's
-     * read_body pulls (resumable head parser), then flip the socket
-     * non-blocking for the streamed phase. */
-    NmTransportStatus rs = nm_request_send(conn, "POST", path, hdrs, nh,
-                                           body, strlen(body));
+    /* Queue the request; the connect/send phases drain inside
+     * chat_step. The stream is returned in CONNECTING. */
+    NmTransportStatus rs = nm_request_queue(conn, "POST", path, hdrs, nh,
+                                            body, strlen(body));
     free(body);
-    if (rs != NM_TRANSPORT_OK || nm_connection_set_nonblocking(conn) != NM_TRANSPORT_OK) {
+    if (rs != NM_TRANSPORT_OK) {
+        if (err)
+            err->status = NM_CHAT_ERR_TRANSPORT;
+        nm_connection_close(conn);
+        free(st);
+        return NULL;
+    }
+    /* Async sockets are already non-blocking from connect_async; TLS
+     * connections still refuse the flip — the documented narrowed
+     * deferral; their reads block inside chat_step, which the
+     * blocking pump and the TUI both tolerate sub-second. */
+    if (nm_connection_set_nonblocking(conn) == NM_TRANSPORT_OK) {
+        /* plain socket: flipped, nothing more to do */
+    } else if (mode == NM_TRANSPORT_PLAIN) {
         if (err)
             err->status = NM_CHAT_ERR_TRANSPORT;
         nm_connection_close(conn);
@@ -537,6 +552,27 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
         return result->status = NM_CHAT_ERR_PARSE, NM_CHAT_ERR_PARSE;
     if (h->done)
         return result->status = h->status, h->status;
+
+    /* Drive the transport phase machine first (async connect/send,
+     * N2): the request is not on the wire until this returns OK at
+     * the READING phase. PENDING = still connecting/sending; the
+     * caller steps again per the interest bits. */
+    if (h->conn) {
+        NmTransportStatus ts = nm_connection_step(h->conn);
+        if (ts == NM_TRANSPORT_PENDING)
+            return NM_CHAT_PENDING;
+        if (ts != NM_TRANSPORT_OK) {
+            h->done = 1;
+            h->status = NM_CHAT_ERR_TRANSPORT;
+            if (result) {
+                result->status = NM_CHAT_ERR_TRANSPORT;
+                result->http_status = 0;
+                result->error_body = NULL;
+            }
+            stream_teardown(h);
+            return NM_CHAT_ERR_TRANSPORT;
+        }
+    }
 
     /* Error-body drain (non-SSE response): continue where the first
      * step left off; would-block means the rest arrives later. */
@@ -648,6 +684,14 @@ int nm_openai_stream_fd(NmChatStream *h)
     return h && h->conn ? nm_connection_fd(h->conn) : -1;
 }
 
+unsigned nm_openai_stream_interest(NmChatStream *h)
+{
+    if (!h || !h->conn)
+        return 0;
+    NmConnectionInterest i = nm_connection_interest(h->conn);
+    return i.fd >= 0 ? i.flags : 0;
+}
+
 void nm_openai_chat_end(NmChatStream *h)
 {
     if (!h)
@@ -678,17 +722,28 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
         NmChatStatus s = nm_openai_chat_step(h, &r);
         if (s != NM_CHAT_PENDING)
             break;
-        /* PENDING: wait for readability, then step again. The socket
-         * is non-blocking; a 10ms poll keeps this simple and bounded
-         * (ask mode is a one-shot process, not a UI loop). */
+        /* PENDING: wait on the CURRENT interest bits (connect/send
+         * phases wait writability, the response phase readability),
+         * then step again. 10ms-bounded poll keeps this simple (ask
+         * mode is a one-shot process, not a UI loop). */
         int fd = nm_openai_stream_fd(h);
-        if (fd < 0)
+        unsigned interest = nm_openai_stream_interest(h);
+        if (fd < 0 || !interest)
             break; /* torn down mid-step (error path) */
-        fd_set fds;
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
+        fd_set rd, wr;
+        FD_ZERO(&rd);
+        FD_ZERO(&wr);
         struct timeval tv = { 0, 10 * 1000 };
-        select(fd + 1, &fds, NULL, NULL, &tv);
+        if (interest & NM_INTEREST_READ)
+            FD_SET(fd, &rd);
+        if (interest & NM_INTEREST_WRITE)
+            FD_SET(fd, &wr);
+#ifdef _WIN32
+        select(fd + 1, (interest & NM_INTEREST_READ) ? &rd : NULL,
+               (interest & NM_INTEREST_WRITE) ? &wr : NULL, NULL, &tv);
+#else
+        select(fd + 1, &rd, &wr, NULL, &tv);
+#endif
     }
     nm_openai_chat_end(h);
     return r;

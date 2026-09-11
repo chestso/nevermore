@@ -104,6 +104,7 @@ const struct NmProvider nm_ollama_provider = {
     ollama_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
+    nm_openai_stream_interest,
     nm_openai_chat_end,
     ollama_models,
     ollama_needs_auth,

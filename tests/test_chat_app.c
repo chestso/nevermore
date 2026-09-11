@@ -289,12 +289,22 @@ static int harness_drive(AppHarness *h, int max_spins)
             st == NM_AGENT_IDLE)
             return 0;
         int fd = nm_chat_app_fd(h->app);
-        if (fd >= 0) {
-            fd_set fds;
+        unsigned interest = nm_chat_app_interest(h->app).flags;
+        if (fd >= 0 && interest) {
+            fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
-            select(fd + 1, &fds, NULL, NULL, &tv);
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (interest & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (interest & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+#ifdef _WIN32
+            select(fd + 1, (interest & NM_INTEREST_READ) ? &r : NULL,
+                   (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#else
+            select(fd + 1, &r, &w, NULL, &tv);
+#endif
             nm_chat_app_step(h->app);
         } else {
             usleep(10 * 1000);
@@ -793,6 +803,16 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     harness_type(h, "anyone there");
     harness_enter(h);
 
+    /* The async transport seam: submit returns while the connect is
+     * still in flight (STREAMING, connect pending); the failure
+     * surfaces through steps, exactly as boba's loop would. */
+    for (int i = 0; i < 200; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR || st == NM_AGENT_IDLE)
+            break;
+        nm_chat_app_step(h->app);
+        usleep(5 * 1000);
+    }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "anyone there") != NULL);

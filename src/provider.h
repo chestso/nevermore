@@ -124,27 +124,33 @@ struct NmProvider
                          const char *base_url, const char *api_key);
 
     /* Event-driven split of chat (phase 4): begin opens a connection
-     * and puts the request on the wire (blocking connect + send; TLS
-     * handshakes block too — documented transport.h deferral), then
-     * the caller drives the stream from its event loop:
+     * and puts the request on the wire, then the caller drives the
+     * stream from its event loop:
      *
      *   fd = chat_stream_fd(h)          // -1 while none open
-     *   on readable: chat_step(h)       // pumps what's available
+     *   interest = chat_stream_interest(h)  // NM_INTEREST_* bits
+     *   ready (per interest) -> chat_step(h)
      *     -> NM_CHAT_PENDING  more bytes may follow; keep stepping
-     *        on readability (or poll fd first)
+     *        when the interest fd is ready
      *     -> NM_CHAT_OK       stream complete; result delivered
      *     -> NM_CHAT_ERR_*    fatal; result carries the error
      *   chat_end(h)                     // frees the stream (cancel ok
      *                                    // at any point mid-stream)
      *
-     * on_delta fires from inside chat_step exactly as it did from
-     * chat. The blocking chat() is implemented as begin + step-pump
-     * over this seam, so both paths share one implementation. */
+     * begin is compose + queue: the connection opens via the async
+     * transport seam (non-blocking connect; the TLS handshake is
+     * the documented sub-second blocking deferral inside the first
+     * step). chat_step drives the connect/send phases first, then
+     * the SSE response; on_delta fires from inside chat_step exactly
+     * as it did from chat. The blocking chat() is implemented as
+     * begin + step-pump over this seam, so both paths share one
+     * implementation. */
     NmChatStream *(*chat_begin)(const NmProvider *p, const NmChatRequest *req,
                                 const char *base_url, const char *api_key,
                                 NmChatResult *err);
     NmChatStatus (*chat_step)(NmChatStream *h, NmChatResult *result);
     int (*chat_stream_fd)(NmChatStream *h);
+    unsigned (*chat_stream_interest)(NmChatStream *h);
     void (*chat_end)(NmChatStream *h);
 
     /* Model catalog. Returns a NULL-terminated array of NmModel

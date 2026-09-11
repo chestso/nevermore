@@ -473,6 +473,19 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
 
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
 
+/* The app's aggregate wait interest (N4 v1: the live agent stream;
+ * phase-5 wire catalog fetches append entries here via the same
+ * NmSource fd seam). fd < 0 or flags == 0 = nothing to wait on. */
+NmConnectionInterest nm_chat_app_interest(NmChatApp *app)
+{
+    if (!app)
+        return (NmConnectionInterest){ -1, 0 };
+    unsigned flags = nm_agent_interest(app->agent);
+    if (!flags)
+        return (NmConnectionInterest){ -1, 0 };
+    return (NmConnectionInterest){ nm_agent_fd(app->agent), flags };
+}
+
 void nm_chat_app_step(NmChatApp *app)
 {
     if (!app || !app->agent)

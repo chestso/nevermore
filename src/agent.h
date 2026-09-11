@@ -76,6 +76,11 @@ int nm_agent_turn(NmAgent *a, const char *user_input);
 int nm_agent_start(NmAgent *a, const char *user_input);
 int nm_agent_step(NmAgent *a);
 int nm_agent_fd(NmAgent *a);
+
+/* The active stream's wait interest (NM_INTEREST_READ/WRITE bits;
+ * the event loop waits on the current bits, re-checked every fill).
+ * 0 = nothing to wait on. */
+unsigned nm_agent_interest(NmAgent *a);
 void nm_agent_cancel(NmAgent *a);
 
 NmAgentState nm_agent_state(const NmAgent *a);

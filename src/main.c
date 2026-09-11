@@ -114,15 +114,32 @@ static const char *provider_env_key(const char *name)
     return NULL;
 }
 
-/* TuiRuntimeConfig event callbacks (event_data = the app). The app's
- * step pump is the agent's fd; the tick animates the spinner. */
-static int chat_get_external_fd(void *userdata)
+/* TuiRuntimeConfig event callbacks (event_data = the app). The fill
+ * callback declares the app's live external fds each wait (Elm
+ * subscriptions in C idiom); the sink routes per fd. Today: the
+ * agent's stream (fd + interest). Phase-5 wire catalog fetches will
+ * append their entries here — the seam was designed for it. */
+static size_t chat_fill_external_fds(TuiExternalFd *out, size_t cap,
+                                     void *userdata)
 {
-    return nm_chat_app_fd(userdata);
+    if (!out || cap == 0)
+        return 0;
+    NmConnectionInterest i = nm_chat_app_interest(userdata);
+    if (i.fd < 0 || i.flags == 0)
+        return 0;
+    out[0].fd = i.fd;
+    out[0].flags = 0;
+    if (i.flags & NM_INTEREST_READ)
+        out[0].flags |= TUI_FD_READ;
+    if (i.flags & NM_INTEREST_WRITE)
+        out[0].flags |= TUI_FD_WRITE;
+    return 1;
 }
 
-static void chat_external_ready(void *userdata)
+static void chat_external_ready(int fd, unsigned ready, void *userdata)
 {
+    (void)fd;
+    (void)ready;
     nm_chat_app_step(userdata);
 }
 
@@ -164,7 +181,7 @@ static int run_interactive(const char *provider_name, const char *model)
     TuiRuntimeConfig cfg = { 0 };
     cfg.raw_mode = 1;
     cfg.output = stdout;
-    cfg.get_external_fd = chat_get_external_fd;
+    cfg.fill_external_fds = chat_fill_external_fds;
     cfg.on_external_ready = chat_external_ready;
     cfg.on_tick = chat_tick;
     cfg.get_tick_timeout_ms = chat_tick_timeout;

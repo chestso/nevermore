@@ -66,6 +66,29 @@ static int socket_init(void)
 }
 #endif
 
+/* Allocate + fill a connection around an existing fd (shared by the
+ * blocking and async connect paths). */
+static NmConnection *nm_socket_conn_new(int fd, const char *host, int port)
+{
+    NmConnection *conn = calloc(1, sizeof(NmConnection));
+    if (!conn) {
+        nm_socket_shutdown(fd);
+        return NULL;
+    }
+    conn->fd = fd;
+    conn->phase = NM_CONN_IDLE;
+    conn->resp.content_len = -1;
+    /* Host header value: host[:port] per RFC 7230 — the port must
+     * ride along for non-default ports (loopback test servers, local
+     * daemons on odd ports). */
+    if (port == 80)
+        snprintf(conn->host, sizeof(conn->host), "%s", host ? host : "");
+    else
+        snprintf(conn->host, sizeof(conn->host), "%s:%d", host ? host : "",
+                 port);
+    return conn;
+}
+
 NmConnection *nm_socket_connect(const char *host, int port,
                                 NmTransportStatus *status)
 {
@@ -107,63 +130,149 @@ NmConnection *nm_socket_connect(const char *host, int port,
         return NULL;
     }
 
-    NmConnection *conn = calloc(1, sizeof(NmConnection));
+    NmConnection *conn = nm_socket_conn_new(fd, host, port);
+    if (!conn && status)
+        *status = NM_TRANSPORT_ERR_NOMEM;
+    return conn;
+}
+
+/* Flip a socket non-blocking (portable). */
+static int socket_set_nonblocking(int fd)
+{
+#ifdef _WIN32
+    u_long mode = 1;
+    return ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0)
+        return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0 ? -1 : 0;
+#endif
+}
+
+/* Async connect: non-blocking socket, connect() in flight. The
+ * caller steps the CONNECTING phase to completion (writability =
+ * completion; SO_ERROR distinguishes failure). Only the FIRST
+ * resolved address is tried — an async multi-address walk needs
+ * per-address retry state that no consumer needs yet (local Ollama
+ * and cloud hosts resolve to one address). */
+NmConnection *nm_socket_connect_async(const char *host, int port,
+                                      NmTransportStatus *status)
+{
+    if (status)
+        *status = NM_TRANSPORT_OK;
+    if (socket_init() != 0) {
+        if (status)
+            *status = NM_TRANSPORT_ERR_SOCKET;
+        return NULL;
+    }
+
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
+        if (status)
+            *status = NM_TRANSPORT_ERR_SOCKET;
+        return NULL;
+    }
+
+    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    struct sockaddr *ai_addr = res->ai_addr;
+    socklen_t ai_addrlen = (socklen_t)res->ai_addrlen;
+    /* Copy the first address out before freeaddrinfo. */
+    struct sockaddr_storage addr_copy;
+    memcpy(&addr_copy, ai_addr, ai_addrlen);
+    freeaddrinfo(res);
+    if (fd < 0) {
+        if (status)
+            *status = NM_TRANSPORT_ERR_SOCKET;
+        return NULL;
+    }
+
+    if (socket_set_nonblocking(fd) != 0) {
+        nm_socket_shutdown(fd);
+        if (status)
+            *status = NM_TRANSPORT_ERR_SOCKET;
+        return NULL;
+    }
+
+    int rc = connect(fd, (struct sockaddr *)&addr_copy, ai_addrlen);
+#ifdef _WIN32
+    int in_flight = rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    int in_flight = rc != 0 && errno == EINPROGRESS;
+#endif
+    if (rc != 0 && !in_flight) {
+        nm_socket_shutdown(fd);
+        if (status)
+            *status = NM_TRANSPORT_ERR_SOCKET;
+        return NULL;
+    }
+
+    NmConnection *conn = nm_socket_conn_new(fd, host, port);
     if (!conn) {
         nm_socket_shutdown(fd);
         if (status)
             *status = NM_TRANSPORT_ERR_NOMEM;
         return NULL;
     }
-    conn->fd = fd;
-    conn->resp.content_len = -1;
-    /* Host header value: host[:port] per RFC 7230 — the port must
-     * ride along for non-default ports (loopback test servers, local
-     * daemons on odd ports). */
-    if (port == 80)
-        snprintf(conn->host, sizeof(conn->host), "%s", host ? host : "");
-    else
-        snprintf(conn->host, sizeof(conn->host), "%s:%d", host ? host : "",
-                 port);
+    conn->nonblocking = 1;
+    conn->phase = in_flight ? NM_CONN_CONNECTING : NM_CONN_IDLE;
     return conn;
+}
+
+/* Poll a plain fd for writability (blocking pump helper for
+ * nm_socket_request_send on a non-blocking socket). Bounded spin. */
+void nm_socket_wait_writable(int fd)
+{
+    if (fd < 0)
+        return;
+    struct timeval tv = { 0, 10 * 1000 };
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET(fd, &w);
+#ifdef _WIN32
+    select(1, NULL, &w, NULL, &tv);
+#else
+    select(fd + 1, NULL, &w, NULL, &tv);
+#endif
 }
 
 /* ---------------------------------------------------------------- */
 /* Request serialization                                             */
 /* ---------------------------------------------------------------- */
 
-/* Growable request buffer: one malloc per request, grown
- * geometrically; freed before return. Request heads are small
- * (hundreds of bytes); bodies ride along via a second write. */
-typedef struct ReqBuf
+/* Owned request buffer (memory-reuse principle): the serialized
+ * request lives in the connection itself — one allocation per
+ * connection, grown geometrically, reused across request rounds.
+ * The per-request malloc/free of the old ReqBuf died with this. */
+static int rb_put(NmConnection *conn, const char *s, size_t n)
 {
-    char *s;
-    size_t len;
-    size_t cap;
-} ReqBuf;
-
-static int rb_put(ReqBuf *b, const char *s, size_t n)
-{
-    if (b->len + n > b->cap) {
-        size_t nc = b->cap ? b->cap : 1024;
-        while (nc < b->len + n)
+    if (conn->req_len + n > conn->req_cap) {
+        size_t nc = conn->req_cap ? conn->req_cap : 1024;
+        while (nc < conn->req_len + n)
             nc *= 2;
-        char *ns = realloc(b->s, nc);
+        char *ns = realloc(conn->req_buf, nc);
         if (!ns)
             return -1;
-        b->s = ns;
-        b->cap = nc;
+        conn->req_buf = ns;
+        conn->req_cap = nc;
     }
-    memcpy(b->s + b->len, s, n);
-    b->len += n;
+    memcpy(conn->req_buf + conn->req_len, s, n);
+    conn->req_len += n;
     return 0;
 }
 
-static int rb_puts(ReqBuf *b, const char *s)
+static int rb_puts(NmConnection *conn, const char *s)
 {
-    return rb_put(b, s, strlen(s));
+    return rb_put(conn, s, strlen(s));
 }
 
-static int rb_printf(ReqBuf *b, const char *fmt, ...)
+static int rb_printf(NmConnection *conn, const char *fmt, ...)
 {
     char tmp[512];
     va_list ap;
@@ -174,7 +283,7 @@ static int rb_printf(ReqBuf *b, const char *fmt, ...)
         return -1;
     if ((size_t)n >= sizeof(tmp))
         n = sizeof(tmp) - 1;
-    return rb_put(b, tmp, (size_t)n);
+    return rb_put(conn, tmp, (size_t)n);
 }
 
 /* Dechunk states (chunk_remaining holds the current chunk's bytes). */
@@ -190,49 +299,11 @@ enum
 
 static int parse_head(NmConnection *conn);
 
-NmTransportStatus nm_socket_request_send(NmConnection *conn, const char *method,
-                                         const char *path,
-                                         const NmRequestHeader *headers,
-                                         size_t n_headers, const char *body,
-                                         size_t body_len)
+/* Reset response state for a new exchange (called once the request
+ * is queued — the head arrives through nm_read_body steps; the head
+ * parser is resumable). */
+static void reset_response_state(NmConnection *conn)
 {
-    if (!conn || conn->fd < 0 || !method || !path)
-        return NM_TRANSPORT_ERR_PROTOCOL;
-
-    ReqBuf rb = { NULL, 0, 0 };
-    if (rb_printf(&rb, "%s %s HTTP/1.1\r\n", method, path) != 0 || rb_printf(&rb, "Host: %s\r\n", conn->host) != 0)
-        goto fail;
-    for (size_t i = 0; i < n_headers; i++) {
-        if (rb_printf(&rb, "%s: %s\r\n", headers[i].name, headers[i].value) != 0)
-            goto fail;
-    }
-    if (!body || body_len == 0) {
-        if (rb_puts(&rb, "Content-Length: 0\r\n") != 0)
-            goto fail;
-    } else {
-        if (rb_printf(&rb, "Content-Length: %zu\r\n", body_len) != 0)
-            goto fail;
-    }
-    if (rb_puts(&rb,
-                "Connection: close\r\n" /* keep-alive comes later */
-                "\r\n") != 0)
-        goto fail;
-    if (body && body_len && rb_put(&rb, body, body_len) != 0)
-        goto fail;
-
-    /* Single write loop: send() may take partial writes. */
-    size_t off = 0;
-    while (off < rb.len) {
-        long n = nm_conn_write(conn, rb.s + off, rb.len - off);
-        if (n <= 0)
-            goto fail;
-        off += (size_t)n;
-    }
-    free(rb.s);
-
-    /* Reset response state for the new exchange. The response head
-     * is NOT read here — it arrives through nm_read_body steps (the
-     * head parser is resumable; phase-4 event loop feeds it). */
     conn->body_started = 0;
     conn->scratch_len = 0;
     conn->pending_len = 0;
@@ -246,11 +317,114 @@ NmTransportStatus nm_socket_request_send(NmConnection *conn, const char *method,
     conn->resp.status = 0;
     conn->resp.chunked = 0;
     conn->resp.content_len = -1;
-    return NM_TRANSPORT_OK;
+}
 
-fail:
-    free(rb.s);
-    return NM_TRANSPORT_ERR_SEND;
+NmTransportStatus nm_socket_request_queue(NmConnection *conn, const char *method,
+                                          const char *path,
+                                          const NmRequestHeader *headers,
+                                          size_t n_headers, const char *body,
+                                          size_t body_len)
+{
+    if (!conn || conn->fd < 0 || !method || !path)
+        return NM_TRANSPORT_ERR_PROTOCOL;
+
+    /* Serialize into the owned buffer: request line + headers +
+     * body, all in one contiguous byte stream so the drain can
+     * resume at any partial-send boundary. */
+    conn->req_len = 0;
+    conn->req_off = 0;
+    if (rb_printf(conn, "%s %s HTTP/1.1\r\n", method, path) != 0 ||
+        rb_printf(conn, "Host: %s\r\n", conn->host) != 0)
+        return NM_TRANSPORT_ERR_SEND;
+    for (size_t i = 0; i < n_headers; i++) {
+        if (rb_printf(conn, "%s: %s\r\n", headers[i].name, headers[i].value) != 0)
+            return NM_TRANSPORT_ERR_SEND;
+    }
+    if (!body || body_len == 0) {
+        if (rb_puts(conn, "Content-Length: 0\r\n") != 0)
+            return NM_TRANSPORT_ERR_SEND;
+    } else {
+        if (rb_printf(conn, "Content-Length: %zu\r\n", body_len) != 0)
+            return NM_TRANSPORT_ERR_SEND;
+    }
+    if (rb_puts(conn,
+                "Connection: close\r\n" /* keep-alive comes later */
+                "\r\n") != 0)
+        return NM_TRANSPORT_ERR_SEND;
+    if (body && body_len && rb_put(conn, body, body_len) != 0)
+        return NM_TRANSPORT_ERR_SEND;
+
+    reset_response_state(conn);
+
+    /* Phase: a connected socket goes straight to draining; an
+     * async-connecting socket waits for CONNECTING to finish first
+     * (the step machine runs phases in order). */
+    if (conn->phase != NM_CONN_CONNECTING)
+        conn->phase = NM_CONN_SENDING;
+    return NM_TRANSPORT_OK;
+}
+
+/* Drain the owned request buffer: send what the socket accepts,
+ * EAGAIN leaves the remainder for the next step. Returns OK when
+ * the buffer is fully on the wire, PENDING when the socket is full,
+ * ERR_SEND on failure. */
+NmTransportStatus nm_socket_step_send(NmConnection *conn)
+{
+    while (conn->req_off < conn->req_len) {
+        long n = nm_conn_write(conn, conn->req_buf + conn->req_off,
+                               conn->req_len - conn->req_off);
+        if (n > 0) {
+            conn->req_off += (size_t)n;
+            continue;
+        }
+        if (n == 0)
+            return NM_TRANSPORT_ERR_SEND;
+        /* n < 0: EAGAIN/EWOULDBLOCK (non-blocking drain) vs real
+         * error. TLS writes report -1 without errno — treat any
+         * -1 on a TLS connection as a hard error (the backends block
+         * today, so -1 is never EAGAIN there). */
+#ifdef _WIN32
+        if (!conn->tls_ctx && conn->nonblocking &&
+            WSAGetLastError() == WSAEWOULDBLOCK)
+            return NM_TRANSPORT_PENDING;
+#else
+        if (!conn->tls_ctx && conn->nonblocking &&
+            (errno == EAGAIN || errno == EWOULDBLOCK))
+            return NM_TRANSPORT_PENDING;
+#endif
+        return NM_TRANSPORT_ERR_SEND;
+    }
+    conn->phase = NM_CONN_READING;
+    return NM_TRANSPORT_OK;
+}
+
+/* Legacy blocking send (nm_request_send contract: the request bytes
+ * are on the wire before returning). Implemented as queue + drain
+ * pump — one implementation, two drives. */
+NmTransportStatus nm_socket_request_send(NmConnection *conn, const char *method,
+                                         const char *path,
+                                         const NmRequestHeader *headers,
+                                         size_t n_headers, const char *body,
+                                         size_t body_len)
+{
+    NmTransportStatus rs = nm_socket_request_queue(conn, method, path, headers,
+                                                   n_headers, body, body_len);
+    if (rs != NM_TRANSPORT_OK)
+        return rs;
+    if (conn->phase == NM_CONN_CONNECTING)
+        return NM_TRANSPORT_ERR_PROTOCOL; /* queue only; step the connect */
+    /* Blocking drain: loop until the whole buffer is on the wire. */
+    for (;;) {
+        rs = nm_socket_step_send(conn);
+        if (rs == NM_TRANSPORT_OK)
+            return NM_TRANSPORT_OK;
+        if (rs != NM_TRANSPORT_PENDING)
+            return rs;
+        /* Plain blocking connections never PENDING; a non-blocking
+         * socket mid-request (set by an earlier async round) would
+         * spin — poll for writability instead of hot-looping. */
+        nm_socket_wait_writable(conn->fd);
+    }
 }
 
 NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,

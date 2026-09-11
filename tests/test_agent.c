@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "agent.h"
+#include "transport.h"
 #include "provider.h"
 #include "provider_internal.h"
 #include "test_net_helpers.h"
@@ -392,17 +393,28 @@ static void test_agent_unknown_tool_reports_error_result(void)
 /* ---------------------------------------------------------------- */
 
 /* Drive one turn to completion the way boba will: poll the agent's
- * fd, step, repeat. Bounded spins; no blocking read anywhere. */
+ * fd + interest bits, step, repeat. Bounded spins; no blocking read
+ * anywhere. */
 static int agent_drive(NmAgent *agent, int max_spins)
 {
     for (int spin = 0; spin < max_spins; spin++) {
         int fd = nm_agent_fd(agent);
-        if (fd >= 0) {
-            fd_set fds;
+        unsigned interest = nm_agent_interest(agent);
+        if (fd >= 0 && interest) {
+            fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
-            select(fd + 1, &fds, NULL, NULL, &tv);
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (interest & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (interest & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+#ifdef _WIN32
+            select(fd + 1, (interest & NM_INTEREST_READ) ? &r : NULL,
+                   (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#else
+            select(fd + 1, &r, &w, NULL, &tv);
+#endif
         } else {
             usleep(10 * 1000); /* between rounds: brief yield */
         }

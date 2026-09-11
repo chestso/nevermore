@@ -16,6 +16,23 @@
 
 #ifdef NM_TRANSPORT_LAYOUT_HERE
 
+/* Connection phase (the async connect/send state machine, N1):
+ *
+ *   IDLE        connected (blocking nm_connect) or async-connect
+ *               completed, no request queued
+ *   CONNECTING  nm_connect_async: non-blocking connect() in flight
+ *   SENDING     request serialized into the owned buffer, draining
+ *   READING     request fully on the wire; response head + body
+ *               (today's machinery, already resumable)
+ */
+enum
+{
+    NM_CONN_IDLE = 0,
+    NM_CONN_CONNECTING,
+    NM_CONN_SENDING,
+    NM_CONN_READING
+};
+
 struct NmConnection
 {
     int fd;
@@ -25,6 +42,16 @@ struct NmConnection
     char host[256];   /* Host header source, set at connect */
     int body_started; /* response head fully parsed */
     int nonblocking;  /* 1 = socket flipped non-blocking (read phase) */
+    int phase;        /* NM_CONN_* — see the enum above */
+
+    /* Owned request buffer (memory-reuse principle: one allocation
+     * per connection, grown geometrically, reused across request
+     * rounds — the request rides here instead of a per-request
+     * malloc/free). req_off = bytes already on the wire. */
+    char *req_buf;
+    size_t req_len; /* serialized bytes of the current request */
+    size_t req_off; /* bytes sent so far */
+    size_t req_cap;
 
     /* Response-head accumulation: bytes arrive into scratch until the
      * blank line; afterwards scratch holds only body bytes pending

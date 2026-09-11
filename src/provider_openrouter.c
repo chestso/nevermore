@@ -48,6 +48,7 @@ const struct NmProvider nm_openrouter_provider = {
     NULL, /* chat_begin */
     NULL, /* chat_step */
     NULL, /* chat_stream_fd */
+    NULL, /* chat_stream_interest */
     NULL, /* chat_end */
     openrouter_models,
     openrouter_needs_auth,

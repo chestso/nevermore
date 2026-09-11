@@ -21,6 +21,15 @@ struct NmConnection;
 /* transport_socket.c */
 NmConnection *nm_socket_connect(const char *host, int port,
                                 NmTransportStatus *status);
+NmConnection *nm_socket_connect_async(const char *host, int port,
+                                      NmTransportStatus *status);
+NmTransportStatus nm_socket_request_queue(NmConnection *conn,
+                                          const char *method, const char *path,
+                                          const NmRequestHeader *headers,
+                                          size_t n_headers, const char *body,
+                                          size_t body_len);
+NmTransportStatus nm_socket_step_send(NmConnection *conn);
+void nm_socket_wait_writable(int fd);
 NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
                                     const char *path,
                                     const NmRequestHeader *headers,

@@ -53,6 +53,7 @@ const struct NmProvider nm_hyper_provider = {
     NULL, /* chat_begin */
     NULL, /* chat_step */
     NULL, /* chat_stream_fd */
+    NULL, /* chat_stream_interest */
     NULL, /* chat_end */
     hyper_models,
     hyper_needs_auth,

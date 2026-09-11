@@ -24,6 +24,7 @@
 #include "agent.h"
 #include "json.h"
 #include "session.h"
+#include "transport.h"
 
 /* Blocking-turn pump (nm_agent_turn): readiness waits. */
 #ifdef _WIN32
@@ -396,6 +397,16 @@ int nm_agent_fd(NmAgent *a)
     return a->provider->chat_stream_fd(a->stream);
 }
 
+/* The active stream's wait interest (async connect/send phases;
+ * mirrors transport's NmConnectionInterest). 0 = nothing to wait
+ * on (idle, or a provider without the step API). */
+unsigned nm_agent_interest(NmAgent *a)
+{
+    if (!a || !a->stream || !a->provider->chat_stream_interest)
+        return 0;
+    return a->provider->chat_stream_interest(a->stream);
+}
+
 void nm_agent_cancel(NmAgent *a)
 {
     if (!a)
@@ -419,17 +430,29 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
         return -1;
 
     /* Pump: step until the turn leaves the streaming cycle. PENDING
-     * steps wait on the fd (the stream's socket is non-blocking);
-     * tool execution happens synchronously inside steps, exactly as
-     * the event loop will see it. */
+     * steps wait on the stream's CURRENT interest bits (connect/send
+     * phases wait writability, the response phase waits readability
+     * — the same bits boba's fill callback declares); tool execution
+     * happens synchronously inside steps, exactly as the event loop
+     * will see it. */
     while (a->stream) {
         int fd = nm_agent_fd(a);
-        if (fd >= 0) {
-            fd_set fds;
-            FD_ZERO(&fds);
-            FD_SET(fd, &fds);
+        unsigned interest = nm_agent_interest(a);
+        if (fd >= 0 && interest) {
+            fd_set r, w;
+            FD_ZERO(&r);
+            FD_ZERO(&w);
             struct timeval tv = { 0, 10 * 1000 };
-            select(fd + 1, &fds, NULL, NULL, &tv);
+            if (interest & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (interest & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+#ifdef _WIN32
+            select(fd + 1, interest & NM_INTEREST_READ ? &r : NULL,
+                   interest & NM_INTEREST_WRITE ? &w : NULL, NULL, &tv);
+#else
+            select(fd + 1, &r, &w, NULL, &tv);
+#endif
         } else {
             nm_usleep(10 * 1000); /* between rounds: brief yield */
         }

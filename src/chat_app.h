@@ -43,6 +43,7 @@
 #include "agent.h"
 #include "provider.h"
 #include "tools.h"
+#include "transport.h"
 
 typedef struct NmChatApp NmChatApp;
 
@@ -73,12 +74,13 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
 
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):
- *   get_external_fd     -> nm_chat_app_fd
+ *   fill_external_fds   -> nm_chat_app_interest (translated in main.c)
  *   on_external_ready   -> nm_chat_app_step
  *   on_tick             -> nm_chat_app_tick
  *   get_tick_timeout_ms -> nm_chat_app_tick_ms
  */
 int nm_chat_app_fd(NmChatApp *app);
+NmConnectionInterest nm_chat_app_interest(NmChatApp *app);
 void nm_chat_app_step(NmChatApp *app);
 void nm_chat_app_tick(NmChatApp *app);
 int nm_chat_app_tick_ms(NmChatApp *app);

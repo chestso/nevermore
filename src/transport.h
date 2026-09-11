@@ -58,6 +58,88 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
                          NmTransportStatus *status);
 void nm_connection_close(NmConnection *conn);
 
+/* ---------------------------------------------------------------- */
+/* Async connect + resumable send (N1; boba subscriptions seam)      */
+/* ---------------------------------------------------------------- */
+
+/* Interest bits, mirroring boba's TUI_FD_* (the app forwards these
+ * straight into its fill_external_fds array). */
+#define NM_INTEREST_READ  (1u << 0) /* readable / EOF */
+#define NM_INTEREST_WRITE (1u << 1) /* connect completion, send room */
+
+/* Open a connection WITHOUT blocking on connect(): the socket is
+ * non-blocking and connect() is in flight (EINPROGRESS /
+ * WSAEWOULDBLOCK). Plain HTTP only for now — TLS connections still
+ * need nm_connect (the handshake blocks; documented narrowed
+ * deferral, see nm_connection_tls_handshake). Returns a connection
+ * in the CONNECTING phase; step it with nm_connection_step().
+ *
+ * Drive contract:
+ *   conn = nm_connect_async(host, port, PLAIN, &st)
+ *   ... later, when writable (per nm_connection_interest):
+ *   nm_connection_step(conn)  // CONNECTING -> SENDING -> READING
+ * A failed connect surfaces as ERR_SOCKET from the step (check
+ * SO_ERROR semantics are the app's business — the step polls the
+ * phase, so writability dispatch arrives with the failure). */
+NmConnection *nm_connect_async(const char *host, int port,
+                               NmTransportMode mode,
+                               NmTransportStatus *status);
+
+/* Current wait interest for the event loop: {fd, NM_INTEREST_*} —
+ * fd is -1 when there is nothing to wait on. Each connection answers
+ * for itself; the app aggregates multiple connections into its fill
+ * array (why the boba seam is fill-array). READ|WRITE while a send
+ * is pending, READ once the request is fully on the wire, WRITE
+ * only while connect/send are in flight (a perpetually-writable
+ * idle socket with WRITE declared busy-loops the runtime). */
+typedef struct NmConnectionInterest
+{
+    int fd;
+    unsigned flags; /* NM_INTEREST_READ / NM_INTEREST_WRITE / both */
+} NmConnectionInterest;
+
+NmConnectionInterest nm_connection_interest(NmConnection *conn);
+
+/* One non-blocking pump over the connection's phase machine:
+ *
+ *   CONNECTING: finish connect() when writable — writable means
+ *              completed (SO_ERROR distinguishes failure), then
+ *              TLS handshake (blocking, sub-second — the narrowed
+ *              deferral), phase -> SENDING
+ *   SENDING:   drain req_buf into the socket; EAGAIN leaves the
+ *              remainder for the next step, phase -> READING when
+ *              fully sent
+ *   READING:   no-op (the resumable head/body machinery of
+ *              nm_read_body is driven by the caller's steps)
+ *
+ * Returns NM_TRANSPORT_OK on progress or completion of a phase,
+ * NM_TRANSPORT_PENDING (see below) when the socket would block,
+ * or an ERR_* code on failure. Idempotent per phase. */
+NmTransportStatus nm_connection_step(NmConnection *conn);
+
+/* Returned by nm_connection_step when the phase needs the event
+ * loop's wait (connect in flight / send buffer full). Not an error:
+ * step again when the interest fd is ready. */
+#define NM_TRANSPORT_PENDING 100
+
+/* Queue a request on the connection WITHOUT sending: serialize
+ * into the owned request buffer (grown geometrically, reused across
+ * requests) and flip the phase to SENDING. The request is drained
+ * by nm_connection_step() — one implementation, two drives: the
+ * blocking nm_request() pumps the same drain. */
+NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
+                                   const char *path,
+                                   const NmRequestHeader *headers,
+                                   size_t n_headers, const char *body,
+                                   size_t body_len);
+
+/* The blocking TLS handshake for async connections, called by
+ * nm_connection_step when connect completes. Kept public for test
+ * seams; blocking is the documented narrowed deferral (sub-second,
+ * post-writability). */
+NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
+                                              const char *host);
+
 /* Send an HTTP/1.1 request and read the response head (status line +
  * headers). The body is then streamed via nm_read_body() so SSE events
  * surface as they arrive.

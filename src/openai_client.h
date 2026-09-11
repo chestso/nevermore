@@ -56,6 +56,13 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                                    NmChatResult *err);
 NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result);
 int nm_openai_stream_fd(NmChatStream *h);
+
+/* The stream's wait interest (async connect/send phases): READ
+ * while the response streams, READ|WRITE while connect/send are in
+ * flight, 0 when nothing is open. Mirrors transport's
+ * nm_connection_interest (NM_INTEREST_*); the app forwards it into
+ * boba's fill_external_fds array. */
+unsigned nm_openai_stream_interest(NmChatStream *h);
 void nm_openai_chat_end(NmChatStream *h);
 
 /* Split "http(s)://host[:port]" into host/port/mode (shared with the
