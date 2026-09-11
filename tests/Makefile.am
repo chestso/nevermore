@@ -5,6 +5,7 @@ check_PROGRAMS = \
     test_sse \
     test_json \
     test_provider \
+    test_source \
     test_wire \
     test_openai_client \
     test_tls \
@@ -69,6 +70,17 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_provider_LDADD = $(TEST_TLS_LIBS)
+
+# Listing-plane sources (registry + static catalog) — the picker's
+# data seam. Same link set as test_provider (sources wrap providers).
+test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
+    ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/openai_client.c ../src/json.c ../src/sse.c \
+    ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE)
+test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_source_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_source_LDADD = $(TEST_TLS_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.

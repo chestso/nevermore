@@ -79,6 +79,8 @@ nevermore_SOURCES = \
     sse.c \
     json.c \
     agent.c \
+    source.h \
+    source.c \
     tools_internal.h \
     tools.c \
     tools_file.c \
