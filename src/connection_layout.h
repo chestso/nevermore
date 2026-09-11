@@ -16,6 +16,16 @@
 
 #ifdef NM_TRANSPORT_LAYOUT_HERE
 
+/* sockaddr_storage for the async-connect target (guarded: the
+ * includer's platform headers define it; MSVC/MinGW via winsock2,
+ * POSIX via sys/socket.h — both already included by the two .c
+ * files before this header). */
+#ifndef _WIN32
+#include <sys/socket.h>
+#else
+#include <winsock2.h>
+#endif
+
 /* Connection phase (the async connect/send state machine, N1):
  *
  *   IDLE        connected (blocking nm_connect) or async-connect
@@ -43,6 +53,14 @@ struct NmConnection
     int body_started; /* response head fully parsed */
     int nonblocking;  /* 1 = socket flipped non-blocking (read phase) */
     int phase;        /* NM_CONN_* — see the enum above */
+
+    /* Async-connect target (NM_CONN_CONNECTING only): the step's
+     * completion probe re-calls connect() on this stored address
+     * (two-stage probe: re-connect + SO_ERROR consult — see
+     * nm_socket_connect_probe in transport_socket.c for the
+     * platform disagreement). */
+    struct sockaddr_storage addr;
+    unsigned addr_len; /* 0 = no async connect in progress */
 
     /* Owned request buffer (memory-reuse principle: one allocation
      * per connection, grown geometrically, reused across request

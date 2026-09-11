@@ -23,6 +23,7 @@ NmConnection *nm_socket_connect(const char *host, int port,
                                 NmTransportStatus *status);
 NmConnection *nm_socket_connect_async(const char *host, int port,
                                       NmTransportStatus *status);
+int nm_socket_connect_probe(NmConnection *conn);
 NmTransportStatus nm_socket_request_queue(NmConnection *conn,
                                           const char *method, const char *path,
                                           const NmRequestHeader *headers,

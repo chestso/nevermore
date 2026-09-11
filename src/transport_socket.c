@@ -221,8 +221,63 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         return NULL;
     }
     conn->nonblocking = 1;
-    conn->phase = in_flight ? NM_CONN_CONNECTING : NM_CONN_IDLE;
+    if (in_flight) {
+        memcpy(&conn->addr, &addr_copy, sizeof(addr_copy));
+        conn->addr_len = ai_addrlen;
+        conn->phase = NM_CONN_CONNECTING;
+    } else {
+        conn->addr_len = 0;
+        conn->phase = NM_CONN_IDLE;
+    }
     return conn;
+}
+
+/* Completion probe for the CONNECTING phase. Two-stage, because the
+ * platforms disagree on how an async connect reports completion:
+ *
+ *  - POSIX: re-connect the stored target. 0/EISCONN = connected,
+ *    EALREADY = in flight, anything else = the failure (errno).
+ *  - Winsock: a FAILED non-blocking connect keeps answering
+ *    WSAEWOULDBLOCK on re-connect forever (the refusal is reported
+ *    exactly once, through the select exception/SO_ERROR path), so
+ *    after an in-flight re-connect answer we consult SO_ERROR: a
+ *    refusal there means failed, zero means still genuinely in
+ *    flight. On POSIX SO_ERROR is 0 while in flight and carries the
+ *    failure after the wakeup, so the same consult is safe there.
+ *
+ * Returns: 1 = connected, 0 = still in flight, -1 = failed. */
+int nm_socket_connect_probe(NmConnection *conn)
+{
+    if (!conn || conn->fd < 0 || conn->addr_len == 0)
+        return -1;
+    int rc = connect(conn->fd, (struct sockaddr *)&conn->addr,
+                     conn->addr_len);
+    if (rc == 0)
+        return 1;
+    int err;
+#ifdef _WIN32
+    err = WSAGetLastError();
+    if (err == WSAEISCONN)
+        return 1;
+    int in_flight = (err == WSAEALREADY || err == WSAEWOULDBLOCK);
+#else
+    err = errno;
+    if (err == EISCONN)
+        return 1;
+    if (err != EALREADY)
+        return -1; /* POSIX: the re-connect carries the failure */
+    int in_flight = 1;
+#endif
+    if (!in_flight)
+        return -1;
+    /* Winsock path (and a belt for POSIX): consult SO_ERROR for a
+     * failure that re-connect won't re-report. */
+    int soerr = 0;
+    socklen_t sl = sizeof(soerr);
+    getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
+    if (soerr != 0)
+        return -1; /* the attempt failed; SO_ERROR has the reason */
+    return 0;      /* genuinely still in flight */
 }
 
 /* Poll a plain fd for writability (blocking pump helper for

@@ -144,30 +144,14 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
     switch (conn->phase) {
     case NM_CONN_CONNECTING:
     {
-        /* Writability = completion. Verify via SO_ERROR (a failed
-         * connect also reports writable). */
-        int soerr = 0;
-        socklen_t sl = sizeof(soerr);
-        /* Winsock's getsockopt takes char* optval; glibc takes void*.
-         * The cast satisfies both. */
-        getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
-        /* Platform wrinkle: while the non-blocking connect is still
-         * in flight, macOS and Winsock report the PENDING connect as
-         * SO_ERROR == EINPROGRESS / WSAEWOULDBLOCK (Linux reports 0
-         * until it resolves). Both mean "not done yet" — PENDING,
-         * not failure. The step is normally called on writability,
-         * but a step raced ahead of the wakeup must not misread the
-         * in-flight state as an error. */
-        if (soerr == EINPROGRESS
-#ifdef WSAEWOULDBLOCK
-            || soerr == WSAEWOULDBLOCK
-#endif
-#ifdef EWOULDBLOCK
-            || soerr == EWOULDBLOCK
-#endif
-        )
+        /* Completion probe: re-connect the stored target (the
+         * deterministic idiom; see connection_layout.h for why
+         * SO_ERROR is not used). 0 = still in flight (PENDING —
+         * step again on writability), 1 = connected, -1 = failed. */
+        int probe = nm_socket_connect_probe(conn);
+        if (probe == 0)
             return NM_TRANSPORT_PENDING;
-        if (soerr != 0) {
+        if (probe < 0) {
             conn->err = NM_TRANSPORT_ERR_SOCKET;
             return NM_TRANSPORT_ERR_SOCKET;
         }
@@ -179,9 +163,8 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
             if (t != NM_TRANSPORT_OK)
                 return t;
         }
-        conn->phase = conn->req_len > conn->req_off ? NM_CONN_SENDING
-                      : conn->req_len > 0           ? NM_CONN_SENDING
-                                                    : NM_CONN_IDLE;
+        conn->addr_len = 0; /* connect resolved; no probe target */
+        conn->phase = conn->req_len > 0 ? NM_CONN_SENDING : NM_CONN_IDLE;
         /* A queued request starts draining immediately (the socket
          * is writable right now — the send below will take what it
          * accepts, PENDING handles the rest). */
