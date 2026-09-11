@@ -52,6 +52,13 @@ run_build test_provider tests/test_provider.c src/nevermore.c \
 	src/transport.c src/transport_socket.c $TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
 
+run_build test_source tests/test_source.c src/source.c src/nevermore.c \
+	src/provider_hyper.c src/provider_ollama.c \
+	src/provider_openai.c src/provider_openrouter.c \
+	src/openai_client.c src/json.c src/sse.c \
+	src/transport.c src/transport_socket.c $TLS_SRC \
+	-lws2_32 -lsecur32 -lcrypt32
+
 run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
 	src/transport_socket.c $TLS_SRC src/nevermore.c \
