@@ -21,6 +21,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
+#include <errno.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #endif
@@ -150,6 +151,22 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
         /* Winsock's getsockopt takes char* optval; glibc takes void*.
          * The cast satisfies both. */
         getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
+        /* Platform wrinkle: while the non-blocking connect is still
+         * in flight, macOS and Winsock report the PENDING connect as
+         * SO_ERROR == EINPROGRESS / WSAEWOULDBLOCK (Linux reports 0
+         * until it resolves). Both mean "not done yet" — PENDING,
+         * not failure. The step is normally called on writability,
+         * but a step raced ahead of the wakeup must not misread the
+         * in-flight state as an error. */
+        if (soerr == EINPROGRESS
+#ifdef WSAEWOULDBLOCK
+            || soerr == WSAEWOULDBLOCK
+#endif
+#ifdef EWOULDBLOCK
+            || soerr == EWOULDBLOCK
+#endif
+        )
+            return NM_TRANSPORT_PENDING;
         if (soerr != 0) {
             conn->err = NM_TRANSPORT_ERR_SOCKET;
             return NM_TRANSPORT_ERR_SOCKET;
