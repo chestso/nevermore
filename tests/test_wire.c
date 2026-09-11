@@ -515,9 +515,20 @@ static void test_async_connect_refused_step_errors(void)
 
     NmConnectionInterest i = nm_connection_interest(c);
     ASSERT_TRUE(i.fd >= 0);
-    /* Wait for the failure to land, then step must surface it. */
-    wait_interest(i.fd, i.flags, 500);
-    NmTransportStatus s = nm_connection_step(c);
+    /* Wait for the failure to land, then step until it surfaces.
+     * Spurious wakeups are part of the contract (the RST may arrive
+     * as writability before SO_ERROR is set — observed on Winsock);
+     * a bounded step-poll is the correct consumer shape. */
+    NmTransportStatus s = NM_TRANSPORT_OK;
+    for (int spin = 0; spin < 100; spin++) {
+        i = nm_connection_interest(c);
+        if (i.flags == 0)
+            break; /* IDLE: never happens for a refused connect */
+        wait_interest(i.fd, i.flags, 100);
+        s = nm_connection_step(c);
+        if (s != NM_TRANSPORT_OK)
+            break;
+    }
     ASSERT_EQ(s, NM_TRANSPORT_ERR_SOCKET);
     nm_connection_close(c);
 }
