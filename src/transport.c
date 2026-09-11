@@ -147,7 +147,9 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
          * connect also reports writable). */
         int soerr = 0;
         socklen_t sl = sizeof(soerr);
-        getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+        /* Winsock's getsockopt takes char* optval; glibc takes void*.
+         * The cast satisfies both. */
+        getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, (char *)&soerr, &sl);
         if (soerr != 0) {
             conn->err = NM_TRANSPORT_ERR_SOCKET;
             return NM_TRANSPORT_ERR_SOCKET;

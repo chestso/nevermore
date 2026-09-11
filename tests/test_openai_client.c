@@ -349,11 +349,32 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
     ASSERT_NOT_NULL(h);
 
     /* Pump chat_step until it stops pending — every byte is already
-     * in the socket, so the FIRST call gets head + body + [DONE]. */
+     * in the socket, so the FIRST call gets head + body + [DONE].
+     * Wait on the CURRENT interest bits per step (connect/send are
+     * async now: the pump waits writability, then readability — the
+     * same thing boba's fill does, spelled inline). */
     NmChatResult result = { NM_CHAT_OK, 0, NULL };
     NmChatStatus st = NM_CHAT_PENDING;
     int steps = 0;
     for (; steps < 500 && st == NM_CHAT_PENDING; steps++) {
+        int fd = nm_openai_stream_fd(h);
+        unsigned interest = nm_openai_stream_interest(h);
+        if (fd < 0 || !interest)
+            break; /* torn down mid-step */
+        fd_set r, w;
+        struct timeval tv = { 0, 10 * 1000 };
+        FD_ZERO(&r);
+        FD_ZERO(&w);
+        if (interest & NM_INTEREST_READ)
+            FD_SET(fd, &r);
+        if (interest & NM_INTEREST_WRITE)
+            FD_SET(fd, &w);
+#ifdef _WIN32
+        select(fd + 1, (interest & NM_INTEREST_READ) ? &r : NULL,
+               (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#else
+        select(fd + 1, &r, &w, NULL, &tv);
+#endif
         st = nm_openai_chat_step(h, &result);
     }
     ASSERT_EQ(st, NM_CHAT_OK);
