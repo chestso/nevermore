@@ -489,25 +489,19 @@ static void test_async_connect_interest_and_phases(void)
     close(sc.fd);
 }
 
-/* Refused connect: the async path returns a connection (connect in
- * flight), the FIRST STEP surfaces the failure (writability with
- * SO_ERROR != 0), and interest goes quiet. */
+/* Refused connect: connect to a port nothing listens on (port 1 —
+ * tcpmux; needs root to bind, so no CI runner has a listener there.
+ * The old bind-then-close trick was NOT deterministic on Windows:
+ * ephemeral port reuse can hand the "closed" port to another test's
+ * listener before we connect, and the connect then legitimately
+ * succeeds). The async path returns a connection (connect in
+ * flight), the step surfaces the failure once the RST lands. */
 static void test_async_connect_refused_step_errors(void)
 {
-    int port;
-    int fd = server_bind(&port);
-    ASSERT_TRUE(fd >= 0);
-    close(fd);
-    /* Give the OS a moment to release the port. */
-    usleep(50 * 1000);
-
     NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c =
-        nm_connect_async("127.0.0.1", port, NM_TRANSPORT_PLAIN, &st);
-    /* Refused on loopback is often instant (RST before we return):
-     * connect_async may legitimately return NULL with ERR_SOCKET.
-     * Both paths must hold: NULL + status, or a connection whose
-     * step errors. */
+    NmConnection *c = nm_connect_async("127.0.0.1", 1, NM_TRANSPORT_PLAIN, &st);
+    /* The RST can beat the return (loopback): NULL + ERR_SOCKET is
+     * also a legitimate outcome. */
     if (!c) {
         ASSERT_EQ(st, NM_TRANSPORT_ERR_SOCKET);
         return;
@@ -516,9 +510,8 @@ static void test_async_connect_refused_step_errors(void)
     NmConnectionInterest i = nm_connection_interest(c);
     ASSERT_TRUE(i.fd >= 0);
     /* Wait for the failure to land, then step until it surfaces.
-     * Spurious wakeups are part of the contract (the RST may arrive
-     * as writability before SO_ERROR is set — observed on Winsock);
-     * a bounded step-poll is the correct consumer shape. */
+     * Spurious wakeups are part of the contract; a bounded
+     * step-poll is the correct consumer shape (what boba does). */
     NmTransportStatus s = NM_TRANSPORT_OK;
     for (int spin = 0; spin < 100; spin++) {
         i = nm_connection_interest(c);
