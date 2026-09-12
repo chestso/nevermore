@@ -119,11 +119,11 @@ static void test_tls_rejects_untrusted_cert(void)
     pthread_t th;
     pthread_create(&th, NULL, tls_server_thread, NULL);
 
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect("localhost", tls_port, NM_TRANSPORT_TLS, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", tls_port, NM_TRANSPORT_TLS, &ci);
     /* Self-signed: the system trust store must reject it. */
     ASSERT_NULL(c);
-    ASSERT_EQ(st, NM_TRANSPORT_ERR_TLS);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
     pthread_join(th, NULL);
     tls_server_stop();
 }
@@ -135,10 +135,10 @@ static void test_tls_no_backend_fails_fast(void)
      * ERR_TLS path for a refused connection, covered above. */
     if (nm_tls_backend())
         return; /* backend present: contract satisfied elsewhere */
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect("localhost", 1, NM_TRANSPORT_TLS, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", 1, NM_TRANSPORT_TLS, &ci);
     ASSERT_NULL(c);
-    ASSERT_EQ(st, NM_TRANSPORT_ERR_TLS);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
 }
 
 #else /* no OpenSSL backend in this build */
@@ -150,11 +150,11 @@ static void test_tls_rejects_untrusted_cert(void)
 
 static void test_tls_no_backend_fails_fast(void)
 {
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect("localhost", 1, NM_TRANSPORT_TLS, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", 1, NM_TRANSPORT_TLS, &ci);
     ASSERT_NULL(c);
     if (nm_tls_backend() == NULL)
-        ASSERT_EQ(st, NM_TRANSPORT_ERR_TLS);
+        ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
 }
 
 #endif
@@ -172,10 +172,11 @@ static void live_tls_probe(void)
                "network + TLS backend)\n");
         return;
     }
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect("api.openai.com", 443, NM_TRANSPORT_TLS, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("api.openai.com", 443, NM_TRANSPORT_TLS, &ci);
     if (!c) {
-        printf("live TLS probe: connect failed st=%d\n", st);
+        printf("live TLS probe: connect failed: %s\n",
+               *ci.detail ? ci.detail : "(no detail)");
         return;
     }
     ASSERT_EQ(nm_request(c, "GET", "/v1/models", NULL, 0, NULL, 0),

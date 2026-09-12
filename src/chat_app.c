@@ -113,10 +113,40 @@ static void chat_app_free(TuiModel *model);
 /* Pending transcript (whole lines only, ever)                      */
 /* ---------------------------------------------------------------- */
 
+/* Append a string to the pend buffer, normalizing line endings:
+ * bare \n becomes \r\n, stray \r becomes \r\n (raw mode: the
+ * terminal does not translate, so a bare LF staircases and a bare
+ * CR overwrites the line from column 0). Wire-derived text reaches
+ * this seam from several callers (error bodies, tool output) —
+ * the seam enforces the transcript's whole-line contract, not
+ * each caller. No allocation: byte walk, appends in place. */
 static void pend_str(NmChatApp *app, const char *s)
 {
-    if (app && s && *s)
-        dynamic_buffer_append(app->pend, s, strlen(s));
+    if (!app || !s || !*s)
+        return;
+    const char *p = s;
+    while (*p) {
+        if (*p == '\r') {
+            if (p[1] == '\n') {
+                dynamic_buffer_append_str(app->pend, "\r\n");
+                p += 2;
+            } else {
+                dynamic_buffer_append_str(app->pend, "\r\n");
+                p++;
+            }
+        } else if (*p == '\n') {
+            dynamic_buffer_append_str(app->pend, "\r\n");
+            p++;
+        } else {
+            /* Append up to the next line-break candidate in one
+             * call (memory-reuse: no per-byte churn). */
+            const char *q = p;
+            while (*q && *q != '\r' && *q != '\n')
+                q++;
+            dynamic_buffer_append(app->pend, p, (size_t)(q - p));
+            p = q;
+        }
+    }
 }
 
 static void pend_printf(NmChatApp *app, const char *fmt, ...)
@@ -131,7 +161,10 @@ static void pend_printf(NmChatApp *app, const char *fmt, ...)
     if (n <= 0)
         return;
     size_t len = (size_t)n >= sizeof(buf) ? sizeof(buf) - 1 : (size_t)n;
-    dynamic_buffer_append(app->pend, buf, len);
+    buf[len] = '\0';
+    /* Through pend_str: caller bytes are never assumed line-safe
+     * (format args can carry wire text). */
+    pend_str(app, buf);
 }
 
 /* Move any complete lines out of the tail into the pending buffer,

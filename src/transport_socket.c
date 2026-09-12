@@ -25,11 +25,6 @@
 
 #include "transport_internal.h"
 
-/* Full definition lives in transport.c — this file needs field access,
- * so pull it in via the shared connection layout. */
-#define NM_TRANSPORT_LAYOUT_HERE
-#include "connection_layout.h"
-
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -41,6 +36,69 @@
 #include <sys/socket.h>
 #include <unistd.h>
 #endif
+
+/* ---------------------------------------------------------------- */
+/* Diagnostics                                                        */
+/* ---------------------------------------------------------------- */
+
+/* errno text for diagnostics ("" when errno is not set). Shared with
+ * transport.c via transport_internal.h. */
+const char *nm_sock_errstr(void)
+{
+#ifdef _WIN32
+    static char buf[64];
+    int e = WSAGetLastError();
+    if (e == 0)
+        return "";
+    snprintf(buf, sizeof(buf), "WSA error %d", e);
+    return buf;
+#else
+    return errno ? strerror(errno) : "";
+#endif
+}
+
+/* Full definition lives in transport.c — this file needs field access,
+ * so pull it in via the shared connection layout. */
+#define NM_TRANSPORT_LAYOUT_HERE
+#include "connection_layout.h"
+
+/* Record a failure reason on the connection (always-set contract).
+ * printf-shaped, capped at NM_ERR_DETAIL_MAX; the tail truncates
+ * silently — it's a diagnostic, not data. */
+static void conn_set_err_detail(NmConnection *conn, const char *fmt, ...)
+{
+    if (!conn)
+        return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(conn->err_detail, sizeof(conn->err_detail), fmt, ap);
+    va_end(ap);
+}
+
+/* ----------------------------------------------------------------
+ * Wire-tap stage tags + error emission (docs/WIRE-DEBUG.md §3)
+ * ---------------------------------------------------------------- */
+
+/* Which seam a failure hit, decided by connection state: a completed
+ * head means body-stage failures, a queued request means the head
+ * was in flight, nothing queued is still connect. */
+static const char *conn_stage(const NmConnection *conn)
+{
+    if (conn->body_started)
+        return "body";
+    if (conn->xchg > 0)
+        return "head";
+    return "connect";
+}
+
+/* Emit the wire-tap error line for a failure whose detail is
+ * already stamped on the connection (callers set conn->err — the
+ * ERR_* class is theirs to pick; this only names the reason and
+ * fires the stage-tagged event). */
+static void conn_tap_error(NmConnection *conn)
+{
+    nm_wire_tap_error(conn, conn_stage(conn), conn->err_detail);
+}
 
 /* ---------------------------------------------------------------- */
 /* Socket lifecycle                                                  */
@@ -68,6 +126,8 @@ static int socket_init(void)
 
 /* Allocate + fill a connection around an existing fd (shared by the
  * blocking and async connect paths). */
+static long g_conn_seq; /* wire-tap correlation ids: monotonic, never reused */
+
 static NmConnection *nm_socket_conn_new(int fd, const char *host, int port)
 {
     NmConnection *conn = calloc(1, sizeof(NmConnection));
@@ -78,6 +138,14 @@ static NmConnection *nm_socket_conn_new(int fd, const char *host, int port)
     conn->fd = fd;
     conn->phase = NM_CONN_IDLE;
     conn->resp.content_len = -1;
+    conn->conn_id = ++g_conn_seq;
+    conn->xchg = 0; /* bumped per queued request (1-based) */
+    /* Both host fields: host carries host[:port] (the Host header
+     * needs the port on non-defaults), tls_host carries the bare
+     * name (SNI + certificate verification reject the ported
+     * form). */
+    snprintf(conn->tls_host, sizeof(conn->tls_host), "%s",
+             host ? host : "");
     /* Host header value: host[:port] per RFC 7230 — the port must
      * ride along for non-default ports (loopback test servers, local
      * daemons on odd ports). */
@@ -90,13 +158,18 @@ static NmConnection *nm_socket_conn_new(int fd, const char *host, int port)
 }
 
 NmConnection *nm_socket_connect(const char *host, int port,
-                                NmTransportStatus *status)
+                                NmConnectInfo *info)
 {
-    if (status)
-        *status = NM_TRANSPORT_OK;
+    if (info) {
+        info->status = NM_TRANSPORT_OK;
+        info->detail[0] = '\0';
+    }
     if (socket_init() != 0) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "WSAStartup failed");
+        }
         return NULL;
     }
 
@@ -107,9 +180,14 @@ NmConnection *nm_socket_connect(const char *host, int port,
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+    int grc = getaddrinfo(host, portstr, &hints, &res);
+    if (grc != 0 || !res) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "DNS: %s: %s", host,
+                     grc != 0 ? gai_strerror(grc) : "no addresses");
+        }
         return NULL;
     }
 
@@ -125,14 +203,19 @@ NmConnection *nm_socket_connect(const char *host, int port,
     }
     freeaddrinfo(res);
     if (fd < 0) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "connect %s:%d: %s", host, port, nm_sock_errstr());
+        }
         return NULL;
     }
 
     NmConnection *conn = nm_socket_conn_new(fd, host, port);
-    if (!conn && status)
-        *status = NM_TRANSPORT_ERR_NOMEM;
+    if (!conn && info) {
+        info->status = NM_TRANSPORT_ERR_NOMEM;
+        snprintf(info->detail, sizeof(info->detail), "out of memory");
+    }
     return conn;
 }
 
@@ -150,6 +233,21 @@ static int socket_set_nonblocking(int fd)
 #endif
 }
 
+/* Flip a socket back to blocking (portable; the TLS handshake path
+ * needs it — see nm_connection_tls_handshake). */
+int nm_socket_set_blocking(int fd)
+{
+#ifdef _WIN32
+    u_long mode = 0;
+    return ioctlsocket(fd, FIONBIO, &mode) == 0 ? 0 : -1;
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0)
+        return -1;
+    return fcntl(fd, F_SETFL, fl & ~O_NONBLOCK) < 0 ? -1 : 0;
+#endif
+}
+
 /* Async connect: non-blocking socket, connect() in flight. The
  * caller steps the CONNECTING phase to completion (writability =
  * completion; SO_ERROR distinguishes failure). Only the FIRST
@@ -157,13 +255,18 @@ static int socket_set_nonblocking(int fd)
  * per-address retry state that no consumer needs yet (local Ollama
  * and cloud hosts resolve to one address). */
 NmConnection *nm_socket_connect_async(const char *host, int port,
-                                      NmTransportStatus *status)
+                                      NmConnectInfo *info)
 {
-    if (status)
-        *status = NM_TRANSPORT_OK;
+    if (info) {
+        info->status = NM_TRANSPORT_OK;
+        info->detail[0] = '\0';
+    }
     if (socket_init() != 0) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "WSAStartup failed");
+        }
         return NULL;
     }
 
@@ -174,9 +277,14 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
-    if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+    int grc = getaddrinfo(host, portstr, &hints, &res);
+    if (grc != 0 || !res) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "DNS: %s: %s", host,
+                     grc != 0 ? gai_strerror(grc) : "no addresses");
+        }
         return NULL;
     }
 
@@ -188,15 +296,21 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
     memcpy(&addr_copy, ai_addr, ai_addrlen);
     freeaddrinfo(res);
     if (fd < 0) {
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "socket: %s", nm_sock_errstr());
+        }
         return NULL;
     }
 
     if (socket_set_nonblocking(fd) != 0) {
         nm_socket_shutdown(fd);
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "nonblocking: %s", nm_sock_errstr());
+        }
         return NULL;
     }
 
@@ -208,16 +322,22 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
 #endif
     if (rc != 0 && !in_flight) {
         nm_socket_shutdown(fd);
-        if (status)
-            *status = NM_TRANSPORT_ERR_SOCKET;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "connect %s:%d: %s", host, port, nm_sock_errstr());
+        }
         return NULL;
     }
 
     NmConnection *conn = nm_socket_conn_new(fd, host, port);
     if (!conn) {
         nm_socket_shutdown(fd);
-        if (status)
-            *status = NM_TRANSPORT_ERR_NOMEM;
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_NOMEM;
+            snprintf(info->detail, sizeof(info->detail),
+                     "out of memory");
+        }
         return NULL;
     }
     conn->nonblocking = 1;
@@ -388,6 +508,7 @@ static void reset_response_state(NmConnection *conn)
     conn->chunk_remaining = 0;
     conn->trailer_line_empty = 1;
     conn->err = NM_TRANSPORT_OK;
+    conn->err_detail[0] = '\0';
     free(conn->resp.content_type);
     conn->resp.content_type = NULL;
     conn->resp.status = 0;
@@ -453,8 +574,12 @@ NmTransportStatus nm_socket_step_send(NmConnection *conn)
             conn->req_off += (size_t)n;
             continue;
         }
-        if (n == 0)
+        if (n == 0) {
+            conn->err = NM_TRANSPORT_ERR_SEND;
+            conn_set_err_detail(conn, "send: wrote 0 bytes");
+            conn_tap_error(conn);
             return NM_TRANSPORT_ERR_SEND;
+        }
         /* n < 0: EAGAIN/EWOULDBLOCK (non-blocking drain) vs real
          * error. TLS writes report -1 without errno — treat any
          * -1 on a TLS connection as a hard error (the backends block
@@ -468,6 +593,9 @@ NmTransportStatus nm_socket_step_send(NmConnection *conn)
             (errno == EAGAIN || errno == EWOULDBLOCK))
             return NM_TRANSPORT_PENDING;
 #endif
+        conn->err = NM_TRANSPORT_ERR_SEND;
+        conn_set_err_detail(conn, "send: %s", nm_sock_errstr());
+        conn_tap_error(conn);
         return NM_TRANSPORT_ERR_SEND;
     }
     conn->phase = NM_CONN_READING;
@@ -524,16 +652,24 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
             return NM_TRANSPORT_OK;
         if (r == -2) {
             conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+            conn_set_err_detail(conn, "malformed response head");
+            conn_tap_error(conn);
             return NM_TRANSPORT_ERR_PROTOCOL;
         }
         if (conn->scratch_len >= sizeof(conn->scratch)) {
             conn->err = NM_TRANSPORT_ERR_PROTOCOL; /* oversized head */
+            conn_set_err_detail(conn, "response head exceeds %zu bytes",
+                                sizeof(conn->scratch));
+            conn_tap_error(conn);
             return NM_TRANSPORT_ERR_PROTOCOL;
         }
         long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
                               sizeof(conn->scratch) - conn->scratch_len);
         if (n <= 0) {
             conn->err = NM_TRANSPORT_ERR_CLOSED;
+            conn_set_err_detail(conn, "peer closed before the response "
+                                      "head completed");
+            conn_tap_error(conn);
             return NM_TRANSPORT_ERR_CLOSED;
         }
         conn->scratch_len += (size_t)n;
@@ -691,6 +827,28 @@ static int parse_head(NmConnection *conn)
         /* every other header: skipped */
     }
 
+    /* response-head capture point: the head is fully parsed. Fires
+     * BEFORE the body-byte relocation below — the memmove overwrites
+     * the scratch's front, and the status text is read from there.
+     * The reason phrase is everything between the status code and
+     * the line end ("OK", "Not Found", ...). */
+    {
+        char status_text[64];
+        size_t rl = 0;
+        const char *rp = s + 13; /* past "HTTP/1.x NNN" */
+        const char *end = s + head_end;
+        while (rp < end && *rp != '\r' && *rp != '\n' && rl + 1 < sizeof(status_text))
+            status_text[rl++] = *rp++;
+        status_text[rl] = '\0';
+        /* Leading space of the reason phrase: skip it. */
+        char *st = status_text;
+        while (*st == ' ')
+            st++;
+        nm_wire_tap_response_head(conn, conn->resp.status, st, "1.1",
+                                  conn->resp.content_type, conn->resp.chunked,
+                                  conn->resp.content_len);
+    }
+
     /* Body bytes that arrived with the head: move them to the front
      * of the scratch as pending body input. */
     conn->pending_len = n - head_end;
@@ -714,11 +872,16 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 break;
             if (r == -2) {
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+                conn_set_err_detail(conn, "malformed response head");
+                conn_tap_error(conn);
                 return -1;
             }
             /* -1: need more bytes */
             if (conn->scratch_len >= sizeof(conn->scratch)) {
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL; /* oversized head */
+                conn_set_err_detail(conn, "response head exceeds %zu bytes",
+                                    sizeof(conn->scratch));
+                conn_tap_error(conn);
                 return -1;
             }
             long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
@@ -730,6 +893,9 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             }
             if (n <= 0) {
                 conn->err = NM_TRANSPORT_ERR_CLOSED;
+                conn_set_err_detail(conn, "peer closed before the "
+                                          "response head completed");
+                conn_tap_error(conn);
                 return -1; /* head never completed */
             }
             conn->scratch_len += (size_t)n;
@@ -755,6 +921,8 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             return NM_READ_WOULD_BLOCK;
         if (n < 0) {
             conn->err = NM_TRANSPORT_ERR_CLOSED;
+            conn_set_err_detail(conn, "read: %s", nm_sock_errstr());
+            conn_tap_error(conn);
             return -1;
         }
         if (n == 0) {
@@ -763,6 +931,10 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             if (conn->resp.content_len < 0 || conn->body_read >= conn->resp.content_len)
                 return 0;
             conn->err = NM_TRANSPORT_ERR_CLOSED;
+            conn_set_err_detail(conn,
+                                "peer closed with %lld of %lld body bytes",
+                                conn->body_read, conn->resp.content_len);
+            conn_tap_error(conn);
             return -1;
         }
         conn->body_read += n;
@@ -792,6 +964,12 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 }
                 if (n <= 0) {
                     conn->err = NM_TRANSPORT_ERR_CLOSED;
+                    conn_set_err_detail(conn,
+                                        "peer closed mid-chunk with %d of "
+                                        "%d chunk bytes undelivered",
+                                        conn->chunk_remaining,
+                                        conn->chunk_remaining + (int)conn->body_read);
+                    conn_tap_error(conn);
                     return -1;
                 }
                 conn->pending_len = (size_t)n;
@@ -809,6 +987,9 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                  * read again next call; can't happen with buf_len>0
                  * unless chunk_remaining==0 (handled on entry). */
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+                conn_set_err_detail(conn, "chunked decode: no room in "
+                                          "caller buffer");
+                conn_tap_error(conn);
                 return -1;
             }
             memcpy(buf + out, conn->scratch, want);
@@ -836,6 +1017,9 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             }
             if (n <= 0) {
                 conn->err = NM_TRANSPORT_ERR_CLOSED;
+                conn_set_err_detail(conn, "peer closed inside chunked "
+                                          "framing");
+                conn_tap_error(conn);
                 return -1;
             }
             conn->pending_len = 1;
@@ -869,6 +1053,10 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 /* overflow guard: > 512MB chunk = protocol error */
                 if (conn->chunk_remaining > 512 * 1024 * 1024) {
                     conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+                    conn_set_err_detail(conn,
+                                        "chunk size %d exceeds 512MB",
+                                        conn->chunk_remaining);
+                    conn_tap_error(conn);
                     return -1;
                 }
             } else if (c == '\n') {
@@ -879,6 +1067,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 conn->trailer_line_empty = 1;
             } else if (c != '\r') {
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+                conn_set_err_detail(conn,
+                                    "bad chunked framing: '0x%02x' in "
+                                    "chunk size",
+                                    (unsigned char)c);
+                conn_tap_error(conn);
                 return -1;
             }
             break;
@@ -903,6 +1096,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 break;
             }
             conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+            conn_set_err_detail(conn,
+                                "missing CRLF after chunk data "
+                                "(got '0x%02x')",
+                                (unsigned char)c);
+            conn_tap_error(conn);
             return -1;
         case CHUNK_TRAILER:
             /* Lines until an empty one. trailer_line_empty tracks
@@ -921,6 +1119,8 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             break;
         default:
             conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+            conn_set_err_detail(conn, "chunked decode: bad state");
+            conn_tap_error(conn);
             return -1;
         }
     }

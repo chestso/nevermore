@@ -835,6 +835,112 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     harness_free(h);
 }
 
+/* Raw responder thread: drain the request, write bytes verbatim (no
+ * chunked/SSE machinery). Used to script wire-truth error pages
+ * whose bodies end with a trailing newline — raw-mode transcript
+ * correctness (no staircasing) is the property under test. */
+struct RawResponse
+{
+    int fd;   /* listen socket */
+    int port; /* filled by the test */
+    const char *response;
+};
+
+static void *raw_responder_thread(void *arg)
+{
+    struct RawResponse *rr = arg;
+    struct timeval atv = { 2, 0 };
+    fd_set arfds;
+    FD_ZERO(&arfds);
+    FD_SET(rr->fd, &arfds);
+    if (select(rr->fd + 1, &arfds, NULL, NULL, &atv) <= 0)
+        return NULL; /* cancelled before connecting: fine */
+    int cfd = accept(rr->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && got > 4 && drain[got - 1] == '}')
+            break;
+    }
+    size_t len = strlen(rr->response);
+    size_t off = 0;
+    while (off < len) {
+        long n = send(cfd, rr->response + off, len - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+/* Regression: a provider error body that ends with a trailing
+ * newline (hyper's does — wire framing) must NOT staircase the
+ * transcript. The error line — message + any follow-on text — must
+ * land as whole \r\n-terminated lines; a bare \n inside the captured
+ * output is the bug (raw mode: the terminal does not translate). */
+static void test_error_line_endings_are_crnl(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 401 Unauthorized\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":\"missing authorization\"}\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("hyper", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    /* No key: the agent's env-var hint rides the same error line. */
+
+    harness_type(h, "hello");
+    harness_enter(h);
+    for (int i = 0; i < 200; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
+            st == NM_AGENT_IDLE)
+            break;
+        nm_chat_app_step(h->app);
+        usleep(5 * 1000);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
+
+    const char *out = harness_read(h);
+    /* The whole error reached the scrollback. */
+    ASSERT_TRUE(strstr(out, "chat failed: auth rejected (HTTP 401)") != NULL);
+    ASSERT_TRUE(strstr(out, "missing authorization") != NULL);
+    ASSERT_TRUE(strstr(out, "export HYPER_API_KEY") != NULL);
+    /* No bare LF anywhere the app wrote: every line break is \r\n
+     * (the transcript is captured verbatim; a bare \n IS the
+     * staircase in raw mode). */
+    for (const char *p = out; *p; p++)
+        ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
+    /* And the hint shares the error's line (one \r\n between the
+     * message and it, not a staircase column shift). */
+    const char *msg = strstr(out, "missing authorization");
+    ASSERT_NOT_NULL(msg);
+    const char *hint = strstr(out, "export HYPER_API_KEY");
+    ASSERT_NOT_NULL(hint);
+    for (const char *p = msg; p < hint; p++)
+        ASSERT_TRUE(*p != '\n' && *p != '\r');
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
 static void test_tool_round_prints_panels(void)
 {
     FILE *f = fopen(FIXTURE_PATH, "wb");
@@ -994,6 +1100,7 @@ int main(void)
     RUN_TEST(test_tab_on_plain_word_is_a_noop);
     RUN_TEST(test_cancel_midstream_returns_to_idle);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
+    RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_tool_round_prints_panels);
     TEST_SUMMARY();
 }

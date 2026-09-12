@@ -371,7 +371,6 @@ static void test_hyper_chat_end_to_end(void)
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
-    nm_chat_result_free(&r);
     pthread_join(th, NULL);
 
     /* The request the server received: hyper path, Bearer auth,
@@ -403,14 +402,14 @@ static void test_hyper_chat_begin_step(void)
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
         capture_delta, &cap
     };
-    NmChatResult err = { 0, 0, NULL };
+    NmChatResult err = { 0 };
     NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
     ASSERT_NOT_NULL(h);
 
     /* Blocking pump over the step seam: poll until the collector has
      * content or the stream completes, never on socket readiness
      * alone (send can race the step). */
-    NmChatResult res = { 0, 0, NULL };
+    NmChatResult res = { 0 };
     NmChatStatus st = NM_CHAT_PENDING;
     int guard = 0;
     while (st == NM_CHAT_PENDING && guard++ < 2000) {
@@ -421,7 +420,6 @@ static void test_hyper_chat_begin_step(void)
     ASSERT_EQ(st, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
     p->chat_end(h);
-    nm_chat_result_free(&res);
     pthread_join(th, NULL);
 }
 
@@ -673,7 +671,6 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     /* Comment keep-alives between data events must not break the
      * delta assembly (live-observed framing, OPENROUTER-API.md §3). */
     ASSERT_STR_EQ(cap.text, "Hi there");
-    nm_chat_result_free(&r);
     pthread_join(th, NULL);
 
     ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);

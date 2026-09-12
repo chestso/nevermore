@@ -1,9 +1,11 @@
-/* connection_layout.h - NmConnection struct, shared between transport.c
- * and transport_socket.c
+/* connection_layout.h - NmConnection struct, shared between transport.c,
+ * transport_socket.c, and wire_recorder.c
  *
  * transport.c owns the public lifecycle (connect/close/request/read);
- * transport_socket.c owns sockets and framing and needs field access.
- * Keep this in sync if fields change — it is included by both files.
+ * transport_socket.c owns sockets and framing and needs field access;
+ * the wire recorder reads the correlation ids. Keep this in sync if
+ * fields change — it is included by all three files (each defines
+ * NM_TRANSPORT_LAYOUT_HERE before the include).
  *
  * Memory model (memory-reuse principle): every buffer here is
  * allocated once per connection (or is a fixed field) and reused
@@ -15,6 +17,8 @@
 #define NM_CONNECTION_LAYOUT_H
 
 #ifdef NM_TRANSPORT_LAYOUT_HERE
+
+#include "transport.h" /* NM_ERR_DETAIL_MAX */
 
 /* sockaddr_storage for the async-connect target (guarded: the
  * includer's platform headers define it; MSVC/MinGW via winsock2,
@@ -49,10 +53,16 @@ struct NmConnection
     void *tls_ctx; /* opaque backend context, or NULL for plain HTTP */
     const NmTlsBackend *tls;
     NmResponse resp;
-    char host[256];   /* Host header source, set at connect */
-    int body_started; /* response head fully parsed */
-    int nonblocking;  /* 1 = socket flipped non-blocking (read phase) */
-    int phase;        /* NM_CONN_* — see the enum above */
+    char host[256];     /* Host header source, set at connect */
+    char tls_host[256]; /* bare hostname (no port): TLS SNI + cert
+                            verification target. host above carries
+                            host:port for the Host header; the async
+                            handshake path must NOT feed the ported
+                            value to the TLS backend (SNI/cert name
+                            mismatch = handshake failure). */
+    int body_started;   /* response head fully parsed */
+    int nonblocking;    /* 1 = socket flipped non-blocking (read phase) */
+    int phase;          /* NM_CONN_* — see the enum above */
 
     /* Async-connect target (NM_CONN_CONNECTING only): the step's
      * completion probe re-calls connect() on this stored address
@@ -81,9 +91,26 @@ struct NmConnection
     size_t scratch_len; /* head bytes accumulated (before parse) */
     size_t pending_len; /* body bytes buffered in scratch (after) */
 
+    /* Wire-tap correlation ids (docs/WIRE-DEBUG.md §3): conn_id is
+     * monotonic per process, never reused (assigned at allocation);
+     * xchg counts requests queued on this connection, 1-based,
+     * bumped at nm_request_queue time (1 today — one exchange per
+     * connection — but the field exists now so correlation never
+     * depends on the one-exchange pattern). */
+    long conn_id;
+    long xchg;
+
     /* Body accounting */
     long long body_read;   /* decoded body bytes delivered so far */
     NmTransportStatus err; /* last error, for diagnostics */
+
+    /* Human-readable reason for the most recent failure (the
+     * always-set contract: every ERR_* path fills this before
+     * returning; see nm_connection_last_error). Fixed size —
+     * diagnostics are never heap on the transport (memory-reuse
+     * principle). Cleared by reset_response_state (a new exchange
+     * clears the old failure). */
+    char err_detail[NM_ERR_DETAIL_MAX];
 
     /* chunked-transfer dechunk state machine (byte-at-a-time so the
      * phase-4 event loop can feed it the same way tests do) */

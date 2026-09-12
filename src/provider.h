@@ -83,16 +83,25 @@ typedef enum
     NM_CHAT_OK = 0,
     NM_CHAT_PENDING, /* step API: no progress yet, call again (see chat_begin) */
     NM_CHAT_ERR_TRANSPORT,
-    NM_CHAT_ERR_HTTP,  /* non-2xx; http_status + error body filled in */
+    NM_CHAT_ERR_HTTP,  /* non-2xx; http_status set, message has the body text */
     NM_CHAT_ERR_PARSE, /* wire response wasn't valid JSON/SSE */
     NM_CHAT_ERR_AUTH   /* 401/403 */
 } NmChatStatus;
 
+/* Error-message cap: diagnostics, not data. HTTP error bodies longer
+ * than the cap truncate (http_status preserves the machine-readable
+ * part). */
+#define NM_CHAT_MSG_MAX 512
+
+/* A chat call's outcome. message is ALWAYS set when status is an
+ * NM_CHAT_ERR_* (the always-set contract: every failure carries a
+ * human-readable reason, so callers never guess a fallback string).
+ * Inline, plain-data: results live on the stack, no free function. */
 typedef struct NmChatResult
 {
     NmChatStatus status;
-    int http_status;  /* HTTP status code when status == NM_CHAT_ERR_HTTP */
-    char *error_body; /* provider error text when HTTP failed; heap-owned */
+    int http_status; /* HTTP status code when the wire answered */
+    char message[NM_CHAT_MSG_MAX];
 } NmChatResult;
 
 /* Event-driven stream handle (chat_begin/step/end below). Opaque;
@@ -165,6 +174,12 @@ struct NmProvider
 
     /* Auth: whether this provider + endpoint requires an API key. */
     int (*needs_auth)(const NmProvider *p, const char *base_url);
+
+    /* The environment variable holding this provider's API key
+     * (e.g. "HYPER_API_KEY"), or NULL when auth is not env-driven.
+     * One source of truth for both lookups and error hints — the
+     * UI never hand-rolls a provider->env map. */
+    const char *(*env_key)(const NmProvider *p);
 };
 
 /* Registry */
@@ -173,7 +188,6 @@ const NmProvider *nm_provider_by_name(const char *name);
 void nm_provider_list(const NmProvider **out, size_t *n_out);
 
 void nm_provider_free_models(const NmProvider *p, const NmModel *models);
-void nm_chat_result_free(NmChatResult *r);
 
 #ifdef __cplusplus
 }

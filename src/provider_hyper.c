@@ -153,6 +153,12 @@ static int hyper_needs_auth(const NmProvider *p, const char *base_url)
     return 1; /* chat needs a token; the catalog alone does not */
 }
 
+static const char *hyper_env_key(const NmProvider *p)
+{
+    (void)p;
+    return "HYPER_API_KEY";
+}
+
 const struct NmProvider nm_hyper_provider = {
     NM_PROVIDER_HYPER,
     "hyper",
@@ -165,4 +171,5 @@ const struct NmProvider nm_hyper_provider = {
     nm_openai_chat_end,
     hyper_models,
     hyper_needs_auth,
+    hyper_env_key,
 };

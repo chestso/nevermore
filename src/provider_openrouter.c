@@ -171,6 +171,12 @@ static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
     return 1; /* chat needs a key; the catalog alone does not */
 }
 
+static const char *openrouter_env_key(const NmProvider *p)
+{
+    (void)p;
+    return "OPENROUTER_API_KEY";
+}
+
 const struct NmProvider nm_openrouter_provider = {
     NM_PROVIDER_OPENROUTER,
     "openrouter",
@@ -183,4 +189,5 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openai_chat_end,
     openrouter_models,
     openrouter_needs_auth,
+    openrouter_env_key,
 };

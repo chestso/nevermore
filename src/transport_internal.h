@@ -20,9 +20,9 @@ struct NmConnection;
 
 /* transport_socket.c */
 NmConnection *nm_socket_connect(const char *host, int port,
-                                NmTransportStatus *status);
+                                NmConnectInfo *info);
 NmConnection *nm_socket_connect_async(const char *host, int port,
-                                      NmTransportStatus *status);
+                                      NmConnectInfo *info);
 int nm_socket_connect_probe(NmConnection *conn);
 NmTransportStatus nm_socket_request_queue(NmConnection *conn,
                                           const char *method, const char *path,
@@ -57,6 +57,14 @@ NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
 /* Raw I/O over whichever channel the connection uses (plain or TLS). */
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len);
 long nm_conn_read(NmConnection *conn, char *buf, size_t len);
+
+/* errno/WSA text for diagnostics ("" when nothing is set). Defined
+ * in transport_socket.c; shared with transport.c's step paths. */
+const char *nm_sock_errstr(void);
+
+/* Flip an fd back to blocking (the TLS handshake path). 0 on
+ * success, -1 on failure. */
+int nm_socket_set_blocking(int fd);
 
 /* TLS backend factories (one per file; guarded by NM_TLS_* defines). */
 #if defined(NM_TLS_SCHANNEL)

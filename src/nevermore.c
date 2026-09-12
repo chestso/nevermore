@@ -67,11 +67,3 @@ void nm_provider_free_models(const NmProvider *p, const NmModel *models)
     (void)p;
     (void)models;
 }
-
-void nm_chat_result_free(NmChatResult *r)
-{
-    if (!r)
-        return;
-    free(r->error_body);
-    r->error_body = NULL;
-}

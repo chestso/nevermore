@@ -262,6 +262,13 @@ static int ollama_needs_auth(const NmProvider *p, const char *base_url)
     return 1;
 }
 
+static const char *ollama_env_key(const NmProvider *p)
+{
+    (void)p;
+    /* Local daemon needs no key; the cloud endpoint reads this. */
+    return "OLLAMA_API_KEY";
+}
+
 const struct NmProvider nm_ollama_provider = {
     NM_PROVIDER_OLLAMA,
     "ollama",
@@ -274,4 +281,5 @@ const struct NmProvider nm_ollama_provider = {
     nm_openai_chat_end,
     ollama_models,
     ollama_needs_auth,
+    ollama_env_key,
 };

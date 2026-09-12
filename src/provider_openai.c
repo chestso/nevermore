@@ -81,7 +81,7 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
     if (nm_openai_split_base_url(base, host, sizeof(host), &port, &mode) != 0)
         return;
 
-    NmTransportStatus tst;
+    NmConnectInfo tst;
     NmConnection *conn = nm_connect(host, port, mode, &tst);
     if (!conn)
         return;
@@ -97,10 +97,12 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
         snprintf(authbuf, sizeof(authbuf), "Bearer %s", api_key);
         hdrs[nh].name = "Authorization";
         hdrs[nh].value = authbuf;
+        hdrs[nh].secret = 1; /* marked at construction (WIRE-DEBUG §4) */
         nh++;
     }
     hdrs[nh].name = "User-Agent";
     hdrs[nh].value = "nevermore (nevermore agent)";
+    hdrs[nh].secret = 0;
     nh++;
 
     char path[512];
@@ -209,6 +211,12 @@ static int openai_needs_auth(const NmProvider *p, const char *base_url)
     return 1; /* every OpenAI endpoint needs a key */
 }
 
+static const char *openai_env_key(const NmProvider *p)
+{
+    (void)p;
+    return "OPENAI_API_KEY";
+}
+
 const struct NmProvider nm_openai_provider = {
     NM_PROVIDER_OPENAI,
     "openai",
@@ -221,4 +229,5 @@ const struct NmProvider nm_openai_provider = {
     nm_openai_chat_end,
     openai_models,
     openai_needs_auth,
+    openai_env_key,
 };

@@ -43,6 +43,10 @@ run_build test_tools tests/test_tools.c src/tools.c src/tools_file.c \
 	src/tools_spawn_win.c src/os_compat_win.c src/json.c
 
 run_build test_wire tests/test_wire.c src/transport.c src/transport_socket.c \
+	src/wire_recorder.c src/json.c $TLS_SRC -lws2_32 -lpthread
+
+run_build test_wire_recorder tests/test_wire_recorder.c src/wire_recorder.c \
+	src/json.c src/transport.c src/transport_socket.c \
 	$TLS_SRC -lws2_32 -lpthread
 
 run_build test_provider tests/test_provider.c src/nevermore.c \
@@ -61,7 +65,7 @@ run_build test_source tests/test_source.c src/source.c src/nevermore.c \
 
 run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
-	src/transport_socket.c $TLS_SRC src/nevermore.c \
+	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	-lws2_32 -lpthread
@@ -70,7 +74,7 @@ run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/tools.c src/tools_file.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
-	src/transport_socket.c $TLS_SRC src/nevermore.c \
+	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	-lws2_32 -lpthread

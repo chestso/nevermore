@@ -27,6 +27,7 @@
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
+#include "wire_recorder.h"
 
 #ifndef _WIN32
 #include <unistd.h> /* isatty */
@@ -98,22 +99,6 @@ static void ask_on_state(NmAgentState state, void *userdata)
 /* Interactive chat (phase 4): boba runtime + the chat_app component */
 /* ---------------------------------------------------------------- */
 
-/* Per-provider API key env (chat + ask both resolve this way). */
-static const char *provider_env_key(const char *name)
-{
-    if (!name)
-        return NULL;
-    if (strcmp(name, "hyper") == 0)
-        return getenv("HYPER_API_KEY");
-    if (strcmp(name, "ollama") == 0)
-        return getenv("OLLAMA_API_KEY");
-    if (strcmp(name, "openai") == 0)
-        return getenv("OPENAI_API_KEY");
-    if (strcmp(name, "openrouter") == 0)
-        return getenv("OPENROUTER_API_KEY");
-    return NULL;
-}
-
 /* TuiRuntimeConfig event callbacks (event_data = the app). The fill
  * callback declares the app's live external fds each wait (Elm
  * subscriptions in C idiom); the sink routes per fd. Today: the
@@ -176,7 +161,10 @@ static int run_interactive(const char *provider_name, const char *model)
         fprintf(stderr, "nevermore: failed to initialize the chat\n");
         return 1;
     }
-    nm_chat_app_set_endpoint(app, NULL, provider_env_key(provider_name));
+    const NmProvider *p = nm_provider_by_name(provider_name);
+    const char *env_key = p && p->env_key ? p->env_key(p) : NULL;
+    nm_chat_app_set_endpoint(app, NULL,
+                             env_key ? getenv(env_key) : NULL);
 
     TuiRuntimeConfig cfg = { 0 };
     cfg.raw_mode = 1;
@@ -210,6 +198,23 @@ static int run_interactive(const char *provider_name, const char *model)
     nm_history_save(nm_chat_app_textinput(app));
     tui_runtime_free(rt); /* frees the app (component->free) */
     return rc == 0 ? 0 : 1;
+}
+
+/* Wire debug recorder (docs/WIRE-DEBUG.md): both entry paths record
+ * — it is the same transport underneath, so wiring happens once at
+ * startup, before any provider traffic. Keys configured are banner
+ * names-only (values never logged). Returns the provider name for
+ * the banner line. */
+static void wire_debug_startup(const char *provider_name, const char *model)
+{
+    const NmProvider *p = nm_provider_by_name(provider_name);
+    const char *env_key = p && p->env_key ? p->env_key(p) : NULL;
+    const char *keys[1];
+    size_t n_keys = 0;
+    if (env_key && getenv(env_key))
+        keys[n_keys++] = env_key;
+    nm_wire_recorder_set_env_keys(keys, n_keys);
+    nm_wire_recorder_init(provider_name, model);
 }
 
 int main(int argc, char *argv[])
@@ -257,6 +262,11 @@ int main(int argc, char *argv[])
         return 1;
     }
 
+    /* $NEVERMORE_DEBUG_WIRE: arm the wire recorder before any
+     * provider traffic (headless ask/models AND the TUI — the same
+     * transport underneath, one wiring). Off unless set. */
+    wire_debug_startup(provider_name, model);
+
     if (want_models) {
         size_t n = 0;
         const NmModel *models = provider->models(provider, NULL, NULL, &n);
@@ -271,7 +281,8 @@ int main(int argc, char *argv[])
         /* One-shot ask mode (phase 3): the full agent loop — stream,
          * tool calls, file edits — with deltas on stdout and tool
          * activity on stderr. */
-        const char *api_key = provider_env_key(provider_name);
+        const char *api_key =
+            provider->env_key ? getenv(provider->env_key(provider)) : NULL;
         if (!model)
             model = "gpt-oss:20b"; /* sane local default */
 
@@ -289,6 +300,7 @@ int main(int argc, char *argv[])
         nm_agent_on_delta(agent, ask_on_delta);
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
+        nm_agent_set_endpoint(agent, NULL, api_key);
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);

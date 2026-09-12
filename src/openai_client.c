@@ -33,8 +33,10 @@
 #include <sys/time.h>
 #endif
 
-#define READ_BUF_CAP   16384
-#define ERROR_BODY_MAX 2048 /* like quoth's openai error-body cap */
+#define READ_BUF_CAP 16384
+/* Non-SSE error-body capture cap: larger than NM_CHAT_MSG_MAX so
+ * the "body too long" marker can note what was dropped. */
+#define ERROR_BODY_MAX (NM_CHAT_MSG_MAX + 32)
 
 /* Silences -Wunused-parameter on params kept for vtable symmetry. */
 #if defined(__GNUC__)
@@ -181,10 +183,18 @@ struct NmChatStream
     int done;            /* [DONE] seen or fatal error */
     NmChatStatus status; /* final status */
     int http_status;
-    char *error_body; /* captured non-SSE error body, capped */
+    char error_body[ERROR_BODY_MAX]; /* captured non-SSE error body, capped */
     size_t error_len;
+    /* Body bytes that rode along with the head-completing read,
+     * before the content-type verdict decided their consumer (SSE
+     * parser vs error-body capture). At most one pull's worth
+     * (nm_read_body returns head-adjacent body bytes exactly once);
+     * routed by the head check in chat_step, then always empty. */
+    char preread[READ_BUF_CAP];
+    size_t preread_len;
     int head_checked; /* SSE/content-type validation done */
     int error_mode;   /* non-SSE response: draining the error body */
+    int error_tapped; /* the failure's error line already emitted */
     /* Assembled tool calls (index-addressed; buffers reused across
      * chunks). Ownership moves to the on_delta receiver at the final
      * NULL-content callback (freed by the receiver with
@@ -231,8 +241,10 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
         const char *msg = nm_json_str(nm_json_get(eobj, "message"));
         if (!msg)
             msg = nm_json_str(eobj);
-        free(st->error_body);
-        st->error_body = msg ? strdup(msg) : NULL;
+        snprintf(st->error_body, sizeof(st->error_body), "server error "
+                                                         "event: %s",
+                 msg ? msg : "(unparseable error payload)");
+        st->error_len = strlen(st->error_body);
         nm_json_free(obj);
         return;
     }
@@ -328,11 +340,25 @@ static void stream_finish(NmChatStream *st)
 }
 
 /* Teardown: release the connection + SSE parser. The handle stays
- * alive (error/result fields) until chat_end frees it. Idempotent. */
+ * alive (error/result fields) until chat_end frees it. Idempotent.
+ * Fatal-exit paths tap the failure first (WIRE-DEBUG §3: every
+ * client failure is an error line; the HTTP status rides along when
+ * the wire answered). */
 static void stream_teardown(NmChatStream *h)
 {
     if (!h)
         return;
+    if (h->status != NM_CHAT_OK && h->status != NM_CHAT_PENDING &&
+        h->conn && !h->error_tapped) {
+        h->error_tapped = 1;
+        /* Body/protocol-stage failure on an exchange already
+         * queued: xchg is the correlation the log already carries. */
+        if (h->http_status)
+            nm_wire_tap_error_status(h->conn, "protocol", h->error_body,
+                                     h->http_status);
+        else
+            nm_wire_tap_error(h->conn, "body", h->error_body);
+    }
     if (h->conn) {
         nm_connection_close(h->conn);
         h->conn = NULL;
@@ -343,42 +369,173 @@ static void stream_teardown(NmChatStream *h)
     }
 }
 
-/* One pull: read what's ready, feed SSE, dispatch events.
- * Returns NM_CHAT_PENDING (call again later — would-block or head
- * incomplete), NM_CHAT_OK (stream complete), or an error. */
-static NmChatStatus stream_one_step(NmChatStream *st)
+/* Feed the SSE parser with bytes from one source (preread stash or
+ * the socket), dispatching complete events. Returns 1 when a
+ * complete event was dispatched, 0 = need more bytes, -1 = parse
+ * error. Every complete event ALSO rides the wire tap (raw SSE
+ * stream only — the derived tool-call events are deliberately not
+ * recorded; the stream data carries them). */
+static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
 {
+    if (len == 0)
+        return 0;
     NmSseEvent ev;
-    long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
-    if (n == NM_READ_WOULD_BLOCK)
-        return NM_CHAT_PENDING;
-    if (n < 0)
-        return NM_CHAT_ERR_TRANSPORT;
-    if (n == 0)
-        return NM_CHAT_OK; /* EOF: stream complete (or truncated; the
-                              caller's status check flags it) */
-
-    /* nm_sse_feed consumes the whole buffer each call (an unconsumed
-     * tail is stashed inside the parser); each call emits at most
-     * one event. Feed, then drain the stashed tail with empty feeds
-     * until no more events come out. */
-    int r = nm_sse_feed(st->sse, st->rbuf, (size_t)n, &ev);
+    int r = nm_sse_feed(st->sse, data, len, &ev);
     while (r == 1) {
+        nm_wire_tap_stream_event(st->conn, ev.event, ev.data,
+                                 strlen(ev.data));
         handle_event(st, ev.data, strlen(ev.data));
         if (st->done)
             break;
         r = nm_sse_feed(st->sse, "", 0, &ev);
     }
-    if (r < 0)
+    return r;
+}
+
+/* One pull: read what's ready, feed SSE, dispatch events.
+ * Returns NM_CHAT_PENDING (call again later — would-block or head
+ * incomplete), NM_CHAT_OK (stream complete), or an error. */
+static NmChatStatus stream_one_step(NmChatStream *st)
+{
+    /* Body bytes stashed by the head check (their consumer was not
+     * known when they arrived): feed them first, then the socket. */
+    if (st->preread_len) {
+        size_t take = st->preread_len;
+        st->preread_len = 0;
+        int r = feed_and_dispatch(st, st->preread, take);
+        if (r < 0) {
+            st->status = NM_CHAT_ERR_PARSE;
+            return NM_CHAT_ERR_PARSE;
+        }
+        if (st->done)
+            return NM_CHAT_OK;
+    }
+
+    NmSseEvent ev;
+    long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
+    if (n == NM_READ_WOULD_BLOCK)
+        return NM_CHAT_PENDING;
+    if (n < 0) {
+        st->status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(st->error_body, sizeof(st->error_body), "%s",
+                 nm_connection_last_error(st->conn));
+        st->error_len = strlen(st->error_body);
+        return NM_CHAT_ERR_TRANSPORT;
+    }
+    if (n == 0)
+        return NM_CHAT_OK; /* EOF: stream complete (or truncated; the
+                              caller's status check flags it) */
+
+    int r = nm_sse_feed(st->sse, st->rbuf, (size_t)n, &ev);
+    while (r == 1) {
+        nm_wire_tap_stream_event(st->conn, ev.event, ev.data,
+                                 strlen(ev.data));
+        handle_event(st, ev.data, strlen(ev.data));
+        if (st->done)
+            break;
+        r = nm_sse_feed(st->sse, "", 0, &ev);
+    }
+    if (r < 0) {
+        st->status = NM_CHAT_ERR_PARSE;
         return NM_CHAT_ERR_PARSE;
+    }
     if (st->done)
         return NM_CHAT_OK;
     return NM_CHAT_PENDING;
 }
 
+/* Pull bytes until the response head completes (or stalls), WITHOUT
+ * feeding the SSE parser: body bytes that ride along with the
+ * head-completing read go to the preread stash, because their
+ * consumer (SSE parser vs error-body capture) is decided by the
+ * head's status/content-type verdict — the very next thing
+ * chat_step does. This is the fix for the whole-response-in-one-
+ * read race: a 401's body arrived before the verdict, and feeding
+ * it to the SSE parser lost it.
+ *
+ * Returns NM_CHAT_PENDING (head still incomplete), NM_CHAT_OK (head
+ * complete — check nm_response), or an error. */
+static NmChatStatus head_pull_step(NmChatStream *st)
+{
+    if (st->preread_len) {
+        /* A previous call completed the head and stashed the body;
+         * there is nothing more to do here. */
+        return NM_CHAT_OK;
+    }
+    long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
+    if (n == NM_READ_WOULD_BLOCK)
+        return NM_CHAT_PENDING;
+    if (n < 0) {
+        st->status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(st->error_body, sizeof(st->error_body), "%s",
+                 nm_connection_last_error(st->conn));
+        st->error_len = strlen(st->error_body);
+        return NM_CHAT_ERR_TRANSPORT;
+    }
+    if (n > 0) {
+        /* nm_read_body parses the head transparently: any bytes it
+         * returned AFTER the head are body bytes — stash them. */
+        memcpy(st->preread, st->rbuf, (size_t)n);
+        st->preread_len = (size_t)n;
+        return NM_CHAT_OK;
+    }
+    /* n == 0: EOF. EOF before any head: dead connection. A complete
+     * head with a connection-close-framed empty body is also n == 0,
+     * but that returns OK with resp->status != 0 first (the head
+     * landed in an earlier call, or in this one's scratch parse). */
+    const NmResponse *resp = nm_response(st->conn);
+    if (resp->status == 0) {
+        st->status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(st->error_body, sizeof(st->error_body),
+                 "connection closed before a response arrived");
+        st->error_len = strlen(st->error_body);
+        return NM_CHAT_ERR_TRANSPORT;
+    }
+    return NM_CHAT_OK;
+}
+
 /* ---------------------------------------------------------------- */
 /* Public: chat + models                                            */
 /* ---------------------------------------------------------------- */
+
+/* Publish the stream's failure state into a result (always-set
+ * contract: message is composed per status class). result may be
+ * NULL (a step driven without a result out). */
+static void result_publish(const NmChatStream *h, NmChatResult *result)
+{
+    if (!result)
+        return;
+    result->status = h->status;
+    result->http_status = h->http_status;
+    result->message[0] = '\0';
+    switch (h->status) {
+    case NM_CHAT_OK:
+    case NM_CHAT_PENDING:
+        return;
+    case NM_CHAT_ERR_AUTH:
+        snprintf(result->message, sizeof(result->message),
+                 "auth rejected (HTTP %d): %s", h->http_status,
+                 *h->error_body ? h->error_body
+                                : "no error body returned");
+        break;
+    case NM_CHAT_ERR_HTTP:
+        snprintf(result->message, sizeof(result->message),
+                 "HTTP %d: %s", h->http_status,
+                 *h->error_body ? h->error_body
+                                : "no error body returned");
+        break;
+    case NM_CHAT_ERR_TRANSPORT:
+        snprintf(result->message, sizeof(result->message), "%s",
+                 *h->error_body ? h->error_body
+                                : "connection failed");
+        break;
+    case NM_CHAT_ERR_PARSE:
+        snprintf(result->message, sizeof(result->message),
+                 "malformed response: %s",
+                 *h->error_body ? h->error_body : "not valid SSE/JSON");
+        break;
+    }
+}
 
 NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                                    const NmChatRequest *req, NmChatResult *err)
@@ -386,12 +543,15 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     if (err) {
         err->status = NM_CHAT_OK;
         err->http_status = 0;
-        free(err->error_body);
-        err->error_body = NULL;
+        err->message[0] = '\0';
     }
     if (!ep || !req || !req->model) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_PARSE;
+            snprintf(err->message, sizeof(err->message),
+                     "internal: bad request (missing %s)",
+                     !ep ? "endpoint" : "model");
+        }
         return NULL;
     }
 
@@ -399,8 +559,12 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     int port;
     NmTransportMode mode;
     if (nm_openai_split_base_url(ep->base_url, host, sizeof(host), &port, &mode) != 0) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "bad base url '%s' (expected http:// or https://)",
+                     ep->base_url ? ep->base_url : "(null)");
+        }
         return NULL;
     }
 
@@ -411,36 +575,47 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
      * writability. The stream handle owns the connection from here. */
     char *body = compose_body(ep, req);
     if (!body) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_PARSE;
+            snprintf(err->message, sizeof(err->message),
+                     "internal: could not compose the request body");
+        }
         return NULL;
     }
 
-    NmTransportStatus tst;
-    NmConnection *conn = nm_connect_async(host, port, mode, &tst);
+    NmConnectInfo ci;
+    NmConnection *conn = nm_connect_async(host, port, mode, &ci);
     if (!conn) {
         free(body);
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message), "%s", ci.detail);
+        }
         return NULL;
     }
 
     /* Headers: Content-Type, auth, User-Agent (nevermore as itself;
-     * no Crush emulation — see openai_client.h). */
+     * no Crush emulation — see openai_client.h). The auth header is
+     * built here and marked secret HERE — the recorder redacts
+     * marked values at log-write time; onboarding a provider via
+     * NmOpenaiEndpoint carries redaction with it (WIRE-DEBUG §4). */
     NmRequestHeader hdrs[3];
     size_t nh = 0;
     hdrs[nh].name = "Content-Type";
     hdrs[nh].value = "application/json";
+    hdrs[nh].secret = 0;
     nh++;
     char authbuf[512];
     if (ep->auth_header && ep->api_key && *ep->api_key) {
         snprintf(authbuf, sizeof(authbuf), ep->auth_header, ep->api_key);
         hdrs[nh].name = "Authorization";
         hdrs[nh].value = authbuf;
+        hdrs[nh].secret = 1;
         nh++;
     }
     hdrs[nh].name = "User-Agent";
     hdrs[nh].value = ep->user_agent ? ep->user_agent : "nevermore";
+    hdrs[nh].secret = 0;
     nh++;
 
     char path[512];
@@ -451,8 +626,11 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     if (!st) {
         free(body);
         nm_connection_close(conn);
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "out of memory");
+        }
         return NULL;
     }
     st->conn = conn;
@@ -466,8 +644,12 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                                             body, strlen(body));
     free(body);
     if (rs != NM_TRANSPORT_OK) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "could not queue the request: %s",
+                     nm_connection_last_error(conn));
+        }
         nm_connection_close(conn);
         free(st);
         return NULL;
@@ -479,16 +661,23 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     if (nm_connection_set_nonblocking(conn) == NM_TRANSPORT_OK) {
         /* plain socket: flipped, nothing more to do */
     } else if (mode == NM_TRANSPORT_PLAIN) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "could not set the socket non-blocking: %s",
+                     nm_connection_last_error(conn));
+        }
         nm_connection_close(conn);
         free(st);
         return NULL;
     }
     st->sse = nm_sse_new();
     if (!st->sse) {
-        if (err)
+        if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "out of memory (SSE parser)");
+        }
         nm_connection_close(conn);
         free(st);
         return NULL;
@@ -501,6 +690,17 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
  * caller reports PENDING), 0 when the body is complete/capped. */
 static int error_drain_step(NmChatStream *h)
 {
+    /* Body bytes stashed by the head check arrive here first. */
+    if (h->preread_len) {
+        size_t take = h->preread_len;
+        if (take > ERROR_BODY_MAX - 1 - h->error_len)
+            take = ERROR_BODY_MAX - 1 - h->error_len;
+        memcpy(h->error_body + h->error_len, h->preread, take);
+        h->error_len += take;
+        h->preread_len = 0;
+        if (h->error_len >= ERROR_BODY_MAX - 1)
+            return 0; /* capped: enough for a diagnostic */
+    }
     for (;;) {
         long n = nm_read_body(h->conn, h->rbuf, READ_BUF_CAP);
         if (n == NM_READ_WOULD_BLOCK)
@@ -511,31 +711,29 @@ static int error_drain_step(NmChatStream *h)
             size_t take = (size_t)n;
             if (take > ERROR_BODY_MAX - 1 - h->error_len)
                 take = ERROR_BODY_MAX - 1 - h->error_len;
-            if (h->error_len == 0) {
-                h->error_body = malloc(ERROR_BODY_MAX);
-                if (!h->error_body)
-                    return 0;
-            }
             memcpy(h->error_body + h->error_len, h->rbuf, take);
             h->error_len += take;
         }
         if (h->error_len >= ERROR_BODY_MAX - 1)
-            return 0;
+            return 0; /* capped: enough for a diagnostic */
     }
 }
 
-/* Finish the error result: NULL-terminate, publish to `result`,
- * tear the stream down, return the status. */
+/* Finish the error result: trim the captured body's outer whitespace
+ * (wire framing: error pages end with a trailing newline; a
+ * diagnostic message is not a verbatim transcript), NULL-terminate,
+ * publish to `result`, tear the stream down, return the status. */
 static NmChatStatus error_result(NmChatStream *h, NmChatResult *result)
 {
-    if (h->error_body)
-        h->error_body[h->error_len] = '\0';
+    while (h->error_len > 0 &&
+           (h->error_body[h->error_len - 1] == '\n' ||
+            h->error_body[h->error_len - 1] == '\r' ||
+            h->error_body[h->error_len - 1] == ' ' ||
+            h->error_body[h->error_len - 1] == '\t'))
+        h->error_len--;
+    h->error_body[h->error_len] = '\0';
     h->done = 1;
-    if (result) {
-        result->status = h->status;
-        result->http_status = h->http_status;
-        result->error_body = h->error_body ? strdup(h->error_body) : NULL;
-    }
+    result_publish(h, result);
     stream_teardown(h);
     return h->status;
 }
@@ -545,13 +743,20 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
     if (result) {
         result->status = NM_CHAT_OK;
         result->http_status = 0;
-        free(result->error_body);
-        result->error_body = NULL;
+        result->message[0] = '\0';
     }
-    if (!h)
-        return result->status = NM_CHAT_ERR_PARSE, NM_CHAT_ERR_PARSE;
-    if (h->done)
-        return result->status = h->status, h->status;
+    if (!h) {
+        if (result) {
+            result->status = NM_CHAT_ERR_PARSE;
+            snprintf(result->message, sizeof(result->message),
+                     "internal: stepped a NULL stream");
+        }
+        return NM_CHAT_ERR_PARSE;
+    }
+    if (h->done) {
+        result_publish(h, result);
+        return h->status;
+    }
 
     /* Drive the transport phase machine first (async connect/send,
      * N2): the request is not on the wire until this returns OK at
@@ -564,11 +769,10 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
         if (ts != NM_TRANSPORT_OK) {
             h->done = 1;
             h->status = NM_CHAT_ERR_TRANSPORT;
-            if (result) {
-                result->status = NM_CHAT_ERR_TRANSPORT;
-                result->http_status = 0;
-                result->error_body = NULL;
-            }
+            snprintf(h->error_body, sizeof(h->error_body), "%s",
+                     nm_connection_last_error(h->conn));
+            h->error_len = strlen(h->error_body);
+            result_publish(h, result);
             stream_teardown(h);
             return NM_CHAT_ERR_TRANSPORT;
         }
@@ -584,52 +788,34 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
 
     /* First step: the response head. It may still be incomplete
      * (PENDING until the blank line lands); once complete, validate
-     * status + content-type, and on non-SSE switch to error mode. */
+     * status + content-type, and on non-SSE switch to error mode.
+     * The pull never feeds the SSE parser: body bytes riding the
+     * head-completing read are stashed (preread) until the verdict
+     * decides their consumer — a 401's body must reach the error
+     * capture, not the SSE parser. */
     if (!h->head_checked && h->conn) {
         const NmResponse *resp = nm_response(h->conn);
         if (resp->status == 0) {
-            /* Head not parsed yet: pull bytes into the head scanner
-             * (this is what nm_read_body does pre-body_started). */
-            NmChatStatus s = stream_one_step(h);
-            if (s == NM_CHAT_PENDING) {
-                resp = nm_response(h->conn);
-                if (resp->status == 0)
-                    return NM_CHAT_PENDING; /* head still incomplete */
-            } else if (s == NM_CHAT_OK) {
-                /* The whole response (head + body) rode one read —
-                 * normal on loopback and whenever the server wins
-                 * the race. Fall through to the shared completion
-                 * path below instead of returning early: an early
-                 * return here would skip stream_finish() and lose
-                 * the assembled tool calls, turning a tool round
-                 * into a silent empty answer. */
-                resp = nm_response(h->conn);
-                if (resp->status == 0) {
-                    /* EOF before a parsable head: dead connection. */
-                    h->done = 1;
-                    h->status = NM_CHAT_ERR_TRANSPORT;
-                    if (result) {
-                        result->status = NM_CHAT_ERR_TRANSPORT;
-                        result->http_status = 0;
-                        result->error_body = NULL;
-                    }
-                    stream_teardown(h);
-                    return NM_CHAT_ERR_TRANSPORT;
-                }
-            } else {
+            NmChatStatus s = head_pull_step(h);
+            if (s == NM_CHAT_PENDING)
+                return NM_CHAT_PENDING; /* head still incomplete */
+            if (s != NM_CHAT_OK) {
                 /* Fatal during the head pull: same treatment as the
                  * SSE body path below (fill result, teardown). */
                 h->done = 1;
                 h->status = s;
-                if (result) {
-                    result->status = s;
-                    result->http_status = h->http_status;
-                    result->error_body = h->error_body
-                                             ? strdup(h->error_body)
-                                             : NULL;
-                }
+                result_publish(h, result);
                 stream_teardown(h);
                 return s;
+            }
+            resp = nm_response(h->conn);
+            if (resp->status == 0) {
+                /* EOF before a parsable head: dead connection. */
+                h->done = 1;
+                h->status = NM_CHAT_ERR_TRANSPORT;
+                result_publish(h, result);
+                stream_teardown(h);
+                return NM_CHAT_ERR_TRANSPORT;
             }
         }
         h->head_checked = 1;
@@ -652,15 +838,18 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
     if (s == NM_CHAT_OK) {
         /* [DONE] or EOF. EOF before [DONE] is a truncated stream:
          * deliver what arrived but flag the transport condition. */
-        if (!h->done)
+        if (!h->done) {
             h->status = NM_CHAT_ERR_TRANSPORT;
-        stream_finish(h);
-        if (result) {
-            result->status = h->status;
-            result->http_status = h->http_status;
-            result->error_body = h->error_body ? strdup(h->error_body)
-                                               : NULL;
+            /* Prefer the transport's specific truncation detail
+             * (byte counts); the generic note is the fallback. */
+            const char *d = *h->error_body ? h->error_body
+                                           : nm_connection_last_error(h->conn);
+            snprintf(h->error_body, sizeof(h->error_body), "%s",
+                     *d ? d : "stream ended before [DONE]");
+            h->error_len = strlen(h->error_body);
         }
+        stream_finish(h);
+        result_publish(h, result);
         stream_teardown(h);
         return h->status;
     }
@@ -668,12 +857,7 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
         /* Fatal mid-stream error. */
         h->done = 1;
         h->status = s;
-        if (result) {
-            result->status = s;
-            result->http_status = h->http_status;
-            result->error_body = h->error_body ? strdup(h->error_body)
-                                               : NULL;
-        }
+        result_publish(h, result);
         stream_teardown(h);
     }
     return s;
@@ -700,14 +884,13 @@ void nm_openai_chat_end(NmChatStream *h)
     /* Cancelled or already-torn-down: tool calls still owned by the
      * client (never delivered) are freed here. */
     nm_tool_calls_free(h->tool_calls, h->n_tool_calls);
-    free(h->error_body);
     free(h);
 }
 
 NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
                             const NmChatRequest *req)
 {
-    NmChatResult r = { NM_CHAT_OK, 0, NULL };
+    NmChatResult r = { 0 };
     NmChatStream *h = nm_openai_chat_begin(ep, req, &r);
     if (!h)
         return r;
@@ -772,11 +955,11 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
         return NULL;
     }
 
-    NmTransportStatus tst;
-    NmConnection *conn = nm_connect(host, port, mode, &tst);
+    NmConnectInfo ci;
+    NmConnection *conn = nm_connect(host, port, mode, &ci);
     if (!conn) {
         if (err)
-            *err = "connect failed";
+            *err = *ci.detail ? ci.detail : "connect failed";
         return NULL;
     }
     /* One-shot fetch is user-facing-blocking (models popup, catalog
@@ -786,12 +969,14 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
-     * §5) + User-Agent. */
+     * §5) + User-Agent. The auth header is marked secret at its
+     * construction site (the redaction seam; WIRE-DEBUG §4). */
     NmRequestHeader hdrs[3];
     size_t nh = 0;
     if (body) {
         hdrs[nh].name = "Content-Type";
         hdrs[nh].value = "application/json";
+        hdrs[nh].secret = 0;
         nh++;
     }
     char authbuf[512];
@@ -799,21 +984,25 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
         snprintf(authbuf, sizeof(authbuf), auth_header, api_key);
         hdrs[nh].name = "Authorization";
         hdrs[nh].value = authbuf;
+        hdrs[nh].secret = 1;
         nh++;
     }
     hdrs[nh].name = "User-Agent";
     hdrs[nh].value = "nevermore (nevermore agent)";
+    hdrs[nh].secret = 0;
     nh++;
 
     size_t body_len = body ? strlen(body) : 0;
     if (nm_request(conn, method, path, hdrs, nh, body, body_len) != NM_TRANSPORT_OK) {
+        const char *d = nm_connection_last_error(conn);
         nm_connection_close(conn);
         if (err)
-            *err = "request failed";
+            *err = *d ? d : "request failed";
         return NULL;
     }
     const NmResponse *resp = nm_response(conn);
     if (resp->status < 200 || resp->status >= 300) {
+        nm_wire_tap_error(conn, "protocol", "http error");
         nm_connection_close(conn);
         if (err)
             *err = "http error";
@@ -848,6 +1037,10 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
             *err = "empty body";
         return NULL;
     }
+
+    /* response capture point: a complete non-streaming body (the
+     * one-shot fetch paths; WIRE-DEBUG §3 "response"). */
+    nm_wire_tap_response(conn, resp_body, len);
 
     const char *jerr = NULL;
     NmJson *doc = nm_json_parse(resp_body, len, &jerr);

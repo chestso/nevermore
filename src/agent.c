@@ -230,6 +230,27 @@ static void round_reset(NmAgent *a)
     a->n_calls = 0;
 }
 
+/* Compose the user-facing error from a failed chat round. The
+ * result's message is always set (NmChatResult contract); this adds
+ * the context the result can't know: which provider and, for auth
+ * failures against a keyed provider with no key configured, the env
+ * variable that would fix it. */
+static void chat_failure(NmAgent *a, const NmChatResult *r, char *out,
+                         size_t cap)
+{
+    size_t n = 0;
+    n += (size_t)snprintf(out + n, cap - n, "chat failed: %s",
+                          r->message[0] ? r->message : "unknown error");
+    if (r->status == NM_CHAT_ERR_AUTH && (!a->api_key || !*a->api_key) &&
+        a->provider->needs_auth(a->provider, a->base_url) &&
+        a->provider->env_key) {
+        const char *ek = a->provider->env_key(a->provider);
+        if (ek)
+            snprintf(out + n, cap - n,
+                     " (no API key set — export %s)", ek);
+    }
+}
+
 /* Open the next round's stream from the session's context view.
  * Returns 0 on success. */
 static int begin_round(NmAgent *a)
@@ -273,17 +294,14 @@ static int begin_round(NmAgent *a)
         a
     };
 
-    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatResult err = { 0 };
     a->stream =
         a->provider->chat_begin(a->provider, &req, a->base_url, a->api_key,
                                 &err);
     free(msgs);
     if (!a->stream) {
-        char msg[512];
-        snprintf(msg, sizeof(msg), "chat failed: %s",
-                 err.error_body ? err.error_body
-                                : "transport/parse error");
-        nm_chat_result_free(&err);
+        char msg[NM_CHAT_MSG_MAX + 64];
+        chat_failure(a, &err, msg, sizeof(msg));
         set_error(a, msg);
         return -1;
     }
@@ -298,9 +316,8 @@ static int begin_round(NmAgent *a)
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
     if (r->status != NM_CHAT_OK) {
-        char msg[512];
-        snprintf(msg, sizeof(msg), "chat failed: %s",
-                 r->error_body ? r->error_body : "transport/parse error");
+        char msg[NM_CHAT_MSG_MAX + 64];
+        chat_failure(a, r, msg, sizeof(msg));
         set_error(a, msg);
         return -1;
     }
@@ -375,7 +392,7 @@ int nm_agent_step(NmAgent *a)
     if (!a || !a->stream)
         return -1;
 
-    NmChatResult r = { NM_CHAT_OK, 0, NULL };
+    NmChatResult r = { 0 };
     NmChatStatus s = a->provider->chat_step(a->stream, &r);
     if (s == NM_CHAT_PENDING)
         return 0; /* more bytes later; fd stays live */
@@ -386,7 +403,6 @@ int nm_agent_step(NmAgent *a)
     a->stream = NULL;
 
     int fr = finish_round(a, &r);
-    nm_chat_result_free(&r);
     return fr >= 0 ? 0 : -1;
 }
 

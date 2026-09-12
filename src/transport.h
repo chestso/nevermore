@@ -33,7 +33,21 @@ typedef struct NmRequestHeader
 {
     const char *name;
     const char *value;
+    /* Wire-recording redaction marker (docs/WIRE-DEBUG.md §4): 1 =
+     * the value is a secret — any wire recording redacts it
+     * (<redacted>); 0 logs as-is. Set where the secret is built,
+     * never searched for afterwards: the constructor knows, the
+     * recorder honors. */
+    int secret;
 } NmRequestHeader;
+
+/* ---------------------------------------------------------------- */
+/* Status + diagnostics                                              */
+/* ---------------------------------------------------------------- */
+
+/* Error-detail cap: failure reasons are short strings (errno text,
+ * TLS backend messages, framing notes). Fixed-size, never heap. */
+#define NM_ERR_DETAIL_MAX 192
 
 typedef enum
 {
@@ -46,6 +60,15 @@ typedef enum
     NM_TRANSPORT_ERR_NOMEM
 } NmTransportStatus;
 
+/* Connect diagnostics (out-parameter of nm_connect / nm_connect_async).
+ * detail is ALWAYS set when status != NM_TRANSPORT_OK — the always-set
+ * contract: every failure carries a human-readable reason. */
+typedef struct NmConnectInfo
+{
+    NmTransportStatus status;
+    char detail[NM_ERR_DETAIL_MAX];
+} NmConnectInfo;
+
 /* ---------------------------------------------------------------- */
 /* Connection: one request/response exchange (keep-alive comes later) */
 /* ---------------------------------------------------------------- */
@@ -53,10 +76,16 @@ typedef enum
 typedef struct NmConnection NmConnection;
 
 /* Open a connection to host:port, negotiating TLS when mode asks for it.
- * NULL + status out on failure. */
+ * NULL + info out on failure. info may be NULL. */
 NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
-                         NmTransportStatus *status);
+                         NmConnectInfo *info);
 void nm_connection_close(NmConnection *conn);
+
+/* The most recent failure's human-readable reason (DNS/connect/TLS/
+ * send/framing/truncation). Borrowed pointer: valid until the next
+ * request is queued on the connection or it is closed. "" when the
+ * connection has no failure recorded. */
+const char *nm_connection_last_error(const NmConnection *conn);
 
 /* Bound the BLOCKING reads on this connection (SO_RCVTIMEO): a read
  * that sees no bytes within `seconds` fails instead of hanging. For
@@ -91,8 +120,7 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
  * SO_ERROR semantics are the app's business — the step polls the
  * phase, so writability dispatch arrives with the failure). */
 NmConnection *nm_connect_async(const char *host, int port,
-                               NmTransportMode mode,
-                               NmTransportStatus *status);
+                               NmTransportMode mode, NmConnectInfo *info);
 
 /* Current wait interest for the event loop: {fd, NM_INTEREST_*} —
  * fd is -1 when there is nothing to wait on. Each connection answers
@@ -232,6 +260,71 @@ typedef struct NmTlsBackend
  * was found — nm_connect() fails with NM_TRANSPORT_ERR_TLS for
  * NM_TRANSPORT_TLS in that case. */
 const NmTlsBackend *nm_tls_backend(void);
+
+/* ---------------------------------------------------------------- */
+/* Wire tap (docs/WIRE-DEBUG.md): the recording seam                 */
+/* ---------------------------------------------------------------- */
+
+struct NmConnection; /* tap signatures borrow it opaquely */
+
+/* One tap per process, installed once at startup — mirrors the
+ * nm_tls_backend() precedent (process-global, selected once,
+ * single-threaded app). The transport calls these hooks at the
+ * structured capture points; the wire recorder (wire_recorder.c) is
+ * the implementation. NULL tap = zero overhead (one pointer check
+ * per hook). conn may be NULL only for pre-connection errors. */
+typedef struct NmWireTap
+{
+    void (*on_connect)(const struct NmConnection *conn, const char *host,
+                       int port, NmTransportMode mode);
+    void (*on_request)(const struct NmConnection *conn, const char *method,
+                       const char *path, const NmRequestHeader *headers,
+                       size_t n_headers, const char *body, size_t body_len);
+    void (*on_response_head)(const struct NmConnection *conn, int status,
+                             const char *status_text, const char *http_version,
+                             const char *content_type, int chunked,
+                             long long content_length);
+    void (*on_response)(const struct NmConnection *conn, const char *body,
+                        size_t body_len);
+    void (*on_stream_event)(const struct NmConnection *conn,
+                            const char *event, const char *data,
+                            size_t data_len);
+    void (*on_error)(const struct NmConnection *conn, const char *stage,
+                     const char *detail);
+} NmWireTap;
+
+/* Install (or clear with NULL) the process-global tap. */
+void nm_transport_set_wire_tap(const NmWireTap *tap);
+
+/* The installed tap (NULL when off). Internal call sites use this;
+ * the hook wrappers below keep call sites terse. */
+const NmWireTap *nm_wire_tap(void);
+
+/* Hook wrappers (internal; no-op when no tap is installed). */
+void nm_wire_tap_connect(const struct NmConnection *conn, const char *host,
+                         int port, NmTransportMode mode);
+void nm_wire_tap_request(const struct NmConnection *conn, const char *method,
+                         const char *path, const NmRequestHeader *headers,
+                         size_t n_headers, const char *body, size_t body_len);
+void nm_wire_tap_response_head(const struct NmConnection *conn, int status,
+                               const char *status_text,
+                               const char *http_version,
+                               const char *content_type, int chunked,
+                               long long content_length);
+void nm_wire_tap_response(const struct NmConnection *conn, const char *body,
+                          size_t body_len);
+void nm_wire_tap_stream_event(const struct NmConnection *conn,
+                              const char *event, const char *data,
+                              size_t data_len);
+void nm_wire_tap_error(const struct NmConnection *conn, const char *stage,
+                       const char *detail);
+
+/* Variant carrying the HTTP status (the error-body paths: the wire
+ * answered, and the status is the machine-readable part of the
+ * failure). Emitted as the same "error" line plus httpStatus. */
+void nm_wire_tap_error_status(const struct NmConnection *conn,
+                              const char *stage, const char *detail,
+                              int http_status);
 
 #ifdef __cplusplus
 }

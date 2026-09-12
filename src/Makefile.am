@@ -76,6 +76,8 @@ nevermore_SOURCES = \
     transport.c \
     connection_layout.h \
     transport_socket.c \
+    wire_recorder.h \
+    wire_recorder.c \
     sse.c \
     json.c \
     agent.c \
@@ -98,6 +100,7 @@ nevermore_SOURCES = \
 nevermore_CPPFLAGS = \
     -I$(top_builddir) \
     -I$(top_srcdir)/src \
+    -DNM_WIRE_HAS_VERSION_HEADER \
     $(BOBA_CFLAGS) \
     $(OPENSSL_CFLAGS) \
     $(MBEDTLS_CFLAGS)

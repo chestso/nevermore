@@ -49,11 +49,40 @@ static const char *openssl_errstr(void)
 {
     static char buf[256];
     unsigned long e = ERR_peek_last_error();
-    if (e)
+    if (e) {
         ERR_error_string_n(e, buf, sizeof(buf));
-    else
-        snprintf(buf, sizeof(buf), "unknown OpenSSL error");
+        return buf;
+    }
+    snprintf(buf, sizeof(buf), "unknown OpenSSL error");
     return buf;
+}
+
+/* Failure reason for a failed SSL_* call: TLS-protocol errors carry
+ * queue entries (openssl_errstr); I/O failures leave the queue EMPTY
+ * and only report errno — an ECONNREFUSED/EHOSTUNREACH/unreachable
+ * peer inside the handshake used to surface as the useless "unknown
+ * OpenSSL error". Classifies via SSL_get_error + errno. */
+static const char *openssl_call_errstr(SSL *ssl, int ret)
+{
+    static char buf[256];
+    unsigned long e = ERR_peek_last_error();
+    if (e) {
+        ERR_error_string_n(e, buf, sizeof(buf));
+        return buf;
+    }
+    int why = SSL_get_error(ssl, ret);
+    switch (why) {
+    case SSL_ERROR_ZERO_RETURN:
+        return "connection closed cleanly during the TLS handshake";
+    case SSL_ERROR_SYSCALL:
+    case SSL_ERROR_WANT_READ:
+    case SSL_ERROR_WANT_WRITE:
+        return errno ? strerror(errno)
+                     : "connection failed during the TLS handshake";
+    default:
+        snprintf(buf, sizeof(buf), "TLS error %d", why);
+        return buf;
+    }
 }
 
 static void *openssl_handshake(int fd, const char *host, const char **err)
@@ -71,9 +100,10 @@ static void *openssl_handshake(int fd, const char *host, const char **err)
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host); /* SNI */
     SSL_set1_host(ssl, host);            /* hostname verification */
-    if (SSL_connect(ssl) != 1) {
+    int rc = SSL_connect(ssl);
+    if (rc != 1) {
         if (err)
-            *err = openssl_errstr();
+            *err = openssl_call_errstr(ssl, rc);
         SSL_free(ssl);
         return NULL;
     }
@@ -83,10 +113,11 @@ static void *openssl_handshake(int fd, const char *host, const char **err)
 static long openssl_write(void *ctx, const char *buf, size_t len,
                           const char **err)
 {
-    int n = SSL_write((SSL *)ctx, buf, (int)len);
+    SSL *ssl = ctx;
+    int n = SSL_write(ssl, buf, (int)len);
     if (n <= 0) {
         if (err)
-            *err = openssl_errstr();
+            *err = openssl_call_errstr(ssl, n);
         return -1;
     }
     return n;
@@ -94,16 +125,17 @@ static long openssl_write(void *ctx, const char *buf, size_t len,
 
 static long openssl_read(void *ctx, char *buf, size_t len, const char **err)
 {
-    int n = SSL_read((SSL *)ctx, buf, (int)len);
+    SSL *ssl = ctx;
+    int n = SSL_read(ssl, buf, (int)len);
     if (n <= 0) {
-        int why = SSL_get_error((SSL *)ctx, n);
+        int why = SSL_get_error(ssl, n);
         if (why == SSL_ERROR_ZERO_RETURN) {
             if (err)
                 *err = NULL;
             return 0; /* clean EOF */
         }
         if (err)
-            *err = openssl_errstr();
+            *err = openssl_call_errstr(ssl, n);
         return -1;
     }
     return n;

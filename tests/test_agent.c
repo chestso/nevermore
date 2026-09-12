@@ -123,6 +123,40 @@ static void *agent_server_thread(void *arg)
     return NULL;
 }
 
+/* One-shot 401 responder (error-message tests): accept once, drain
+ * the request, answer 401 with a JSON error body, close. */
+static void *auth_401_server_thread(void *arg)
+{
+    struct ServerScript *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    if (got == 0) {
+        /* Client tore down before sending (cancel race): no round. */
+        close(cfd);
+        return NULL;
+    }
+    static const char resp[] =
+        "HTTP/1.1 401 Unauthorized\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"invalid api key\",\"code\":\"bad_key\""
+        "}}";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
 static int server_bind(int *port)
 {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -591,6 +625,87 @@ static void test_agent_cancel_then_next_turn_works(void)
     remove(FIXTURE);
 }
 
+/* The user-facing failure string (what the TUI prints): the agent
+ * must surface the result's always-set message — "transport/parse
+ * error" guess strings are gone. A 401 also hints the env var. */
+static void test_agent_error_message_is_informative(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = NULL; /* no SSE round: the server answers 401 */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    /* One-shot server: drain the request, answer 401 + a JSON body. */
+    pthread_t th;
+    pthread_create(&th, NULL, auth_401_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, "bad-key");
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    int rc = nm_agent_turn(agent, "hello");
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "chat failed: auth rejected (HTTP 401)") != NULL);
+    ASSERT_TRUE(strstr(err, "invalid api key") != NULL);
+    /* Key was set (bad), so no env-var hint. */
+    ASSERT_TRUE(strstr(err, "export") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+static void test_agent_error_message_hints_env_var(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = NULL;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, auth_401_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    /* No key: the auth hint names the provider's env var. */
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    int rc = nm_agent_turn(agent, "hello");
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "no API key set — export HYPER_API_KEY") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_agent_set_model_changes_wire_model(void)
 {
     reset_capture();
@@ -645,6 +760,8 @@ int main(void)
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_cancel_then_next_turn_works);
+    RUN_TEST(test_agent_error_message_is_informative);
+    RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_set_model_changes_wire_model);
     TEST_SUMMARY();
 }

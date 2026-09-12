@@ -23,6 +23,18 @@
 #include "openai_client.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
+#include "wire_recorder.h"
+
+/* MinGW has no setenv (POSIX). */
+static void test_setenv(const char *name, const char *value, int overwrite)
+{
+    (void)overwrite;
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, overwrite);
+#endif
+}
 
 /* ---------------------------------------------------------------- */
 /* Canned server: validates the request, streams a fixed SSE body    */
@@ -152,7 +164,6 @@ static void test_chat_stream_end_to_end(void)
     NmChatResult r = nm_openai_chat(&ep, &req);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
-    nm_chat_result_free(&r);
     pthread_join(th, NULL);
     close(lfd);
 
@@ -236,7 +247,7 @@ static void test_chat_step_pending_between_events(void)
         capture_delta, &cap
     };
 
-    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatResult err = { 0 };
     NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
     ASSERT_NOT_NULL(h);
     int fd = nm_openai_stream_fd(h);
@@ -248,7 +259,7 @@ static void test_chat_step_pending_between_events(void)
     int saw_pending = 0;
     int saw_delta_before_pending = 0;
     NmChatStatus st = NM_CHAT_PENDING;
-    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    NmChatResult result = { 0 };
     for (int spin = 0; spin < 500 && st == NM_CHAT_PENDING; spin++) {
         struct timeval tv = { 0, 10 * 1000 };
         FD_ZERO(&fds);
@@ -269,7 +280,6 @@ static void test_chat_step_pending_between_events(void)
     /* fd accessor must be closed/-1 after the stream completes. */
     ASSERT_EQ(nm_openai_stream_fd(h), -1);
     nm_openai_chat_end(h);
-    nm_chat_result_free(&result);
     pthread_join(th, NULL);
     close(lfd);
 }
@@ -344,7 +354,7 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
         capture_delta, &cap
     };
 
-    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatResult err = { 0 };
     NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
     ASSERT_NOT_NULL(h);
 
@@ -353,7 +363,7 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
      * Wait on the CURRENT interest bits per step (connect/send are
      * async now: the pump waits writability, then readability — the
      * same thing boba's fill does, spelled inline). */
-    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    NmChatResult result = { 0 };
     NmChatStatus st = NM_CHAT_PENDING;
     int steps = 0;
     for (; steps < 500 && st == NM_CHAT_PENDING; steps++) {
@@ -390,7 +400,6 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
 
     nm_tool_calls_free(cap.tool_calls, cap.n_tool_calls);
     nm_openai_chat_end(h);
-    nm_chat_result_free(&result);
     pthread_join(th, NULL);
     close(lfd);
 }
@@ -436,19 +445,323 @@ static void test_chat_step_cancel_mid_stream(void)
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
     };
 
-    NmChatResult err = { NM_CHAT_OK, 0, NULL };
+    NmChatResult err = { 0 };
     NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
     ASSERT_NOT_NULL(h);
 
     /* Step once (no bytes yet): PENDING. Then cancel — chat_end must
      * free the stream mid-flight without hanging or leaking. */
-    NmChatResult result = { NM_CHAT_OK, 0, NULL };
+    NmChatResult result = { 0 };
     ASSERT_EQ(nm_openai_chat_step(h, &result), NM_CHAT_PENDING);
     nm_openai_chat_end(h);
-    nm_chat_result_free(&result);
 
     pthread_join(th, NULL);
     close(lfd);
+}
+
+/* ---------------------------------------------------------------- */
+/* Error diagnostics (always-set contract)                          */
+/* ---------------------------------------------------------------- */
+
+/* HTTP 401 with a JSON body: the result carries ERR_AUTH, the HTTP
+ * code, and the provider's error text. */
+static void *auth_error_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char resp[] =
+        "HTTP/1.1 401 Unauthorized\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"bad key\"}}";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    close(cfd); /* EOF completes the connection-close framed body */
+    return NULL;
+}
+
+static void test_chat_auth_error_carries_detail(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, auth_error_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "bad-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_AUTH);
+    ASSERT_EQ(r.http_status, 401);
+    /* Always-set contract: the message names the code + body text. */
+    ASSERT_TRUE(r.message[0] != '\0');
+    ASSERT_TRUE(strstr(r.message, "HTTP 401") != NULL);
+    ASSERT_TRUE(strstr(r.message, "bad key") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* Connect refused: the transport detail (host:port + errno) rides
+ * the result message. */
+static void test_chat_connect_refused_names_target(void)
+{
+    NmOpenaiEndpoint ep = { "http://127.0.0.1:1/v1", NULL, NULL,
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_TRANSPORT);
+    ASSERT_TRUE(r.message[0] != '\0');
+    /* The loopback RST can beat begin's return or land in the first
+     * step; either way the message must name the target. */
+    ASSERT_TRUE(strstr(r.message, "127.0.0.1") != NULL);
+}
+
+/* Truncated body: Content-Length promises more than the peer sends
+ * before closing; the detail reports the byte accounting. */
+static void *truncate_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Content-Length: 100\r\n\r\n"
+        "data: {\"choices\":";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    usleep(50 * 1000);
+    close(cfd); /* 18 of 100 promised bytes: truncated */
+    return NULL;
+}
+
+static void test_chat_truncated_body_reports_byte_counts(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, truncate_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_TRANSPORT);
+    ASSERT_TRUE(r.message[0] != '\0');
+    ASSERT_TRUE(strstr(r.message, "closed with") != NULL);
+    ASSERT_TRUE(strstr(r.message, "of 100 body bytes") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* ---------------------------------------------------------------- */
+/* Wire debug recorder tap-through (docs/WIRE-DEBUG.md)              */
+/* ---------------------------------------------------------------- */
+
+/* The failure-path recorder round trip: a marked auth header's value
+ * never reaches the file even through the real client path. */
+static void *wiretap_401_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char resp[] =
+        "HTTP/1.1 401 Unauthorized\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"bad key\"}}";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
+static char taplog[512];
+
+static const char *taplog_path(void)
+{
+    if (!taplog[0])
+#ifdef _WIN32
+        snprintf(taplog, sizeof(taplog),
+                 "C:/Users/Public/nm-wire-openai-%d.ndjson", (int)getpid());
+#else
+        snprintf(taplog, sizeof(taplog), "/tmp/nm-wire-openai-%d.ndjson",
+                 (int)getpid());
+#endif
+    return taplog;
+}
+
+static void taplog_reset(void)
+{
+    remove(taplog_path());
+}
+
+static char *taplog_read(void)
+{
+    FILE *f = fopen(taplog_path(), "r");
+    if (!f)
+        return NULL;
+    char *buf = malloc(65536);
+    if (!buf) {
+        fclose(f);
+        return NULL;
+    }
+    size_t n = fread(buf, 1, 65535, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* Count lines carrying the given kind. */
+static int log_count_kind(const char *log, const char *kind)
+{
+    char needle[64];
+    snprintf(needle, sizeof(needle), "\"kind\":\"%s\"", kind);
+    int n = 0;
+    const char *p = log;
+    while ((p = strstr(p, needle)) != NULL) {
+        n++;
+        p++;
+    }
+    return n;
+}
+
+static void test_wiretap_401_records_error_with_status(void)
+{
+    taplog_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, wiretap_401_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "wiretap-secret-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmChatRequest req = {
+        "gpt-4o", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_AUTH);
+
+    pthread_join(th, NULL);
+    close(lfd);
+    nm_wire_recorder_shutdown();
+
+    char *log = taplog_read();
+    ASSERT_NOT_NULL(log);
+    /* The marked header is redacted on the REAL client path. */
+    ASSERT_TRUE(strstr(log, "wiretap-secret-key") == NULL);
+    ASSERT_TRUE(strstr(log, "<redacted>") != NULL);
+    /* Sequence: request -> response-head -> error, all correlated. */
+    ASSERT_TRUE(log_count_kind(log, "request") == 1);
+    ASSERT_TRUE(log_count_kind(log, "response-head") == 1);
+    ASSERT_TRUE(log_count_kind(log, "error") >= 1);
+    ASSERT_TRUE(strstr(log, "\"status\":401") != NULL);
+    ASSERT_TRUE(strstr(log, "\"stage\":\"protocol\"") != NULL);
+    /* Same (conn, xchg) pair joins the sequence. */
+    ASSERT_TRUE(strstr(log, "\"xchg\":1") != NULL);
+    free(log);
+}
+
+/* Scripted SSE stream: N events in, N stream-event lines out. */
+static void test_wiretap_stream_records_events(void)
+{
+    taplog_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama", "gpt-oss:20b"), 1);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "key", "nevermore-test" };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hello, world");
+
+    pthread_join(th, NULL);
+    close(lfd);
+    nm_wire_recorder_shutdown();
+
+    char *log = taplog_read();
+    ASSERT_NOT_NULL(log);
+    /* The canned stream carries exactly three SSE events; each one
+     * is a stream-event line — 1:1 with the parser's emissions. */
+    ASSERT_EQ(log_count_kind(log, "stream-event"), 3);
+    /* The [DONE] event's data rides raw (no derived lines). */
+    ASSERT_TRUE(strstr(log, "[DONE]") != NULL);
+    /* The request + head are there too. */
+    ASSERT_EQ(log_count_kind(log, "request"), 1);
+    ASSERT_EQ(log_count_kind(log, "response-head"), 1);
+    free(log);
 }
 
 int main(int argc, char *argv[])
@@ -467,5 +780,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_step_pending_between_events);
     RUN_TEST(test_chat_step_whole_response_in_first_read_delivers_tools);
     RUN_TEST(test_chat_step_cancel_mid_stream);
+    RUN_TEST(test_chat_auth_error_carries_detail);
+    RUN_TEST(test_chat_connect_refused_names_target);
+    RUN_TEST(test_chat_truncated_body_reports_byte_counts);
+    RUN_TEST(test_wiretap_401_records_error_with_status);
+    RUN_TEST(test_wiretap_stream_records_events);
     TEST_SUMMARY();
 }

@@ -7,6 +7,7 @@ check_PROGRAMS = \
     test_provider \
     test_source \
     test_wire \
+    test_wire_recorder \
     test_openai_client \
     test_tls \
     test_session \
@@ -86,7 +87,7 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE)
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -97,23 +98,35 @@ test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE)
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_source_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_source_LDADD = $(TEST_TLS_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
-test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE)
+test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c \
+    ../src/wire_recorder.c ../src/json.c $(TEST_TLS_SOURCE)
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
+
+# Wire debug recorder (docs/WIRE-DEBUG.md): banner + NDJSON event
+# lines + redaction via the header secret marker, plus a tap round
+# trip against a canned loopback server. Direct recorder calls, no
+# real network.
+test_wire_recorder_SOURCES = test_wire_recorder.c ../src/wire_recorder.c \
+    ../src/json.c ../src/transport.c ../src/transport_socket.c \
+    $(TEST_TLS_SOURCE)
+test_wire_recorder_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_wire_recorder_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # End-to-end: the shared OpenAI-compatible client against a canned
 # chat/completions SSE server (request validation + delta assembly).
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
 test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(TEST_TLS_CFLAGS_EXTRA)
@@ -150,7 +163,7 @@ test_tools_LDADD = -lpthread
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
     ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
-    ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)

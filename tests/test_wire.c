@@ -100,8 +100,8 @@ static void test_wire_content_length(void)
     pthread_t th;
     pthread_create(&th, NULL, server_thread, &sc);
 
-    NmTransportStatus st;
-    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
     const NmResponse *r = nm_response(c);
@@ -148,8 +148,8 @@ static void test_wire_chunked_sse(void)
     pthread_t th;
     pthread_create(&th, NULL, server_thread, &sc);
 
-    NmTransportStatus st;
-    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request(c, "POST", "/v1/chat/completions", NULL, 0,
                          "{\"q\":1}", 7),
@@ -195,8 +195,8 @@ static void test_wire_http_error_status(void)
     pthread_t th;
     pthread_create(&th, NULL, server_thread, &sc);
 
-    NmTransportStatus st;
-    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request(c, "GET", "/missing", NULL, 0, NULL, 0),
               NM_TRANSPORT_OK);
@@ -222,10 +222,37 @@ static void test_wire_refused(void)
     int fd = server_bind(&port);
     ASSERT_TRUE(fd >= 0);
     close(fd);
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NULL(c);
-    ASSERT_EQ(st, NM_TRANSPORT_ERR_SOCKET);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
+    /* Always-set contract: the failure names the target. */
+    ASSERT_TRUE(ci.detail[0] != '\0');
+    ASSERT_TRUE(strstr(ci.detail, "connect 127.0.0.1:") != NULL);
+}
+
+/* DNS failure: a non-resolvable host names the reason. (Offline CI:
+ * a resolver is required to answer NXDOMAIN for this TLD-free name;
+ * if a captive resolver answers anything, connect fails with the
+ * same always-set detail, so both paths assert on detail != "".) */
+static void test_wire_connect_error_detail_always_set(void)
+{
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("nonexistent.invalid", 1,
+                                 NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NULL(c);
+    ASSERT_TRUE(ci.status != NM_TRANSPORT_OK);
+    ASSERT_TRUE(ci.detail[0] != '\0'); /* always-set contract */
+    ASSERT_TRUE(strstr(ci.detail, "nonexistent.invalid") != NULL);
+
+    /* Async connect: same contract, same reason surface. */
+    NmConnectInfo aci = { 0 };
+    NmConnection *a = nm_connect_async("nonexistent.invalid", 1,
+                                       NM_TRANSPORT_PLAIN, &aci);
+    ASSERT_NULL(a);
+    ASSERT_TRUE(aci.status != NM_TRANSPORT_OK);
+    ASSERT_TRUE(aci.detail[0] != '\0');
+    ASSERT_TRUE(strstr(aci.detail, "nonexistent.invalid") != NULL);
 }
 
 /* ---------------------------------------------------------------- */
@@ -263,9 +290,9 @@ static void test_wire_nonblocking_read_would_block(void)
     pthread_t th;
     pthread_create(&th, NULL, stall_server_thread, &sc);
 
-    NmTransportStatus st;
+    NmConnectInfo ci;
     NmConnection *c =
-        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
 
     /* Event-driven contract: send the request, don't wait for the
@@ -330,9 +357,9 @@ static void test_wire_nonblocking_head_resume(void)
     pthread_t th;
     pthread_create(&th, NULL, dribble_server_thread, &sc);
 
-    NmTransportStatus st;
+    NmConnectInfo ci;
     NmConnection *c =
-        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+        nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request_send(c, "POST", "/v1/chat/completions", NULL, 0,
                               "{}", 2),
@@ -438,9 +465,9 @@ static void test_async_connect_interest_and_phases(void)
     pthread_t th;
     pthread_create(&th, NULL, server_thread, &sc);
 
-    NmTransportStatus st;
+    NmConnectInfo ci;
     NmConnection *c =
-        nm_connect_async("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+        nm_connect_async("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
 
     /* Interest while connecting: WRITE on a live fd. */
@@ -498,12 +525,12 @@ static void test_async_connect_interest_and_phases(void)
  * flight), the step surfaces the failure once the RST lands. */
 static void test_async_connect_refused_step_errors(void)
 {
-    NmTransportStatus st = NM_TRANSPORT_OK;
-    NmConnection *c = nm_connect_async("127.0.0.1", 1, NM_TRANSPORT_PLAIN, &st);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect_async("127.0.0.1", 1, NM_TRANSPORT_PLAIN, &ci);
     /* The RST can beat the return (loopback): NULL + ERR_SOCKET is
      * also a legitimate outcome. */
     if (!c) {
-        ASSERT_EQ(st, NM_TRANSPORT_ERR_SOCKET);
+        ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
         return;
     }
 
@@ -579,9 +606,9 @@ static void test_async_send_partial_resume(void)
     pthread_t th;
     pthread_create(&th, NULL, slow_drain_server, &sc);
 
-    NmTransportStatus st;
+    NmConnectInfo ci;
     NmConnection *c =
-        nm_connect_async("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &st);
+        nm_connect_async("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
 
     NmRequestHeader h = { "X-Test", "resume" };
@@ -644,6 +671,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_http_error_status);
     RUN_TEST(test_wire_refused);
+    RUN_TEST(test_wire_connect_error_detail_always_set);
     RUN_TEST(test_wire_nonblocking_read_would_block);
     RUN_TEST(test_wire_nonblocking_head_resume);
     RUN_TEST(test_async_connect_interest_and_phases);
