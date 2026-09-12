@@ -51,7 +51,9 @@ jobs:
           # test binaries serially inside the timed test step —
           # serial compile time was a big chunk of the mysterious
           # macOS "Run tests" stalls (it was never only the tests).
-          make -j"$(sysctl -n hw.ncpu)" check_PROGRAMS
+          # (check_PROGRAMS is a tests/ subdir target — no such
+          # rule at the build root.)
+          make -j"$(sysctl -n hw.ncpu)" -C tests check_PROGRAMS
 
       - name: Run tests
         # Hard cap: one hung step can never again burn the 4h job
