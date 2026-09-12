@@ -199,7 +199,17 @@ TESTS = $(check_PROGRAMS)
 check-programs: $(check_PROGRAMS)
 
 # Verbose logging flag convention: pass -v to any test binary.
-TESTS_ENVIRONMENT =
+#
+# Network gate: the suite must never make a REAL network call. Tests
+# that exercise wire paths point at scripted loopback servers via
+# explicit base URLs; but catalog sources default to probing the
+# provider's default endpoint (local daemon 127.0.0.1:11434,
+# api.openai.com, ...) when no base URL is given — on CI that probe's
+# refusal latency is environment-dependent (a blackholed loopback
+# connect stalled Windows CI past the 10s watchdog). NM_NO_LIVE_CATALOG
+# makes default-base probes no-ops (static fallback); explicit-base
+# fetches are unaffected.
+TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1
 
 EXTRA_DIST = test_helpers.h tls/test-cert.pem tls/test-key.pem tls/README.md
 

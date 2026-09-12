@@ -540,6 +540,31 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
     }
 }
 
+NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn,
+                                             int seconds)
+{
+    if (!conn || conn->fd < 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+    /* SO_RCVTIMEO works for both plain and TLS reads (TLS I/O rides
+     * the same fd) and on Winsock + POSIX alike — the one bounded-
+     * blocking knob that needs no per-OS file. */
+#ifdef _WIN32
+    DWORD ms = (DWORD)seconds * 1000;
+    if (seconds == 0)
+        ms = 0;
+    if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, (const char *)&ms,
+                   sizeof(ms)) != 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+#else
+    struct timeval tv;
+    tv.tv_sec = seconds;
+    tv.tv_usec = 0;
+    if (setsockopt(conn->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+        return NM_TRANSPORT_ERR_SOCKET;
+#endif
+    return NM_TRANSPORT_OK;
+}
+
 NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn)
 {
     if (!conn || conn->fd < 0)

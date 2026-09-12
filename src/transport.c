@@ -203,6 +203,12 @@ void nm_connection_close(NmConnection *conn)
     free(conn);
 }
 
+NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
+                                                 int seconds)
+{
+    return nm_socket_set_recv_timeout(conn, seconds);
+}
+
 NmTransportStatus nm_request(NmConnection *conn, const char *method,
                              const char *path, const NmRequestHeader *headers,
                              size_t n_headers, const char *body, size_t body_len)

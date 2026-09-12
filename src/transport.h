@@ -58,6 +58,15 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
                          NmTransportStatus *status);
 void nm_connection_close(NmConnection *conn);
 
+/* Bound the BLOCKING reads on this connection (SO_RCVTIMEO): a read
+ * that sees no bytes within `seconds` fails instead of hanging. For
+ * the one-shot fetch paths (model catalogs, /models) so a wedged
+ * peer (a local daemon that accepted but never answers) degrades to
+ * the static fallback instead of freezing the app. seconds 0 clears
+ * the timeout. Best-effort: returns ERR_SOCKET on failure. */
+NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
+                                                 int seconds);
+
 /* ---------------------------------------------------------------- */
 /* Async connect + resumable send (N1; boba subscriptions seam)      */
 /* ---------------------------------------------------------------- */

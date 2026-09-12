@@ -233,7 +233,8 @@ static const NmModel *ollama_models(const NmProvider *p, const char *base_url,
                                     const char *api_key, size_t *n_out)
 {
     (void)p;
-    if (!ollama_live_models)
+    if (!ollama_live_models &&
+        (base_url || nm_live_catalog_enabled()))
         ollama_fetch_catalog(base_url, api_key);
     if (ollama_live_models) {
         if (n_out)

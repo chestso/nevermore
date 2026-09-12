@@ -85,6 +85,10 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
     NmConnection *conn = nm_connect(host, port, mode, &tst);
     if (!conn)
         return;
+    /* Bounded one-shot fetch: a wedged peer degrades to the static
+     * fallback instead of hanging the catalog call (seen on Windows
+     * CI where a loopback:11434 probe stalled >10s). */
+    nm_connection_set_recv_timeout(conn, 2);
 
     NmRequestHeader hdrs[2];
     size_t nh = 0;
@@ -181,7 +185,7 @@ static const NmModel *openai_models(const NmProvider *p, const char *base_url,
                                     const char *api_key, size_t *n_out)
 {
     (void)p;
-    if (!openai_live_models)
+    if (!openai_live_models && (base_url || nm_live_catalog_enabled()))
         openai_fetch_catalog(base_url, api_key);
     if (openai_live_models) {
         if (n_out)

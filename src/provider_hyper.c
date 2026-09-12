@@ -129,7 +129,7 @@ static const NmModel *hyper_models(const NmProvider *p, const char *base_url,
 {
     (void)p;
     (void)api_key; /* catalog is tokenless (HYPER-API.md §5) */
-    if (!hyper_live_models)
+    if (!hyper_live_models && (base_url || nm_live_catalog_enabled()))
         hyper_fetch_catalog(base_url);
     if (hyper_live_models) {
         if (n_out)

@@ -147,7 +147,7 @@ static const NmModel *openrouter_models(const NmProvider *p,
 {
     (void)p;
     (void)api_key; /* the catalog is public (OPENROUTER-API.md §1) */
-    if (!openrouter_live_models)
+    if (!openrouter_live_models && (base_url || nm_live_catalog_enabled()))
         openrouter_fetch_catalog(base_url);
     if (openrouter_live_models) {
         if (n_out)

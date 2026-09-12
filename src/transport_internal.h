@@ -47,6 +47,13 @@ int nm_socket_fd(NmConnection *conn);
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len);
 void nm_socket_shutdown(int fd);
 
+/* Bound blocking reads on the connection's socket: SO_RCVTIMEO, so a
+ * wedged peer (local daemon that accepted but never answers) makes
+ * nm_conn_read fail instead of hanging the one-shot fetch forever.
+ * Plain + TLS (TLS reads ride the same fd). Returns ERR_SOCKET on
+ * failure; a 0 timeout clears it. */
+NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
+
 /* Raw I/O over whichever channel the connection uses (plain or TLS). */
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len);
 long nm_conn_read(NmConnection *conn, char *buf, size_t len);

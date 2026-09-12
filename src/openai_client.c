@@ -779,6 +779,10 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
             *err = "connect failed";
         return NULL;
     }
+    /* One-shot fetch is user-facing-blocking (models popup, catalog
+     * refresh): bound it, so a wedged peer degrades to the static
+     * fallback instead of freezing the UI. */
+    nm_connection_set_recv_timeout(conn, 2);
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
