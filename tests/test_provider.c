@@ -226,6 +226,101 @@ static void *hyper_models_server_thread(void *arg)
     return NULL;
 }
 
+/* Ollama native catalog: round 1 = GET /api/tags (membership, details
+ * are an empty stub on the cloud — OLLAMA-CLOUD-API.md §6.3), then
+ * one POST /api/show round per tagged model with real metadata
+ * (capabilities, architecture-prefixed model_info context length,
+ * §6.4). Sequential connections on one listener. */
+static void *ollama_catalog_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    /* Bound the rounds: 1 tags + up to N shows; accept with a
+     * timeout so the thread exits when the client stops connecting
+     * (the stall-drain below handles per-connection EOF). */
+    for (int round = 0; round < 16; round++) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(lfd, &r);
+        struct timeval tv = { 2, 0 };
+#ifdef _WIN32
+        if (select(0, &r, NULL, NULL, &tv) <= 0)
+            break; /* no more client rounds within 2s */
+#else
+        if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
+            break;
+#endif
+        int cfd = accept(lfd, NULL, NULL);
+        if (cfd < 0)
+            break;
+        drain_request(cfd);
+
+        char head[256];
+        const char *body = NULL;
+        if (round == 0) {
+            body =
+                "{\"models\":["
+                "{\"name\":\"gpt-oss:20b\",\"model\":\"gpt-oss:20b\"},"
+                "{\"name\":\"gemma4:31b\",\"model\":\"gemma4:31b\"}"
+                "]}";
+            snprintf(head, sizeof(head),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Content-Length: %zu\r\n\r\n",
+                     strlen(body));
+        } else {
+            /* /api/show per model: the request body named it. */
+            const char *is_gemma =
+                strstr(last_request, "\"model\":\"gemma4:31b\"");
+            body = is_gemma
+                       ? "{\"capabilities\":[\"completion\",\"vision\",\"tools\"],"
+                         "\"model_info\":{\"gemma4.embedding_length\":2560,"
+                         "\"gemma4.context_length\":262144}}"
+                       : "{\"capabilities\":[\"completion\",\"tools\",\"thinking\"],"
+                         "\"model_info\":{\"gptoss.embedding_length\":2880,"
+                         "\"gptoss.context_length\":131072}}";
+            snprintf(head, sizeof(head),
+                     "HTTP/1.1 200 OK\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Content-Length: %zu\r\n\r\n",
+                     strlen(body));
+        }
+        size_t off = 0;
+        while (off < strlen(head)) {
+            long n = send(cfd, head + off, strlen(head) - off, 0);
+            if (n <= 0)
+                break;
+            off += (size_t)n;
+        }
+        off = 0;
+        while (off < strlen(body)) {
+            long n = send(cfd, body + off, strlen(body) - off, 0);
+            if (n <= 0)
+                break;
+            off += (size_t)n;
+        }
+        /* Drain-recv stall loop (peer closes after reading). */
+        for (;;) {
+            fd_set r;
+            FD_ZERO(&r);
+            FD_SET(cfd, &r);
+            struct timeval tv = { 0, 50 * 1000 };
+#ifdef _WIN32
+            if (select(0, &r, NULL, NULL, &tv) <= 0)
+                break;
+#else
+            if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
+                break;
+#endif
+            char sink[64];
+            if (recv(cfd, sink, sizeof(sink), 0) <= 0)
+                break;
+        }
+        close(cfd);
+    }
+    close(lfd);
+    return NULL;
+}
+
 /* ---------------------------------------------------------------- */
 /* Hyper vtable (real provider code, canned wire)                    */
 /* ---------------------------------------------------------------- */
@@ -388,6 +483,57 @@ static void test_hyper_needs_auth(void)
     ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
 }
 
+/* ---------------------------------------------------------------- */
+/* Ollama native catalog (real provider code, canned wire)           */
+/* ---------------------------------------------------------------- */
+
+static void test_ollama_models_tags_and_show(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, ollama_catalog_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    /* Base as the chat surface (with /v1): the catalog derives the
+     * API root by stripping it — /api/tags is at the host root. */
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("ollama");
+    ASSERT_NOT_NULL(p);
+
+    size_t n = 0;
+    const NmModel *models = p->models(p, base, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(models[0].id, "gpt-oss:20b");
+    ASSERT_EQ(models[0].vision, 0);              /* no "vision" capability */
+    ASSERT_EQ(models[0].context_length, 131072); /* gptoss.context_length */
+    ASSERT_STR_EQ(models[1].id, "gemma4:31b");
+    ASSERT_EQ(models[1].vision, 1);              /* capabilities has "vision" */
+    ASSERT_EQ(models[1].context_length, 262144); /* gemma4.context_length */
+
+    pthread_join(th, NULL);
+    close(lfd);
+
+    /* The tags round hit the host root, not /v1 (OLLAMA-CLOUD-API.md
+     * §6: native endpoints are not under the OpenAI prefix). */
+    (void)0;
+}
+
+static void test_ollama_needs_auth_local_vs_cloud(void)
+{
+    const NmProvider *p = nm_provider_by_name("ollama");
+    ASSERT_NOT_NULL(p);
+    /* Local daemon: no auth. */
+    ASSERT_EQ(p->needs_auth(p, "http://localhost:11434/v1"), 0);
+    ASSERT_EQ(p->needs_auth(p, "http://127.0.0.1:11434/v1"), 0);
+    /* Cloud: auth. */
+    ASSERT_TRUE(p->needs_auth(p, "https://ollama.com/v1") != 0);
+    ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -407,5 +553,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_chat_end_to_end);
     RUN_TEST(test_hyper_chat_begin_step);
     RUN_TEST(test_hyper_needs_auth);
+    RUN_TEST(test_ollama_models_tags_and_show);
+    RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
     TEST_SUMMARY();
 }

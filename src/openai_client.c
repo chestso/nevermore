@@ -749,11 +749,14 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     return r;
 }
 
-NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
+NmJson *nm_fetch_json(const char *base_url, const char *method,
+                      const char *path, const char *auth_header,
+                      const char *api_key, const char *body,
+                      const char **err)
 {
     if (err)
         *err = NULL;
-    if (!ep || !ep->base_url || !*ep->base_url) {
+    if (!base_url || !*base_url) {
         if (err)
             *err = "no base url";
         return NULL;
@@ -762,7 +765,7 @@ NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
     char host[256];
     int port;
     NmTransportMode mode;
-    if (nm_openai_split_base_url(ep->base_url, host, sizeof(host), &port,
+    if (nm_openai_split_base_url(base_url, host, sizeof(host), &port,
                                  &mode) != 0) {
         if (err)
             *err = "bad base url";
@@ -777,25 +780,29 @@ NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
         return NULL;
     }
 
-    /* Same header set as chat: auth (absent for tokenless catalogs,
-     * e.g. hyper /v1/models — HYPER-API.md §5) + User-Agent. */
-    NmRequestHeader hdrs[2];
+    /* Same header set as chat: Content-Type (bodies), auth (absent
+     * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
+     * §5) + User-Agent. */
+    NmRequestHeader hdrs[3];
     size_t nh = 0;
+    if (body) {
+        hdrs[nh].name = "Content-Type";
+        hdrs[nh].value = "application/json";
+        nh++;
+    }
     char authbuf[512];
-    if (ep->auth_header && ep->api_key && *ep->api_key) {
-        snprintf(authbuf, sizeof(authbuf), ep->auth_header, ep->api_key);
+    if (auth_header && api_key && *api_key) {
+        snprintf(authbuf, sizeof(authbuf), auth_header, api_key);
         hdrs[nh].name = "Authorization";
         hdrs[nh].value = authbuf;
         nh++;
     }
     hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = ep->user_agent ? ep->user_agent : "nevermore";
+    hdrs[nh].value = "nevermore (nevermore agent)";
     nh++;
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
-
-    if (nm_request(conn, "GET", path, hdrs, nh, NULL, 0) != NM_TRANSPORT_OK) {
+    size_t body_len = body ? strlen(body) : 0;
+    if (nm_request(conn, method, path, hdrs, nh, body, body_len) != NM_TRANSPORT_OK) {
         nm_connection_close(conn);
         if (err)
             *err = "request failed";
@@ -809,48 +816,58 @@ NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
         return NULL;
     }
 
-    /* Whole body into one growing buffer (one-shot fetch, not the
-     * streaming path — the catalog is a bounded document). */
-    char *body = NULL;
+    /* Whole response body into one growing buffer (one-shot fetch,
+     * not the streaming path — the catalog is a bounded document). */
+    char *resp_body = NULL;
     size_t len = 0, cap = 0;
     char chunk[4096];
     long n;
     while ((n = nm_read_body(conn, chunk, sizeof(chunk))) > 0) {
         if (len + (size_t)n > cap) {
             cap = cap ? cap * 2 : 8192;
-            char *grown = realloc(body, cap);
+            char *grown = realloc(resp_body, cap);
             if (!grown) {
-                free(body);
+                free(resp_body);
                 nm_connection_close(conn);
                 if (err)
                     *err = "oom";
                 return NULL;
             }
-            body = grown;
+            resp_body = grown;
         }
-        memcpy(body + len, chunk, (size_t)n);
+        memcpy(resp_body + len, chunk, (size_t)n);
         len += (size_t)n;
     }
     nm_connection_close(conn);
-    if (!body) {
+    if (!resp_body) {
         if (err)
             *err = "empty body";
         return NULL;
     }
 
     const char *jerr = NULL;
-    NmJson *doc = nm_json_parse(body, len, &jerr);
-    free(body);
+    NmJson *doc = nm_json_parse(resp_body, len, &jerr);
+    free(resp_body);
     if (!doc) {
         if (err)
             *err = jerr ? jerr : "bad json";
         return NULL;
     }
-    if (!nm_json_get(doc, "data")) {
-        nm_json_free(doc);
+    return doc; /* caller owns: nm_json_free when done */
+}
+
+NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
+{
+    if (err)
+        *err = NULL;
+    if (!ep || !ep->base_url || !*ep->base_url) {
         if (err)
-            *err = "no data array";
+            *err = "no base url";
         return NULL;
     }
-    return doc; /* caller owns: nm_json_free when done */
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
+    return nm_fetch_json(ep->base_url, "GET", path, ep->auth_header,
+                         ep->api_key, NULL, err);
 }

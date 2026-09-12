@@ -71,7 +71,18 @@ void nm_openai_chat_end(NmChatStream *h);
 int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
                              int *port, NmTransportMode *mode);
 
-/* Fetch GET {base_url}/models (OpenAI + OpenRouter catalogs). */
+/* Blocking one-shot JSON fetch: {METHOD} {base_url}{path}, optional
+ * auth header, optional JSON body (POST), whole body parsed into
+ * one arena document. NULL + *err on any failure (connect, HTTP
+ * status, parse). Caller owns the returned doc: nm_json_free when
+ * done. Shared by the /v1/models catalogs and the ollama native
+ * /api/tags + /api/show catalog. */
+NmJson *nm_fetch_json(const char *base_url, const char *method,
+                      const char *path, const char *auth_header,
+                      const char *api_key, const char *body,
+                      const char **err);
+
+/* Fetch GET {base_url}/models (OpenAI + hyper + OpenRouter catalogs). */
 NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err);
 
 #ifdef __cplusplus
