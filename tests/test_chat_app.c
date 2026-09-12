@@ -74,6 +74,16 @@ static void *chat_server_thread(void *arg)
 {
     struct ServerScript *sc = arg;
     for (int round = 0; round < sc->n_rounds; round++) {
+        /* Bounded accept: a turn cancelled during the async connect
+         * or send phase may never produce a deliverable connection
+         * (macOS/BSD drop it from the backlog; Linux delivers EOF).
+         * Wait bounded, then treat a no-show as end of script. */
+        struct timeval atv = { 2, 0 };
+        fd_set arfds;
+        FD_ZERO(&arfds);
+        FD_SET(sc->fd, &arfds);
+        if (select(sc->fd + 1, &arfds, NULL, NULL, &atv) <= 0)
+            return NULL; /* cancelled before connecting: fine */
         int cfd = accept(sc->fd, NULL, NULL);
         if (cfd < 0)
             return NULL;
