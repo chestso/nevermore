@@ -23,9 +23,10 @@ jobs:
 
       - name: Checkout boba (dependency)
         uses: actions/checkout@v5
-        repository: chestso/boba
-        path: boba
-        fetch-depth: 0
+        with:
+          repository: chestso/boba
+          path: boba
+          fetch-depth: 0
 
       - name: Install dependencies
         run: |
