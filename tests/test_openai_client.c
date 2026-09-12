@@ -398,6 +398,16 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
 static void *slow_start_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
+    /* Bounded accept: a connect cancelled before completion may
+     * NEVER be delivered (macOS/BSD drop it from the backlog;
+     * Linux hands it over as EOF). Waiting forever made
+     * pthread_join hang the whole binary on macOS CI. */
+    struct timeval tv = { 2, 0 };
+    fd_set rfds;
+    FD_ZERO(&rfds);
+    FD_SET(lfd, &rfds);
+    if (select(lfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+        return NULL; /* cancelled before ever connecting: fine */
     int cfd = accept(lfd, NULL, NULL);
     if (cfd < 0)
         return NULL;
