@@ -534,6 +534,190 @@ static void test_ollama_needs_auth_local_vs_cloud(void)
     ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
 }
 
+/* ---------------------------------------------------------------- */
+/* OpenRouter (real provider code, canned wire — live truth in      */
+/* docs/OPENROUTER-API.md, verified Sep 2026)                        */
+/* ---------------------------------------------------------------- */
+
+/* Chat server with SSE comment keep-alives (": OPENROUTER PROCESSING"
+ * — live-observed on the real wire; the parser must ignore them). */
+static void *openrouter_chat_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char sse[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "30\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n\r\n"
+        "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
+        "34\r\ndata: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n\r\n"
+        "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(sse) - 1) {
+        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    for (;;) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(cfd, &r);
+        struct timeval tv = { 0, 50 * 1000 };
+#ifdef _WIN32
+        if (select(0, &r, NULL, NULL, &tv) <= 0)
+            break;
+#else
+        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
+            break;
+#endif
+        char sink[64];
+        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
+            break;
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+/* OpenRouter catalog shape (differs from OpenAI's — §2): label is
+ * "name", context is TOP-LEVEL "context_length", vision is
+ * architecture.input_modalities containing "image". Tokenless. */
+static void *openrouter_models_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char body[] =
+        "{\"data\":["
+        "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
+        "\"context_length\":1050000,"
+        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"]}},"
+        "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
+        "\"context_length\":8192,"
+        "\"architecture\":{\"input_modalities\":[\"text\"]}}"
+        "],\"total_count\":2}";
+    char head[256];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             sizeof(body) - 1);
+    size_t off = 0;
+    while (off < strlen(head)) {
+        long n = send(cfd, head + off, strlen(head) - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    off = 0;
+    while (off < sizeof(body) - 1) {
+        long n = send(cfd, body + off, sizeof(body) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    for (;;) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(cfd, &r);
+        struct timeval tv = { 0, 50 * 1000 };
+#ifdef _WIN32
+        if (select(0, &r, NULL, NULL, &tv) <= 0)
+            break;
+#else
+        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
+            break;
+#endif
+        char sink[64];
+        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
+            break;
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_openrouter_chat_with_keepalive_comments(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
+        capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    /* Comment keep-alives between data events must not break the
+     * delta assembly (live-observed framing, OPENROUTER-API.md §3). */
+    ASSERT_STR_EQ(cap.text, "Hi there");
+    nm_chat_result_free(&r);
+    pthread_join(th, NULL);
+
+    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
+}
+
+static void test_openrouter_models_fetch(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_models_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    size_t n = 0;
+    const NmModel *models = p->models(p, base, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(models[0].id, "~openai/gpt-astra-latest");
+    ASSERT_STR_EQ(models[0].label, "GPT Astra");  /* "name", not display_name */
+    ASSERT_EQ(models[0].vision, 1);               /* input_modalities has "image" */
+    ASSERT_EQ(models[0].context_length, 1050000); /* top-level field */
+    ASSERT_STR_EQ(models[1].id, "vendor/text-only");
+    ASSERT_EQ(models[1].vision, 0);
+    pthread_join(th, NULL);
+
+    /* Tokenless catalog (public — OPENROUTER-API.md §1). */
+    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL);
+}
+
+static void test_openrouter_needs_auth(void)
+{
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+    ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -555,5 +739,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
+    RUN_TEST(test_openrouter_models_fetch);
+    RUN_TEST(test_openrouter_chat_with_keepalive_comments);
+    RUN_TEST(test_openrouter_needs_auth);
     TEST_SUMMARY();
 }
