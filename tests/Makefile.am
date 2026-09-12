@@ -28,6 +28,17 @@ AM_CPPFLAGS = \
 # test FAILS loudly with a diagnosable core in CI artifacts instead
 # of stalling the workflow until the 4h job watchdog cancels it.
 # Override for interactive debugging: NM_TEST_TIMEOUT=0 turns it off.
+#
+# HARNESS GOTCHA (found the hard way, 2026-09): without automake's
+# `parallel-tests` option this project uses the SERIAL harness, and
+# serial runs suffix-less binaries through LOG_COMPILER —
+# TEST_LOG_COMPILER only ever applies to `.test`-suffix scripts.
+# Setting only TEST_LOG_COMPILER wired the watchdog into a dead
+# variable: it never ran, on any OS, which is why the macOS hangs
+# burned 4h with the "watchdog" in place. LOG_COMPILER is the one
+# that fires; TEST_LOG_COMPILER is kept for a future parallel-tests
+# switch.
+LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
 TEST_LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
 
 TEST_CFLAGS = -Wall -Wextra

@@ -52,6 +52,9 @@ jobs:
           make -j"$(nproc)"
 
       - name: Run tests
+        # Backstop: the per-test watchdog fires first; this bounds
+        # the whole step so no hang can burn the job budget.
+        timeout-minutes: 20
         run: make -C build check
 
       - name: Upload test logs on failure
@@ -61,6 +64,7 @@ jobs:
           name: test-logs-linux
           path: |
             build/tests/*.log
+            build/tests/test-progress.log
             build/tests/core*
             core*
           retention-days: 7

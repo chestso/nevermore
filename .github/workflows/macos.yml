@@ -23,10 +23,9 @@ jobs:
 
       - name: Checkout boba (dependency)
         uses: actions/checkout@v5
-        with:
-          repository: chestso/boba
-          path: boba
-          fetch-depth: 0
+        repository: chestso/boba
+        path: boba
+        fetch-depth: 0
 
       - name: Install dependencies
         run: |
@@ -46,9 +45,20 @@ jobs:
           ./autogen.sh
           mkdir build && cd build
           ../configure --prefix="$HOME/.local"
-          make -j"$(sysctl -n hw.ncpu)"
+          # Build everything INCLUDING the test binaries here, in
+          # parallel. `make check` would otherwise compile all 13
+          # test binaries serially inside the timed test step —
+          # serial compile time was a big chunk of the mysterious
+          # macOS "Run tests" stalls (it was never only the tests).
+          make -j"$(sysctl -n hw.ncpu)" check_PROGRAMS
 
       - name: Run tests
+        # Hard cap: one hung step can never again burn the 4h job
+        # budget. The per-test watchdog should fire first (a FAIL
+        # with a stack in the .log); this is the backstop. 20m
+        # covers the serial check_PROGRAMS rebuild automake does
+        # plus the parallel test run with generous slack.
+        timeout-minutes: 20
         run: |
           # Cores where the watchdog's kill can drop them (macOS:
           # /cores is the writable core dir on the runner).
@@ -62,6 +72,7 @@ jobs:
           name: test-logs-macos
           path: |
             build/tests/*.log
+            build/tests/test-progress.log
             build/tests/core*
             core*
             /cores/*
