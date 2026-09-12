@@ -49,13 +49,21 @@ jobs:
           make -j"$(sysctl -n hw.ncpu)"
 
       - name: Run tests
-        run: make -C build check
+        run: |
+          # Cores where the watchdog's kill can drop them (macOS:
+          # /cores is the writable core dir on the runner).
+          ulimit -c unlimited 2>/dev/null || true
+          make -C build check
 
       - name: Upload test logs
         if: failure()
         uses: actions/upload-artifact@v7
         with:
           name: test-logs-macos
-          path: build/tests/*.log
+          path: |
+            build/tests/*.log
+            build/tests/core*
+            core*
+            /cores/*
           retention-days: 7
           if-no-files-found: warn

@@ -21,6 +21,15 @@ AM_CPPFLAGS = \
     -I$(top_builddir) \
     $(BOBA_CFLAGS)
 
+# Per-test runtime cap (house rule: loopback tests are ms-fast; a
+# hang is a bug, not a condition to wait out). The watchdog wraps
+# every test binary: NM_TEST_TIMEOUT seconds (default 10), then a
+# stack snapshot into the .log and a core-dumping kill — so a hung
+# test FAILS loudly with a diagnosable core in CI artifacts instead
+# of stalling the workflow until the 4h job watchdog cancels it.
+# Override for interactive debugging: NM_TEST_TIMEOUT=0 turns it off.
+TEST_LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
+
 TEST_CFLAGS = -Wall -Wextra
 
 # TLS backend source: same conditional as src/Makefile.am — exactly
