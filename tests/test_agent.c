@@ -68,6 +68,20 @@ static void *agent_server_thread(void *arg)
                 break;
         }
         req[got] = '\0';
+        if (got == 0) {
+            /* A connection that closed before any request bytes
+             * landed — a cancelled turn whose queued-but-never-
+             * sent request died with the teardown. It must NOT
+             * consume a script round: on Linux a client-closed
+             * connection is still delivered from the backlog, on
+             * macOS/BSD it is silently dropped, so scripting a
+             * round for it makes alignment OS-dependent (this was
+             * the macOS CI red in test_agent_cancel...). Skip it
+             * and hold this round for the next real request. */
+            close(cfd);
+            round--;
+            continue;
+        }
         if (got < REQ_CAP) {
             snprintf(g_requests[round], REQ_CAP, "%s", req);
             if (round + 1 > g_n_requests)
@@ -501,21 +515,25 @@ static void test_agent_cancel_then_next_turn_works(void)
     reset_capture();
     write_fixture();
 
-    /* Round 1 stalls (no bytes), so we can cancel mid-stream; the
-     * cancel tears the connection down, then a fresh turn runs the
-     * full 2-round script against the second + third connections. */
+    /* Turn 1 is cancelled before any request bytes go out (async
+     * connect: the request is only queued; nothing steps it), so
+     * there is nothing to script for it. Whether the kernel ever
+     * delivers that cancelled connection is OS-dependent (Linux
+     * hands it out of the backlog as a 0-byte EOF; macOS/BSD drops
+     * it) — the server skips 0-byte connections without consuming
+     * a script round, so alignment is the same on both. Turn 2
+     * then runs the full 2-round tool script. */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 3;
-    sc.sse[0] = ""; /* stalling round: server sends nothing */
-    sc.sse[1] =
+    sc.n_rounds = 2;
+    sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_2\",\"type\":\"function\",\"function\":"
         "{\"name\":\"edit_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
         "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
         "\\\"fast red\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.sse[2] =
+    sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
@@ -556,14 +574,15 @@ static void test_agent_cancel_then_next_turn_works(void)
     char content[128];
     read_fixture(content, sizeof(content));
     ASSERT_STR_EQ(content, "the fast red fox\n");
-    /* Three requests hit the wire: the cancelled round 1 (torn down
-     * before any bytes came back) + turn 2's two rounds. Round 3
-     * (index 2) carries the tool result. */
-    ASSERT_EQ(g_n_requests, 3);
-    ASSERT_TRUE(strstr(g_requests[2], "\"tool_call_id\":\"call_2\"") != NULL);
+    /* Two REAL requests hit the wire (turn 2's two rounds): the
+     * cancelled round 1 is queued-then-torn-down, and a 0-byte
+     * connection never counts as a request (the server skips it).
+     * Round 1 (index 1) carries the tool result. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_2\"") != NULL);
     /* The cancelled turn's user message still rode the turn-2
      * transcript (session persists across cancel). */
-    ASSERT_TRUE(strstr(g_requests[1], "first, get cancelled") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "first, get cancelled") != NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
