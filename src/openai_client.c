@@ -751,10 +751,106 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
 
 NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
 {
-    /* GET {base_url}/models — phase 2 wires this for openai; the
-     * ollama provider uses its static catalog until phase 5. */
-    (void)ep;
     if (err)
-        *err = "not yet implemented";
-    return NULL; /* TODO(phase 2/5) */
+        *err = NULL;
+    if (!ep || !ep->base_url || !*ep->base_url) {
+        if (err)
+            *err = "no base url";
+        return NULL;
+    }
+
+    char host[256];
+    int port;
+    NmTransportMode mode;
+    if (nm_openai_split_base_url(ep->base_url, host, sizeof(host), &port,
+                                 &mode) != 0) {
+        if (err)
+            *err = "bad base url";
+        return NULL;
+    }
+
+    NmTransportStatus tst;
+    NmConnection *conn = nm_connect(host, port, mode, &tst);
+    if (!conn) {
+        if (err)
+            *err = "connect failed";
+        return NULL;
+    }
+
+    /* Same header set as chat: auth (absent for tokenless catalogs,
+     * e.g. hyper /v1/models — HYPER-API.md §5) + User-Agent. */
+    NmRequestHeader hdrs[2];
+    size_t nh = 0;
+    char authbuf[512];
+    if (ep->auth_header && ep->api_key && *ep->api_key) {
+        snprintf(authbuf, sizeof(authbuf), ep->auth_header, ep->api_key);
+        hdrs[nh].name = "Authorization";
+        hdrs[nh].value = authbuf;
+        nh++;
+    }
+    hdrs[nh].name = "User-Agent";
+    hdrs[nh].value = ep->user_agent ? ep->user_agent : "nevermore";
+    nh++;
+
+    char path[512];
+    snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
+
+    if (nm_request(conn, "GET", path, hdrs, nh, NULL, 0) != NM_TRANSPORT_OK) {
+        nm_connection_close(conn);
+        if (err)
+            *err = "request failed";
+        return NULL;
+    }
+    const NmResponse *resp = nm_response(conn);
+    if (resp->status < 200 || resp->status >= 300) {
+        nm_connection_close(conn);
+        if (err)
+            *err = "http error";
+        return NULL;
+    }
+
+    /* Whole body into one growing buffer (one-shot fetch, not the
+     * streaming path — the catalog is a bounded document). */
+    char *body = NULL;
+    size_t len = 0, cap = 0;
+    char chunk[4096];
+    long n;
+    while ((n = nm_read_body(conn, chunk, sizeof(chunk))) > 0) {
+        if (len + (size_t)n > cap) {
+            cap = cap ? cap * 2 : 8192;
+            char *grown = realloc(body, cap);
+            if (!grown) {
+                free(body);
+                nm_connection_close(conn);
+                if (err)
+                    *err = "oom";
+                return NULL;
+            }
+            body = grown;
+        }
+        memcpy(body + len, chunk, (size_t)n);
+        len += (size_t)n;
+    }
+    nm_connection_close(conn);
+    if (!body) {
+        if (err)
+            *err = "empty body";
+        return NULL;
+    }
+
+    const char *jerr = NULL;
+    NmJson *doc = nm_json_parse(body, len, &jerr);
+    free(body);
+    if (!doc) {
+        if (err)
+            *err = jerr ? jerr : "bad json";
+        return NULL;
+    }
+    if (!nm_json_get(doc, "data")) {
+        nm_json_free(doc);
+        if (err)
+            *err = "no data array";
+        return NULL;
+    }
+    return doc; /* caller owns: nm_json_free when done */
 }

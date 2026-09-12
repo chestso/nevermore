@@ -69,7 +69,7 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/transport.c ../src/transport_socket.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_provider_LDADD = $(TEST_TLS_LIBS)
+test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
