@@ -189,6 +189,15 @@ test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
 
+# Build the test binaries WITHOUT running them. CI uses this in the
+# parallel Build step (make -j ... check-programs) so the timed Run
+# tests step is pure execution — `make check` in the serial harness
+# would otherwise compile all 13 binaries one-by-one inside it.
+# (There is no built-in `make check_PROGRAMS`: the serial harness
+# only expands that variable inside its own recursive rule.)
+.PHONY: check-programs
+check-programs: $(check_PROGRAMS)
+
 # Verbose logging flag convention: pass -v to any test binary.
 TESTS_ENVIRONMENT =
 
