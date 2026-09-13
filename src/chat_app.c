@@ -14,13 +14,13 @@
  *
  *   Streaming text is line-buffered: deltas append to a tail buffer;
  *   complete lines move to a pending buffer that only ever holds
- *   whole lines. A print is tui_runtime_clear_inline (erase the frame
- *   in place — boba addition for exactly this), write the pending
- *   lines, wake the runtime; the next flush re-renders the live
- *   region below. The partial-line tail renders in the frame as live
- *   content, so mid-line continuation across delta batches is
- *   preserved without terminal-emulation math, and no stale frame
- *   rows are abandoned in the scrollback.
+ *   whole lines. A print is tui_runtime_transcript_write (boba's
+ *   atomic seam: erase the frame in place, write the pending lines,
+ *   re-render the live region below them — one call, one geometry
+ *   baseline, no window for an interleaved step to strand frame rows
+ *   in the scrollback). The partial-line tail renders in the frame as
+ *   live content, so mid-line continuation across delta batches is
+ *   preserved without terminal-emulation math.
  *
  *   Submitting is the one place the frame must PERSIST: the rendered
  *   input line (the user's message) stays in the scrollback via
@@ -200,17 +200,16 @@ static void flush_tail(NmChatApp *app)
 }
 
 /* The one print: erase the frame in place, write the pending whole
- * lines, and let the next flush re-render the live region below. */
+ * lines, and re-render the live region below them — all inside
+ * boba's atomic tui_runtime_transcript_write (no geometry window
+ * between the erase, the write, and the repaint; a step or tool
+ * boundary can never interleave between them). */
 static void flush_transcript(NmChatApp *app)
 {
     if (!app || app->pend->len == 0)
         return;
-    FILE *out = app->rt ? app->rt->output : stdout;
-    tui_runtime_clear_inline(app->rt); /* no-op without a runtime */
-    fwrite(app->pend->data, 1, app->pend->len, out);
-    fflush(out);
+    tui_runtime_transcript_write(app->rt, app->pend->data, app->pend->len);
     dynamic_buffer_clear(app->pend);
-    tui_runtime_wakeup(app->rt); /* repaint the live region */
 }
 
 /* ---------------------------------------------------------------- */

@@ -1069,6 +1069,124 @@ static void test_tab_on_plain_word_is_a_noop(void)
     harness_free(h);
 }
 
+/* Count TRANSCRIPT occurrences of a completed line in the harness's
+ * raw byte stream. The stream legitimately contains the same words as
+ * live-region frame rows (later erased by clear_inline — the raw file
+ * keeps them); a transcript line's signature is `text\r\n` NOT
+ * followed by an EL (frame rows are `\r\n`-separated and each row
+ * ends before an `\x1b[K`). This is the file-level stand-in for
+ * "count on the rendered screen", per the bug report's review. */
+static size_t count_transcript_line(const char *hay, const char *line)
+{
+    size_t n = 0;
+    const char *p = hay;
+    size_t ll = strlen(line);
+    while ((p = strstr(p, line)) != NULL) {
+        const char *eol = p + ll;
+        if (strncmp(eol, "\r\n", 2) == 0 &&
+            strncmp(eol + 2, "\x1b[K", 3) != 0)
+            n++;
+        p = eol;
+    }
+    return n;
+}
+
+/* Regression (bugs/streaming-content-rendered-multiple-times.md):
+ * a delta batch that completes a line while the partial tail spans
+ * multiple wrapped rows. The transcript seam must print each
+ * completed line exactly once — no stale partial prefixes stranded
+ * in the scrollback. Two hard requirements from the review:
+ *   - the width is FORCED (a wrapped tail is the trigger; the app's
+ *     default 80 would not wrap this fixture)
+ *   - the assertion counts occurrences of the framed byte sequence
+ *     (frame bytes legitimately contain the partial tail; only a
+ *     count on the transcript's "\r\n"-framed form can see strays)
+ * The interleaving hazard is exercised directly: two steps print
+ * with no intervening runtime flush (the run loop dispatches the
+ * external fd before its wakeup drain). */
+static void test_streaming_multiline_no_duplicate_transcript(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    /* Long completed line (wraps at the forced width), then a
+     * newline-bearing delta whose REMAINDER must stay in the live
+     * tail, then more partial growth on the same line. */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\""
+        "First completed line long enough to wrap at the forced "
+        "terminal width several times over for sure here\\n\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\""
+        "## The others\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\",\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" for "
+        "contrast\\n- `history.c` is next\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.delay_us = 120 * 1000; /* separate readable events */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* Force the geometry: narrow enough that the partial tail and the
+     * completed line both wrap. */
+    tui_runtime_send(h->rt, tui_msg_window_size(30, 8));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    harness_type(h, "review");
+    harness_enter(h);
+
+    /* Drive a few steps MID-STREAM with no interleaved runtime flush
+     * (the ext-fd dispatch runs before the wakeup drain in run()):
+     * the transcript print happens inside the step, so two steps can
+     * print back-to-back before any flush. */
+    for (int i = 0; i < 40; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+            break;
+        int fd = nm_chat_app_fd(h->app);
+        fd_set fds;
+        struct timeval tv = { 0, 50 * 1000 };
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        select(fd + 1, &fds, NULL, NULL, &tv);
+        nm_chat_app_step(h->app); /* prints internally, NO flush here */
+    }
+    tui_runtime_flush(h->rt);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    if (getenv("NM_DUMP_OUT")) {
+        FILE *d = fopen(getenv("NM_DUMP_OUT"), "wb");
+        if (d) {
+            fwrite(out, 1, strlen(out), d);
+            fclose(d);
+        }
+    }
+    /* Each completed transcript line appears EXACTLY once in the
+     * transcript sense (line-\r\n-terminated, not a frame row). */
+    ASSERT_EQ(count_transcript_line(out, "## The others, for contrast"), 1u);
+    ASSERT_EQ(count_transcript_line(out, "- `history.c` is next"), 1u);
+    /* The wrapped completed line also printed exactly once. */
+    ASSERT_EQ(count_transcript_line(out, "several times over for sure here"),
+              1u);
+    /* No stale partial prefixes stranded as transcript lines: only
+     * the completed full line exists, never an intermediate prefix
+     * as its own \r\n-terminated line. */
+    ASSERT_EQ(count_transcript_line(out, "## The others,"), 0u);
+    ASSERT_EQ(count_transcript_line(out, "## The others"), 0u);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -1102,5 +1220,6 @@ int main(void)
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_tool_round_prints_panels);
+    RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
     TEST_SUMMARY();
 }

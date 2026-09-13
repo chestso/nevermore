@@ -24,11 +24,12 @@
  *   cursor, and abandoning frame lines per batch would litter the
  *   scrollback with stale spinner rows.
  *
- *   A print is: tui_runtime_clear_inline (erase the frame in place),
- *   fwrite whole lines, wake the runtime — the next flush re-renders
- *   the live region below the printed text. Exactly one such print
- *   per event (end of update / end of agent step), coalesced through
- *   a pending buffer that only ever holds whole lines.
+ *   A print is: tui_runtime_transcript_write (boba's atomic seam:
+ *   erase the frame in place, write the whole lines, re-render the
+ *   live region below them — one call, one geometry baseline).
+ *   Exactly one such print per event (end of update / end of agent
+ *   step), coalesced through a pending buffer that only ever holds
+ *   whole lines.
  */
 
 #ifndef NM_CHAT_APP_H
