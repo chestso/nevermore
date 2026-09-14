@@ -404,6 +404,164 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
     close(lfd);
 }
 
+/* Deterministic regression server for the parallel-tool-call index
+ * collision (2026-09-14): ollama cloud streams two tool calls in a
+ * single delta, each stamped "index":0. Merging by the raw index
+ * glued the second call's arguments onto the first slot and dropped
+ * the second id, so the next round sent concatenated non-JSON args
+ * and the API answered HTTP 400 "invalid tool call arguments". */
+static void *parallel_same_index_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[4096];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "10e\r\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_a\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":\"{\\\"cmd\\\":\\\"ls\\\"}\"}},"
+        "{\"index\":0,\"id\":\"call_b\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"src/x.c\\\"}\"}}]}}]}\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(resp) - 1) {
+        long n = send(cfd, resp + off, sizeof(resp) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+static void test_parallel_calls_with_same_index_stay_distinct(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, parallel_same_index_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "do two things", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "minimax-m3", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_tool_calls, (size_t)2);
+    ASSERT_STR_EQ(cap.tool_calls[0].id, "call_a");
+    ASSERT_STR_EQ(cap.tool_calls[0].name, "run_command");
+    ASSERT_STR_EQ(cap.tool_calls[0].args_json, "{\"cmd\":\"ls\"}");
+    ASSERT_STR_EQ(cap.tool_calls[1].id, "call_b");
+    ASSERT_STR_EQ(cap.tool_calls[1].name, "read_file");
+    ASSERT_STR_EQ(cap.tool_calls[1].args_json, "{\"path\":\"src/x.c\"}");
+
+    nm_tool_calls_free(cap.tool_calls, cap.n_tool_calls);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The legitimate multi-delta case must still merge: fragments of one
+ * call share (index, id) across deltas, and two distinct calls use
+ * distinct indices. */
+static void *fragmented_tool_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[4096];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "96\r\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_a\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":\"{\\\"cmd\\\":\"}}]}}]}\n\n\r\n"
+        "5f\r\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"function\":{\"arguments\":\"\\\"ls\\\"}\"}}]}}]}\n\n\r\n"
+        "a1\r\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,"
+        "\"id\":\"call_b\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"src/x.c\\\"}\"}}]}}]}\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(resp) - 1) {
+        long n = send(cfd, resp + off, sizeof(resp) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+static void test_fragmented_tool_args_merge_by_index_and_id(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, fragmented_tool_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test" };
+    NmMessage msg = { "user", "do two things", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_tool_calls, (size_t)2);
+    ASSERT_STR_EQ(cap.tool_calls[0].id, "call_a");
+    ASSERT_STR_EQ(cap.tool_calls[0].name, "run_command");
+    ASSERT_STR_EQ(cap.tool_calls[0].args_json, "{\"cmd\":\"ls\"}");
+    ASSERT_STR_EQ(cap.tool_calls[1].id, "call_b");
+    ASSERT_STR_EQ(cap.tool_calls[1].name, "read_file");
+    ASSERT_STR_EQ(cap.tool_calls[1].args_json, "{\"path\":\"src/x.c\"}");
+
+    nm_tool_calls_free(cap.tool_calls, cap.n_tool_calls);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void *slow_start_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -779,6 +937,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_step_pending_between_events);
     RUN_TEST(test_chat_step_whole_response_in_first_read_delivers_tools);
+    RUN_TEST(test_parallel_calls_with_same_index_stay_distinct);
+    RUN_TEST(test_fragmented_tool_args_merge_by_index_and_id);
     RUN_TEST(test_chat_step_cancel_mid_stream);
     RUN_TEST(test_chat_auth_error_carries_detail);
     RUN_TEST(test_chat_connect_refused_names_target);

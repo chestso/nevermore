@@ -65,6 +65,12 @@ typedef struct NmToolCall
      * contract. args_json grows geometrically across chunks. */
     size_t args_len;
     size_t args_cap;
+    /* Wire delta index this slot was opened with. Providers reuse
+     * "index":0 on every tool call of a single delta when returning
+     * parallel calls (ollama cloud does); the index is only a
+     * fragment-merge key, never a slot identity, so the merge also
+     * compares the call id. */
+    long index;
 } NmToolCall;
 
 /* Streaming callback. Called with delta text chunks as they arrive

@@ -263,27 +263,53 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
             /* Tool-call deltas: merge fragments by index (port of
              * quoth's sse-merge-tool-calls). Arguments accumulate
              * across chunks; assembled calls are delivered from
-             * finish_stream when the stream completes. */
+             * finish_stream when the stream completes.
+             *
+             * The wire index is a PER-DELTA fragment key, not a
+             * stable slot id: providers emitting parallel calls in
+             * one delta (ollama cloud) stamp "index":0 on every
+             * entry. Merging on the raw number therefore glued the
+             * second call's arguments onto the first slot (and
+             * stranded the second id), producing concatenated
+             * non-JSON args the API rejects with HTTP 400. Key the
+             * merge on (index, id) instead: slots within one delta
+             * are told apart by id, while a continuation delta that
+             * omits/!duplicates the id still finds its slot. */
             NmJson *tcs = nm_json_get(delta, "tool_calls");
             for (size_t i = 0; tcs && i < nm_json_len(tcs); i++) {
                 NmJson *tc = nm_json_at(tcs, i);
                 long idx = (long)nm_json_num(nm_json_get(tc, "index"));
                 if (idx < 0)
                     continue;
-                while ((size_t)idx >= st->tc_cap) {
-                    size_t ncap = st->tc_cap ? st->tc_cap * 2 : 4;
-                    NmToolCall *nt =
-                        realloc(st->tool_calls, ncap * sizeof(*nt));
-                    if (!nt)
+                const char *id = nm_json_str(nm_json_get(tc, "id"));
+                /* Find the existing slot this fragment continues:
+                 * same index, and (when the fragment carries an id)
+                 * the same id. Else it opens a new call. */
+                NmToolCall *slot = NULL;
+                for (size_t s = 0; s < st->n_tool_calls; s++) {
+                    NmToolCall *cand = &st->tool_calls[s];
+                    if (cand->index != idx)
                         continue;
-                    memset(nt + st->tc_cap, 0,
-                           (ncap - st->tc_cap) * sizeof(*nt));
-                    st->tool_calls = nt;
-                    st->tc_cap = ncap;
+                    if (id && cand->id && strcmp(cand->id, id) != 0)
+                        continue;
+                    slot = cand;
+                    break;
                 }
-                NmToolCall *slot = &st->tool_calls[idx];
-                if ((size_t)idx + 1 > st->n_tool_calls)
-                    st->n_tool_calls = (size_t)idx + 1;
+                if (!slot) {
+                    if (st->n_tool_calls >= st->tc_cap) {
+                        size_t ncap = st->tc_cap ? st->tc_cap * 2 : 4;
+                        NmToolCall *nt =
+                            realloc(st->tool_calls, ncap * sizeof(*nt));
+                        if (!nt)
+                            continue;
+                        memset(nt + st->tc_cap, 0,
+                               (ncap - st->tc_cap) * sizeof(*nt));
+                        st->tool_calls = nt;
+                        st->tc_cap = ncap;
+                    }
+                    slot = &st->tool_calls[st->n_tool_calls++];
+                    slot->index = idx;
+                }
                 NmJson *fn = nm_json_get(tc, "function");
                 if (fn) {
                     const char *args =
@@ -316,7 +342,6 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
                     if (name && !slot->name)
                         slot->name = strdup(name);
                 }
-                const char *id = nm_json_str(nm_json_get(tc, "id"));
                 if (id && !slot->id)
                     slot->id = strdup(id);
             }

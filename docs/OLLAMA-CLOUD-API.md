@@ -734,6 +734,17 @@ curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
 > the native endpoint accepts the key but ignores it (usage arrives via
 > `prompt_eval_count`/`eval_count` on every chunk instead).
 
+> **Parallel tool calls stamp `"index":0` on every entry (Sep 2026 live
+> test):** when a single streamed delta carries more than one tool call (e.g.
+> `minimax-m3` answering a two-part prompt), ollama cloud puts `"index":0` on
+> _each_ call in the array, not `0,1,2,...` as OpenAI does. The per-delta index
+> is a fragment-merge key, not a stable slot identity: merge on `(index, id)`,
+> or the second call's `arguments` get appended to the first slot and the
+> second `id` is lost — replaying that as the assistant `tool_calls` message
+> yields concatenated non-JSON arguments and a 400 `invalid tool call
+arguments`. (nevermore's openai_client keys its merge on `(index, id)` for
+> exactly this; a continuation delta that omits the id still finds its slot.)
+
 **Tool call flow:**
 
 1. Send user message + tool definitions
