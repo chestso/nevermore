@@ -62,9 +62,12 @@ OpenRouter deltas (all verified):
 - **Content deltas**: `choices[0].delta.content` — identical to
   OpenAI.
 - **Reasoning deltas**: `choices[0].delta.reasoning` (string) plus
-  `reasoning_details[]` may stream ALONGSIDE content on reasoning
-  models. nevermore's parser reads `delta.content` only, so these
-  are inert noise — but a client must not treat an empty
+  `reasoning_details[]` — phase-sequential with content, NEVER
+  concurrent (observed 2026-09): reasoning streams first, each
+  chunk carrying `content:""` as a placeholder, then content
+  streams (reasoning absent or `""`; reverse never observed,
+  wire-possible). nevermore's parser reads `delta.content` only, so
+  these are inert noise — but a client must not treat an empty
   `content:""` delta with `reasoning` present as end-of-stream.
 - **Tool-call streaming**: byte-identical to OpenAI —
   `delta.tool_calls[0].id/type/function.name` on the first chunk,
