@@ -56,6 +56,7 @@ src/                the nevermore binary: entry point, providers, wire
                     session, TUI (headers live alongside sources —
                     CLI app, no library)
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
+tools/wire-replay/  replay server for captured wire dumps (Python)
 docs/               wire specs ported from quoth + platform notes
 data/               static model catalogs
 ```

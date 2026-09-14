@@ -12,6 +12,7 @@ EXTRA_DIST = \
     README.md \
     .clang-format \
     scripts \
+    tools \
     docs \
     data
 
