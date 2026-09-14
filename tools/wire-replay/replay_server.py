@@ -116,8 +116,9 @@ class Scenario:
         explicit rather than a comparison of unrelated clocks."""
         for dump in dumps:
             for ex in sorted(dump.exchanges, key=lambda e: (e.t0, e.index)):
-                action = Action(action_id=0, exchange=ex,
-                                signature=ex.request.signature())
+                action = Action(
+                    action_id=0, exchange=ex, signature=ex.request.signature()
+                )
                 self._all.append(action)
         for action_id, action in enumerate(self._all):
             action.action_id = action_id
@@ -134,9 +135,7 @@ class Scenario:
                 return None
             action = queue.popleft()
             action.served = True
-            self._served_count[signature] = (
-                self._served_count.get(signature, 0) + 1
-            )
+            self._served_count[signature] = self._served_count.get(signature, 0) + 1
             return action
 
     # -- introspection ---------------------------------------------- #
@@ -191,10 +190,14 @@ class Scenario:
 
         lines: List[str] = []
         if exact_pending:
-            lines.append(f"{exact_pending} pending action(s) exist but none matched (internal inconsistency)")
+            lines.append(
+                f"{exact_pending} pending action(s) exist but none matched (internal inconsistency)"
+            )
             return lines
         if exact_served:
-            lines.append(f"queue exhausted: {exact_served} action(s) already served for this exact request")
+            lines.append(
+                f"queue exhausted: {exact_served} action(s) already served for this exact request"
+            )
         body_differs = [a for a in same_path if a.signature[2] != body]
         if body_differs:
             lines.append(
@@ -345,7 +348,9 @@ class ReplayHandler(BaseHTTPRequestHandler):
         size = len(raw)
         if action is None:
             reason = self.server.scenario.miss_reason(signature)
-            self._log(f"conn={conn_id} {method} {target} body={size}B -> NO ACTION (503, {reason})")
+            self._log(
+                f"conn={conn_id} {method} {target} body={size}B -> NO ACTION (503, {reason})"
+            )
             for line in self.server.scenario.explain(signature):
                 self._log(f"  {line}")
             self._respond_json(
@@ -364,7 +369,9 @@ class ReplayHandler(BaseHTTPRequestHandler):
         exchange = action.exchange
         response = exchange.response
         if response is None:
-            self._log(f"conn={conn_id} {method} {target} body={size}B -> {action.describe()}: no recorded response (502)")
+            self._log(
+                f"conn={conn_id} {method} {target} body={size}B -> {action.describe()}: no recorded response (502)"
+            )
             self._respond_json(
                 502,
                 {"error": {"message": "wire-replay: action has no recorded response"}},
@@ -373,7 +380,9 @@ class ReplayHandler(BaseHTTPRequestHandler):
             )
             return
 
-        self._log(f"conn={conn_id} {method} {target} body={size}B -> {action.describe()}")
+        self._log(
+            f"conn={conn_id} {method} {target} body={size}B -> {action.describe()}"
+        )
         self._serve_recorded(action, response, with_body)
 
     def _read_request_body(self) -> bytes:
@@ -409,36 +418,58 @@ class ReplayHandler(BaseHTTPRequestHandler):
 
     # ----- serving a recorded response ------------------------------ #
 
-    def _serve_recorded(self, action: Action, response: Response, with_body: bool) -> None:
+    def _serve_recorded(
+        self, action: Action, response: Response, with_body: bool
+    ) -> None:
         kind = response.kind()
         pace = self.server.options.pace
 
         if kind == "stream":
             framing = "chunked" if response.chunked else "close"
             content_type = response.content_type or "text/event-stream"
-            self._send_head(response.status or 200, response.status_text,
-                            content_type, framing, action_id=action.action_id)
+            self._send_head(
+                response.status or 200,
+                response.status_text,
+                content_type,
+                framing,
+                action_id=action.action_id,
+            )
             if not with_body:
                 return
             try:
                 self._write_events(response.stream_events, framing)
             except OSError as exc:
-                self._log(f"  client closed early ({exc.__class__.__name__}); action consumed")
+                self._log(
+                    f"  client closed early ({exc.__class__.__name__}); action consumed"
+                )
             return
 
         if kind == "failure":
             detail = (response.error or "recorded transport failure").encode("utf-8")
-            self._log("  recorded transport failure cannot be replayed over HTTP; answering 502 with the recorded detail")
-            self._send_head(502, "", response.content_type or "text/plain; charset=utf-8",
-                            "length", length=len(detail), replay_status="failed")
+            self._log(
+                "  recorded transport failure cannot be replayed over HTTP; answering 502 with the recorded detail"
+            )
+            self._send_head(
+                502,
+                "",
+                response.content_type or "text/plain; charset=utf-8",
+                "length",
+                length=len(detail),
+                replay_status="failed",
+            )
             if with_body:
                 self._write_bytes(detail)
             return
 
         if kind == "empty":
-            self._send_head(response.status or 200, response.status_text,
-                            response.content_type or "application/json",
-                            "length", length=0, action_id=action.action_id)
+            self._send_head(
+                response.status or 200,
+                response.status_text,
+                response.content_type or "application/json",
+                "length",
+                length=0,
+                action_id=action.action_id,
+            )
             return
 
         # body / error: whole payload, content type as recorded.
@@ -446,10 +477,15 @@ class ReplayHandler(BaseHTTPRequestHandler):
         data = (text or "").encode("utf-8")
         framing = "chunked" if response.chunked else "length"
         content_type = response.content_type or "application/json"
-        self._send_head(response.status or 200, response.status_text,
-                        content_type, framing, length=len(data),
-                        action_id=action.action_id,
-                        replay_status="served")
+        self._send_head(
+            response.status or 200,
+            response.status_text,
+            content_type,
+            framing,
+            length=len(data),
+            action_id=action.action_id,
+            replay_status="served",
+        )
         if not with_body:
             return
         try:
@@ -465,7 +501,9 @@ class ReplayHandler(BaseHTTPRequestHandler):
             else:
                 self._write_bytes(data)
         except OSError as exc:
-            self._log(f"  client closed early ({exc.__class__.__name__}); action consumed")
+            self._log(
+                f"  client closed early ({exc.__class__.__name__}); action consumed"
+            )
 
     def _write_events(self, events: Sequence[StreamEvent], framing: str) -> None:
         pace = self.server.options.pace
@@ -524,8 +562,14 @@ class ReplayHandler(BaseHTTPRequestHandler):
         self, status: int, payload: dict, replay_status: str, with_body: bool = True
     ) -> None:
         data = (json.dumps(payload) + "\n").encode("utf-8")
-        self._send_head(status, "", "application/json", "length",
-                        length=len(data), replay_status=replay_status)
+        self._send_head(
+            status,
+            "",
+            "application/json",
+            "length",
+            length=len(data),
+            replay_status=replay_status,
+        )
         if not with_body:
             return
         try:
@@ -537,8 +581,14 @@ class ReplayHandler(BaseHTTPRequestHandler):
     def _serve_status(self, with_body: bool) -> None:
         payload = self.server.scenario.status()
         data = (json.dumps(payload, indent=2) + "\n").encode("utf-8")
-        self._send_head(200, "", "application/json", "length",
-                        length=len(data), replay_status="status")
+        self._send_head(
+            200,
+            "",
+            "application/json",
+            "length",
+            length=len(data),
+            replay_status="status",
+        )
         if with_body:
             try:
                 self.wfile.write(data)
@@ -712,7 +762,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
 
     threads = [
-        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True)
+        threading.Thread(
+            target=srv.serve_forever, kwargs={"poll_interval": 0.2}, daemon=True
+        )
         for srv in servers
     ]
     for thread in threads:

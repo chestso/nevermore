@@ -28,7 +28,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import replay_server  # noqa: E402
 import wire_dump  # noqa: E402
 
-
 # ------------------------------------------------------------------ #
 # Fixture helpers                                                     #
 # ------------------------------------------------------------------ #
@@ -62,7 +61,9 @@ def request_line(conn=1, xchg=1, body="{}", url=URL, t=0.0, method="POST"):
     }
 
 
-def head_line(conn=1, xchg=1, status=200, chunked=True, content_type="text/event-stream", t=0.1):
+def head_line(
+    conn=1, xchg=1, status=200, chunked=True, content_type="text/event-stream", t=0.1
+):
     return {
         "t": t,
         "kind": "response-head",
@@ -192,11 +193,29 @@ class TestDumpParser(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lines = [
                 request_line(conn=1, body="q1"),
-                head_line(conn=1, status=200, chunked=False, content_type="application/json"),
-                {"t": 0.2, "kind": "response", "conn": 1, "xchg": 1, "body": '{"ok":1}'},
+                head_line(
+                    conn=1, status=200, chunked=False, content_type="application/json"
+                ),
+                {
+                    "t": 0.2,
+                    "kind": "response",
+                    "conn": 1,
+                    "xchg": 1,
+                    "body": '{"ok":1}',
+                },
                 request_line(conn=2, body="q2"),
-                head_line(conn=2, status=401, chunked=False, content_type="application/json"),
-                {"t": 0.4, "kind": "error", "conn": 2, "xchg": 1, "httpStatus": 401, "stage": "protocol", "detail": "bad key"},
+                head_line(
+                    conn=2, status=401, chunked=False, content_type="application/json"
+                ),
+                {
+                    "t": 0.4,
+                    "kind": "error",
+                    "conn": 2,
+                    "xchg": 1,
+                    "httpStatus": 401,
+                    "stage": "protocol",
+                    "detail": "bad key",
+                },
             ]
             path = write_dump(tmp, "b.ndjson", lines)
             dump = wire_dump.load(path)
@@ -210,7 +229,9 @@ class TestDumpParser(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = write_dump(tmp, "c.ndjson", simple_stream_exchange())
             with open(path, "a", encoding="utf-8") as f:
-                f.write('{"t":9.9,"kind":"stream-event","conn":1,"xchg":1,"da')  # cut mid-line
+                f.write(
+                    '{"t":9.9,"kind":"stream-event","conn":1,"xchg":1,"da'
+                )  # cut mid-line
             dump = wire_dump.load(path)
         self.assertEqual(len(dump.exchanges), 1)
         self.assertTrue(any("truncated" in w for w in dump.warnings))
@@ -230,9 +251,15 @@ class TestDumpParser(unittest.TestCase):
 
     def test_signature_ignores_host_but_keeps_query(self):
         with tempfile.TemporaryDirectory() as tmp:
-            l1 = request_line(conn=1, body="q", url="https://a.example:443/v1/chat/completions?x=1")
-            l2 = request_line(conn=2, body="q", url="http://127.0.0.1:9000/v1/chat/completions?x=1")
-            l3 = request_line(conn=3, body="q", url="https://a.example:443/v1/chat/completions?x=2")
+            l1 = request_line(
+                conn=1, body="q", url="https://a.example:443/v1/chat/completions?x=1"
+            )
+            l2 = request_line(
+                conn=2, body="q", url="http://127.0.0.1:9000/v1/chat/completions?x=1"
+            )
+            l3 = request_line(
+                conn=3, body="q", url="https://a.example:443/v1/chat/completions?x=2"
+            )
             path = write_dump(tmp, "e.ndjson", [l1, l2, l3])
             dump = wire_dump.load(path)
         s1 = dump.exchanges[0].request.signature()
@@ -282,8 +309,12 @@ class TestScenario(unittest.TestCase):
         """Cross-file: argument order wins (each dump's t starts at its
         own zero), so part1's actions serve before part2's."""
         with tempfile.TemporaryDirectory() as tmp:
-            p1 = write_dump(tmp, "p1.ndjson", simple_stream_exchange(conn=1, marker="one", t=99.0))
-            p2 = write_dump(tmp, "p2.ndjson", simple_stream_exchange(conn=2, marker="two", t=0.0))
+            p1 = write_dump(
+                tmp, "p1.ndjson", simple_stream_exchange(conn=1, marker="one", t=99.0)
+            )
+            p2 = write_dump(
+                tmp, "p2.ndjson", simple_stream_exchange(conn=2, marker="two", t=0.0)
+            )
             dumps = [wire_dump.load(p1), wire_dump.load(p2)]
         scenario = replay_server.Scenario()
         scenario.build(dumps)
@@ -373,9 +404,19 @@ class TestServer(unittest.TestCase):
 
     def test_body_response(self):
         lines = [
-            request_line(conn=1, body="", url="https://ollama.com:443/api/tags", method="GET"),
-            head_line(conn=1, status=200, chunked=False, content_type="application/json"),
-            {"t": 0.2, "kind": "response", "conn": 1, "xchg": 1, "body": '{"models":[]}'},
+            request_line(
+                conn=1, body="", url="https://ollama.com:443/api/tags", method="GET"
+            ),
+            head_line(
+                conn=1, status=200, chunked=False, content_type="application/json"
+            ),
+            {
+                "t": 0.2,
+                "kind": "response",
+                "conn": 1,
+                "xchg": 1,
+                "body": '{"models":[]}',
+            },
         ]
         fx = self.fixture(lines)
         status, headers, data = fx.request("GET", "/api/tags")
@@ -386,9 +427,18 @@ class TestServer(unittest.TestCase):
     def test_error_exchange_replays_status_and_body(self):
         lines = [
             request_line(conn=1, body="q"),
-            head_line(conn=1, status=401, chunked=False, content_type="application/json"),
-            {"t": 0.2, "kind": "error", "conn": 1, "xchg": 1, "httpStatus": 401,
-             "stage": "protocol", "detail": "invalid api key"},
+            head_line(
+                conn=1, status=401, chunked=False, content_type="application/json"
+            ),
+            {
+                "t": 0.2,
+                "kind": "error",
+                "conn": 1,
+                "xchg": 1,
+                "httpStatus": 401,
+                "stage": "protocol",
+                "detail": "invalid api key",
+            },
         ]
         fx = self.fixture(lines)
         status, headers, data = fx.post("/v1/chat/completions", "q")

@@ -16,7 +16,13 @@ EXTRA_DIST = \
     docs \
     data
 
-# Format target — clang-format on C, shfmt on shell, prettier on Markdown.
+# dist hygiene: tools/ ships wholesale, so strip Python bytecode caches
+# (regenerated whenever the tools run in-tree; never part of the dist).
+dist-hook:
+	find $(distdir) -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+# Format target — clang-format on C, shfmt on shell, black on Python,
+# prettier on Markdown.
 .PHONY: format
 format:
 	@if command -v clang-format >/dev/null 2>&1; then \
@@ -34,6 +40,15 @@ format:
             | xargs -0 -r shfmt -w; \
     else \
         echo "shfmt not found - skipping shell script formatting." >&2; \
+    fi
+	@if command -v black >/dev/null 2>&1; then \
+        echo "Formatting Python with black..."; \
+        find $(top_srcdir) -name '*.py' \
+            -not -path '$(top_srcdir)/build/*' \
+            -not -path '$(top_srcdir)/build-asan/*' -print0 \
+            | xargs -0 -r black --quiet; \
+    else \
+        echo "black not found - skipping Python formatting." >&2; \
     fi
 	@if command -v prettier >/dev/null 2>&1; then \
         echo "Formatting Markdown with prettier..."; \
