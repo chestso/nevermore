@@ -45,8 +45,21 @@ nevermore models                   # provider model catalog
 NEVERMORE_PROVIDER=openrouter nevermore ask "..."
 ```
 
-Provider keys come from the environment: `HYPER_API_KEY`,
-`OLLAMA_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`.
+Provider keys come from the environment (`HYPER_API_KEY`,
+`OLLAMA_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`) or, when an
+env var is unset, from `~/.authinfo` — one `machine <name> password
+<secret>` line per provider:
+
+```
+machine hyper.charm.land   login apikey password ...
+machine ollama.com         login apikey password ...
+machine openai.com         login apikey password ...
+machine openrouter.ai      login apikey password ...
+```
+
+Environment variables win over the file. Point elsewhere with
+`NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama-local` (the zero-config
+default) needs no key: use `-p ollama` for Ollama Cloud.
 
 ## Layout
 

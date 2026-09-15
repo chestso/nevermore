@@ -7,6 +7,10 @@
  * Memory model: escape/unescape buffers are per-call by nature
  * (translating between the textinput's string and the file's line)
  * and freed immediately; nothing accumulates.
+ *
+ * This is the file path-seam + home-dir pattern authinfo.c copies
+ * (nm_authinfo_path / nm_authinfo_set_path): override, then env var
+ * (XDG_STATE_HOME / NEVERMORE_AUTHINFO), then home.
  */
 
 #include "history.h"

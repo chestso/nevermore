@@ -20,21 +20,24 @@ typedef struct
     size_t n;
 } RegistrySource;
 
-/* Provider display labels — the human name for each built-in. */
+/* Provider display labels — the human name for each built-in,
+ * indexed by NmProviderId. */
 static const char *const provider_labels[] = {
-    "Charm Hyper", "Ollama", "OpenAI", "OpenRouter"
+    "Charm Hyper", "Ollama Cloud", "Ollama Local", "OpenAI", "OpenRouter"
 };
+#define PROVIDER_LABELS_N \
+    (sizeof(provider_labels) / sizeof(provider_labels[0]))
 
 static int registry_fetch_begin(NmSource *s, const char *query_hint)
 {
     RegistrySource *r = (RegistrySource *)s;
     (void)query_hint; /* sync source: no query-side filtering */
 
-    const NmProvider *providers[16];
+    const NmProvider *providers[NM_PROVIDER_MAX];
     size_t n = 0;
     nm_provider_list(providers, &n);
-    if (n > 16)
-        n = 16;
+    if (n > NM_PROVIDER_MAX)
+        n = NM_PROVIDER_MAX;
 
     if (n > r->n) {
         NmEntry *grown = realloc(r->entries, n * sizeof(NmEntry));
@@ -48,7 +51,9 @@ static int registry_fetch_begin(NmSource *s, const char *query_hint)
     for (size_t i = 0; i < n; i++) {
         NmProviderId id = providers[i]->id;
         r->entries[i].id = providers[i]->name;
-        r->entries[i].label = id < 4 ? provider_labels[id] : providers[i]->name;
+        r->entries[i].label = (size_t)id < PROVIDER_LABELS_N
+                                  ? provider_labels[id]
+                                  : providers[i]->name;
         r->entries[i].tags = NULL;
         r->entries[i].n_tags = 0;
         r->entries[i].context_length = -1;

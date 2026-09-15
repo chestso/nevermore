@@ -13,8 +13,24 @@
 
 extern const struct NmProvider nm_hyper_provider;
 extern const struct NmProvider nm_ollama_provider;
+extern const struct NmProvider nm_ollama_local_provider;
 extern const struct NmProvider nm_openai_provider;
 extern const struct NmProvider nm_openrouter_provider;
+
+/* Shared Ollama wire surface (provider_ollama.c): the cloud vtable
+ * and the local daemon vtable (provider_ollama_local.c) sit on the
+ * same OpenAI-compatible client + native /api catalog; only the
+ * endpoint default differs, so the implementation lives in one file
+ * and is parameterized by the provider's id. */
+NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
+                            const char *base_url, const char *api_key);
+NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
+                                   const NmChatRequest *req,
+                                   const char *base_url, const char *api_key,
+                                   NmChatResult *err);
+const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
+                                const char *api_key, size_t *n_out);
+int nm_ollama_needs_auth(const NmProvider *p, const char *base_url);
 
 /* Live-catalog fetch gate (shared by all providers): 0 when
  * NM_NO_LIVE_CATALOG is set in the environment. `make check` runs

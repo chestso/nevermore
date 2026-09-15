@@ -22,9 +22,48 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "authinfo.h"
 #include "provider.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+
+/* MinGW has no setenv (POSIX); the tests only ever set/replace. */
+static void test_setenv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+static void test_unsetenv(const char *name)
+{
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
+
+/* A scratch authinfo file (never the real ~/.authinfo). */
+static const char *write_authinfo(const char *content)
+{
+#ifdef _WIN32
+    static char path[512];
+    snprintf(path, sizeof(path), "C:/Users/Public/nm-provider-authinfo");
+#else
+    static char path[512];
+    snprintf(path, sizeof(path), "/tmp/nm-provider-authinfo-%d",
+             (int)getpid());
+#endif
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return NULL;
+    fputs(content, f);
+    fclose(f);
+    return path;
+}
 
 /* ---------------------------------------------------------------- */
 /* Registry (offline)                                                */
@@ -34,6 +73,7 @@ static void test_provider_registry_complete(void)
 {
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_HYPER));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA));
+    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA_LOCAL));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENAI));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENROUTER));
 }
@@ -42,9 +82,72 @@ static void test_provider_lookup_by_name(void)
 {
     ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
     ASSERT_NOT_NULL(nm_provider_by_name("ollama"));
+    ASSERT_NOT_NULL(nm_provider_by_name("ollama-local"));
     ASSERT_NOT_NULL(nm_provider_by_name("openai"));
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
     ASSERT_NULL(nm_provider_by_name("nope"));
+}
+
+static void test_provider_api_key_env_then_authinfo(void)
+{
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    /* No env, no authinfo file: NULL. */
+    test_unsetenv("OPENAI_API_KEY");
+    nm_authinfo_set_path("/nonexistent/nm-authinfo-test");
+    ASSERT_NULL(nm_provider_api_key(p));
+
+    /* authinfo alone resolves. */
+    const char *path = write_authinfo("machine openai.com password file-key\n");
+    ASSERT_NOT_NULL(path);
+    nm_authinfo_set_path(path);
+    ASSERT_STR_EQ(nm_provider_api_key(p), "file-key");
+
+    /* Env wins over the file... */
+    test_setenv("OPENAI_API_KEY", "env-key");
+    ASSERT_STR_EQ(nm_provider_api_key(p), "env-key");
+
+    /* ...an EMPTY env var is unset for this purpose (falls through
+     * to the file, never an empty key). */
+    test_setenv("OPENAI_API_KEY", "");
+    ASSERT_STR_EQ(nm_provider_api_key(p), "file-key");
+
+    test_unsetenv("OPENAI_API_KEY");
+    nm_authinfo_set_path(NULL);
+
+    /* Providers with an authinfo machine but no key for it: NULL. */
+    const NmProvider *hyper = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(hyper);
+    test_unsetenv("HYPER_API_KEY");
+    nm_authinfo_set_path(path);
+    ASSERT_NULL(nm_provider_api_key(hyper));
+
+    /* The local daemon has no authinfo machine at all. */
+    const NmProvider *local = nm_provider_by_name("ollama-local");
+    ASSERT_NOT_NULL(local);
+    ASSERT_NULL(local->authinfo_machine);
+    test_unsetenv("OLLAMA_API_KEY");
+    ASSERT_NULL(nm_provider_api_key(local));
+
+    /* NULL provider is safe. */
+    ASSERT_NULL(nm_provider_api_key(NULL));
+    nm_authinfo_set_path(NULL);
+}
+
+static void test_provider_authinfo_machines(void)
+{
+    /* One machine name per keyed provider, and it matches the names
+     * the box's ~/.authinfo uses (README documents them). */
+    ASSERT_STR_EQ(nm_provider_by_name("hyper")->authinfo_machine,
+                  "hyper.charm.land");
+    ASSERT_STR_EQ(nm_provider_by_name("ollama")->authinfo_machine,
+                  "ollama.com");
+    ASSERT_STR_EQ(nm_provider_by_name("openai")->authinfo_machine,
+                  "openai.com");
+    ASSERT_STR_EQ(nm_provider_by_name("openrouter")->authinfo_machine,
+                  "openrouter.ai");
+    ASSERT_NULL(nm_provider_by_name("ollama-local")->authinfo_machine);
 }
 
 /* ---------------------------------------------------------------- */
@@ -522,14 +625,42 @@ static void test_ollama_models_tags_and_show(void)
 
 static void test_ollama_needs_auth_local_vs_cloud(void)
 {
-    const NmProvider *p = nm_provider_by_name("ollama");
-    ASSERT_NOT_NULL(p);
-    /* Local daemon: no auth. */
-    ASSERT_EQ(p->needs_auth(p, "http://localhost:11434/v1"), 0);
-    ASSERT_EQ(p->needs_auth(p, "http://127.0.0.1:11434/v1"), 0);
-    /* Cloud: auth. */
-    ASSERT_TRUE(p->needs_auth(p, "https://ollama.com/v1") != 0);
-    ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
+    const NmProvider *cloud = nm_provider_by_name("ollama");
+    ASSERT_NOT_NULL(cloud);
+    /* Cloud: auth (an overridden localhost base still means no auth). */
+    ASSERT_TRUE(cloud->needs_auth(cloud, "https://ollama.com/v1") != 0);
+    ASSERT_TRUE(cloud->needs_auth(cloud, NULL) != 0);
+    ASSERT_EQ(cloud->needs_auth(cloud, "http://localhost:11434/v1"), 0);
+    ASSERT_EQ(cloud->needs_auth(cloud, "http://127.0.0.1:11434/v1"), 0);
+
+    /* The local daemon: no auth, ever. */
+    const NmProvider *local = nm_provider_by_name("ollama-local");
+    ASSERT_NOT_NULL(local);
+    ASSERT_EQ(local->needs_auth(local, NULL), 0);
+    ASSERT_EQ(local->needs_auth(local, "http://127.0.0.1:11434/v1"), 0);
+    /* Both share one key env name (the daemon ignores it). */
+    ASSERT_STR_EQ(cloud->env_key(cloud), "OLLAMA_API_KEY");
+    ASSERT_STR_EQ(local->env_key(local), "OLLAMA_API_KEY");
+    /* Endpoint defaults are pinned per provider, not derived from key
+     * presence: cloud-vs-local is the user's choice of provider name. */
+    ASSERT_STR_EQ(cloud->default_base_url, "https://ollama.com/v1");
+    ASSERT_STR_EQ(local->default_base_url, "http://localhost:11434/v1");
+}
+
+static void test_ollama_local_catalog_uses_local_default(void)
+{
+    /* The two providers keep separate catalog caches (different
+     * endpoints); the cloud's canned-wire fetch above must not have
+     * poisoned the local daemon's view. Offline here (the live gate
+     * is on under make check), so the local provider falls back to
+     * the static list — not the cloud's cached models. */
+    const NmProvider *local = nm_provider_by_name("ollama-local");
+    ASSERT_NOT_NULL(local);
+    size_t n = 0;
+    const NmModel *models = local->models(local, NULL, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_TRUE(n > 0);
+    ASSERT_STR_EQ(models[0].id, "gpt-oss:20b"); /* static fallback head */
 }
 
 /* ---------------------------------------------------------------- */
@@ -726,6 +857,8 @@ int main(int argc, char *argv[])
     printf("test_provider:\n");
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_lookup_by_name);
+    RUN_TEST(test_provider_authinfo_machines);
+    RUN_TEST(test_provider_api_key_env_then_authinfo);
     /* Fetch BEFORE the fallback test: the live catalog cache is
      * process-global (memory-reuse principle), and the fallback test
      * must not poison it with a failed fetch. */
@@ -736,6 +869,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
+    RUN_TEST(test_ollama_local_catalog_uses_local_default);
     RUN_TEST(test_openrouter_models_fetch);
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);
     RUN_TEST(test_openrouter_needs_auth);

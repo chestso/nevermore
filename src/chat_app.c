@@ -632,13 +632,13 @@ static void open_models_popup(NmChatApp *app, const char *query)
  * truth the router reads), pre-filtered by `query`. */
 static void open_providers_popup(NmChatApp *app, const char *query)
 {
-    const NmProvider *providers[16];
+    const NmProvider *providers[NM_PROVIDER_MAX];
     size_t n = 0;
     nm_provider_list(providers, &n);
-    if (n > 16)
-        n = 16;
+    if (n > NM_PROVIDER_MAX)
+        n = NM_PROVIDER_MAX;
 
-    const char *ids[16];
+    const char *ids[NM_PROVIDER_MAX];
     for (size_t i = 0; i < n; i++)
         ids[i] = providers[i]->name;
     tui_list_popup_set_items(app->popup, ids, (int)n);
@@ -659,12 +659,12 @@ static void switch_provider(NmChatApp *app, const char *name)
     const NmProvider *p = nm_provider_by_name(name);
     if (!p) {
         /* The error carries the vocabulary: list the valid names. */
-        const NmProvider *providers[16];
+        const NmProvider *providers[NM_PROVIDER_MAX];
         size_t n = 0;
         nm_provider_list(providers, &n);
         pend_printf(app, SGR_CORAL "nevermore: unknown provider '%s' — one of:" SGR_TEXT_RESET,
                     name);
-        for (size_t i = 0; i < n && i < 16; i++)
+        for (size_t i = 0; i < n && i < NM_PROVIDER_MAX; i++)
             pend_printf(app, " %s", providers[i]->name);
         pend_str(app, "\r\n");
         return;

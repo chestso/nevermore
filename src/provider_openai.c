@@ -221,6 +221,7 @@ const struct NmProvider nm_openai_provider = {
     NM_PROVIDER_OPENAI,
     "openai",
     OPENAI_DEFAULT_BASE,
+    "openai.com",
     openai_chat,
     openai_chat_begin,
     nm_openai_chat_step,

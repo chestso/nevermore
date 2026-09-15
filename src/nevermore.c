@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "authinfo.h"
 #include "provider.h"
 
 #include "provider_internal.h"
@@ -25,10 +26,11 @@ int nm_live_catalog_enabled(void)
 }
 
 static const struct NmProvider *const g_providers[] = {
-    &nm_hyper_provider,     /* provider_hyper.c */
-    &nm_ollama_provider,    /* provider_ollama.c */
-    &nm_openai_provider,    /* provider_openai.c */
-    &nm_openrouter_provider /* provider_openrouter.c */
+    &nm_hyper_provider,        /* provider_hyper.c */
+    &nm_ollama_provider,       /* provider_ollama.c (cloud) */
+    &nm_ollama_local_provider, /* provider_ollama_local.c (daemon) */
+    &nm_openai_provider,       /* provider_openai.c */
+    &nm_openrouter_provider    /* provider_openrouter.c */
 };
 
 const NmProvider *nm_provider_get(NmProviderId id)
@@ -66,4 +68,26 @@ void nm_provider_free_models(const NmProvider *p, const NmModel *models)
      * release without an API break. */
     (void)p;
     (void)models;
+}
+
+/* ---------------------------------------------------------------- */
+/* API key resolution                                                */
+/* ---------------------------------------------------------------- */
+
+const char *nm_provider_api_key(const NmProvider *p)
+{
+    if (!p)
+        return NULL;
+
+    /* Environment wins: a non-empty value is the whole answer. An
+     * EMPTY env var is unset for this purpose (never an empty key). */
+    if (p->env_key) {
+        const char *name = p->env_key(p);
+        const char *v = name ? getenv(name) : NULL;
+        if (v && *v)
+            return v;
+    }
+    if (p->authinfo_machine)
+        return nm_authinfo_password(p->authinfo_machine);
+    return NULL;
 }

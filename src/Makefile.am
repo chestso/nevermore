@@ -65,9 +65,12 @@ nevermore_SOURCES = \
     nevermore_version.h \
     main.c \
     nevermore.c \
+    authinfo.h \
+    authinfo.c \
     provider_internal.h \
     provider_hyper.c \
     provider_ollama.c \
+    provider_ollama_local.c \
     provider_openai.c \
     provider_openrouter.c \
     openai_client.h \

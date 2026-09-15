@@ -163,6 +163,7 @@ const struct NmProvider nm_hyper_provider = {
     NM_PROVIDER_HYPER,
     "hyper",
     HYPER_DEFAULT_BASE,
+    "hyper.charm.land",
     hyper_chat,
     hyper_chat_begin,
     nm_openai_chat_step,

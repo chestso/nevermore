@@ -1,20 +1,24 @@
 /* provider.h - model provider backends
  *
- * Four providers, one function-pointer interface (the portty backend
+ * Five providers, one function-pointer interface (the portty backend
  * pattern):
  *
- *   hyper      Charm Hyper gateway (OpenAI-compatible /v1 chat surface
- *              plus OAuth device flow; docs/HYPER-API.md)
- *   ollama     local daemon (http://localhost:11434, no auth) and
- *              Ollama Cloud (https://ollama.com) — OpenAI-compatible
- *              chat surface plus the native /api catalog
- *   openai     OpenAI chat completions
- *   openrouter OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
+ *   hyper         Charm Hyper gateway (OpenAI-compatible /v1 chat
+ *                 surface plus OAuth device flow; docs/HYPER-API.md)
+ *   ollama        Ollama Cloud (https://ollama.com) — OpenAI-compatible
+ *                 chat surface plus the native /api catalog
+ *   ollama-local  the local Ollama daemon (http://localhost:11434,
+ *                 no auth) — same wire and catalog, other endpoint
+ *   openai        OpenAI chat completions
+ *   openrouter    OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
  *
- * All four share one wire client (openai_client.h); only base URL,
+ * All five share one wire client (openai_client.h); only base URL,
  * auth headers, and model catalogs differ. provider_openai.c is the
  * reference implementation. Provider-specific surfaces are narrow:
  * hyper's OAuth device flow, ollama's native /api catalog.
+ *
+ * API keys resolve via nm_provider_api_key: $<env_key>, else the
+ * provider's authinfo_machine password in ~/.authinfo (authinfo.h).
  */
 
 #ifndef NM_PROVIDER_H
@@ -31,7 +35,8 @@ typedef struct NmProvider NmProvider;
 typedef enum
 {
     NM_PROVIDER_HYPER = 0,
-    NM_PROVIDER_OLLAMA,
+    NM_PROVIDER_OLLAMA,       /* Ollama Cloud */
+    NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
     NM_PROVIDER_OPENAI,
     NM_PROVIDER_OPENROUTER
 } NmProviderId;
@@ -131,8 +136,15 @@ typedef struct NmChatRequest
 struct NmProvider
 {
     NmProviderId id;
-    const char *name; /* "hyper", "ollama", "openai", "openrouter" */
+    const char *name; /* "hyper", "ollama", "ollama-local", "openai", "openrouter" */
     const char *default_base_url;
+
+    /* The `machine <name>` this provider's key is stored under in
+     * ~/.authinfo (authinfo.h). Data beside name/default_base_url,
+     * not behavior — the lookup seam (nm_provider_api_key) reads it.
+     * NULL when the provider has no authinfo machine (ollama-local:
+     * the daemon is keyless by construction). */
+    const char *authinfo_machine;
 
     /* Streaming chat completion. Blocking; on_delta fires from inside. */
     NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,
@@ -188,10 +200,21 @@ struct NmProvider
     const char *(*env_key)(const NmProvider *p);
 };
 
+/* Provider API key: $<env_key> when set/non-empty, else the authinfo
+ * password for authinfo_machine. Borrowed (env var storage, or
+ * authinfo's process-static slot) — callers that keep it own a copy;
+ * NULL when neither source has one. */
+const char *nm_provider_api_key(const NmProvider *p);
+
 /* Registry */
 const NmProvider *nm_provider_get(NmProviderId id);
 const NmProvider *nm_provider_by_name(const char *name);
 void nm_provider_list(const NmProvider **out, size_t *n_out);
+
+/* Worst-case provider count: bounded arrays of NmProvider* on the
+ * stack (picker, sources, error hints) use this instead of a bare
+ * literal. Bump it when a provider is added. */
+#define NM_PROVIDER_MAX 16
 
 void nm_provider_free_models(const NmProvider *p, const NmModel *models);
 

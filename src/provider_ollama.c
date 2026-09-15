@@ -1,15 +1,17 @@
-/* provider_ollama.c - Ollama provider
+/* provider_ollama.c - Ollama Cloud (+ the shared Ollama wire surface)
  *
- * Two endpoints, one wire: the local daemon (http://localhost:11434,
- * no auth) and Ollama Cloud (https://ollama.com, bearer key) both
- * speak the OpenAI-compatible chat surface (docs/OLLAMA-CLOUD-API.md,
- * live-probed). Chat goes through the shared openai_client; only
- * the endpoint differs.
+ * Two providers, one wire (docs/OLLAMA-CLOUD-API.md, live-probed):
+ * this file holds Ollama Cloud (https://ollama.com, bearer key) and
+ * the wire/catalog helpers; provider_ollama_local.c is the local
+ * daemon (http://localhost:11434, no auth) forwarding here with its
+ * own vtable. Chat goes through the shared openai_client; only the
+ * endpoint differs.
  *
  * Model catalog (phase 5): native GET /api/tags for the membership
  * list + POST /api/show per model for the real metadata (the tags
  * details sub-object is an empty stub on the cloud — OLLAMA-CLOUD-
- * API.md §6.3), cached provider-owned for the process lifetime.
+ * API.md §6.3), cached provider-owned for the process lifetime (one
+ * cache per provider: the two talk to different endpoints).
  * /api/tags and /api/show answer with or without a key (cloud §6
  * note), so the local daemon needs no key and the cloud catalog
  * works offline-key. Static list stays the fallback.
@@ -55,23 +57,24 @@ static void ollama_api_root(const char *chat_base, char *out, size_t cap)
     out[len] = '\0';
 }
 
-static const char *ollama_base(const char *base_url, const char *api_key)
+/* The provider fixed the cloud-vs-local choice when the user named
+ * it; an explicit base URL still overrides (tests, proxies). */
+static const char *ollama_base(const NmProvider *p, const char *base_url,
+                               const char *api_key)
 {
-    /* Cloud vs local: an API key means cloud; no key means the local
-     * daemon (or an explicitly overridden base URL). */
+    (void)api_key;
     if (base_url && *base_url)
         return base_url;
-    if (api_key && *api_key)
-        return OLLAMA_CLOUD_DEFAULT;
-    return OLLAMA_LOCAL_DEFAULT;
+    if (p->id == NM_PROVIDER_OLLAMA_LOCAL)
+        return OLLAMA_LOCAL_DEFAULT;
+    return OLLAMA_CLOUD_DEFAULT;
 }
 
-static NmChatResult ollama_chat(const NmProvider *p, const NmChatRequest *req,
-                                const char *base_url, const char *api_key)
+NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
+                            const char *base_url, const char *api_key)
 {
-    (void)p;
     NmOpenaiEndpoint ep = {
-        ollama_base(base_url, api_key),
+        ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
         NEVERMORE_UA
@@ -80,14 +83,13 @@ static NmChatResult ollama_chat(const NmProvider *p, const NmChatRequest *req,
 }
 
 /* Event-driven split (phase 4): same endpoint shape, step API. */
-static NmChatStream *ollama_chat_begin(const NmProvider *p,
-                                       const NmChatRequest *req,
-                                       const char *base_url,
-                                       const char *api_key, NmChatResult *err)
+NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
+                                   const NmChatRequest *req,
+                                   const char *base_url, const char *api_key,
+                                   NmChatResult *err)
 {
-    (void)p;
     NmOpenaiEndpoint ep = {
-        ollama_base(base_url, api_key),
+        ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
         NEVERMORE_UA
@@ -99,9 +101,22 @@ static NmChatStream *ollama_chat_begin(const NmProvider *p,
 /* Native catalog: /api/tags + /api/show                             */
 /* ---------------------------------------------------------------- */
 
-/* Live catalog cache: provider-owned, process lifetime. */
-static NmModel *ollama_live_models;
-static size_t ollama_live_n;
+/* Live catalog cache: provider-owned, process lifetime. One per
+ * provider — cloud and local daemon are different endpoints and may
+ * both be exercised in one process. Indexed by the NmProviderId's
+ * ollama-ness (0 = cloud, 1 = local). */
+typedef struct
+{
+    NmModel *models;
+    size_t n;
+} OllamaCatalog;
+
+static OllamaCatalog ollama_catalogs[2];
+
+static size_t ollama_catalog_slot(const NmProvider *p)
+{
+    return p->id == NM_PROVIDER_OLLAMA_LOCAL ? 1 : 0;
+}
 
 /* capabilities contains "vision"? (character scan, no regex —
  * house rule). capabilities is an array of strings; scan entries. */
@@ -173,12 +188,13 @@ static int show_one(const char *api_root, const char *api_key,
 /* Fetch /api/tags once, then /api/show per model, cache as NmModel[].
  * One-time per process (memory-reuse principle); the show fan-out is
  * bounded by the tags list (19 on the cloud, Sep 2026). */
-static void ollama_fetch_catalog(const char *base_url, const char *api_key)
+static void ollama_fetch_catalog(const NmProvider *p, const char *base_url,
+                                 const char *api_key)
 {
     /* The API root derives from the CHAT base (which defaults by
-     * key: no key -> local daemon, key -> cloud). */
+     * provider: the local daemon or the cloud). */
     char root[256];
-    ollama_api_root(ollama_base(base_url, api_key), root, sizeof(root));
+    ollama_api_root(ollama_base(p, base_url, api_key), root, sizeof(root));
 
     const char *err = NULL;
     NmJson *doc = nm_fetch_json(root, "GET", "/api/tags", "Bearer %s",
@@ -225,21 +241,21 @@ static void ollama_fetch_catalog(const char *base_url, const char *api_key)
         free(models);
         return;
     }
-    ollama_live_models = models;
-    ollama_live_n = out;
+    OllamaCatalog *c = &ollama_catalogs[ollama_catalog_slot(p)];
+    c->models = models;
+    c->n = out;
 }
 
-static const NmModel *ollama_models(const NmProvider *p, const char *base_url,
-                                    const char *api_key, size_t *n_out)
+const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
+                                const char *api_key, size_t *n_out)
 {
-    (void)p;
-    if (!ollama_live_models &&
-        (base_url || nm_live_catalog_enabled()))
-        ollama_fetch_catalog(base_url, api_key);
-    if (ollama_live_models) {
+    OllamaCatalog *c = &ollama_catalogs[ollama_catalog_slot(p)];
+    if (!c->models && (base_url || nm_live_catalog_enabled()))
+        ollama_fetch_catalog(p, base_url, api_key);
+    if (c->models) {
         if (n_out)
-            *n_out = ollama_live_n;
-        return ollama_live_models;
+            *n_out = c->n;
+        return c->models;
     }
     /* Daemon down / offline: the static fallback. */
     if (n_out) {
@@ -251,35 +267,36 @@ static const NmModel *ollama_models(const NmProvider *p, const char *base_url,
     return ollama_static_models;
 }
 
-static int ollama_needs_auth(const NmProvider *p, const char *base_url)
+int nm_ollama_needs_auth(const NmProvider *p, const char *base_url)
 {
-    (void)p;
     /* Local daemon needs no auth; anything else (cloud) does. */
     if (base_url && *base_url && strncmp(base_url, "http://localhost", 16) == 0)
         return 0;
     if (base_url && *base_url && strncmp(base_url, "http://127.", 11) == 0)
         return 0;
+    if (p->id == NM_PROVIDER_OLLAMA_LOCAL)
+        return 0; /* the daemon is keyless by construction */
     return 1;
 }
 
 static const char *ollama_env_key(const NmProvider *p)
 {
     (void)p;
-    /* Local daemon needs no key; the cloud endpoint reads this. */
     return "OLLAMA_API_KEY";
 }
 
 const struct NmProvider nm_ollama_provider = {
     NM_PROVIDER_OLLAMA,
     "ollama",
-    OLLAMA_LOCAL_DEFAULT,
-    ollama_chat,
-    ollama_chat_begin,
+    OLLAMA_CLOUD_DEFAULT,
+    "ollama.com",
+    nm_ollama_chat,
+    nm_ollama_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_chat_end,
-    ollama_models,
-    ollama_needs_auth,
+    nm_ollama_models,
+    nm_ollama_needs_auth,
     ollama_env_key,
 };

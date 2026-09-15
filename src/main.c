@@ -11,6 +11,9 @@
  * ~/.config/nevermore/config, plus provider env vars:
  *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, HYPER_API_KEY,
  *   OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY.
+ * A key with no env var set resolves from ~/.authinfo
+ * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
+ * nm_provider_api_key; env always wins.
  */
 
 #include <stdio.h>
@@ -49,7 +52,8 @@ static void usage(FILE *out)
             "       nevermore models\n"
             "\n"
             "options:\n"
-            "  -p, --provider NAME   hyper | ollama | openai | openrouter\n"
+            "  -p, --provider NAME   hyper | ollama | ollama-local |\n"
+            "                        openai | openrouter\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"
@@ -162,9 +166,7 @@ static int run_interactive(const char *provider_name, const char *model)
         return 1;
     }
     const NmProvider *p = nm_provider_by_name(provider_name);
-    const char *env_key = p && p->env_key ? p->env_key(p) : NULL;
-    nm_chat_app_set_endpoint(app, NULL,
-                             env_key ? getenv(env_key) : NULL);
+    nm_chat_app_set_endpoint(app, NULL, nm_provider_api_key(p));
 
     TuiRuntimeConfig cfg = { 0 };
     cfg.raw_mode = 1;
@@ -211,7 +213,10 @@ static void wire_debug_startup(const char *provider_name, const char *model)
     const char *env_key = p && p->env_key ? p->env_key(p) : NULL;
     const char *keys[1];
     size_t n_keys = 0;
-    if (env_key && getenv(env_key))
+    /* Banner truth: a key is configured when it resolves (env or
+     * authinfo). Redaction stays names-only (values are never logged),
+     * so the recorder gets the env KEY NAME either way. */
+    if (env_key && nm_provider_api_key(p) != NULL)
         keys[n_keys++] = env_key;
     nm_wire_recorder_set_env_keys(keys, n_keys);
     nm_wire_recorder_init(provider_name, model);
@@ -255,7 +260,7 @@ int main(int argc, char *argv[])
     }
 
     if (!provider_name)
-        provider_name = "ollama"; /* zero-config default: local daemon */
+        provider_name = "ollama-local"; /* zero-config default: local daemon */
     const NmProvider *provider = nm_provider_by_name(provider_name);
     if (!provider) {
         fprintf(stderr, "nevermore: unknown provider '%s'\n", provider_name);
@@ -281,8 +286,7 @@ int main(int argc, char *argv[])
         /* One-shot ask mode (phase 3): the full agent loop — stream,
          * tool calls, file edits — with deltas on stdout and tool
          * activity on stderr. */
-        const char *api_key =
-            provider->env_key ? getenv(provider->env_key(provider)) : NULL;
+        const char *api_key = nm_provider_api_key(provider);
         if (!model)
             model = "gpt-oss:20b"; /* sane local default */
 

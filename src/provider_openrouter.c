@@ -181,6 +181,7 @@ const struct NmProvider nm_openrouter_provider = {
     NM_PROVIDER_OPENROUTER,
     "openrouter",
     OPENROUTER_DEFAULT_BASE,
+    "openrouter.ai",
     openrouter_chat,
     openrouter_chat_begin,
     nm_openai_chat_step,

@@ -4,6 +4,7 @@
 check_PROGRAMS = \
     test_sse \
     test_json \
+    test_authinfo \
     test_provider \
     test_source \
     test_wire \
@@ -81,10 +82,16 @@ test_sse_CFLAGS = $(TEST_CFLAGS)
 test_json_SOURCES = test_json.c ../src/json.c
 test_json_CFLAGS = $(TEST_CFLAGS)
 
+# authinfo key lookup (pure C: stdio/stdlib/string only, no sockets).
+test_authinfo_SOURCES = test_authinfo.c ../src/authinfo.c
+test_authinfo_CFLAGS = $(TEST_CFLAGS)
+
 # Provider registry (nevermore.c + the provider vtables; the ollama
-# vtable calls into the shared openai_client, so it links too).
+# vtables call into the shared openai_client, so it links too).
 test_provider_SOURCES = test_provider.c ../src/nevermore.c \
+    ../src/authinfo.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
@@ -95,7 +102,9 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
 test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
+    ../src/authinfo.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
@@ -127,7 +136,8 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
+    ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
 test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -164,7 +174,8 @@ test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
     ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
+    ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -192,8 +203,10 @@ test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
     ../src/agent.c ../src/session.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
-    $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/provider_hyper.c \
-    ../src/provider_ollama.c ../src/provider_openai.c \
+    $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \
+    ../src/provider_hyper.c \
+    ../src/provider_ollama.c ../src/provider_ollama_local.c \
+    ../src/provider_openai.c \
     ../src/provider_openrouter.c
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -205,7 +218,7 @@ TESTS = $(check_PROGRAMS)
 # Build the test binaries WITHOUT running them. CI uses this in the
 # parallel Build step (make -j ... check-programs) so the timed Run
 # tests step is pure execution — `make check` in the serial harness
-# would otherwise compile all 13 binaries one-by-one inside it.
+# would otherwise compile all 15 binaries one-by-one inside it.
 # (There is no built-in `make check_PROGRAMS`: the serial harness
 # only expands that variable inside its own recursive rule.)
 .PHONY: check-programs
