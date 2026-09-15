@@ -98,9 +98,9 @@ typedef struct NmToolCall
  *
  * channel names what the text is: NM_STREAM_CONTENT for the answer
  * text, NM_STREAM_REASONING for chain-of-thought (providers stream
- * it phase-sequentially before the answer; the transcript renders it
- * dimmed). A reasoning delta carries text on the reasoning channel
- * and never any answer bytes. */
+ * it phase-sequentially before the answer; the app's renderer dims
+ * it). A reasoning delta carries text on the reasoning channel and
+ * never any answer bytes. */
 typedef enum
 {
     NM_STREAM_CONTENT = 0, /* the assistant answer */
