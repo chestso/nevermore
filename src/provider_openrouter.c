@@ -50,7 +50,8 @@ static NmChatResult openrouter_chat(const NmProvider *p,
         openrouter_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat(&ep, req);
 }
@@ -66,7 +67,8 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
         openrouter_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat_begin(&ep, req, err);
 }
@@ -94,7 +96,8 @@ static int modalities_have_image(NmJson *arch)
 static void openrouter_fetch_catalog(const char *base_url)
 {
     NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
-                            NEVERMORE_UA };
+                            NEVERMORE_UA,
+                            NULL, 0 };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)

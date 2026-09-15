@@ -77,7 +77,8 @@ NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
         ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat(&ep, req);
 }
@@ -92,7 +93,8 @@ NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
         ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat_begin(&ep, req, err);
 }
@@ -170,7 +172,7 @@ static int show_one(const char *api_root, const char *api_key,
 
     const char *err = NULL;
     NmJson *doc = nm_fetch_json(api_root, "POST", "/api/show", "Bearer %s",
-                                api_key, dump, &err);
+                                api_key, NULL, 0, dump, &err);
     free(dump);
     if (!doc)
         return -1; /* offline / gated model: defaults stand */
@@ -198,7 +200,7 @@ static void ollama_fetch_catalog(const NmProvider *p, const char *base_url,
 
     const char *err = NULL;
     NmJson *doc = nm_fetch_json(root, "GET", "/api/tags", "Bearer %s",
-                                api_key, NULL, &err);
+                                api_key, NULL, 0, NULL, &err);
     if (!doc)
         return; /* daemon down / offline: caller uses static */
 

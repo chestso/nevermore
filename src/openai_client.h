@@ -23,12 +23,41 @@
 extern "C" {
 #endif
 
+/* Provider-supplied extra request headers on top of the fixed set
+ * (Content-Type, auth, User-Agent). Two tiers of one gateway that
+ * differ only in a routing header are the motivating case
+ * (x-opencode-session); the seam is deliberately a small ordered
+ * array, not a header map.
+ *
+ * Rules (mirror the auth header's redaction contract):
+ *  - appended in array order, between the auth header and
+ *    User-Agent (UA stays the tail);
+ *  - a pair with name == NULL, or value == NULL/empty, is SKIPPED,
+ *    never sent empty (empty and absent are equivalent on the wire
+ *    for the header this seam was built for);
+ *  - `secret` is the wire-recorder redaction marker, marked where
+ *    the value is built (docs/WIRE-DEBUG.md §4). The session id is
+ *    explicitly not a secret; the flag exists for the next
+ *    key-in-a-header provider so it cannot forget.
+ *  - n_extra_headers above the cap is a programming error and is
+ *    clamped defensively (no allocation). */
+#define NM_EXTRA_HEADERS_MAX 4
+
+typedef struct NmExtraHeader
+{
+    const char *name;  /* borrowed, e.g. "x-opencode-session" */
+    const char *value; /* borrowed; NULL/"" => pair skipped */
+    int secret;        /* redaction marker (wire_recorder) */
+} NmExtraHeader;
+
 typedef struct NmOpenaiEndpoint
 {
     const char *base_url;    /* e.g. "https://api.openai.com/v1" */
     const char *auth_header; /* e.g. "Authorization: Bearer %s", or NULL */
     const char *api_key;
-    const char *user_agent; /* never NULL */
+    const char *user_agent;             /* never NULL */
+    const NmExtraHeader *extra_headers; /* may be NULL */
+    size_t n_extra_headers;             /* capped at NM_EXTRA_HEADERS_MAX */
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas
@@ -72,15 +101,15 @@ int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
                              int *port, NmTransportMode *mode);
 
 /* Blocking one-shot JSON fetch: {METHOD} {base_url}{path}, optional
- * auth header, optional JSON body (POST), whole body parsed into
- * one arena document. NULL + *err on any failure (connect, HTTP
- * status, parse). Caller owns the returned doc: nm_json_free when
- * done. Shared by the /v1/models catalogs and the ollama native
- * /api/tags + /api/show catalog. */
+ * auth header, optional extra headers, optional JSON body (POST),
+ * whole body parsed into one arena document. NULL + *err on any
+ * failure (connect, HTTP status, parse). Caller owns the returned
+ * doc: nm_json_free when done. Shared by the /v1/models catalogs and
+ * the ollama native /api/tags + /api/show catalog. */
 NmJson *nm_fetch_json(const char *base_url, const char *method,
                       const char *path, const char *auth_header,
-                      const char *api_key, const char *body,
-                      const char **err);
+                      const char *api_key, const NmExtraHeader *extra,
+                      size_t n_extra, const char *body, const char **err);
 
 /* Fetch GET {base_url}/models (OpenAI + hyper + OpenRouter catalogs). */
 NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err);

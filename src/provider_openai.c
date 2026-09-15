@@ -48,7 +48,8 @@ static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
         (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE,
         "Bearer %s",
         api_key,
-        "nevermore (nevermore agent)"
+        "nevermore (nevermore agent)",
+        NULL, 0
     };
     return nm_openai_chat(&ep, req);
 }
@@ -64,7 +65,8 @@ static NmChatStream *openai_chat_begin(const NmProvider *p,
         (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE,
         "Bearer %s",
         api_key,
-        "nevermore (nevermore agent)"
+        "nevermore (nevermore agent)",
+        NULL, 0
     };
     return nm_openai_chat_begin(&ep, req, err);
 }

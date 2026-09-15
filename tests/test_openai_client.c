@@ -154,7 +154,7 @@ static void test_chat_stream_end_to_end(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -239,7 +239,7 @@ static void test_chat_step_pending_between_events(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -346,7 +346,7 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -461,7 +461,7 @@ static void test_parallel_calls_with_same_index_stay_distinct(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "do two things", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -541,7 +541,7 @@ static void test_fragmented_tool_args_merge_by_index_and_id(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "do two things", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -597,7 +597,7 @@ static void test_chat_step_cancel_mid_stream(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
@@ -661,7 +661,7 @@ static void test_chat_auth_error_carries_detail(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "bad-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
@@ -684,7 +684,7 @@ static void test_chat_auth_error_carries_detail(void)
 static void test_chat_connect_refused_names_target(void)
 {
     NmOpenaiEndpoint ep = { "http://127.0.0.1:1/v1", NULL, NULL,
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
@@ -739,7 +739,7 @@ static void test_chat_truncated_body_reports_byte_counts(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
@@ -754,10 +754,6 @@ static void test_chat_truncated_body_reports_byte_counts(void)
     pthread_join(th, NULL);
     close(lfd);
 }
-
-/* ---------------------------------------------------------------- */
-/* Wire debug recorder tap-through (docs/WIRE-DEBUG.md)              */
-/* ---------------------------------------------------------------- */
 
 /* The failure-path recorder round trip: a marked auth header's value
  * never reaches the file even through the real client path. */
@@ -837,6 +833,277 @@ static int log_count_kind(const char *log, const char *kind)
     return n;
 }
 
+/* ---------------------------------------------------------------- */
+/* extra_headers seam (provider extras: x-opencode-session and the   */
+/* future key-in-a-header providers)                                 */
+/* ---------------------------------------------------------------- */
+
+/* Capture the request into a caller buffer, answer one fixed
+ * response. Reusable for both the chat and nm_fetch_json header
+ * assertions (neither test cares about the response shape). */
+typedef struct ExtraServer
+{
+    int lfd;
+    char *req; /* caller-owned capture buffer */
+    size_t cap;
+    size_t got;
+    const char *resp; /* complete HTTP response, or NULL for a chat SSE body */
+} ExtraServer;
+
+static void *extra_capture_server_thread(void *arg)
+{
+    ExtraServer *s = arg;
+    int cfd = accept(s->lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    while (s->got < s->cap - 1) {
+        long n = recv(cfd, s->req + s->got, s->cap - 1 - s->got, 0);
+        if (n <= 0)
+            break;
+        s->got += (size_t)n;
+        /* Whole request = head + declared Content-Length body (a
+         * bodyless GET declares 0; a POST declares the JSON length). */
+        const char *head_end = strstr(s->req, "\r\n\r\n");
+        if (!head_end)
+            continue;
+        size_t head_len = (size_t)(head_end - s->req) + 4;
+        long long clen = 0;
+        const char *cl = strstr(s->req, "Content-Length:");
+        if (cl)
+            clen = atoll(cl + strlen("Content-Length:"));
+        if ((long long)s->got >= (long long)head_len + clen)
+            break;
+    }
+    s->req[s->got] = '\0';
+    if (s->resp) {
+        size_t off = 0, len = strlen(s->resp);
+        while (off < len) {
+            long n = send(cfd, s->resp + off, len - off, 0);
+            if (n <= 0)
+                break;
+            off += (size_t)n;
+        }
+    }
+    close(cfd);
+    return NULL;
+}
+
+/* The canned SSE body used by the chat-path extras tests. */
+static const char *extra_sse_response(void)
+{
+    return "HTTP/1.1 200 OK\r\n"
+           "Content-Type: text/event-stream\r\n"
+           "Transfer-Encoding: chunked\r\n\r\n"
+           "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+           "e\r\ndata: [DONE]\n\n\r\n"
+           "0\r\n\r\n";
+}
+
+/* Header order: an extra pair sits between Authorization and
+ * User-Agent, in array order; UA stays the tail. */
+static void test_extra_headers_ordered_between_auth_and_ua(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = { lfd, req, sizeof(req), 0, extra_sse_response() };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmExtraHeader extras[2] = {
+        { "x-opencode-session", "nm-0123456789abcdef0123456789abcdef", 0 },
+        { "x-second", "two", 0 },
+    };
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            extras, 2 };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req2 = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    const char *auth = strstr(req, "Authorization: Bearer test-key");
+    const char *e1 = strstr(req, "x-opencode-session: nm-0123456789abcdef0123456789abcdef");
+    const char *e2 = strstr(req, "x-second: two");
+    const char *ua = strstr(req, "User-Agent: nevermore-test");
+    ASSERT_NOT_NULL(auth);
+    ASSERT_NOT_NULL(e1);
+    ASSERT_NOT_NULL(e2);
+    ASSERT_NOT_NULL(ua);
+    ASSERT_TRUE(auth < e1 && e1 < e2 && e2 < ua);
+    /* Extras must not have displaced the mandatory user-agent. */
+    ASSERT_TRUE(strstr(req, "Content-Type: application/json") != NULL);
+}
+
+/* Empty value (and NULL name/value) is skipped, never sent empty:
+ * "empty is as bad as absent" is the seam's contract. */
+static void test_extra_headers_empty_value_is_skipped(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = { lfd, req, sizeof(req), 0, extra_sse_response() };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmExtraHeader extras[4] = {
+        { "x-opencode-session", "", 0 },  /* empty: skipped */
+        { NULL, "value-but-no-name", 0 }, /* no name: skipped */
+        { "x-null-value", NULL, 0 },      /* no value: skipped */
+        { "x-live", "yes", 0 },           /* the one real pair */
+    };
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            extras, 4 };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req2 = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(req, "x-opencode-session") == NULL);
+    ASSERT_TRUE(strstr(req, "x-null-value") == NULL);
+    ASSERT_TRUE(strstr(req, "value-but-no-name") == NULL);
+    ASSERT_TRUE(strstr(req, "x-live: yes") != NULL);
+    ASSERT_TRUE(strstr(req, "User-Agent: nevermore-test") != NULL);
+}
+
+/* Regression: NULL/0 extras leave the header set exactly as before
+ * the seam existed (auth + UA, no gap). */
+static void test_extra_headers_null_changes_nothing(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = { lfd, req, sizeof(req), 0, extra_sse_response() };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req2 = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    const char *auth = strstr(req, "Authorization: Bearer test-key\r\n");
+    const char *ua = strstr(req, "User-Agent: nevermore-test\r\n");
+    ASSERT_NOT_NULL(auth);
+    ASSERT_NOT_NULL(ua);
+    /* Adjacency: nothing may sit between auth and UA. */
+    ASSERT_TRUE(strncmp(auth + strlen("Authorization: Bearer test-key\r\n"),
+                        "User-Agent: nevermore-test\r\n",
+                        strlen("User-Agent: nevermore-test\r\n")) == 0);
+    ASSERT_TRUE(strstr(req, "x-opencode-session") == NULL);
+}
+
+/* nm_fetch_json carries the extras too (the catalog path is a header
+ * path; opencode's tier consistency requirement). */
+static void test_fetch_json_carries_extra_headers(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = {
+        lfd, req, sizeof(req), 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 11\r\n\r\n"
+        "{\"ok\":true}"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmExtraHeader extras[1] = { { "x-opencode-session", "nm-catalogid", 0 } };
+    const char *err = NULL;
+    NmJson *doc = nm_fetch_json(base, "GET", "/v1/models", "Bearer %s",
+                                "test-key", extras, 1, NULL, &err);
+    ASSERT_NOT_NULL(doc);
+    nm_json_free(doc);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(req, "Authorization: Bearer test-key") != NULL);
+    ASSERT_TRUE(strstr(req, "x-opencode-session: nm-catalogid") != NULL);
+    ASSERT_TRUE(strstr(req, "User-Agent: nevermore (nevermore agent)") != NULL);
+    /* And with no extras the fetch is byte-for-byte the old behavior. */
+}
+
+/* Redaction plumbing: the recorder redacts a marked extra and logs an
+ * unmarked one verbatim (the `secret` flag's whole reason for
+ * existing). Marked where built — the endpoint carries it. */
+static void test_extra_headers_redaction_marker(void)
+{
+    taplog_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("opencode", "glm-5.3"), 1);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = { lfd, req, sizeof(req), 0, extra_sse_response() };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmExtraHeader extras[2] = {
+        { "x-opencode-session", "nm-visible-session", 0 },
+        { "x-future-key", "super-secret-value", 1 },
+    };
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            extras, 2 };
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req2 = {
+        "glm-5.3", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    /* On the wire (the canned capture) the secret is verbatim; only
+     * the log redacts. */
+    ASSERT_TRUE(strstr(req, "x-future-key: super-secret-value") != NULL);
+    ASSERT_TRUE(strstr(req, "x-opencode-session: nm-visible-session") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+    nm_wire_recorder_shutdown();
+
+    char *log = taplog_read();
+    ASSERT_NOT_NULL(log);
+    ASSERT_TRUE(strstr(log, "super-secret-value") == NULL);
+    ASSERT_TRUE(strstr(log, "<redacted>") != NULL);
+    /* The unmarked session id is explicitly not a secret: visible. */
+    ASSERT_TRUE(strstr(log, "nm-visible-session") != NULL);
+    free(log);
+}
+
 static void test_wiretap_401_records_error_with_status(void)
 {
     taplog_reset();
@@ -852,7 +1119,7 @@ static void test_wiretap_401_records_error_with_status(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "wiretap-secret-key",
-                            "nevermore-test" };
+                            "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
         "gpt-4o", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
@@ -895,7 +1162,8 @@ static void test_wiretap_stream_records_events(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "key", "nevermore-test" };
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "key", "nevermore-test",
+                            NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -945,5 +1213,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_truncated_body_reports_byte_counts);
     RUN_TEST(test_wiretap_401_records_error_with_status);
     RUN_TEST(test_wiretap_stream_records_events);
+    RUN_TEST(test_extra_headers_ordered_between_auth_and_ua);
+    RUN_TEST(test_extra_headers_empty_value_is_skipped);
+    RUN_TEST(test_extra_headers_null_changes_nothing);
+    RUN_TEST(test_fetch_json_carries_extra_headers);
+    RUN_TEST(test_extra_headers_redaction_marker);
     TEST_SUMMARY();
 }

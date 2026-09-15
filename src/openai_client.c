@@ -38,12 +38,42 @@
  * the "body too long" marker can note what was dropped. */
 #define ERROR_BODY_MAX (NM_CHAT_MSG_MAX + 32)
 
+/* nm_fetch_json's *err target: the function's failure details come
+ * from connection state that dies with the connection (and from a
+ * stack-local NmConnectInfo), so the string is copied here before
+ * the owning object is closed. Process-static, one caller at a time
+ * (the one-shot fetch is documented blocking) — same pattern as
+ * authinfo's password slot. */
+static char g_fetch_err[NM_ERR_DETAIL_MAX];
+
 /* Silences -Wunused-parameter on params kept for vtable symmetry. */
 #if defined(__GNUC__)
 #define NM_UNUSED __attribute__((unused))
 #else
 #define NM_UNUSED
 #endif
+
+/* Append provider extra headers to a header array, in array order.
+ * Skips name == NULL and value == NULL/empty (the seam's contract:
+ * empty is not sent). Clamps n_extra at NM_EXTRA_HEADERS_MAX (a
+ * programming error, not a runtime condition — no allocation).
+ * Shared by both request builders so the two cannot drift. */
+static void append_extra_headers(NmRequestHeader *hdrs, size_t *nh,
+                                 const NmExtraHeader *extra, size_t n_extra)
+{
+    if (!extra)
+        return;
+    if (n_extra > NM_EXTRA_HEADERS_MAX)
+        n_extra = NM_EXTRA_HEADERS_MAX;
+    for (size_t i = 0; i < n_extra; i++) {
+        if (!extra[i].name || !extra[i].value || !*extra[i].value)
+            continue;
+        hdrs[*nh].name = extra[i].name;
+        hdrs[*nh].value = extra[i].value;
+        hdrs[*nh].secret = extra[i].secret;
+        (*nh)++;
+    }
+}
 
 /* ---------------------------------------------------------------- */
 /* URL / endpoint plumbing                                          */
@@ -619,12 +649,14 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         return NULL;
     }
 
-    /* Headers: Content-Type, auth, User-Agent (nevermore as itself;
-     * no Crush emulation — see openai_client.h). The auth header is
-     * built here and marked secret HERE — the recorder redacts
-     * marked values at log-write time; onboarding a provider via
-     * NmOpenaiEndpoint carries redaction with it (WIRE-DEBUG §4). */
-    NmRequestHeader hdrs[3];
+    /* Headers: Content-Type, auth, provider extras, User-Agent
+     * (nevermore as itself; no Crush emulation — see
+     * openai_client.h). The auth header is built here and marked
+     * secret HERE — the recorder redacts marked values at log-write
+     * time; onboarding a provider via NmOpenaiEndpoint carries
+     * redaction with it (WIRE-DEBUG §4). Extras sit between auth
+     * and UA, in array order; UA stays the tail. */
+    NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
     size_t nh = 0;
     hdrs[nh].name = "Content-Type";
     hdrs[nh].value = "application/json";
@@ -638,6 +670,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         hdrs[nh].secret = 1;
         nh++;
     }
+    append_extra_headers(hdrs, &nh, ep->extra_headers, ep->n_extra_headers);
     hdrs[nh].name = "User-Agent";
     hdrs[nh].value = ep->user_agent ? ep->user_agent : "nevermore";
     hdrs[nh].secret = 0;
@@ -959,8 +992,8 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
 
 NmJson *nm_fetch_json(const char *base_url, const char *method,
                       const char *path, const char *auth_header,
-                      const char *api_key, const char *body,
-                      const char **err)
+                      const char *api_key, const NmExtraHeader *extra,
+                      size_t n_extra, const char *body, const char **err)
 {
     if (err)
         *err = NULL;
@@ -983,8 +1016,11 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
     NmConnectInfo ci;
     NmConnection *conn = nm_connect(host, port, mode, &ci);
     if (!conn) {
+        /* ci.detail is stack-local to this call: copy before use. */
+        snprintf(g_fetch_err, sizeof(g_fetch_err), "%s",
+                 ci.detail[0] ? ci.detail : "connect failed");
         if (err)
-            *err = *ci.detail ? ci.detail : "connect failed";
+            *err = g_fetch_err;
         return NULL;
     }
     /* One-shot fetch is user-facing-blocking (models popup, catalog
@@ -994,9 +1030,10 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
-     * §5) + User-Agent. The auth header is marked secret at its
-     * construction site (the redaction seam; WIRE-DEBUG §4). */
-    NmRequestHeader hdrs[3];
+     * §5), provider extras, + User-Agent. The auth header is marked
+     * secret at its construction site (the redaction seam;
+     * WIRE-DEBUG §4). */
+    NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
     size_t nh = 0;
     if (body) {
         hdrs[nh].name = "Content-Type";
@@ -1012,6 +1049,7 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
         hdrs[nh].secret = 1;
         nh++;
     }
+    append_extra_headers(hdrs, &nh, extra, n_extra);
     hdrs[nh].name = "User-Agent";
     hdrs[nh].value = "nevermore (nevermore agent)";
     hdrs[nh].secret = 0;
@@ -1019,10 +1057,17 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
 
     size_t body_len = body ? strlen(body) : 0;
     if (nm_request(conn, method, path, hdrs, nh, body, body_len) != NM_TRANSPORT_OK) {
+        /* Capture the detail BEFORE close: the connection (and its
+         * error string) is freed by nm_connection_close, and the
+         * *err contract needs a pointer that outlives this call.
+         * Process-static slot, same pattern as authinfo's password
+         * slot (the one-shot fetch is documented blocking; one
+         * caller at a time). */
         const char *d = nm_connection_last_error(conn);
+        snprintf(g_fetch_err, sizeof(g_fetch_err), "%s", d ? d : "");
         nm_connection_close(conn);
         if (err)
-            *err = *d ? d : "request failed";
+            *err = g_fetch_err[0] ? g_fetch_err : "request failed";
         return NULL;
     }
     const NmResponse *resp = nm_response(conn);
@@ -1091,5 +1136,6 @@ NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
     char path[512];
     snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
     return nm_fetch_json(ep->base_url, "GET", path, ep->auth_header,
-                         ep->api_key, NULL, err);
+                         ep->api_key, ep->extra_headers, ep->n_extra_headers,
+                         NULL, err);
 }

@@ -47,7 +47,8 @@ static NmChatResult hyper_chat(const NmProvider *p, const NmChatRequest *req,
         hyper_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat(&ep, req);
 }
@@ -62,7 +63,8 @@ static NmChatStream *hyper_chat_begin(const NmProvider *p,
         hyper_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA
+        NEVERMORE_UA,
+        NULL, 0
     };
     return nm_openai_chat_begin(&ep, req, err);
 }
@@ -76,7 +78,8 @@ static size_t hyper_live_n;
 static void hyper_fetch_catalog(const char *base_url)
 {
     NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
-                            NEVERMORE_UA };
+                            NEVERMORE_UA,
+                            NULL, 0 };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)
