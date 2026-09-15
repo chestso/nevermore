@@ -66,9 +66,10 @@ OpenRouter deltas (all verified):
   concurrent (observed 2026-09): reasoning streams first, each
   chunk carrying `content:""` as a placeholder, then content
   streams (reasoning absent or `""`; reverse never observed,
-  wire-possible). nevermore's parser reads `delta.content` only, so
-  these are inert noise — but a client must not treat an empty
-  `content:""` delta with `reasoning` present as end-of-stream.
+  wire-possible). nevermore now surfaces these on the reasoning
+  channel (see `docs/OPENCODE-PROVIDER-PLAN.md` §7); a client that
+  reads `delta.content` only must not treat an empty `content:""`
+  delta with `reasoning` present as end-of-stream.
 - **Tool-call streaming**: byte-identical to OpenAI —
   `delta.tool_calls[0].id/type/function.name` on the first chunk,
   then `delta.tool_calls[0].function.arguments` fragments (verified:
