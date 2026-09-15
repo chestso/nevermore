@@ -717,6 +717,10 @@ static void test_providers_alias_lists_providers(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "openai") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+    /* The registry is the router's truth: both OpenCode tiers are
+     * listed (seven providers total). */
+    ASSERT_TRUE(strstr(frame, "opencode") != NULL);
+    ASSERT_TRUE(strstr(frame, "opencode-zen") != NULL);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
 
     /* Escape dismisses without switching. */

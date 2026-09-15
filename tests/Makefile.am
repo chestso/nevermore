@@ -90,9 +90,11 @@ test_authinfo_CFLAGS = $(TEST_CFLAGS)
 # vtables call into the shared openai_client, so it links too).
 test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/authinfo.c \
+    ../src/conversation_id.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -103,9 +105,11 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 # data seam. Same link set as test_provider (sources wrap providers).
 test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
     ../src/authinfo.c \
+    ../src/conversation_id.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -136,9 +140,11 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
+    ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c \
+    ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c
+    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c
 test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -170,13 +176,14 @@ test_tools_LDADD = -lpthread
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
-test_agent_SOURCES = test_agent.c ../src/agent.c ../src/session.c \
+test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
     ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c
+    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -200,14 +207,15 @@ test_history_LDADD = $(BOBA_LIBS)
 # an agent (provider + openai_client + transport) and prints the
 # transcript through tui_runtime_clear_inline (new in boba).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
-    ../src/agent.c ../src/session.c ../src/tools.c ../src/tools_file.c \
+    ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \
     ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c \
-    ../src/provider_openrouter.c
+    ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)

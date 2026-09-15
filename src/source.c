@@ -23,7 +23,8 @@ typedef struct
 /* Provider display labels — the human name for each built-in,
  * indexed by NmProviderId. */
 static const char *const provider_labels[] = {
-    "Charm Hyper", "Ollama Cloud", "Ollama Local", "OpenAI", "OpenRouter"
+    "Charm Hyper", "Ollama Cloud", "Ollama Local", "OpenAI",
+    "OpenRouter", "OpenCode Go", "OpenCode Zen"
 };
 #define PROVIDER_LABELS_N \
     (sizeof(provider_labels) / sizeof(provider_labels[0]))

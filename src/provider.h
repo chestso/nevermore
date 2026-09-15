@@ -1,7 +1,7 @@
 /* provider.h - model provider backends
  *
- * Five providers, one function-pointer interface (the portty backend
- * pattern):
+ * Seven providers, one function-pointer interface (the portty
+ * backend pattern):
  *
  *   hyper         Charm Hyper gateway (OpenAI-compatible /v1 chat
  *                 surface plus OAuth device flow; docs/HYPER-API.md)
@@ -11,11 +11,17 @@
  *                 no auth) — same wire and catalog, other endpoint
  *   openai        OpenAI chat completions
  *   openrouter    OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
+ *   opencode      OpenCode Go (https://opencode.ai/zen/go/v1, the
+ *                 $10/month tier) — OpenAI-compatible chat plus the
+ *                 x-opencode-session routing header
+ *   opencode-zen  OpenCode Zen (https://opencode.ai/zen/v1, credits)
+ *                 — same wire, other tier
  *
- * All five share one wire client (openai_client.h); only base URL,
- * auth headers, and model catalogs differ. provider_openai.c is the
- * reference implementation. Provider-specific surfaces are narrow:
- * hyper's OAuth device flow, ollama's native /api catalog.
+ * All of them share one wire client (openai_client.h); only base URL,
+ * auth headers, extra headers, and model catalogs differ.
+ * provider_openai.c is the reference implementation. Provider-specific
+ * surfaces are narrow: hyper's OAuth device flow, ollama's native
+ * /api catalog, opencode's session header.
  *
  * API keys resolve via nm_provider_api_key: $<env_key>, else the
  * provider's authinfo_machine password in ~/.authinfo (authinfo.h).
@@ -38,7 +44,9 @@ typedef enum
     NM_PROVIDER_OLLAMA,       /* Ollama Cloud */
     NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
     NM_PROVIDER_OPENAI,
-    NM_PROVIDER_OPENROUTER
+    NM_PROVIDER_OPENROUTER,
+    NM_PROVIDER_OPENCODE,    /* OpenCode Go (subscription tier) */
+    NM_PROVIDER_OPENCODE_ZEN /* OpenCode Zen (credits tier) */
 } NmProviderId;
 
 typedef struct NmModel

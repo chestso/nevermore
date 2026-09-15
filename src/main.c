@@ -10,7 +10,8 @@
  * Configuration discovery: $NEVERMORE_CONFIG (file) or
  * ~/.config/nevermore/config, plus provider env vars:
  *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, HYPER_API_KEY,
- *   OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY.
+ *   OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+ *   OPENCODE_API_KEY.
  * A key with no env var set resolves from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
  * nm_provider_api_key; env always wins.
@@ -53,7 +54,8 @@ static void usage(FILE *out)
             "\n"
             "options:\n"
             "  -p, --provider NAME   hyper | ollama | ollama-local |\n"
-            "                        openai | openrouter\n"
+            "                        openai | openrouter | opencode |\n"
+            "                        opencode-zen\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"

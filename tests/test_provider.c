@@ -76,6 +76,8 @@ static void test_provider_registry_complete(void)
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA_LOCAL));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENAI));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENROUTER));
+    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE));
+    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE_ZEN));
 }
 
 static void test_provider_lookup_by_name(void)
@@ -85,6 +87,8 @@ static void test_provider_lookup_by_name(void)
     ASSERT_NOT_NULL(nm_provider_by_name("ollama-local"));
     ASSERT_NOT_NULL(nm_provider_by_name("openai"));
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode-zen"));
     ASSERT_NULL(nm_provider_by_name("nope"));
 }
 
@@ -147,6 +151,11 @@ static void test_provider_authinfo_machines(void)
                   "openai.com");
     ASSERT_STR_EQ(nm_provider_by_name("openrouter")->authinfo_machine,
                   "openrouter.ai");
+    /* Both OpenCode tiers share the one box line. */
+    ASSERT_STR_EQ(nm_provider_by_name("opencode")->authinfo_machine,
+                  "opencode.ai");
+    ASSERT_STR_EQ(nm_provider_by_name("opencode-zen")->authinfo_machine,
+                  "opencode.ai");
     ASSERT_NULL(nm_provider_by_name("ollama-local")->authinfo_machine);
 }
 
@@ -849,6 +858,226 @@ static void test_openrouter_needs_auth(void)
     ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
 }
 
+/* ---------------------------------------------------------------- */
+/* OpenCode Go + Zen (real provider code, canned wire — live truth  */
+/* in docs/OPENCODE-API.md, probed 2026-09-15)                      */
+/* ---------------------------------------------------------------- */
+
+/* The OpenCode chat body: a reasoning-only delta (content:"",
+ * reasoning present) BEFORE any content, so the tolerance assertions
+ * ride the same server. Chunk sizes verified with the printf|wc
+ * pattern. */
+static void *opencode_chat_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char sse[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "4e\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning\":\"thinking about it\"}}]}\n\n\r\n"
+        "e\r\n: keep-alive\n\n\r\n"
+        "51\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"more thought\"}}]}\n\n\r\n"
+        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(sse) - 1) {
+        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_opencode_registry_and_identity(void)
+{
+    const NmProvider *go = nm_provider_get(NM_PROVIDER_OPENCODE);
+    const NmProvider *zen = nm_provider_get(NM_PROVIDER_OPENCODE_ZEN);
+    ASSERT_NOT_NULL(go);
+    ASSERT_NOT_NULL(zen);
+    ASSERT_STR_EQ(go->name, "opencode");
+    ASSERT_STR_EQ(zen->name, "opencode-zen");
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode-zen"));
+    /* One tier base each; the plain noun is Go. */
+    ASSERT_STR_EQ(go->default_base_url, "https://opencode.ai/zen/go/v1");
+    ASSERT_STR_EQ(zen->default_base_url, "https://opencode.ai/zen/v1");
+    /* One key, one authinfo machine, both tiers. */
+    ASSERT_STR_EQ(go->env_key(go), "OPENCODE_API_KEY");
+    ASSERT_STR_EQ(zen->env_key(zen), "OPENCODE_API_KEY");
+    ASSERT_STR_EQ(go->authinfo_machine, "opencode.ai");
+    ASSERT_STR_EQ(zen->authinfo_machine, "opencode.ai");
+    /* The tokenless catalog does not make chat keyless. */
+    ASSERT_TRUE(go->needs_auth(go, NULL) != 0);
+    ASSERT_TRUE(go->needs_auth(go, "http://127.0.0.1:1/v1") != 0);
+    ASSERT_TRUE(zen->needs_auth(zen, NULL) != 0);
+}
+
+static void test_opencode_chat_carries_session_header(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, opencode_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("opencode");
+    ASSERT_NOT_NULL(p);
+    ASSERT_STR_EQ(p->default_base_url, "https://opencode.ai/zen/go/v1");
+
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "glm-5.3", &msg, 1, NULL, NULL, -1, -1,
+        "nm-0123456789abcdef0123456789abcdef", /* conversation id */
+        capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    /* Reasoning-only deltas are not content and not end-of-stream;
+     * the answer arrives intact across them. */
+    ASSERT_STR_EQ(cap.text, "Hello, world");
+
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-opencode-test") != NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "x-opencode-session: nm-0123456789abcdef0123456789abcdef") != NULL);
+    ASSERT_TRUE(strstr(last_request, "User-Agent: nevermore (nevermore agent)") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
+}
+
+/* conversation_id == NULL must still carry a non-empty header: the
+ * provider falls back to its process-stable catalog id rather than
+ * letting the seam's skip-empty rule turn "no id" into a 400. */
+static void test_opencode_chat_null_conversation_id_still_sends_header(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, opencode_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("opencode-zen");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "mimo-v2.5-free", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* no conversation id (direct caller) */
+        capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    const char *h = strstr(last_request, "x-opencode-session: ");
+    ASSERT_NOT_NULL(h);
+    /* Non-empty value (the next char is not CR). */
+    ASSERT_TRUE(h[sizeof("x-opencode-session: ") - 1] != '\r');
+    ASSERT_TRUE(h[sizeof("x-opencode-session: ") - 1] != '\0');
+}
+
+/* Catalog: ids-only mapping ({"object":"list","data":[{"id"}]}),
+ * non-empty session header on the request, tokenless. */
+static void *opencode_models_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char body[] =
+        "{\"object\":\"list\",\"data\":["
+        "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+        "{\"id\":\"omen-alpha\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+        "]}";
+    char head[256];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             sizeof(body) - 1);
+    send(cfd, head, strlen(head), 0);
+    send(cfd, body, sizeof(body) - 1, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_opencode_models_fetch_maps_ids(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, opencode_models_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("opencode");
+    ASSERT_NOT_NULL(p);
+
+    size_t n = 0;
+    const NmModel *models = p->models(p, base, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(models[0].id, "glm-5.3");
+    ASSERT_STR_EQ(models[0].label, "glm-5.3"); /* id-only: label = id */
+    ASSERT_EQ(models[0].vision, 0);
+    ASSERT_EQ(models[0].context_length, -1);
+    ASSERT_STR_EQ(models[1].id, "omen-alpha"); /* absent from models.dev too */
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
+    /* Catalog sends the session header too (consistency; harmless). */
+    ASSERT_TRUE(strstr(last_request, "x-opencode-session: ") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
+}
+
+/* The static fallback is per-tier: Zen's differs from Go's (the
+ * offline gate under make check means default-base calls are no-ops). */
+static void test_opencode_models_static_fallback_per_tier(void)
+{
+    const NmProvider *go = nm_provider_by_name("opencode");
+    const NmProvider *zen = nm_provider_by_name("opencode-zen");
+    size_t gn = 0, zn = 0;
+    const NmModel *g = go->models(go, NULL, NULL, &gn);
+    const NmModel *z = zen->models(zen, NULL, NULL, &zn);
+    ASSERT_NOT_NULL(g);
+    ASSERT_NOT_NULL(z);
+    ASSERT_TRUE(gn > 0);
+    ASSERT_TRUE(zn > 0);
+    /* Different lists (tiers have different catalogs). */
+    ASSERT_TRUE(strcmp(g[0].id, z[0].id) != 0);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -876,5 +1105,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_models_fetch);
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);
     RUN_TEST(test_openrouter_needs_auth);
+    RUN_TEST(test_opencode_registry_and_identity);
+    RUN_TEST(test_opencode_chat_carries_session_header);
+    RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
+    RUN_TEST(test_opencode_models_fetch_maps_ids);
+    RUN_TEST(test_opencode_models_static_fallback_per_tier);
     TEST_SUMMARY();
 }

@@ -30,7 +30,9 @@ static const struct NmProvider *const g_providers[] = {
     &nm_ollama_provider,       /* provider_ollama.c (cloud) */
     &nm_ollama_local_provider, /* provider_ollama_local.c (daemon) */
     &nm_openai_provider,       /* provider_openai.c */
-    &nm_openrouter_provider    /* provider_openrouter.c */
+    &nm_openrouter_provider,   /* provider_openrouter.c */
+    &nm_opencode_provider,     /* provider_opencode.c (Go) */
+    &nm_opencode_zen_provider  /* provider_opencode_zen.c (Zen) */
 };
 
 const NmProvider *nm_provider_get(NmProviderId id)

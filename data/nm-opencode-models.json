@@ -1,0 +1,222 @@
+# Generated from models.dev api.json entry "opencode-go" on 2026-09-15 by
+# tools/generate-opencode-models.sh. Do not edit by hand;
+# regenerate and commit. Never fetched at runtime.
+# 
+[
+  {
+    "id": "deepseek-v4-flash",
+    "label": "DeepSeek V4 Flash",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "deepseek-v4-flash-vision-exp",
+    "label": "DeepSeek V4 Flash Vision Exp",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "deepseek-v4-pro",
+    "label": "DeepSeek V4 Pro (New)",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "deepseek-v4.1-flash",
+    "label": "DeepSeek V4.1 Flash",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "glm-5",
+    "label": "GLM-5",
+    "vision": 0,
+    "context_length": 202752
+  },
+  {
+    "id": "glm-5.1",
+    "label": "GLM-5.1",
+    "vision": 0,
+    "context_length": 202752
+  },
+  {
+    "id": "glm-5.2",
+    "label": "GLM-5.2",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "glm-5.3",
+    "label": "GLM-5.3",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "glm-5.3-flash",
+    "label": "GLM-5.3-Flash",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "gpt-5.6-luna",
+    "label": "GPT-5.6 Luna",
+    "vision": 1,
+    "context_length": 1050000
+  },
+  {
+    "id": "grok-4.5",
+    "label": "Grok 4.5",
+    "vision": 1,
+    "context_length": 500000
+  },
+  {
+    "id": "grok-4.6",
+    "label": "Grok 4.6",
+    "vision": 1,
+    "context_length": 500000
+  },
+  {
+    "id": "hy3",
+    "label": "Hy3",
+    "vision": 0,
+    "context_length": 256000
+  },
+  {
+    "id": "hy4-preview",
+    "label": "Hy4 preview",
+    "vision": 0,
+    "context_length": 1024000
+  },
+  {
+    "id": "kimi-k2.5",
+    "label": "Kimi K2.5",
+    "vision": 1,
+    "context_length": 262144
+  },
+  {
+    "id": "kimi-k2.6",
+    "label": "Kimi K2.6",
+    "vision": 1,
+    "context_length": 262144
+  },
+  {
+    "id": "kimi-k2.7-code",
+    "label": "Kimi K2.7 Code",
+    "vision": 1,
+    "context_length": 262144
+  },
+  {
+    "id": "kimi-k3",
+    "label": "Kimi K3",
+    "vision": 1,
+    "context_length": 1048576
+  },
+  {
+    "id": "longcat-2.0",
+    "label": "LongCat-2.0",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "mimo-v2-omni",
+    "label": "MiMo V2 Omni",
+    "vision": 1,
+    "context_length": 262144
+  },
+  {
+    "id": "mimo-v2-pro",
+    "label": "MiMo V2 Pro",
+    "vision": 0,
+    "context_length": 1048576
+  },
+  {
+    "id": "mimo-v2.5",
+    "label": "MiMo V2.5",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "mimo-v2.5-pro",
+    "label": "MiMo V2.5 Pro",
+    "vision": 0,
+    "context_length": 1048576
+  },
+  {
+    "id": "minimax-m2.5",
+    "label": "MiniMax-M2.5",
+    "vision": 0,
+    "context_length": 204800
+  },
+  {
+    "id": "minimax-m2.7",
+    "label": "MiniMax-M2.7",
+    "vision": 0,
+    "context_length": 204800
+  },
+  {
+    "id": "minimax-m3",
+    "label": "MiniMax-M3",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "muse-spark-1.2-contributor",
+    "label": "Muse Spark 1.2 Contributor",
+    "vision": 1,
+    "context_length": 1048576
+  },
+  {
+    "id": "muse-spark-1.3-contributor",
+    "label": "Muse Spark 1.3 Contributor",
+    "vision": 1,
+    "context_length": 1048576
+  },
+  {
+    "id": "omen-alpha",
+    "label": "Omen Alpha",
+    "vision": 1,
+    "context_length": 500000
+  },
+  {
+    "id": "ox-alpha-free",
+    "label": "Ox Alpha Free (Unlimited)",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "qwen3.5-plus",
+    "label": "Qwen3.5 Plus",
+    "vision": 1,
+    "context_length": 262144
+  },
+  {
+    "id": "qwen3.6-plus",
+    "label": "Qwen3.6 Plus",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "qwen3.7-max",
+    "label": "Qwen3.7 Max",
+    "vision": 0,
+    "context_length": 1000000
+  },
+  {
+    "id": "qwen3.7-plus",
+    "label": "Qwen3.7 Plus",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "qwen3.8-flash",
+    "label": "Qwen3.8 Flash",
+    "vision": 1,
+    "context_length": 1000000
+  },
+  {
+    "id": "qwen3.8-max",
+    "label": "Qwen3.8 Max",
+    "vision": 1,
+    "context_length": 1000000
+  }
+]

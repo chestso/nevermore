@@ -74,6 +74,8 @@ nevermore_SOURCES = \
     provider_ollama_local.c \
     provider_openai.c \
     provider_openrouter.c \
+    provider_opencode.c \
+    provider_opencode_zen.c \
     openai_client.h \
     openai_client.c \
     transport_internal.h \
@@ -85,6 +87,7 @@ nevermore_SOURCES = \
     sse.c \
     json.c \
     agent.c \
+    conversation_id.c \
     source.h \
     source.c \
     tools_internal.h \
