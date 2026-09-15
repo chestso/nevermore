@@ -162,6 +162,14 @@ static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
         if (req->messages[i].tool_call_id && *req->messages[i].tool_call_id)
             nm_json_set(m, "tool_call_id",
                         nm_json_new_string(req->messages[i].tool_call_id));
+        /* Reasoning echo-back: an assistant message may carry its
+         * round's trace as reasoning_content. Providers that require
+         * it (hyper) need it present on later requests carrying the
+         * turn, including tool-call rounds; for the rest it is inert
+         * documentation of the thinking (and empty is tolerated). */
+        if (req->messages[i].reasoning && *req->messages[i].reasoning)
+            nm_json_set(m, "reasoning_content",
+                        nm_json_new_string(req->messages[i].reasoning));
         nm_json_push(messages, m);
     }
     nm_json_set(body, "model", nm_json_new_string(req->model));
@@ -284,12 +292,30 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
     if (choice) {
         NmJson *delta = nm_json_get(choice, "delta");
         if (delta) {
+            /* Reasoning first: providers stream it phase-sequential
+             * with content (never concurrent). Two key spellings:
+             * reasoning_content (GLM/Go, hyper, OpenRouter) and
+             * reasoning (Zen free models, OpenRouter's other shape).
+             * Read the first present one; both carry the same text,
+             * and reasoning_details[]/top-level reasoning is a
+             * structured echo of it, not a second channel. */
+            const char *reasoning =
+                nm_json_str(nm_json_get(delta, "reasoning_content"));
+            if (!reasoning)
+                reasoning = nm_json_str(nm_json_get(delta, "reasoning"));
+            if (reasoning && *reasoning && st->on_delta)
+                st->on_delta(NM_STREAM_REASONING, reasoning, NULL, 0,
+                             st->userdata);
+
             const char *content = nm_json_str(nm_json_get(delta, "content"));
-            /* quoth drops empty content deltas: ollama puts "" on
-             * every reasoning chunk; emitting them would garble the
-             * region boundaries. */
+            /* Empty content is not a content delta: providers put ""
+             * on every reasoning chunk and on the trailing cost
+             * event; emitting them would garble region boundaries.
+             * (This is why "reasoning-only" deltas never fabricate
+             * answer text or look like end-of-stream.) */
             if (content && *content && st->on_delta)
-                st->on_delta(content, NULL, 0, st->userdata);
+                st->on_delta(NM_STREAM_CONTENT, content, NULL, 0,
+                             st->userdata);
             /* Tool-call deltas: merge fragments by index (port of
              * quoth's sse-merge-tool-calls). Arguments accumulate
              * across chunks; assembled calls are delivered from
@@ -387,8 +413,8 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
 static void stream_finish(NmChatStream *st)
 {
     if (st->n_tool_calls > 0 && st->on_delta) {
-        st->on_delta(NULL, st->tool_calls, st->n_tool_calls,
-                     st->userdata);
+        st->on_delta(NM_STREAM_CONTENT, NULL, st->tool_calls,
+                     st->n_tool_calls, st->userdata);
         st->tool_calls = NULL;
         st->n_tool_calls = 0;
     }

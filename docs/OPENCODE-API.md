@@ -25,7 +25,7 @@ share one API key and one OpenAI-compatible wire:
 | Chat         | `POST {base}/chat/completions` (the tier base already ends in `/v1`)    |
 | Catalog      | `GET {base}/models` — public, tokenless, `{"object":"list","data":[…]}` |
 | Auth         | `Authorization: Bearer <key>`                                           |
-| Key env      | `OPENCODE_API_KEY` (nevermore's one key; no alias)                       |
+| Key env      | `OPENCODE_API_KEY` (nevermore's one key; no alias)                      |
 | Content type | `application/json` (chat request + catalog response)                    |
 | Transport    | HTTP/2 to Cloudflare; SSE `text/event-stream` for streaming             |
 

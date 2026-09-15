@@ -65,13 +65,20 @@ static void usage(FILE *out)
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
  * renders as a compact status line (the -P pipeline shape). */
 
-static void ask_on_delta(const char *delta_text, const NmToolCall *calls,
-                         size_t n_calls, void *userdata)
+static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
+                         const NmToolCall *calls, size_t n_calls,
+                         void *userdata)
 {
     (void)calls;
     (void)n_calls;
     (void)userdata;
-    if (delta_text)
+    if (!delta_text)
+        return;
+    /* Headless ask: reasoning goes to stderr (dimmed), the answer to
+     * stdout, so piping the answer stays clean. */
+    if (channel == NM_STREAM_REASONING)
+        fprintf(stderr, "\033[2m%s\033[0m", delta_text);
+    else
         fputs(delta_text, stdout);
 }
 

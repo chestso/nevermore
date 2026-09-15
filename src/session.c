@@ -69,6 +69,7 @@ void nm_session_free(NmSession *s)
         free(s->msgs[i].tool_calls_json);
         free(s->msgs[i].tool_call_id);
         free(s->msgs[i].tool_name);
+        free(s->msgs[i].reasoning);
     }
     free(s->msgs);
     free(s->view);
@@ -88,8 +89,24 @@ const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
     return m;
 }
 
+const NmSessionMessage *nm_session_append_reasoning(NmSession *s,
+                                                    const char *reasoning,
+                                                    const char *content)
+{
+    if (!s)
+        return NULL;
+    NmSessionMessage *m = push_slot(s);
+    if (!m)
+        return NULL;
+    m->role = NM_ROLE_ASSISTANT;
+    m->content = dup_or_null(content);
+    m->reasoning = dup_or_null(reasoning);
+    return m;
+}
+
 const NmSessionMessage *nm_session_append_tool_call(NmSession *s,
-                                                    const char *tool_calls_json)
+                                                    const char *tool_calls_json,
+                                                    const char *reasoning)
 {
     if (!s)
         return NULL;
@@ -98,6 +115,7 @@ const NmSessionMessage *nm_session_append_tool_call(NmSession *s,
         return NULL;
     m->role = NM_ROLE_ASSISTANT;
     m->tool_calls_json = dup_or_null(tool_calls_json);
+    m->reasoning = dup_or_null(reasoning);
     return m;
 }
 

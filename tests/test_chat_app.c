@@ -938,6 +938,66 @@ static void *raw_responder_thread(void *arg)
     return NULL;
 }
 
+/* Reasoning deltas render dimmed, ahead of the answer, on their own
+ * lines; the answer itself is untouched. Wire shape: reasoning-only
+ * chunks (content:"") then content, phase-sequential. */
+static void test_reasoning_prints_dimmed_before_answer(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "think");
+    harness_enter(h);
+    for (int i = 0; i < 200; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR || st == NM_AGENT_IDLE)
+            break;
+        nm_chat_app_step(h->app);
+        usleep(5 * 1000);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "weighing options") != NULL);
+    ASSERT_TRUE(strstr(out, "the answer") != NULL);
+    /* The reasoning line is preceded by the dim SGR (scan for it in
+     * the bytes before the reasoning text — no memmem, no regex). */
+    const char *r = strstr(out, "weighing options");
+    ASSERT_NOT_NULL(r);
+    int saw_dim = 0;
+    for (const char *p = out; p + 3 < r; p++) {
+        if (p[0] == '\033' && p[1] == '[' && p[2] == '2' && p[3] == 'm') {
+            saw_dim = 1;
+            break;
+        }
+    }
+    ASSERT_TRUE(saw_dim);
+    /* Reasoning precedes the answer (phase-sequential). */
+    ASSERT_TRUE(strstr(out, "weighing options") < strstr(out, "the answer"));
+    /* No staircasing. */
+    for (const char *p = out; *p; p++)
+        ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
+
+    harness_free(h);
+}
+
 /* Regression: a provider error body that ends with a trailing
  * newline (hyper's does — wire framing) must NOT staircase the
  * transcript. The error line — message + any follow-on text — must
@@ -1278,6 +1338,7 @@ int main(void)
     RUN_TEST(test_cancel_midstream_returns_to_idle);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_error_line_endings_are_crnl);
+    RUN_TEST(test_reasoning_prints_dimmed_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
     TEST_SUMMARY();

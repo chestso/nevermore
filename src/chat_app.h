@@ -88,8 +88,9 @@ int nm_chat_app_tick_ms(NmChatApp *app);
 
 /* Feed agent callbacks back into the view (fired from inside agent
  * steps; same-thread). Registered on the agent by nm_chat_app_new. */
-void nm_chat_app_on_delta(const char *text, const NmToolCall *calls,
-                          size_t n_calls, void *userdata);
+void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
+                          const NmToolCall *calls, size_t n_calls,
+                          void *userdata);
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
                          void *userdata);

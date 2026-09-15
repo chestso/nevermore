@@ -441,9 +441,11 @@ typedef struct
 {
     char text[256];
     size_t len;
+    char reasoning[256];
+    size_t reasoning_len;
 } Capture;
 
-static void capture_delta(const char *delta_text,
+static void capture_delta(NmStreamChannel channel, const char *delta_text,
                           const NmToolCall *tool_calls, size_t n_tool_calls,
                           void *userdata)
 {
@@ -453,6 +455,14 @@ static void capture_delta(const char *delta_text,
     if (!delta_text)
         return; /* completion ping */
     size_t n = strlen(delta_text);
+    if (channel == NM_STREAM_REASONING) {
+        if (cap->reasoning_len + n < sizeof(cap->reasoning)) {
+            memcpy(cap->reasoning + cap->reasoning_len, delta_text, n);
+            cap->reasoning_len += n;
+            cap->reasoning[cap->reasoning_len] = '\0';
+        }
+        return;
+    }
     if (cap->len + n < sizeof(cap->text)) {
         memcpy(cap->text + cap->len, delta_text, n);
         cap->len += n;
@@ -474,7 +484,7 @@ static void test_hyper_chat_end_to_end(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, "you are terse", NULL, -1, -1,
@@ -509,7 +519,7 @@ static void test_hyper_chat_begin_step(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -802,7 +812,7 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
@@ -940,7 +950,7 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_NOT_NULL(p);
     ASSERT_STR_EQ(p->default_base_url, "https://opencode.ai/zen/go/v1");
 
-    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "glm-5.3", &msg, 1, NULL, NULL, -1, -1,
@@ -951,8 +961,10 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
     /* Reasoning-only deltas are not content and not end-of-stream;
-     * the answer arrives intact across them. */
+     * the answer arrives intact across them. Both key spellings are
+     * read, on the reasoning channel, never the content channel. */
     ASSERT_STR_EQ(cap.text, "Hello, world");
+    ASSERT_STR_EQ(cap.reasoning, "thinking about itmore thought");
 
     pthread_join(th, NULL);
     close(lfd);
@@ -982,7 +994,7 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
     const NmProvider *p = nm_provider_by_name("opencode-zen");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "mimo-v2.5-free", &msg, 1, NULL, NULL, -1, -1,

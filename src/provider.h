@@ -67,6 +67,10 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
+    /* Assistant reasoning trace echoed back as reasoning_content on
+     * requests carrying the turn (HYPER-API.md requires it on
+     * assistant tool-call messages). NULL/"" when none. */
+    const char *reasoning;
 } NmMessage;
 
 typedef struct NmToolCall
@@ -90,8 +94,21 @@ typedef struct NmToolCall
  * over SSE; called once more with NULL content at stream completion.
  * tool_calls is non-NULL when the completed stream carried function
  * calls: n_tool_calls entries, heap-owned args_json freed with
- * nm_tool_calls_free(). */
-typedef void (*NmStreamCallback)(const char *delta_text,
+ * nm_tool_calls_free().
+ *
+ * channel names what the text is: NM_STREAM_CONTENT for the answer
+ * text, NM_STREAM_REASONING for chain-of-thought (providers stream
+ * it phase-sequentially before the answer; the transcript renders it
+ * dimmed). A reasoning delta carries text on the reasoning channel
+ * and never any answer bytes. */
+typedef enum
+{
+    NM_STREAM_CONTENT = 0, /* the assistant answer */
+    NM_STREAM_REASONING    /* CoT / thinking trace */
+} NmStreamChannel;
+
+typedef void (*NmStreamCallback)(NmStreamChannel channel,
+                                 const char *delta_text,
                                  const NmToolCall *tool_calls,
                                  size_t n_tool_calls, void *userdata);
 

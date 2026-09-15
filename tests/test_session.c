@@ -47,18 +47,43 @@ static void test_session_tool_roundtrip(void)
     const char *calls = "[{\"id\":\"call_1\",\"type\":\"function\","
                         "\"function\":{\"name\":\"edit_file\","
                         "\"arguments\":\"{}\"}}]";
-    nm_session_append_tool_call(s, calls);
+    nm_session_append_tool_call(s, calls, NULL);
     nm_session_append_tool_result(s, "call_1", "edit_file", "Edited x");
     ASSERT_EQ(nm_session_len(s), 4);
     const NmSessionMessage *m = nm_session_get(s, 2);
     ASSERT_EQ(m->role, NM_ROLE_ASSISTANT);
     ASSERT_NOT_NULL(m->tool_calls_json);
     ASSERT_NULL(m->content);
+    ASSERT_NULL(m->reasoning);
     const NmSessionMessage *t = nm_session_get(s, 3);
     ASSERT_EQ(t->role, NM_ROLE_TOOL);
     ASSERT_STR_EQ(t->tool_call_id, "call_1");
     ASSERT_STR_EQ(t->tool_name, "edit_file");
     ASSERT_STR_EQ(t->content, "Edited x");
+    nm_session_free(s);
+}
+
+/* The reasoning trace rides the assistant message (content and
+ * tool-call shapes) so later requests can echo it back. */
+static void test_session_reasoning_roundtrip(void)
+{
+    NmSession *s = nm_session_new("sys");
+    nm_session_append(s, NM_ROLE_USER, "q");
+    nm_session_append_reasoning(s, "step one", "the answer");
+    const char *calls = "[{\"id\":\"c\",\"type\":\"function\","
+                        "\"function\":{\"name\":\"read_file\","
+                        "\"arguments\":\"{}\"}}]";
+    nm_session_append_tool_call(s, calls, "thinking hard");
+    nm_session_append_tool_result(s, "c", "read_file", "contents");
+
+    const NmSessionMessage *m = nm_session_get(s, 2);
+    ASSERT_EQ(m->role, NM_ROLE_ASSISTANT);
+    ASSERT_STR_EQ(m->content, "the answer");
+    ASSERT_STR_EQ(m->reasoning, "step one");
+    const NmSessionMessage *tc = nm_session_get(s, 3);
+    ASSERT_EQ(tc->role, NM_ROLE_ASSISTANT);
+    ASSERT_NOT_NULL(tc->tool_calls_json);
+    ASSERT_STR_EQ(tc->reasoning, "thinking hard");
     nm_session_free(s);
 }
 
@@ -101,7 +126,7 @@ static void test_context_view_keeps_tool_pair(void)
 {
     NmSession *s = nm_session_new("sys");
     nm_session_append(s, NM_ROLE_USER, "do it");
-    nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]");
+    nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]", NULL);
     nm_session_append_tool_result(s, "c1", "read_file", "the file contents");
 
     /* Tight enough that a naive per-message walk would drop the tool
@@ -129,7 +154,7 @@ static void test_session_save(void)
 {
     NmSession *s = nm_session_new("sysprompt");
     nm_session_append(s, NM_ROLE_USER, "hello there");
-    nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]");
+    nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]", NULL);
     nm_session_append_tool_result(s, "c1", "read_file", "content here");
 
 #ifdef _WIN32
@@ -158,6 +183,7 @@ int main(void)
     RUN_TEST(test_session_new_free);
     RUN_TEST(test_session_append);
     RUN_TEST(test_session_tool_roundtrip);
+    RUN_TEST(test_session_reasoning_roundtrip);
     RUN_TEST(test_context_view_basic);
     RUN_TEST(test_context_view_budget_trims_oldest);
     RUN_TEST(test_context_view_keeps_tool_pair);

@@ -38,6 +38,11 @@ typedef struct NmSessionMessage
     char *tool_calls_json; /* NM_ROLE_ASSISTANT: wire tool_calls array, or NULL */
     char *tool_call_id;    /* NM_ROLE_TOOL: answered call id, or NULL */
     char *tool_name;       /* NM_ROLE_TOOL: tool that produced this result */
+    /* NM_ROLE_ASSISTANT: this round's reasoning trace, echoed back as
+     * reasoning_content on later requests carrying the turn. Some
+     * providers require it present (or empty) on assistant
+     * tool-call messages (HYPER-API.md). NULL/"" when none. */
+    char *reasoning;
 } NmSessionMessage;
 
 NmSession *nm_session_new(const char *system_prompt);
@@ -46,8 +51,15 @@ void nm_session_free(NmSession *s);
 /* Append-only transcript. */
 const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
                                           const char *content);
-const NmSessionMessage *nm_session_append_tool_call(NmSession *s,
-                                                    const char *tool_calls_json);
+/* Append an assistant message carrying a reasoning trace (content
+ * may be NULL for a tool-call-only turn). */
+const NmSessionMessage *nm_session_append_reasoning(NmSession *s,
+                                                    const char *reasoning,
+                                                    const char *content);
+/* Append an assistant message carrying a tool_calls array, with the
+ * round's reasoning echoed back (reasoning may be NULL/""). */
+const NmSessionMessage *nm_session_append_tool_call(
+    NmSession *s, const char *tool_calls_json, const char *reasoning);
 const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
                                                       const char *tool_call_id,
                                                       const char *tool_name,

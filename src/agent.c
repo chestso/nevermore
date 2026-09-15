@@ -71,6 +71,11 @@ struct NmAgent
     char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
+    /* This round's accumulated reasoning text (echoed back on the
+     * assistant message). Reused across rounds; same growth rule. */
+    char *reasoning;
+    size_t reasoning_len;
+    size_t reasoning_cap;
     NmToolCall *calls; /* delivered tool calls (owned between rounds) */
     size_t n_calls;
 };
@@ -114,6 +119,7 @@ void nm_agent_free(NmAgent *a)
     free(a->api_key);
     free(a->last_error);
     free(a->text); /* reused round buffer; released with the agent */
+    free(a->reasoning);
     nm_tool_calls_free(a->calls, a->n_calls);
     nm_session_free(a->session);
     free(a);
@@ -156,16 +162,41 @@ const char *nm_agent_last_error(const NmAgent *a)
 /* Turn internals                                                    */
 /* ---------------------------------------------------------------- */
 
-/* Streaming collector: text deltas accumulate into the agent's
- * reused round buffer; the final NULL-content call delivers the
- * assembled tool calls (ownership moves in here, moves out at the
- * end of the round). Agent-internal, installed as the request's
- * on_delta for every round. */
-static void round_on_delta(const char *delta_text, const NmToolCall *calls,
-                           size_t n_calls, void *userdata)
+/* Streaming collector: content text accumulates into the agent's
+ * reused round buffer; reasoning text accumulates into a second
+ * reused buffer (echoed back as reasoning_content on the assistant
+ * message, which some providers require on later requests carrying
+ * the turn). The final NULL-content call delivers the assembled tool
+ * calls (ownership moves in here, moves out at the end of the
+ * round). Agent-internal, installed as the request's on_delta for
+ * every round. */
+static void round_on_delta(NmStreamChannel channel, const char *delta_text,
+                           const NmToolCall *calls, size_t n_calls,
+                           void *userdata)
 {
     NmAgent *a = userdata;
     if (delta_text && *delta_text) {
+        if (channel == NM_STREAM_REASONING) {
+            /* Accumulate for echo-back; forward for display. */
+            size_t dlen = strlen(delta_text);
+            if (a->reasoning_len + dlen + 1 > a->reasoning_cap) {
+                size_t ncap = a->reasoning_cap ? a->reasoning_cap : 256;
+                while (ncap < a->reasoning_len + dlen + 1)
+                    ncap *= 2;
+                char *nb = realloc(a->reasoning, ncap);
+                if (!nb)
+                    return; /* OOM: drop rather than die */
+                a->reasoning = nb;
+                a->reasoning_cap = ncap;
+            }
+            memcpy(a->reasoning + a->reasoning_len, delta_text, dlen);
+            a->reasoning_len += dlen;
+            a->reasoning[a->reasoning_len] = '\0';
+            if (a->on_delta)
+                a->on_delta(NM_STREAM_REASONING, delta_text, NULL, 0,
+                            a->userdata);
+            return;
+        }
         size_t dlen = strlen(delta_text);
         if (a->text_len + dlen + 1 > a->text_cap) {
             size_t ncap = a->text_cap ? a->text_cap : 256;
@@ -181,7 +212,7 @@ static void round_on_delta(const char *delta_text, const NmToolCall *calls,
         a->text_len += dlen;
         a->text[a->text_len] = '\0';
         if (a->on_delta)
-            a->on_delta(delta_text, NULL, 0, a->userdata);
+            a->on_delta(NM_STREAM_CONTENT, delta_text, NULL, 0, a->userdata);
     }
     if (!delta_text && calls) {
         /* Final call: tool calls delivered; ownership of the array
@@ -235,6 +266,9 @@ static void round_reset(NmAgent *a)
     a->text_len = 0;
     if (a->text)
         a->text[0] = '\0';
+    a->reasoning_len = 0;
+    if (a->reasoning)
+        a->reasoning[0] = '\0';
     nm_tool_calls_free(a->calls, a->n_calls);
     a->calls = NULL;
     a->n_calls = 0;
@@ -290,6 +324,7 @@ static int begin_round(NmAgent *a)
         msgs[i].content = sm->content;
         msgs[i].tool_calls_json = sm->tool_calls_json;
         msgs[i].tool_call_id = sm->tool_call_id;
+        msgs[i].reasoning = sm->reasoning;
     }
 
     NmChatRequest req = {
@@ -333,20 +368,24 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         return -1;
     }
 
-    /* Record what the model said. */
-    if (a->text && *a->text)
-        nm_session_append(a->session, NM_ROLE_ASSISTANT, a->text);
-
+    /* Record what the model said, echoing the reasoning trace so
+     * later requests carrying this turn can re-send it as
+     * reasoning_content (required by some providers). */
     if (a->n_calls == 0) {
+        if (a->text && *a->text)
+            nm_session_append_reasoning(a->session, a->reasoning, a->text);
+        else if (a->reasoning && *a->reasoning)
+            nm_session_append_reasoning(a->session, a->reasoning, NULL);
         /* Plain answer: turn complete. */
         set_state(a, NM_AGENT_DONE);
         return 1;
     }
 
-    /* Tool-call round: assistant tool_calls message, then one
-     * tool message per call, then the next stream. */
+    /* Tool-call round: assistant tool_calls message (carrying the
+     * reasoning trace), then one tool message per call, then the next
+     * stream. */
     char *calls_json = calls_to_json(a->calls, a->n_calls);
-    nm_session_append_tool_call(a->session, calls_json);
+    nm_session_append_tool_call(a->session, calls_json, a->reasoning);
     free(calls_json);
 
     set_state(a, NM_AGENT_RUNNING_TOOL);

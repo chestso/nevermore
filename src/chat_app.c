@@ -58,6 +58,7 @@
  * colors.h item; these are the values that lands behind. */
 #define SGR_OYSTER     "\033[38;2;96;95;107m"  /* oyster #605F6B */
 #define SGR_CORAL      "\033[38;2;255;87;125m" /* coral  #FF577D */
+#define SGR_DIM        "\033[2m"               /* reasoning trace */
 #define SGR_TEXT_RESET "\033[0m"
 
 #define PROMPT              "❯ "
@@ -216,8 +217,9 @@ static void flush_transcript(NmChatApp *app)
 /* Agent callbacks (see chat_app.h for the signatures)              */
 /* ---------------------------------------------------------------- */
 
-void nm_chat_app_on_delta(const char *text, const NmToolCall *calls,
-                          size_t n_calls, void *userdata)
+void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
+                          const NmToolCall *calls, size_t n_calls,
+                          void *userdata)
 {
     (void)calls;
     (void)n_calls;
@@ -225,6 +227,17 @@ void nm_chat_app_on_delta(const char *text, const NmToolCall *calls,
     NmChatApp *app = s_app;
     if (!app || !text || !*text)
         return;
+    if (channel == NM_STREAM_REASONING) {
+        /* Chain-of-thought renders dimmed, phase-sequential before
+         * the answer. Routed through the same pend seam (wire text
+         * normalization lives there). */
+        pend_str(app, SGR_DIM);
+        pend_str(app, text);
+        pend_str(app, SGR_TEXT_RESET);
+        split_completed_lines(app);
+        tui_runtime_wakeup(app->rt);
+        return;
+    }
     dynamic_buffer_append(app->tail, text, strlen(text));
     split_completed_lines(app);
     /* Tail growth is a view change: wake the loop so the live region
