@@ -776,6 +776,71 @@ static void test_chat_truncated_body_reports_byte_counts(void)
     close(lfd);
 }
 
+/* An error body much longer than the message cap (NM_CHAT_MSG_MAX):
+ * the composed message is clipped by an explicit bounded append, so
+ * no part of the body can overflow — and nothing after a clipped
+ * body gets lost to an implicit formatter truncation. */
+static void *long_error_body_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char head[] =
+        "HTTP/1.1 500 Internal Server Error\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n";
+    send(cfd, head, sizeof(head) - 1, 0);
+    /* 700 bytes of body: past ERROR_BODY_MAX (544) and far past the
+     * 512-byte message slot. */
+    char chunk[100];
+    memset(chunk, 'x', sizeof(chunk));
+    for (int i = 0; i < 7; i++)
+        send(cfd, chunk, sizeof(chunk), 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_chat_long_error_body_is_clipped(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, long_error_body_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_HTTP);
+    ASSERT_EQ(r.http_status, 500);
+    /* Prefix intact, slot terminated, never longer than the cap. */
+    ASSERT_TRUE(strncmp(r.message, "HTTP 500: ", 10) == 0);
+    ASSERT_EQ(strlen(r.message), NM_CHAT_MSG_MAX - 1);
+    ASSERT_EQ(r.message[NM_CHAT_MSG_MAX - 1], '\0');
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* The failure-path recorder round trip: a marked auth header's value
  * never reaches the file even through the real client path. */
 static void *wiretap_401_thread(void *arg)
@@ -1237,6 +1302,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_auth_error_carries_detail);
     RUN_TEST(test_chat_connect_refused_names_target);
     RUN_TEST(test_chat_truncated_body_reports_byte_counts);
+    RUN_TEST(test_chat_long_error_body_is_clipped);
     RUN_TEST(test_wiretap_401_records_error_with_status);
     RUN_TEST(test_wiretap_stream_records_events);
     RUN_TEST(test_extra_headers_ordered_between_auth_and_ua);

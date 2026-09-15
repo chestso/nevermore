@@ -120,12 +120,16 @@ static void test_provider_api_key_env_then_authinfo(void)
     test_unsetenv("OPENAI_API_KEY");
     nm_authinfo_set_path(NULL);
 
-    /* Providers with an authinfo machine but no key for it: NULL. */
-    const NmProvider *hyper = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(hyper);
+    /* Providers with an authinfo machine but no key for it: NULL.
+     * Not named `hyper`: MinGW's rpcndr.h (reachable through
+     * windows.h, which winsock2.h pulls in) #defines hyper as a
+     * MIDL 64-bit integer spelling, so the identifier cannot be a
+     * variable in any TU that sees windows.h. */
+    const NmProvider *hyper_provider = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(hyper_provider);
     test_unsetenv("HYPER_API_KEY");
     nm_authinfo_set_path(path);
-    ASSERT_NULL(nm_provider_api_key(hyper));
+    ASSERT_NULL(nm_provider_api_key(hyper_provider));
 
     /* The local daemon has no authinfo machine at all. */
     const NmProvider *local = nm_provider_by_name("ollama-local");

@@ -43,22 +43,8 @@ static SSL_CTX *openssl_ctx(void)
     return c;
 }
 
-/* Pull the last OpenSSL error string into a static buffer (bounded,
- * reused — error strings are diagnostic-only, never freed). */
-static const char *openssl_errstr(void)
-{
-    static char buf[256];
-    unsigned long e = ERR_peek_last_error();
-    if (e) {
-        ERR_error_string_n(e, buf, sizeof(buf));
-        return buf;
-    }
-    snprintf(buf, sizeof(buf), "unknown OpenSSL error");
-    return buf;
-}
-
 /* Failure reason for a failed SSL_* call: TLS-protocol errors carry
- * queue entries (openssl_errstr); I/O failures leave the queue EMPTY
+ * queue entries (drained below); I/O failures leave the queue EMPTY
  * and only report errno — an ECONNREFUSED/EHOSTUNREACH/unreachable
  * peer inside the handshake used to surface as the useless "unknown
  * OpenSSL error". Classifies via SSL_get_error + errno. */

@@ -25,6 +25,18 @@
 #include <string.h>
 
 #include "json.h"
+
+#ifdef _WIN32
+/* MUST precede the two includes below: each reaches windows.h on its
+ * own (nm_clock.h directly, connection_layout.h by way of
+ * winsock2.h), and a later winsock2.h then trips MinGW's
+ * include-order #warning. Same rule as transport.c /
+ * transport_socket.c. (The `hyper` macro that rpcndr.h smuggles into
+ * every windows.h consumer is the other reason to keep the windows
+ * headers deliberate — no local identifier may be named hyper.) */
+#include <winsock2.h>
+#endif
+
 #include "nm_clock.h"
 
 /* The recorder reads (conn_id, xchg, tls) off the connection for the

@@ -579,6 +579,24 @@ static NmChatStatus head_pull_step(NmChatStream *st)
 /* Public: chat + models                                            */
 /* ---------------------------------------------------------------- */
 
+/* Bounded append to a half-composed message. ERROR_BODY_MAX is
+ * deliberately larger than NM_CHAT_MSG_MAX (the body keeps the "too
+ * long" marker so the diagnostic says what was dropped); the message
+ * therefore clips the body rather than letting the formatter
+ * implicitly truncate the whole composed string. */
+static void message_append(char *message, size_t cap, const char *text)
+{
+    size_t n = strlen(message);
+    if (n + 1 >= cap)
+        return;
+    size_t room = cap - 1 - n;
+    size_t len = strlen(text);
+    if (len > room)
+        len = room;
+    memcpy(message + n, text, len);
+    message[n + len] = '\0';
+}
+
 /* Publish the stream's failure state into a result (always-set
  * contract: message is composed per status class). result may be
  * NULL (a step driven without a result out). */
@@ -595,25 +613,29 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
         return;
     case NM_CHAT_ERR_AUTH:
         snprintf(result->message, sizeof(result->message),
-                 "auth rejected (HTTP %d): %s", h->http_status,
-                 *h->error_body ? h->error_body
-                                : "no error body returned");
+                 "auth rejected (HTTP %d): ", h->http_status);
+        message_append(result->message, sizeof(result->message),
+                       *h->error_body ? h->error_body
+                                      : "no error body returned");
         break;
     case NM_CHAT_ERR_HTTP:
-        snprintf(result->message, sizeof(result->message),
-                 "HTTP %d: %s", h->http_status,
-                 *h->error_body ? h->error_body
-                                : "no error body returned");
+        snprintf(result->message, sizeof(result->message), "HTTP %d: ",
+                 h->http_status);
+        message_append(result->message, sizeof(result->message),
+                       *h->error_body ? h->error_body
+                                      : "no error body returned");
         break;
     case NM_CHAT_ERR_TRANSPORT:
-        snprintf(result->message, sizeof(result->message), "%s",
-                 *h->error_body ? h->error_body
-                                : "connection failed");
+        message_append(result->message, sizeof(result->message),
+                       *h->error_body ? h->error_body
+                                      : "connection failed");
         break;
     case NM_CHAT_ERR_PARSE:
         snprintf(result->message, sizeof(result->message),
-                 "malformed response: %s",
-                 *h->error_body ? h->error_body : "not valid SSE/JSON");
+                 "malformed response: ");
+        message_append(result->message, sizeof(result->message),
+                       *h->error_body ? h->error_body
+                                      : "not valid SSE/JSON");
         break;
     }
 }

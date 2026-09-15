@@ -55,10 +55,10 @@
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
 /* Frame / transcript accents. Centralized color presets are a phase-5
- * colors.h item; these are the values that lands behind. */
+ * colors.h item; these are the values that lands behind. Dimmed
+ * reasoning text uses boba's SGR_DIM (ansi_sequences.h). */
 #define SGR_OYSTER     "\033[38;2;96;95;107m"  /* oyster #605F6B */
 #define SGR_CORAL      "\033[38;2;255;87;125m" /* coral  #FF577D */
-#define SGR_DIM        "\033[2m"               /* reasoning trace */
 #define SGR_TEXT_RESET "\033[0m"
 
 #define PROMPT              "❯ "

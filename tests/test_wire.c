@@ -611,7 +611,7 @@ static void test_async_send_partial_resume(void)
         nm_connect_async("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
 
-    NmRequestHeader h = { "X-Test", "resume" };
+    NmRequestHeader h = { "X-Test", "resume", 0 };
     ASSERT_EQ(nm_request_queue(c, "POST", "/", &h, 1, req_body,
                                strlen(req_body)),
               NM_TRANSPORT_OK);
