@@ -776,6 +776,131 @@ static void test_chat_truncated_body_reports_byte_counts(void)
     close(lfd);
 }
 
+/* Canned server for the "no [DONE] terminator" family: streams one
+ * chunked SSE body and closes cleanly (well-formed framing, real
+ * chunked terminator, no Content-Length). */
+typedef struct
+{
+    int lfd;
+    const char *sse;
+} BodyServer;
+
+static void *body_server_thread(void *arg)
+{
+    BodyServer *s = arg;
+    int cfd = accept(s->lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    size_t off = 0, len = strlen(s->sse);
+    while (off < len) {
+        long n = send(cfd, s->sse + off, len - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+/* OpenCode Go's minimax-m3 sends NO `[DONE]`: finish_reason and a
+ * usage chunk, then the `{"choices":[],"cost":"0"}` trailer, then
+ * the chunked end. A cleanly framed stream that ends after a
+ * finish_reason chunk is complete, not truncated (live probe
+ * 2026-09-15; docs/OPENCODE-API.md). Without the finished flag this
+ * turn delivered its whole answer and *then* reported
+ * "stream ended before [DONE]" — chat_app prints turn-end errors
+ * below the answer, so the user saw correct output plus a failure. */
+static void test_chat_no_done_after_finish_reason_is_complete(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    BodyServer s = {
+        lfd,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n\r\n"
+        "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
+        "0\r\n\r\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, body_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "minimax-m3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.message, "");
+    ASSERT_STR_EQ(cap.text, "Hello");
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The same shape WITHOUT a finish_reason chunk is still a truncated
+ * stream: the fallback must not weaken the real truncation check.
+ * (The body ends cleanly at the chunked terminator — a well-framed
+ * short stream, not a dead socket.) */
+static void test_chat_no_done_and_no_finish_reason_is_truncated(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    BodyServer s = {
+        lfd,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+        "0\r\n\r\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, body_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_TRANSPORT);
+    /* The delivered content is still handed over (no data loss on a
+     * flagged truncation), and the reason names the missing
+     * terminator. */
+    ASSERT_STR_EQ(cap.text, "Hello");
+    ASSERT_TRUE(strstr(r.message, "before [DONE]") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* An error body much longer than the message cap (NM_CHAT_MSG_MAX):
  * the composed message is clipped by an explicit bounded append, so
  * no part of the body can overflow — and nothing after a clipped
@@ -1302,6 +1427,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_auth_error_carries_detail);
     RUN_TEST(test_chat_connect_refused_names_target);
     RUN_TEST(test_chat_truncated_body_reports_byte_counts);
+    RUN_TEST(test_chat_no_done_after_finish_reason_is_complete);
+    RUN_TEST(test_chat_no_done_and_no_finish_reason_is_truncated);
     RUN_TEST(test_chat_long_error_body_is_clipped);
     RUN_TEST(test_wiretap_401_records_error_with_status);
     RUN_TEST(test_wiretap_stream_records_events);

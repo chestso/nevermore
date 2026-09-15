@@ -219,6 +219,13 @@ struct NmChatStream
     NmStreamCallback on_delta;
     void *userdata;
     int done;            /* [DONE] seen or fatal error */
+    int finished;        /* a non-empty choices[0].finish_reason was
+                          * seen: the generation is complete. [DONE]
+                          * is not universal — OpenCode Go's
+                          * minimax-m3 ends after the trailing cost
+                          * event with no marker at all — so a clean
+                          * transport end plus this flag is also a
+                          * complete stream; see chat_step. */
     NmChatStatus status; /* final status */
     int http_status;
     char error_body[ERROR_BODY_MAX]; /* captured non-SSE error body, capped */
@@ -290,6 +297,14 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
     NmJson *choices = nm_json_get(obj, "choices");
     NmJson *choice = nm_json_at(choices, 0);
     if (choice) {
+        /* finish_reason marks the generation complete. It rides a
+         * chunk whose delta may be empty (the answer text can come
+         * in the same chunk, as minimax-m3 does). Only a
+         * non-empty string counts: providers send
+         * `"finish_reason": null` on every mid-stream chunk, and
+         * `nm_json_str` is NULL for JSON null. */
+        if (nm_json_str(nm_json_get(choice, "finish_reason")))
+            st->finished = 1;
         NmJson *delta = nm_json_get(choice, "delta");
         if (delta) {
             /* Reasoning first: providers stream it phase-sequential
@@ -942,9 +957,25 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
     /* SSE body: pull what's ready. */
     NmChatStatus s = stream_one_step(h);
     if (s == NM_CHAT_OK) {
-        /* [DONE] or EOF. EOF before [DONE] is a truncated stream:
-         * deliver what arrived but flag the transport condition. */
-        if (!h->done) {
+        /* Complete stream. Two ways to get here:
+         *
+         *  - `[DONE]` was seen (h->done), the OpenAI-compatible
+         *    marker almost every provider sends; or
+         *  - the transport ended the body at a real framing
+         *    boundary with a finish_reason chunk already delivered.
+         *    `[DONE]` is *not* universal on the OpenAI-compatible
+         *    wire: OpenCode Go's minimax-m3 sends finish_reason +
+         *    usage + a `{"choices":[],"cost":…}` trailer and then
+         *    the chunked end — no `[DONE]` ever (live-probed; see
+         *    docs/OPENCODE-API.md). Flagging that as a truncation
+         *    failed an otherwise perfect turn *after* the answer
+         *    had rendered (the chat_app prints the error at
+         *    turn end, so the user sees correct output followed by
+         *    "chat failed").
+         *
+         * EOF with neither is still a truncated stream: deliver
+         * what arrived but flag the transport condition. */
+        if (!h->done && !h->finished) {
             h->status = NM_CHAT_ERR_TRANSPORT;
             /* Prefer the transport's specific truncation detail
              * (byte counts); the generic note is the fallback. */

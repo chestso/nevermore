@@ -80,12 +80,27 @@ Notes:
 SSE framing is OpenAI `chat.completion.chunk`, but Zen/Go is **not
 byte-identical** to OpenAI — three deltas from real responses:
 
-1. **`[DONE]` is not the last event.** Both tiers append, after
-   `data: [DONE]`, a final data event with no choices but a
-   `cost` field:
-   `data: {"choices":[],"cost":"0"}`. Harmless to a client that
-   stops at `[DONE]`; a client that treats "any further event" as
-   malformed will break.
+1. **`[DONE]` is NOT guaranteed, and when present it is not the
+   last event.** Two observed terminations, per upstream model:
+   - most models (`glm-5.3`, `glm-5.3-flash`, `deepseek-v4-flash`,
+     `deepseek-v4.1-flash`) send `data: [DONE]`, then a final data
+     event with no choices but a `cost` field:
+     `data: {"choices":[],"cost":"0"}`. Harmless to a client that
+     stops at `[DONE]`; a client that treats "any further event" as
+     malformed will break.
+   - **`minimax-m3` (Go) never sends `[DONE]` at all** (re-probed
+     five times, 2026-09-15): the stream ends
+     `finish_reason:"stop"` chunk → choices-empty `usage` chunk →
+     `data: {"choices":[],"cost":"0"}` → the chunked `0` terminator,
+     with no marker event anywhere. A client that hard-requires
+     `[DONE]` renders the whole answer and then reports a
+     truncation ("stream ended before [DONE]") — exactly the bug
+     nevermore shipped until it was caught here. The completion
+     signal that _is_ universal is the non-empty
+     `choices[0].finish_reason`; `[DONE]` is a bonus, not a
+     contract. Nevermore treats a finish_reason chunk plus a clean
+     framing end as a complete stream, and still flags a stream
+     that ends with neither.
 2. **`: keep-alive` SSE comments** arrive while the upstream
    provider thinks (seen heavily on the Zen free models, 170+
    between the first chunk and `[DONE]` in one probe). Standard
@@ -283,7 +298,9 @@ the shared client:
 - **The catalog carries ids only** — context/vision must come
   from a static fallback (models.dev-derived), not from a
   metadata endpoint.
-- **`[DONE]` is not the last SSE event** (a `cost` event trails
-  it) and **`: keep-alive` comments are common**, both already
-  tolerated by `sse.c` but worth asserting in the canned-wire
-  test.
+- **`[DONE]` is not the last SSE event** (a `cost` event trails it
+  when it appears at all — `minimax-m3` sends no `[DONE]`, see §3)
+  and **`: keep-alive` comments are common**, both already
+  tolerated by `sse.c` but worth asserting in the canned-wire test.
+  The completion check must therefore rest on a non-empty
+  `choices[0].finish_reason`, not on the `[DONE]` marker.

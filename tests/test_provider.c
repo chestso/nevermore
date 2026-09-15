@@ -981,6 +981,68 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
 }
 
+/* minimax-m3 on Go sends no `[DONE]` at all: finish_reason chunk →
+ * choices-empty usage chunk → `{"choices":[],"cost":"0"}` → chunked
+ * end. The turn must report OK (live probe + docs/OPENCODE-API.md
+ * §3); the regression this pins is the post-answer "stream ended
+ * before [DONE]" failure. */
+static void *opencode_no_done_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char sse[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n\r\n"
+        "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(sse) - 1) {
+        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_opencode_chat_without_done_is_complete(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, opencode_no_done_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("opencode");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "hello", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "minimax-m3", &msg, 1, NULL, NULL, -1, -1,
+        "nm-0123456789abcdef0123456789abcdef", capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.message, "");
+    ASSERT_STR_EQ(cap.text, "Hello");
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* conversation_id == NULL must still carry a non-empty header: the
  * provider falls back to its process-stable catalog id rather than
  * letting the seam's skip-empty rule turn "no id" into a 400. */
@@ -1123,6 +1185,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
     RUN_TEST(test_opencode_chat_carries_session_header);
+    RUN_TEST(test_opencode_chat_without_done_is_complete);
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
     RUN_TEST(test_opencode_models_fetch_maps_ids);
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
