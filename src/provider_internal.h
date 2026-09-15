@@ -32,6 +32,17 @@ const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
                                 const char *api_key, size_t *n_out);
 int nm_ollama_needs_auth(const NmProvider *p, const char *base_url);
 
+/* Conversation id (one per agent/conversation; design §3).
+ *
+ * A provider-scoped routing hint: providers that care read
+ * NmChatRequest.conversation_id and point an extra header at it
+ * (x-opencode-session). Stable per agent, non-empty, non-colliding
+ * across clients; explicitly not a secret and not authenticated. One
+ * declaration, one implementation (agent.c) so the array sizes
+ * cannot drift. */
+#define NM_CONVERSATION_ID_LEN 40
+void nm_conversation_id_new(char out[NM_CONVERSATION_ID_LEN]);
+
 /* Live-catalog fetch gate (shared by all providers): 0 when
  * NM_NO_LIVE_CATALOG is set in the environment. `make check` runs
  * with it set (TESTS_ENVIRONMENT) so default-base catalog probes are

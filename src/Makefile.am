@@ -32,6 +32,7 @@ bin_PROGRAMS = nevermore
 EXTRA_DIST = \
     connection_layout.h \
     provider_internal.h \
+    nm_clock.h \
     tools_internal.h \
     transport_internal.h \
     openai_client.h

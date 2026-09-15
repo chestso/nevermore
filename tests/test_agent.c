@@ -238,9 +238,43 @@ static void cap_state(NmAgentState state, void *userdata)
     g_final_state = (int)state;
 }
 
-/* ---------------------------------------------------------------- */
-/* Fixture                                                           */
-/* ---------------------------------------------------------------- */
+static void test_agent_conversation_id_shape_and_uniqueness(void)
+{
+    /* The helper is the whole id contract at this step: format,
+     * non-empty, and different per call (one call == one agent ==
+     * one conversation). The header-on-the-wire stability assertion
+     * (the same id across a tool-call turn's two rounds) lives in
+     * test_provider.c, where an opencode endpoint exposes it. */
+    char a[NM_CONVERSATION_ID_LEN];
+    char b[NM_CONVERSATION_ID_LEN];
+    nm_conversation_id_new(a);
+    nm_conversation_id_new(b);
+
+    ASSERT_TRUE(a[0] != '\0');
+    ASSERT_TRUE(b[0] != '\0');
+    ASSERT_TRUE(strcmp(a, b) != 0);
+
+    /* nm-<32 lowercase hex>, 35 chars. */
+    ASSERT_EQ(strlen(a), (size_t)35);
+    ASSERT_TRUE(strncmp(a, "nm-", 3) == 0);
+    for (const char *p = a + 3; *p; p++)
+        ASSERT_TRUE((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f'));
+}
+
+/* Both entropy paths run in make check (POSIX /dev/urandom here, the
+ * Win32 fallback under Wine): every call is still well-formed and
+ * distinct. A loop is the cheapest way to notice a constant id. */
+static void test_agent_conversation_id_many_distinct(void)
+{
+    char ids[16][NM_CONVERSATION_ID_LEN];
+    for (size_t i = 0; i < 16; i++) {
+        nm_conversation_id_new(ids[i]);
+        ASSERT_EQ(strlen(ids[i]), (size_t)35);
+    }
+    for (size_t i = 0; i < 16; i++)
+        for (size_t j = i + 1; j < 16; j++)
+            ASSERT_TRUE(strcmp(ids[i], ids[j]) != 0);
+}
 
 #ifdef _WIN32
 /* Forward slashes: they ride inside a JSON string (the tool-call
@@ -763,5 +797,7 @@ int main(void)
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_set_model_changes_wire_model);
+    RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
+    RUN_TEST(test_agent_conversation_id_many_distinct);
     TEST_SUMMARY();
 }

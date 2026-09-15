@@ -25,6 +25,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "nm_clock.h"
 
 /* The recorder reads (conn_id, xchg, tls) off the connection for the
  * correlation pair — the shared layout include (same pattern as
@@ -88,21 +89,11 @@ static struct NmWireRecorder g_rec;
 
 /* Monotonic-ish clock: monotonic where the OS offers it, wall clock
  * otherwise. The t field's contract is "seconds since the banner",
- * immune to NTP jumps where possible. */
+ * immune to NTP jumps where possible. Extracted to nm_clock.h so
+ * the conversation-id fallback shares one definition. */
 static double wire_now_wall(void)
 {
-#ifdef _WIN32
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    /* 100ns ticks since 1601 -> unix seconds */
-    unsigned long long t = ((unsigned long long)ft.dwHighDateTime << 32) |
-                           ft.dwLowDateTime;
-    return (double)t / 10000000.0 - 11644473600.0;
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-#endif
+    return nm_monotonic_seconds();
 }
 
 double nm_wire_recorder_now(void)

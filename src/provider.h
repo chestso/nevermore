@@ -128,6 +128,12 @@ typedef struct NmChatRequest
     const char *tools_json; /* optional JSON array of tool schemas, or NULL */
     double temperature;     /* -1 = provider default */
     long max_tokens;        /* -1 = provider default */
+    /* Provider-scoped routing id (design §3): the agent's stable
+     * per-conversation id, or NULL. Borrowed — it points into the
+     * NmAgent's inline array, which outlives the compose+queue
+     * window the endpoint is read in. Providers that do not care
+     * ignore it; opencode points an extra header at it. */
+    const char *conversation_id;
     NmStreamCallback on_delta;
     void *userdata;
 } NmChatRequest;

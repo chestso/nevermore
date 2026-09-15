@@ -469,6 +469,7 @@ static void test_hyper_chat_end_to_end(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, "you are terse", NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
@@ -503,6 +504,7 @@ static void test_hyper_chat_begin_step(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
     NmChatResult err = { 0 };
@@ -795,6 +797,7 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-or-test");

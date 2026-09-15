@@ -159,6 +159,7 @@ static void test_chat_stream_end_to_end(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, "you are terse", NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req);
@@ -244,6 +245,7 @@ static void test_chat_step_pending_between_events(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
 
@@ -351,6 +353,7 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
         capture_delta, &cap
     };
 
@@ -465,7 +468,8 @@ static void test_parallel_calls_with_same_index_stay_distinct(void)
     NmMessage msg = { "user", "do two things", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
-        "minimax-m3", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "minimax-m3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -545,7 +549,8 @@ static void test_fragmented_tool_args_merge_by_index_and_id(void)
     NmMessage msg = { "user", "do two things", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -600,7 +605,7 @@ static void test_chat_step_cancel_mid_stream(void)
                             "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
     };
 
     NmChatResult err = { 0 };
@@ -664,7 +669,7 @@ static void test_chat_auth_error_carries_detail(void)
                             "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
     };
 
     NmChatResult r = nm_openai_chat(&ep, &req);
@@ -687,7 +692,7 @@ static void test_chat_connect_refused_names_target(void)
                             "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
     };
 
     NmChatResult r = nm_openai_chat(&ep, &req);
@@ -742,7 +747,7 @@ static void test_chat_truncated_body_reports_byte_counts(void)
                             "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
     };
 
     NmChatResult r = nm_openai_chat(&ep, &req);
@@ -922,7 +927,8 @@ static void test_extra_headers_ordered_between_auth_and_ua(void)
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req2);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -967,7 +973,8 @@ static void test_extra_headers_empty_value_is_skipped(void)
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req2);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1000,7 +1007,8 @@ static void test_extra_headers_null_changes_nothing(void)
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req2);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1081,7 +1089,8 @@ static void test_extra_headers_redaction_marker(void)
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
-        "glm-5.3", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "glm-5.3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req2);
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1122,7 +1131,7 @@ static void test_wiretap_401_records_error_with_status(void)
                             "nevermore-test", NULL, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL };
     NmChatRequest req = {
-        "gpt-4o", &msg, 1, NULL, NULL, -1, -1, NULL, NULL
+        "gpt-4o", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
     };
     NmChatResult r = nm_openai_chat(&ep, &req);
     ASSERT_EQ(r.status, NM_CHAT_ERR_AUTH);
@@ -1167,7 +1176,8 @@ static void test_wiretap_stream_records_events(void)
     NmMessage msg = { "user", "say hi", NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
-        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, capture_delta, &cap
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
     };
     NmChatResult r = nm_openai_chat(&ep, &req);
     ASSERT_EQ(r.status, NM_CHAT_OK);
