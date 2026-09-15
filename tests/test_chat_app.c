@@ -431,6 +431,60 @@ static void test_delta_line_continuation_is_preserved(void)
     close(sc.fd);
 }
 
+/* Regression (bugs/streaming-dupes-and-cursor-move-to-top-of-terminal.md):
+ * with an EMPTY tail (the whole "thinking" phase), the busy frame
+ * must not begin with \r\n — that painted a phantom leading blank
+ * row between the submitted prompt and the spinner, and boba's
+ * newline row counting then tracked one row more than the spinner
+ * ever used. */
+static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    /* Stalling round: no SSE payload at all — the app sits in
+     * STREAMING state with an empty tail ("thinking"). */
+    sc.sse[0] = "";
+    sc.stall_at_end = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    harness_enter(h);
+    harness_step_once(h);
+    nm_chat_app_tick(h->app); /* advance the spinner (the run loop's tick) */
+    tui_runtime_flush(h->rt);
+
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_EQ(nm_chat_app_tail_len(h->app), 0u);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    /* The frame's first row is the spinner itself: no leading
+     * line separator (the phantom row). */
+    ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
+    /* A braille spinner glyph is on the frame. */
+    ASSERT_TRUE(strstr(frame, "\xe2\xa0\x8b") != NULL); /* "⠋" */
+    /* And once the tail grows, the tail row is frame row 0 too —
+     * the first tail row renders where the spinner was, and the
+     * spinner moves below it (no blank row in between). */
+    /* (covered structurally: tail row 0 emits "\r" + EL, spinner
+     * separated by exactly one "\r\n" — see render_tail_rows) */
+
+    harness_free(h);
+    /* Teardown cancels the agent; the runtime free closes the socket
+     * and releases the server's stall loop (its `sc` is on this
+     * frame). Join so the thread never outlives it. */
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_streaming_frame_shows_tail_and_spinner(void)
 {
     struct ServerScript sc;
@@ -1199,6 +1253,7 @@ int main(void)
     printf("test_chat_app:\n");
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
+    RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_quit_command_quits);
     RUN_TEST(test_model_command_sets_model);

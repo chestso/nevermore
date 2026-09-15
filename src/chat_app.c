@@ -227,6 +227,9 @@ void nm_chat_app_on_delta(const char *text, const NmToolCall *calls,
         return;
     dynamic_buffer_append(app->tail, text, strlen(text));
     split_completed_lines(app);
+    /* Tail growth is a view change: wake the loop so the live region
+     * repaints now, not on the next 100 ms spinner tick. */
+    tui_runtime_wakeup(app->rt);
 }
 
 /* Compact tool-call summary for the panel line: the argument that
@@ -1083,14 +1086,15 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 
 /* Streaming tail, wrapped to the terminal width, at most the last
  * rows_cap rows. One pass records row-start byte offsets; the emit
- * then walks those starts (a row runs to the next row's start). */
-static void render_tail_rows(const NmChatApp *app, DynamicBuffer *out,
-                             int width, int rows_cap)
+ * then walks those starts (a row runs to the next row's start).
+ * Returns the number of rows emitted (0 = empty tail). */
+static int render_tail_rows(const NmChatApp *app, DynamicBuffer *out,
+                            int width, int rows_cap)
 {
     const char *text = app->tail->data;
     size_t len = app->tail->len;
     if (!text || len == 0 || width <= 0)
-        return;
+        return 0;
 
     size_t starts[TAIL_ROWS_MAX];
     int rows = 1; /* the first row starts at 0 */
@@ -1127,6 +1131,7 @@ static void render_tail_rows(const NmChatApp *app, DynamicBuffer *out,
         if (end > starts[r])
             dynamic_buffer_append(out, text + starts[r], end - starts[r]);
     }
+    return rows - first;
 }
 
 static const char *spinner_label(const NmChatApp *app)
@@ -1147,10 +1152,19 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
 
     if (busy) {
-        /* Live region: streaming tail + spinner row. */
-        render_tail_rows(app, out, app->term_w > 4 ? app->term_w : 80,
-                         app->term_h > 3 ? app->term_h - 2 : 1);
-        dynamic_buffer_append_str(out, "\r\n");
+        /* Live region: streaming tail + spinner row. The spinner
+         * row's separator is emitted ONLY when tail rows precede
+         * it — with an empty tail the spinner IS frame row 0 (no
+         * phantom leading blank row: boba counts frame rows by
+         * newlines, so a leading \r\n would paint a blank row that
+         * steals the row the first tail line should replace). */
+        int tail_rows = render_tail_rows(app, out,
+                                         app->term_w > 4 ? app->term_w : 80,
+                                         app->term_h > 3 ? app->term_h - 2 : 1);
+        if (tail_rows > 0)
+            dynamic_buffer_append_str(out, "\r\n");
+        else
+            dynamic_buffer_append_str(out, "\r");
         dynamic_buffer_append_str(out, EL_TO_END);
         const char *frame = app->spinner_frame;
         if (frame)
