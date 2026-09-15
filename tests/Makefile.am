@@ -12,6 +12,7 @@ check_PROGRAMS = \
     test_openai_client \
     test_tls \
     test_session \
+    test_context \
     test_tools \
     test_agent \
     test_spinner \
@@ -162,6 +163,11 @@ test_tls_LDADD = -lpthread $(TEST_TLS_LIBS)
 test_session_SOURCES = test_session.c ../src/session.c
 test_session_CFLAGS = $(TEST_CFLAGS)
 
+# Context: AGENTS.md discovery + system-prompt assembly (pure C,
+# links context.c only — no network, no boba).
+test_context_SOURCES = test_context.c ../src/context.c
+test_context_CFLAGS = $(TEST_CFLAGS)
+
 # Tools: registry + schemas + file tools + spawn (canned temp files).
 # Same spawn split as src/Makefile.am — one file per OS.
 if HOST_WINDOWS
@@ -177,6 +183,7 @@ test_tools_LDADD = -lpthread
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
+    ../src/context.c \
     ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
@@ -207,7 +214,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # an agent (provider + openai_client + transport) and prints the
 # transcript through tui_runtime_clear_inline (new in boba).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
-    ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/tools.c ../src/tools_file.c \
+    ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \

@@ -39,6 +39,7 @@ run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_session tests/test_session.c src/session.c
+run_build test_context tests/test_context.c src/context.c
 
 run_build test_tools tests/test_tools.c src/tools.c src/tools_file.c \
 	src/tools_spawn_win.c src/os_compat_win.c src/json.c
@@ -83,7 +84,7 @@ run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 	-lws2_32 -lpthread
 
 run_build test_agent tests/test_agent.c src/agent.c src/session.c \
-	src/tools.c src/tools_file.c src/tools_spawn_win.c \
+	src/context.c src/tools.c src/tools_file.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \

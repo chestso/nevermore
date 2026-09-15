@@ -1314,6 +1314,12 @@ int main(void)
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;
     }
+    /* No context files in the test's cwd: agent construction reads
+     * AGENTS.md from the working directory. */
+    if (test_chdir_to_scratch() != 0) {
+        fprintf(stderr, "  FAIL: scratch cwd\n");
+        return 1;
+    }
     printf("test_chat_app:\n");
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);

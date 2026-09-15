@@ -88,6 +88,8 @@ nevermore_SOURCES = \
     json.c \
     agent.c \
     conversation_id.c \
+    context.h \
+    context.c \
     source.h \
     source.c \
     tools_internal.h \

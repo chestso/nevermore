@@ -11,11 +11,13 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <direct.h> /* _getcwd/_chdir */
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/stat.h> /* mkdir */
 #include <sys/time.h>
 #include <unistd.h>
 #endif
@@ -436,6 +438,97 @@ static void test_agent_plain_answer_no_tools(void)
     nm_toolset_free(tools);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* The system message on the wire carries the AGENTS.md context: a
+ * scratch project with an AGENTS.md, a .git marker at its root, and
+ * the agent built from that working directory. The system role must
+ * carry both the base text and the labeled <project_context> entry —
+ * this is the assertion that discovery reaches the model, not just
+ * the assembler (test_context covers assembly). */
+static void test_agent_system_message_carries_agents_md(void)
+{
+    reset_capture();
+
+    /* Scratch project: P/.git (root marker) + P/AGENTS.md. */
+    char proj[600];
+    char marker[700];
+    char agents[700];
+#ifdef _WIN32
+    snprintf(proj, sizeof(proj), "C:/Users/Public/nm-test-agent-proj-%d",
+             (int)getpid());
+    mkdir(proj, 0755);
+    snprintf(marker, sizeof(marker), "%s/.git", proj);
+    mkdir(marker, 0755);
+#else
+    snprintf(proj, sizeof(proj), "/tmp/nm-test-agent-proj-%d",
+             (int)getpid());
+    mkdir(proj, 0755);
+    snprintf(marker, sizeof(marker), "%s/.git", proj);
+    mkdir(marker, 0755);
+#endif
+    snprintf(agents, sizeof(agents), "%s/AGENTS.md", proj);
+    FILE *af = fopen(agents, "wb");
+    ASSERT_NOT_NULL(af);
+    fputs("WIRE-CONTEXT-MARKER: prefer make check.\n", af);
+    fclose(af);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+
+    /* The agent discovers AGENTS.md from the cwd at construction, so
+     * root ourselves in the scratch project FIRST. */
+    char saved[512];
+#ifdef _WIN32
+    _getcwd(saved, (int)sizeof(saved));
+    ASSERT_EQ(_chdir(proj), 0);
+#else
+    ASSERT_NOT_NULL(getcwd(saved, sizeof(saved)));
+    ASSERT_EQ(chdir(proj), 0);
+#endif
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    int rc = nm_agent_turn(agent, "what is the rule?");
+#ifdef _WIN32
+    _chdir(saved);
+#else
+    chdir(saved);
+#endif
+    ASSERT_EQ(rc, 0);
+
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "\"role\":\"system\"") != NULL);
+    /* Base prompt still leads the system message … */
+    ASSERT_TRUE(strstr(g_requests[0], "interactive coding agent") != NULL);
+    /* … and the AGENTS.md block rides inside it, escaped as JSON. */
+    ASSERT_TRUE(strstr(g_requests[0], "Project-Specific Context") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "<file path=\\\"AGENTS.md\\\">") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "WIRE-CONTEXT-MARKER") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(agents);
+    remove(marker);
+    remove(proj);
 }
 
 static void test_agent_unknown_tool_reports_error_result(void)
@@ -867,9 +960,16 @@ int main(void)
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;
     }
+    /* No context files in the test's cwd: agent construction reads
+     * AGENTS.md from the working directory. */
+    if (test_chdir_to_scratch() != 0) {
+        fprintf(stderr, "  FAIL: scratch cwd\n");
+        return 1;
+    }
     printf("test_agent:\n");
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_plain_answer_no_tools);
+    RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_cancel_then_next_turn_works);

@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "agent.h"
+#include "context.h"
 #include "json.h"
 #include "session.h"
 #include "transport.h"
@@ -47,6 +48,10 @@ struct NmAgent
     char *model;
     NmToolset *tools;
     NmSession *session;
+    /* System-prompt context (AGENTS.md discovery + assembly). Built
+     * at new, owned here, rebuilt only when a new agent is (fresh
+     * chat / provider switch). */
+    NmContext *context;
     NmAgentState state;
     char *last_error;
     const char *base_url;      /* borrowed; NULL = provider default */
@@ -105,6 +110,10 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->tools = tools;
     a->userdata = userdata;
     a->state = NM_AGENT_IDLE;
+    /* Context assembly is construction-time I/O (one walk + a couple
+     * of bounded reads). Failure degrades to the base prompt, never
+     * to a failed agent. */
+    a->context = nm_context_new(NULL);
     nm_conversation_id_new(a->conversation_id);
     return a;
 }
@@ -121,6 +130,7 @@ void nm_agent_free(NmAgent *a)
     free(a->text); /* reused round buffer; released with the agent */
     free(a->reasoning);
     nm_tool_calls_free(a->calls, a->n_calls);
+    nm_context_free(a->context);
     nm_session_free(a->session);
     free(a);
 }
@@ -246,17 +256,16 @@ static char *calls_to_json(const NmToolCall *calls, size_t n)
     return s;
 }
 
-/* Ensure the session exists (system prompt first; the context
- * assembly port of quoth-context.el is phase-4 polish; a plain
- * coding-agent prompt today). */
+/* Ensure the session exists, seeded with the assembled system prompt
+ * (base text + the <project_context> block from AGENTS.md discovery;
+ * see context.h). The session keeps message 0 across turns — and
+ * nm_session_context() always keeps it even under a tiny budget, so
+ * the context files cannot be trimmed away. */
 static int ensure_session(NmAgent *a)
 {
     if (a->session)
         return 0;
-    a->session =
-        nm_session_new("You are nevermore, an interactive coding "
-                       "agent. Answer concisely and correctly. Use "
-                       "the tools for file operations and commands.");
+    a->session = nm_session_new(nm_context_system_prompt(a->context));
     return a->session ? 0 : -1;
 }
 
