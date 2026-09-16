@@ -90,6 +90,57 @@ static void test_provider_lookup_by_name(void)
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:go"));
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:zen"));
     ASSERT_NULL(nm_provider_by_name("nope"));
+    /* No bare option for a tiered service: the pre-rename forms and
+     * the service nouns themselves are all unaddressable. */
+    ASSERT_NULL(nm_provider_by_name("ollama"));
+    ASSERT_NULL(nm_provider_by_name("ollama-local"));
+    ASSERT_NULL(nm_provider_by_name("opencode"));
+    ASSERT_NULL(nm_provider_by_name("opencode-zen"));
+}
+
+/* The naming invariant (provider.h): a service with more than one
+ * endpoint-tier must qualify EVERY one of its providers — the bare
+ * service name is never a registered provider. A single-endpoint
+ * service keeps a bare name. This is the "no bare option for a
+ * tiered provider" rule; without this test it would only live in
+ * convention and a fourth tier could be added as `ollama` again.
+ *
+ * Two scans, both character-level (no regex):
+ *  1. every ':'-qualified name has a non-empty tier;
+ *  2. no bare name is the service prefix of another provider's
+ *     `name:` (which would make both a bare and a tiered form
+ *     addressable). */
+static void test_provider_names_are_tier_qualified(void)
+{
+    const NmProvider *providers[NM_PROVIDER_MAX];
+    size_t n = 0;
+    nm_provider_list(providers, &n);
+    ASSERT_TRUE(n > 0);
+
+    for (size_t i = 0; i < n; i++) {
+        const char *name = providers[i]->name;
+        ASSERT_NOT_NULL(name);
+
+        const char *colon = strchr(name, ':');
+        if (colon) {
+            /* Qualified: the tier must be present and non-empty. */
+            ASSERT_TRUE(colon > name);
+            ASSERT_TRUE(colon[1] != '\0');
+            continue;
+        }
+
+        /* Bare: no other provider may be this service's `<name>:<tier>`
+         * form — that is exactly the bare-option-for-a-tiered-provider
+         * shape. */
+        size_t slen = strlen(name);
+        for (size_t j = 0; j < n; j++) {
+            if (j == i)
+                continue;
+            const char *other = providers[j]->name;
+            if (strncmp(other, name, slen) == 0 && other[slen] == ':')
+                ASSERT_TRUE(0); /* a tiered sibling exists: qualify me */
+        }
+    }
 }
 
 static void test_provider_api_key_env_then_authinfo(void)
@@ -1167,6 +1218,7 @@ int main(int argc, char *argv[])
     printf("test_provider:\n");
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_lookup_by_name);
+    RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_authinfo_machines);
     RUN_TEST(test_provider_api_key_env_then_authinfo);
     /* Fetch BEFORE the fallback test: the live catalog cache is

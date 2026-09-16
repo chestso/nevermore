@@ -1,10 +1,15 @@
 /* provider.h - model provider backends
  *
  * Seven providers, one function-pointer interface (the portty
- * backend pattern). Naming: a provider whose service has more than
- * one endpoint-tier (hosted vs local, subscription vs credits) is
- * named `<service>:<tier>` — the tier is always explicit, never a
- * bare noun or a dash suffix.
+ * backend pattern).
+ *
+ * NAMING INVARIANT: a service with more than one endpoint-tier
+ * (hosted vs local, subscription vs credits) registers EVERY tier
+ * under an explicit `<service>:<tier>` name — there is no bare
+ * service alias and no dash-suffix tier. The bare noun fails lookup
+ * on purpose (a user typing `-p ollama` gets "unknown provider", not
+ * a silent pick of one tier). Single-endpoint services keep a bare
+ * name. Enforced by test_provider_names_are_tier_qualified.
  *
  *   hyper          Charm Hyper gateway (OpenAI-compatible /v1 chat
  *                  surface plus OAuth device flow; docs/HYPER-API.md)
