@@ -55,11 +55,20 @@ static void usage(FILE *out)
             "options:\n"
             "  -p, --provider NAME   hyper | ollama:cloud | ollama:local |\n"
             "                        openai | openrouter | opencode:go |\n"
-            "                        opencode:zen\n"
+            "                        opencode:zen | test:replay\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"
-            "  -v, --version         version\n");
+            "  -v, --version         version\n"
+            "\n"
+            "environment:\n"
+            "  NEVERMORE_PROVIDER      default provider (as -p)\n"
+            "  NEVERMORE_MODEL         default model (as -m)\n"
+            "  NEVERMORE_BASE_URL      override the provider's endpoint\n"
+            "                          (e.g. a wire-replay server)\n"
+            "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
+            "  NEVERMORE_DEBUG_WIRE=1  record the wire to\n"
+            "                          ~/.local/state/nevermore/wire/\n");
 }
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
@@ -176,7 +185,8 @@ static int stdin_is_tty(void)
 #endif
 }
 
-static int run_interactive(const char *provider_name, const char *model)
+static int run_interactive(const char *provider_name, const char *model,
+                           const char *base_url)
 {
     if (!stdin_is_tty()) {
         fprintf(stderr,
@@ -194,7 +204,7 @@ static int run_interactive(const char *provider_name, const char *model)
     if (max_rounds > 0)
         nm_chat_app_set_max_rounds(app, max_rounds);
     const NmProvider *p = nm_provider_by_name(provider_name);
-    nm_chat_app_set_endpoint(app, NULL, nm_provider_api_key(p));
+    nm_chat_app_set_endpoint(app, base_url, nm_provider_api_key(p));
 
     TuiRuntimeConfig cfg = { 0 };
     cfg.raw_mode = 1;
@@ -259,6 +269,7 @@ int main(int argc, char *argv[])
 {
     const char *provider_name = getenv("NEVERMORE_PROVIDER");
     const char *model = getenv("NEVERMORE_MODEL");
+    const char *base_url = getenv("NEVERMORE_BASE_URL");
     const char *prompt = NULL;
     int want_models = 0;
 
@@ -337,7 +348,7 @@ int main(int argc, char *argv[])
         nm_agent_on_delta(agent, ask_on_delta);
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
-        nm_agent_set_endpoint(agent, NULL, api_key);
+        nm_agent_set_endpoint(agent, base_url, api_key);
         int max_rounds = env_max_rounds();
         if (max_rounds > 0)
             nm_agent_set_max_rounds(agent, max_rounds);
@@ -357,5 +368,5 @@ int main(int argc, char *argv[])
 
     /* Interactive chat: boba owns the event loop; the agent streams
      * through the app's fd/step/tick callbacks. */
-    return run_interactive(provider_name, model);
+    return run_interactive(provider_name, model, base_url);
 }

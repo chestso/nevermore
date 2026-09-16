@@ -1,6 +1,6 @@
 /* provider.h - model provider backends
  *
- * Seven providers, one function-pointer interface (the portty
+ * Eight providers, one function-pointer interface (the portty
  * backend pattern).
  *
  * NAMING INVARIANT: a service with more than one endpoint-tier
@@ -24,6 +24,11 @@
  *                  x-opencode-session routing header
  *   opencode:zen   OpenCode Zen (https://opencode.ai/zen/v1, credits)
  *                  — same wire, other tier
+ *   test:replay    a local wire-replay server (tools/wire-replay/,
+ *                  http://localhost:11434/v1) — the debug vehicle for
+ *                  replaying a captured wire dump through the real
+ *                  portty/coffer path. Keyless, tokenless catalog;
+ *                  never a shipping endpoint.
  *
  * All of them share one wire client (openai_client.h); only base URL,
  * auth headers, extra headers, and model catalogs differ.
@@ -53,8 +58,9 @@ typedef enum
     NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
     NM_PROVIDER_OPENAI,
     NM_PROVIDER_OPENROUTER,
-    NM_PROVIDER_OPENCODE,    /* OpenCode Go (subscription tier) */
-    NM_PROVIDER_OPENCODE_ZEN /* OpenCode Zen (credits tier) */
+    NM_PROVIDER_OPENCODE,     /* OpenCode Go (subscription tier) */
+    NM_PROVIDER_OPENCODE_ZEN, /* OpenCode Zen (credits tier) */
+    NM_PROVIDER_TEST          /* test:replay — local wire-replay server */
 } NmProviderId;
 
 typedef struct NmModel

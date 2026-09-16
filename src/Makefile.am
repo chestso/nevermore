@@ -93,6 +93,7 @@ nevermore_SOURCES = \
     provider_openrouter.c \
     provider_opencode.c \
     provider_opencode_zen.c \
+    provider_test.c \
     openai_client.h \
     openai_client.c \
     transport_internal.h \

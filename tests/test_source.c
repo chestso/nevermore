@@ -24,8 +24,9 @@ static void test_registry_source_lists_all_providers(void)
     size_t n = 0;
     const NmEntry *items = nm_source_items(s, &n);
     ASSERT_NOT_NULL(items);
-    ASSERT_EQ(n, 7); /* hyper, ollama:cloud, ollama:local, openai,
-                        openrouter, opencode:go, opencode:zen */
+    ASSERT_EQ(n, 8); /* hyper, ollama:cloud, ollama:local, openai,
+                        openrouter, opencode:go, opencode:zen,
+                        test:replay */
 
     /* Every entry is a registered provider; id is the router's
      * vocabulary (what /provider <name> accepts). */

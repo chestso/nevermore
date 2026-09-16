@@ -78,6 +78,7 @@ static void test_provider_registry_complete(void)
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENROUTER));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE_ZEN));
+    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_TEST));
 }
 
 static void test_provider_lookup_by_name(void)
@@ -89,6 +90,7 @@ static void test_provider_lookup_by_name(void)
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:go"));
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:zen"));
+    ASSERT_NOT_NULL(nm_provider_by_name("test:replay"));
     ASSERT_NULL(nm_provider_by_name("nope"));
     /* No bare option for a tiered service: the pre-rename forms and
      * the service nouns themselves are all unaddressable. */
@@ -96,6 +98,41 @@ static void test_provider_lookup_by_name(void)
     ASSERT_NULL(nm_provider_by_name("ollama-local"));
     ASSERT_NULL(nm_provider_by_name("opencode"));
     ASSERT_NULL(nm_provider_by_name("opencode-zen"));
+    ASSERT_NULL(nm_provider_by_name("test"));
+}
+
+/* test:replay is the wire-replay debug vehicle: loopback base, no
+ * authinfo machine, keyless on loopback, and the same
+ * /chat/completions target the recorded exchanges used — the replay
+ * server matches on method + target + exact body, and the recorded
+ * dumps were captured with the /v1 prefix. */
+static void test_replay_provider_is_loopback_and_keyless(void)
+{
+    const NmProvider *p = nm_provider_by_name("test:replay");
+    ASSERT_NOT_NULL(p);
+    ASSERT_STR_EQ(p->default_base_url, "http://localhost:11434/v1");
+    ASSERT_NULL(p->authinfo_machine);
+    /* NULL base = the loopback default = keyless; an explicit
+     * non-loopback base is a real endpoint and needs a key. */
+    ASSERT_TRUE(!p->needs_auth(p, NULL));
+    ASSERT_TRUE(!p->needs_auth(p, ""));
+    ASSERT_TRUE(p->needs_auth(p, "https://example.com/v1"));
+    ASSERT_TRUE(!p->needs_auth(p, "http://localhost:11434/v1"));
+    ASSERT_TRUE(!p->needs_auth(p, "http://127.0.0.1:11434/v1"));
+    ASSERT_TRUE(!p->needs_auth(p, "http://[::1]:11434/v1"));
+
+    /* Tokenless static catalog naming the ids the reference dumps
+     * use (the model id is part of the replay signature). */
+    size_t n = 0;
+    const NmModel *m = p->models(p, NULL, NULL, &n);
+    ASSERT_NOT_NULL(m);
+    ASSERT_TRUE(n > 0);
+    int found = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (strcmp(m[i].id, "deepseek-v4.1-flash") == 0)
+            found = 1;
+    }
+    ASSERT_TRUE(found);
 }
 
 /* The naming invariant (provider.h): a service with more than one
@@ -1395,6 +1432,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);
     RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
+    RUN_TEST(test_replay_provider_is_loopback_and_keyless);
     RUN_TEST(test_opencode_chat_carries_session_header);
     RUN_TEST(test_opencode_chat_without_done_is_complete);
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);

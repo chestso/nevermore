@@ -106,6 +106,11 @@ class Scenario:
         self._queues: Dict[Signature, Deque[Action]] = {}
         self._served_count: Dict[Signature, int] = {}
         self._all: List[Action] = []
+        # Loose (sequential) mode: serve any pending action without a
+        # body match. For rendering repros, where the session content
+        # (tool output, AGENTS.md) cannot be reproduced byte-exactly —
+        # the request SHAPE and the response stream are what matter.
+        self.loose = False
 
     # -- build ------------------------------------------------------ #
 
@@ -128,12 +133,28 @@ class Scenario:
 
     def take(self, signature: Signature) -> Optional[Action]:
         """Pop the oldest pending action for a signature (None when
-        none is queued)."""
+        none is queued). In loose mode, a miss falls back to the
+        oldest pending action of the same method+path (any body) —
+        and only then, when that path is exhausted too, to the oldest
+        pending action overall, so a scenario recorded against a
+        differently-shaped request still drives the client."""
         with self._lock:
             queue = self._queues.get(signature)
-            if not queue:
+            if queue:
+                action = queue.popleft()
+            elif self.loose:
+                method, path, _ = signature
+                candidates = [
+                    a for a in self._all if not a.served and a.signature[1] == path
+                ]
+                if not candidates:
+                    candidates = [a for a in self._all if not a.served]
+                if not candidates:
+                    return None
+                action = candidates[0]
+                self._queues[action.signature].remove(action)
+            else:
                 return None
-            action = queue.popleft()
             action.served = True
             self._served_count[signature] = self._served_count.get(signature, 0) + 1
             return action
@@ -715,6 +736,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "each %dB body slice; 0 = full speed" % BODY_SLICE,
     )
     parser.add_argument(
+        "--loose",
+        action="store_true",
+        help="serve actions sequentially without the byte-exact body match "
+        "(for rendering repros whose session content cannot be reproduced); "
+        "the request target still wins over an unrelated pending action",
+    )
+    parser.add_argument(
         "--quiet", action="store_true", help="suppress per-request logging"
     )
     parser.add_argument(
@@ -745,8 +773,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     scenario = Scenario()
     scenario.build(dumps)
+    scenario.loose = args.loose
     for dump in dumps:
         log(f"loaded {dump.path}: {dump.summary()}")
+    if args.loose:
+        log("loose mode: body match disabled (sequential actions)")
 
     options = ServerOptions(pace=args.pace, quiet=args.quiet)
     servers = start_listeners(args.host, args.port, scenario, options)

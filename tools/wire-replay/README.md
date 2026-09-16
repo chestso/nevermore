@@ -65,8 +65,20 @@ Options:
 | `--host HOST` | bind address; default `localhost` binds `::1` **and** `127.0.0.1`                         |
 | `--port PORT` | bind port; default `0` = ephemeral (the chosen port is printed)                           |
 | `--pace S`    | delay before each SSE event after the first (and each 512 B body slice); `0` = full speed |
+| `--loose`     | serve actions in recorded order **without** the byte-exact body match (see below)         |
 | `--quiet`     | suppress per-request logging                                                              |
 | `--list`      | list the dump's exchanges and exit                                                        |
+
+**`--loose` is for rendering repros, not wire-accuracy work.** A dump
+whose later rounds embed tool output (a directory listing, `ps` output,
+a file's contents) only matches byte-exact if the client reproduces
+that exact session content — impossible after the fact. Loose mode
+serves the oldest pending action for the request target (falling back
+to the oldest pending action overall), so a captured conversation still
+drives the client end-to-end. The request shape and the response stream
+are faithful; the body match verdict is deliberately waived, and the
+per-request log marks the substitution. Never use it to judge whether
+nevermore constructs a correct request.
 
 Introspection: `GET /__wire_replay__/status` returns action counts
 (total / served / pending) plus per-signature counts with body sizes
@@ -92,6 +104,35 @@ tools/wire-replay/wire-replay DUMP --port 11434 --pace 0.02
 dump recorded against Ollama Cloud (`https://ollama.com/v1`) is matched
 the same way — the host rewrite is what makes cloud dumps replayable
 locally.
+
+### Driving nevermore at the replay server
+
+The `test:replay` provider exists for exactly this: a loopback base, no
+auth, a tokenless static catalog, and the same OpenAI-compatible wire
+the other providers use. Two knobs make a recorded dump reproducible:
+
+```sh
+# 1. capture a real session (any provider)
+NEVERMORE_DEBUG_WIRE=1 nevermore -p opencode:go -m deepseek-v4.1-flash ...
+
+# 2. serve the dump (--loose: later rounds embed unreproducible tool
+#    output; see the flag note above)
+tools/wire-replay/wire-replay ~/.local/state/nevermore/wire/DUMP.ndjson \
+    --port 11434 --loose &
+
+# 3. replay it through the real client. NEVERMORE_BASE_URL overrides the
+#    provider's endpoint, and its PATH is what the dump's request target
+#    was recorded under (a Go dump carries /zen/go/v1).
+NEVERMORE_BASE_URL=http://localhost:11434/zen/go/v1 \
+NEVERMORE_AUTHINFO=/dev/null NM_NO_LIVE_CATALOG=1 \
+    nevermore -p test:replay -m deepseek-v4.1-flash
+```
+
+`NM_NO_LIVE_CATALOG=1` keeps the model popup from fetching `/models`
+over the wire (the replay server holds only chat completions).
+`NEVERMORE_AUTHINFO=/dev/null` is belt-and-braces: `test:replay` is
+keyless on loopback, but a stray real authinfo entry would otherwise
+ride along.
 
 ## Behavior notes
 

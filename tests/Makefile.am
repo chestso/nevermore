@@ -103,6 +103,7 @@ test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -118,6 +119,7 @@ test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -152,7 +154,8 @@ test_openai_client_SOURCES = test_openai_client.c \
     ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c
 test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -197,7 +200,8 @@ test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src
     ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -238,7 +242,8 @@ test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c \
     ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
