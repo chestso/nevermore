@@ -249,8 +249,8 @@ is the offline fallback.
 
 ## 6. What nevermore must send (summary)
 
-For `provider_opencode.c` (Go) and the `opencode-zen` vtable over
-the shared client:
+For `provider_opencode.c` (Go, provider name `opencode:go`) and the
+`opencode:zen` vtable over the shared client:
 
 - base URL `https://opencode.ai/zen/v1` / `…/zen/go/v1`;
 - `Authorization: Bearer $OPENCODE_API_KEY` or the authinfo

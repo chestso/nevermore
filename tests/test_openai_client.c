@@ -1274,7 +1274,7 @@ static void test_extra_headers_redaction_marker(void)
 {
     taplog_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("opencode", "glm-5.3"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("opencode:go", "glm-5.3"), 1);
 
     int port;
     int lfd = server_listen(&port);
@@ -1367,7 +1367,7 @@ static void test_wiretap_stream_records_events(void)
 {
     taplog_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("ollama", "gpt-oss:20b"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "gpt-oss:20b"), 1);
 
     int port;
     int lfd = server_listen(&port);

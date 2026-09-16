@@ -24,8 +24,8 @@ static void test_registry_source_lists_all_providers(void)
     size_t n = 0;
     const NmEntry *items = nm_source_items(s, &n);
     ASSERT_NOT_NULL(items);
-    ASSERT_EQ(n, 7); /* hyper, ollama, ollama-local, openai, openrouter,
-                        opencode (Go), opencode-zen */
+    ASSERT_EQ(n, 7); /* hyper, ollama:cloud, ollama:local, openai,
+                        openrouter, opencode:go, opencode:zen */
 
     /* Every entry is a registered provider; id is the router's
      * vocabulary (what /provider <name> accepts). */
@@ -45,7 +45,7 @@ static void test_registry_source_names_round_trip(void)
     const NmEntry *items = nm_source_items(s, &n);
     int saw_ollama = 0, saw_openai = 0;
     for (size_t i = 0; i < n; i++) {
-        if (strcmp(items[i].id, "ollama") == 0)
+        if (strcmp(items[i].id, "ollama:cloud") == 0)
             saw_ollama = 1;
         if (strcmp(items[i].id, "openai") == 0)
             saw_openai = 1;
@@ -58,7 +58,7 @@ static void test_registry_source_names_round_trip(void)
 
 static void test_static_source_wraps_provider_catalog(void)
 {
-    const NmProvider *ollama = nm_provider_by_name("ollama");
+    const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(ollama);
 
     NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
@@ -88,7 +88,7 @@ static void test_static_source_wraps_provider_catalog(void)
 
 static void test_static_source_entry_shape(void)
 {
-    const NmProvider *ollama = nm_provider_by_name("ollama");
+    const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
     NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
 
@@ -107,7 +107,7 @@ static void test_static_source_refetch_reuses(void)
 {
     /* The memory-reuse principle: a second fetch rebuilds in place —
      * items stay valid, no leak (ASan watches), count consistent. */
-    const NmProvider *ollama = nm_provider_by_name("ollama");
+    const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
     NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
     size_t n1 = 0;
@@ -140,7 +140,7 @@ static void test_cancel_is_safe_on_sync_sources(void)
     nm_source_cancel(reg); /* no fetch in flight */
     nm_source_free(reg);
 
-    const NmProvider *ollama = nm_provider_by_name("ollama");
+    const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
     NmSource *cat = nm_source_catalog_create(ollama, NULL, NULL);
     nm_source_cancel(cat);
     nm_source_free(cat);

@@ -16,8 +16,8 @@ extern const struct NmProvider nm_ollama_provider;
 extern const struct NmProvider nm_ollama_local_provider;
 extern const struct NmProvider nm_openai_provider;
 extern const struct NmProvider nm_openrouter_provider;
-extern const struct NmProvider nm_opencode_provider;     /* Go */
-extern const struct NmProvider nm_opencode_zen_provider; /* Zen */
+extern const struct NmProvider nm_opencode_provider;     /* :go */
+extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
 
 /* Shared OpenCode wire surface (provider_opencode.c): the Go vtable
  * lives there and provider_opencode_zen.c holds only the second

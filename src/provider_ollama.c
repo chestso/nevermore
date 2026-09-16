@@ -289,7 +289,7 @@ static const char *ollama_env_key(const NmProvider *p)
 
 const struct NmProvider nm_ollama_provider = {
     NM_PROVIDER_OLLAMA,
-    "ollama",
+    "ollama:cloud",
     OLLAMA_CLOUD_DEFAULT,
     "ollama.com",
     nm_ollama_chat,

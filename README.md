@@ -5,11 +5,16 @@ An interactive coding agent in pure C — quoth's spoken-word sibling.
 _"Quoth the raven: nevermore."_
 
 nevermore chats with AI models (Charm Hyper, Ollama local daemon and
-Ollama Cloud, OpenAI, OpenRouter) from a terminal, with an agent loop
-that can read, edit, and search files and run commands. It is a
-first-class citizen of the [portty](../portty) terminal: kitty keyboard
-protocol, OSC 52 clipboard, Lottie spinner via OSC 5555, sixel image
-attach — graceful degradation everywhere else.
+Ollama Cloud, OpenAI, OpenRouter, OpenCode Go and Zen) from a
+terminal, with an agent loop that can read, edit, and search files and
+run commands. It is a first-class citizen of the [portty](../portty)
+terminal: kitty keyboard protocol, OSC 52 clipboard, Lottie spinner
+via OSC 5555, sixel image attach — graceful degradation elsewhere.
+
+Provider names carry the endpoint tier explicitly: `ollama:cloud`,
+`ollama:local`, `opencode:go`, `opencode:zen`. A bare noun or a dash
+suffix reads as a separate service; the colon keeps the service and
+the tier distinct.
 
 Pre-alpha. No backwards-compatibility constraint.
 
@@ -60,8 +65,8 @@ machine opencode.ai        login apikey password ...
 ```
 
 Environment variables win over the file. Point elsewhere with
-`NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama-local` (the zero-config
-default) needs no key: use `-p ollama` for Ollama Cloud.
+`NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
+default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
 ## Layout
 

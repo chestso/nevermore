@@ -428,7 +428,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     tui_textinput_set_history_size(app->input, 500);
     tui_textinput_set_word_chars(
         app->input,
-        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/");
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/:");
 
     app->popup = tui_list_popup_create();
     if (!app->popup)

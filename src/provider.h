@@ -1,21 +1,24 @@
 /* provider.h - model provider backends
  *
  * Seven providers, one function-pointer interface (the portty
- * backend pattern):
+ * backend pattern). Naming: a provider whose service has more than
+ * one endpoint-tier (hosted vs local, subscription vs credits) is
+ * named `<service>:<tier>` — the tier is always explicit, never a
+ * bare noun or a dash suffix.
  *
- *   hyper         Charm Hyper gateway (OpenAI-compatible /v1 chat
- *                 surface plus OAuth device flow; docs/HYPER-API.md)
- *   ollama        Ollama Cloud (https://ollama.com) — OpenAI-compatible
- *                 chat surface plus the native /api catalog
- *   ollama-local  the local Ollama daemon (http://localhost:11434,
- *                 no auth) — same wire and catalog, other endpoint
- *   openai        OpenAI chat completions
- *   openrouter    OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
- *   opencode      OpenCode Go (https://opencode.ai/zen/go/v1, the
- *                 $10/month tier) — OpenAI-compatible chat plus the
- *                 x-opencode-session routing header
- *   opencode-zen  OpenCode Zen (https://opencode.ai/zen/v1, credits)
- *                 — same wire, other tier
+ *   hyper          Charm Hyper gateway (OpenAI-compatible /v1 chat
+ *                  surface plus OAuth device flow; docs/HYPER-API.md)
+ *   ollama:cloud   Ollama Cloud (https://ollama.com) — OpenAI-compatible
+ *                  chat surface plus the native /api catalog
+ *   ollama:local   the local Ollama daemon (http://localhost:11434,
+ *                  no auth) — same wire and catalog, other endpoint
+ *   openai         OpenAI chat completions
+ *   openrouter     OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
+ *   opencode:go    OpenCode Go (https://opencode.ai/zen/go/v1, the
+ *                  $10/month tier) — OpenAI-compatible chat plus the
+ *                  x-opencode-session routing header
+ *   opencode:zen   OpenCode Zen (https://opencode.ai/zen/v1, credits)
+ *                  — same wire, other tier
  *
  * All of them share one wire client (openai_client.h); only base URL,
  * auth headers, extra headers, and model catalogs differ.
@@ -167,13 +170,15 @@ typedef struct NmChatRequest
 struct NmProvider
 {
     NmProviderId id;
-    const char *name; /* "hyper", "ollama", "ollama-local", "openai", "openrouter" */
+    const char *name; /* "hyper", "ollama:cloud", "ollama:local",
+                       * "openai", "openrouter", "opencode:go",
+                       * "opencode:zen" */
     const char *default_base_url;
 
     /* The `machine <name>` this provider's key is stored under in
      * ~/.authinfo (authinfo.h). Data beside name/default_base_url,
      * not behavior — the lookup seam (nm_provider_api_key) reads it.
-     * NULL when the provider has no authinfo machine (ollama-local:
+     * NULL when the provider has no authinfo machine (ollama:local:
      * the daemon is keyless by construction). */
     const char *authinfo_machine;
 

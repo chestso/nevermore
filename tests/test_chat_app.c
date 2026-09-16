@@ -541,7 +541,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 
 static void test_quit_command_quits(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/quit");
@@ -556,7 +556,7 @@ static void test_quit_command_quits(void)
 
 static void test_model_command_sets_model(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
@@ -579,7 +579,7 @@ static void test_model_command_sets_model(void)
  * and is pre-selected, so Enter-then-submit leaves it unchanged. */
 static void test_model_picker_active_first(void)
 {
-    AppHarness *h = harness_new("ollama", "llama3.2", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model");
@@ -612,7 +612,7 @@ static void test_model_picker_active_first(void)
 
 static void test_model_picker_selects_and_commits(void)
 {
-    AppHarness *h = harness_new("ollama", "llama3.2", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Bare /model: active model first, catalog after. Down to the
@@ -633,7 +633,7 @@ static void test_model_picker_selects_and_commits(void)
 
 static void test_model_picker_pre_filters_by_query(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* /model with a query that is not an exact id: the popup opens
@@ -656,7 +656,7 @@ static void test_model_picker_pre_filters_by_query(void)
 
 static void test_model_picker_enter_composes_first_match(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model llama");
@@ -674,7 +674,7 @@ static void test_model_picker_enter_composes_first_match(void)
 
 static void test_model_picker_no_match_prints_nothing(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* No match: no popup; a note prints instead; model unchanged. */
@@ -689,7 +689,7 @@ static void test_model_picker_no_match_prints_nothing(void)
 
 static void test_provider_popup_composes_into_input(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* /provider with no arg opens the registry popup; Enter
@@ -700,17 +700,17 @@ static void test_provider_popup_composes_into_input(void)
     harness_type(h, "/provider");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "ollama") != NULL);
+    ASSERT_TRUE(strstr(frame, "ollama:cloud") != NULL);
     ASSERT_TRUE(strstr(frame, "openai") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
-    ASSERT_TRUE(strstr(frame, "opencode-zen") != NULL);
+    ASSERT_TRUE(strstr(frame, "opencode:zen") != NULL);
 
     /* Enter on the pre-selected active entry composes it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     const char *text = tui_textinput_text(nm_chat_app_textinput(h->app));
     ASSERT_NOT_NULL(text);
-    ASSERT_STR_EQ(text, "/provider ollama");
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+    ASSERT_STR_EQ(text, "/provider ollama:cloud");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
 
     /* Down to the second entry, Enter composes; submit commits the
      * switch to exactly the composed name. Clear the input first —
@@ -726,7 +726,7 @@ static void test_provider_popup_composes_into_input(void)
     char name[32] = { 0 };
     snprintf(name, sizeof(name), "%s", text + 10);
     /* Provider NOT switched yet (selection = composition). */
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
 
     /* Submit commits the switch to exactly the composed name. */
     harness_enter(h);
@@ -737,7 +737,7 @@ static void test_provider_popup_composes_into_input(void)
 
 static void test_provider_popup_query_pre_filters(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/provider openr");
@@ -757,14 +757,14 @@ static void test_provider_popup_query_pre_filters(void)
 
 static void test_providers_alias_is_unknown_command(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* /providers is retired: one command per noun. It is now an
      * unknown command, naming the survivor. */
     harness_type(h, "/providers");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
     ASSERT_TRUE(strstr(harness_read(h), "unknown command 'providers'") != NULL);
 
     harness_free(h);
@@ -772,7 +772,7 @@ static void test_providers_alias_is_unknown_command(void)
 
 static void test_model_validation_refuses_unknown_id(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Not in the catalog: it is a QUERY, so the picker opens with no
@@ -792,7 +792,7 @@ static void test_model_validation_refuses_unknown_id(void)
 
 static void test_model_exact_escape_hatch(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Exact-set escape hatch: "! " prefix sets any id without
@@ -808,10 +808,10 @@ static void test_model_exact_escape_hatch(void)
 
 static void test_provider_command_switches_provider(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
 
     harness_type(h, "/provider openai");
     harness_enter(h);
@@ -825,7 +825,7 @@ static void test_provider_command_switches_provider(void)
     harness_type(h, "/provider");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "ollama") != NULL);
+    ASSERT_TRUE(strstr(frame, "ollama:cloud") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
     ASSERT_TRUE(strstr(frame, "hyper") != NULL);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
@@ -844,7 +844,7 @@ static void test_provider_command_switches_provider(void)
 
 static void test_help_command_lists_commands(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/help");
@@ -1151,7 +1151,7 @@ static void test_tool_round_prints_panels(void)
 
 static void test_tab_on_slash_prefix_opens_commands_popup(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Regression (TUI crash): Tab after "/m" matches several slash
@@ -1182,7 +1182,7 @@ static void test_tab_on_slash_prefix_opens_commands_popup(void)
 
 static void test_tab_single_match_inserts_completion(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* "/he" matches exactly one command: Tab completes to "/help". */
@@ -1200,7 +1200,7 @@ static void test_tab_single_match_inserts_completion(void)
 
 static void test_tab_on_plain_word_is_a_noop(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Regression (TUI crash): Tab after a NON-slash word emitted
@@ -1385,7 +1385,7 @@ static void test_submit_echoes_once(void)
  * separator line marking the boundary. */
 static void test_provider_switch_clears_and_prints_separator(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/provider openai");

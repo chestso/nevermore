@@ -180,7 +180,7 @@ static void test_off_by_default(void)
 {
     /* Unset: recorder off, no tap installed, init reports 0. */
     test_unsetenv("NEVERMORE_DEBUG_WIRE");
-    ASSERT_EQ(nm_wire_recorder_init("ollama", "gpt-oss:20b"), 0);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "gpt-oss:20b"), 0);
     ASSERT_NULL(nm_wire_tap());
     nm_wire_recorder_shutdown();
 }
@@ -294,7 +294,7 @@ static void test_truncation_tolerance(void)
      * still parses. */
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("ollama", "m"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "m"), 1);
     nm_wire_recorder_shutdown();
 
     /* Truncate the file mid-last-line by appending a partial JSON

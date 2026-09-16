@@ -10,8 +10,8 @@
 #         (defaults to fetching https://models.dev/api.json)
 #
 # THE MAPPING IS INVERTED, and that is the easy mistake (design §5):
-#   models.dev "opencode"    == nevermore "opencode-zen" (Zen tier)
-#   models.dev "opencode-go" == nevermore "opencode"     (Go tier)
+#   models.dev "opencode"    == nevermore "opencode:zen" (Zen tier)
+#   models.dev "opencode-go" == nevermore "opencode:go"  (Go tier)
 # The script asserts both entries exist; a missing entry is an error,
 # not a silent empty file.
 #

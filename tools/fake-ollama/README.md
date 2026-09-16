@@ -7,7 +7,7 @@ local Ollama surface for nevermore's manual smoke:
 - `POST /v1/chat/completions` — a paced SSE stream
 
 It exists because a real local daemon is not available on every dev
-box, and a manual TUI smoke should not depend on one. `-p ollama-local`
+box, and a manual TUI smoke should not depend on one. `-p ollama:local`
 pins nevermore's base URL to `http://localhost:11434/v1`, so the fake
 server binds that port and the unmodified binary talks to it.
 
@@ -58,7 +58,7 @@ across separate SSE events), as a real stream would.
 tools/fake-ollama/fake_ollama.py --both --pace 0.6 &
 tmux new-session -d -s smoke -x 90 -y 28
 tmux send-keys -t smoke \
-    "NEVERMORE_AUTHINFO=/dev/null ./build/src/nevermore -p ollama-local" Enter
+    "NEVERMORE_AUTHINFO=/dev/null ./build/src/nevermore -p ollama:local" Enter
 sleep 2
 tmux send-keys -t smoke "show me the regions and a loader" Enter
 # mid-stream: the live region (tail + spinner)

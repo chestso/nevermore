@@ -53,9 +53,9 @@ static void usage(FILE *out)
             "       nevermore models\n"
             "\n"
             "options:\n"
-            "  -p, --provider NAME   hyper | ollama | ollama-local |\n"
-            "                        openai | openrouter | opencode |\n"
-            "                        opencode-zen\n"
+            "  -p, --provider NAME   hyper | ollama:cloud | ollama:local |\n"
+            "                        openai | openrouter | opencode:go |\n"
+            "                        opencode:zen\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"
@@ -274,7 +274,7 @@ int main(int argc, char *argv[])
     }
 
     if (!provider_name)
-        provider_name = "ollama-local"; /* zero-config default: local daemon */
+        provider_name = "ollama:local"; /* zero-config default: local daemon */
     const NmProvider *provider = nm_provider_by_name(provider_name);
     if (!provider) {
         fprintf(stderr, "nevermore: unknown provider '%s'\n", provider_name);

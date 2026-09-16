@@ -19,7 +19,7 @@ static const char *ollama_local_env_key(const NmProvider *p)
 
 const struct NmProvider nm_ollama_local_provider = {
     NM_PROVIDER_OLLAMA_LOCAL,
-    "ollama-local",
+    "ollama:local",
     "http://localhost:11434/v1",
     NULL, /* no authinfo machine: the daemon is keyless */
     nm_ollama_chat,

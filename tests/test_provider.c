@@ -83,12 +83,12 @@ static void test_provider_registry_complete(void)
 static void test_provider_lookup_by_name(void)
 {
     ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
-    ASSERT_NOT_NULL(nm_provider_by_name("ollama"));
-    ASSERT_NOT_NULL(nm_provider_by_name("ollama-local"));
+    ASSERT_NOT_NULL(nm_provider_by_name("ollama:cloud"));
+    ASSERT_NOT_NULL(nm_provider_by_name("ollama:local"));
     ASSERT_NOT_NULL(nm_provider_by_name("openai"));
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
-    ASSERT_NOT_NULL(nm_provider_by_name("opencode"));
-    ASSERT_NOT_NULL(nm_provider_by_name("opencode-zen"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode:go"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode:zen"));
     ASSERT_NULL(nm_provider_by_name("nope"));
 }
 
@@ -132,7 +132,7 @@ static void test_provider_api_key_env_then_authinfo(void)
     ASSERT_NULL(nm_provider_api_key(hyper_provider));
 
     /* The local daemon has no authinfo machine at all. */
-    const NmProvider *local = nm_provider_by_name("ollama-local");
+    const NmProvider *local = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(local);
     ASSERT_NULL(local->authinfo_machine);
     test_unsetenv("OLLAMA_API_KEY");
@@ -149,18 +149,18 @@ static void test_provider_authinfo_machines(void)
      * the box's ~/.authinfo uses (README documents them). */
     ASSERT_STR_EQ(nm_provider_by_name("hyper")->authinfo_machine,
                   "hyper.charm.land");
-    ASSERT_STR_EQ(nm_provider_by_name("ollama")->authinfo_machine,
+    ASSERT_STR_EQ(nm_provider_by_name("ollama:cloud")->authinfo_machine,
                   "ollama.com");
     ASSERT_STR_EQ(nm_provider_by_name("openai")->authinfo_machine,
                   "openai.com");
     ASSERT_STR_EQ(nm_provider_by_name("openrouter")->authinfo_machine,
                   "openrouter.ai");
     /* Both OpenCode tiers share the one box line. */
-    ASSERT_STR_EQ(nm_provider_by_name("opencode")->authinfo_machine,
+    ASSERT_STR_EQ(nm_provider_by_name("opencode:go")->authinfo_machine,
                   "opencode.ai");
-    ASSERT_STR_EQ(nm_provider_by_name("opencode-zen")->authinfo_machine,
+    ASSERT_STR_EQ(nm_provider_by_name("opencode:zen")->authinfo_machine,
                   "opencode.ai");
-    ASSERT_NULL(nm_provider_by_name("ollama-local")->authinfo_machine);
+    ASSERT_NULL(nm_provider_by_name("ollama:local")->authinfo_machine);
 }
 
 /* ---------------------------------------------------------------- */
@@ -626,7 +626,7 @@ static void test_ollama_models_tags_and_show(void)
      * API root by stripping it — /api/tags is at the host root. */
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("ollama");
+    const NmProvider *p = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(p);
 
     size_t n = 0;
@@ -650,7 +650,7 @@ static void test_ollama_models_tags_and_show(void)
 
 static void test_ollama_needs_auth_local_vs_cloud(void)
 {
-    const NmProvider *cloud = nm_provider_by_name("ollama");
+    const NmProvider *cloud = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(cloud);
     /* Cloud: auth (an overridden localhost base still means no auth). */
     ASSERT_TRUE(cloud->needs_auth(cloud, "https://ollama.com/v1") != 0);
@@ -659,7 +659,7 @@ static void test_ollama_needs_auth_local_vs_cloud(void)
     ASSERT_EQ(cloud->needs_auth(cloud, "http://127.0.0.1:11434/v1"), 0);
 
     /* The local daemon: no auth, ever. */
-    const NmProvider *local = nm_provider_by_name("ollama-local");
+    const NmProvider *local = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(local);
     ASSERT_EQ(local->needs_auth(local, NULL), 0);
     ASSERT_EQ(local->needs_auth(local, "http://127.0.0.1:11434/v1"), 0);
@@ -679,7 +679,7 @@ static void test_ollama_local_catalog_uses_local_default(void)
      * poisoned the local daemon's view. Offline here (the live gate
      * is on under make check), so the local provider falls back to
      * the static list — not the cloud's cached models. */
-    const NmProvider *local = nm_provider_by_name("ollama-local");
+    const NmProvider *local = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(local);
     size_t n = 0;
     const NmModel *models = local->models(local, NULL, NULL, &n);
@@ -921,11 +921,11 @@ static void test_opencode_registry_and_identity(void)
     const NmProvider *zen = nm_provider_get(NM_PROVIDER_OPENCODE_ZEN);
     ASSERT_NOT_NULL(go);
     ASSERT_NOT_NULL(zen);
-    ASSERT_STR_EQ(go->name, "opencode");
-    ASSERT_STR_EQ(zen->name, "opencode-zen");
-    ASSERT_NOT_NULL(nm_provider_by_name("opencode"));
-    ASSERT_NOT_NULL(nm_provider_by_name("opencode-zen"));
-    /* One tier base each; the plain noun is Go. */
+    ASSERT_STR_EQ(go->name, "opencode:go");
+    ASSERT_STR_EQ(zen->name, "opencode:zen");
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode:go"));
+    ASSERT_NOT_NULL(nm_provider_by_name("opencode:zen"));
+    /* One tier base each; the names carry the tier. */
     ASSERT_STR_EQ(go->default_base_url, "https://opencode.ai/zen/go/v1");
     ASSERT_STR_EQ(zen->default_base_url, "https://opencode.ai/zen/v1");
     /* One key, one authinfo machine, both tiers. */
@@ -950,7 +950,7 @@ static void test_opencode_chat_carries_session_header(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode");
+    const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
     ASSERT_STR_EQ(p->default_base_url, "https://opencode.ai/zen/go/v1");
 
@@ -1025,7 +1025,7 @@ static void test_opencode_chat_without_done_is_complete(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode");
+    const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
 
     NmMessage msg = { "user", "hello", NULL, NULL, NULL };
@@ -1057,7 +1057,7 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode-zen");
+    const NmProvider *p = nm_provider_by_name("opencode:zen");
     ASSERT_NOT_NULL(p);
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
@@ -1118,7 +1118,7 @@ static void test_opencode_models_fetch_maps_ids(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode");
+    const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
 
     size_t n = 0;
@@ -1143,8 +1143,8 @@ static void test_opencode_models_fetch_maps_ids(void)
  * offline gate under make check means default-base calls are no-ops). */
 static void test_opencode_models_static_fallback_per_tier(void)
 {
-    const NmProvider *go = nm_provider_by_name("opencode");
-    const NmProvider *zen = nm_provider_by_name("opencode-zen");
+    const NmProvider *go = nm_provider_by_name("opencode:go");
+    const NmProvider *zen = nm_provider_by_name("opencode:zen");
     size_t gn = 0, zn = 0;
     const NmModel *g = go->models(go, NULL, NULL, &gn);
     const NmModel *z = zen->models(zen, NULL, NULL, &zn);

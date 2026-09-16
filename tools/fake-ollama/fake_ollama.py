@@ -2,7 +2,7 @@
 """fake-ollama - a stdlib stand-in for the local Ollama daemon.
 
 Serves just enough of the local daemon surface for a manual TUI smoke
-of nevermore (which pins `-p ollama-local` to localhost:11434):
+of nevermore (which pins `-p ollama:local` to localhost:11434):
 
     GET  /api/tags             -> a one-model catalog
     POST /v1/chat/completions  -> a paced SSE stream

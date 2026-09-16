@@ -3,8 +3,8 @@
  * https://opencode.ai/zen/v1 (pay-per-use credits). One wire and one
  * implementation with OpenCode Go (provider_opencode.c) — this file
  * is only the vtable that pins the tier's base URL and catalog. The
- * "opencode" noun is Go (the box's working tier); this is the Zen
- * tier under an explicit name.
+ * provider names carry the tier explicitly: `opencode:go` (the
+ * working tier) and `opencode:zen` (this one).
  *
  * Zen's full catalog (data/nm-opencode-zen-models.json) and free ids
  * live in provider_opencode.c; the x-opencode-session rule is shared
@@ -24,7 +24,7 @@ static const char *opencode_zen_env_key(const NmProvider *p)
 
 const struct NmProvider nm_opencode_zen_provider = {
     NM_PROVIDER_OPENCODE_ZEN,
-    "opencode-zen",
+    "opencode:zen",
     "https://opencode.ai/zen/v1",
     "opencode.ai",
     nm_opencode_chat,
