@@ -104,6 +104,7 @@ run_build test_spinner tests/test_spinner.c src/spinner.c
 # plain-model parts of history (escape/unescape) are exercised by
 # test_history under Linux + macOS pre-flights.
 echo "SKIP: test_history.exe (needs MinGW boba; MSYS2 CI covers it)"
+echo "SKIP: test_markdown.exe (needs MinGW boba; MSYS2 CI covers it)"
 echo "SKIP: test_chat_app.exe (needs MinGW boba; MSYS2 CI covers it)"
 
 echo "=== running under wine ==="

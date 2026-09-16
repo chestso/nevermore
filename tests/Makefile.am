@@ -17,6 +17,7 @@ check_PROGRAMS = \
     test_agent \
     test_spinner \
     test_history \
+    test_markdown \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -208,11 +209,18 @@ test_history_SOURCES = test_history.c ../src/history.c
 test_history_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_history_LDADD = $(BOBA_LIBS)
 
+# Markdown: nevermore's line classifier (pure C, no I/O) + the boba
+# transcript integration (classifier verdicts -> commit behavior).
+# Links boba because the renderer writes through a TuiRowSink.
+test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c
+test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
+test_markdown_LDADD = $(BOBA_LIBS)
+
 # Chat app: the inline TUI component, driven through boba without a
 # terminal (runtime over tmpfile output, hand-fed messages) against
 # canned SSE servers. The full source stack rides along: the app owns
-# an agent (provider + openai_client + transport) and prints the
-# transcript through tui_runtime_clear_inline (new in boba).
+# an agent (provider + openai_client + transport) and drives the
+# transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
     ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
