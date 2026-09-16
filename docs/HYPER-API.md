@@ -190,18 +190,25 @@ or `nil` to omit).
 **nevermore mirrors it too** (`src/provider_hyper.c`): every chat request
 carries the affinity pair — `XXH3-64` of the conversation id, sent under both
 names — plus `x-crush-id`, `XXH3-64("<hostname>@<HOME>")`, derived once per
-process. The digest comes from `src/xxh3.c`, an implementation of the XXH3-64
-algorithm from Cyan4973/xxHash's `doc/xxhash_spec.md` (`tests/test_xxh3.c`
-pins the reference known-answer values and every boundary length); seed 0,
-matching the gateway's expectation. When a request carries no conversation id,
-nevermore falls back to a provider-scoped one rather than omitting the headers
-— an absent header silently defeats caching, which is the failure mode worth
-designing against. `HYPER_NO_SESSION_CACHE` (non-empty) drops the two
-`x-session-*` headers (the C analog of quoth's `quoth-hyper-session-cache-p`
-defcustom); `x-crush-id` is identity rather than cache routing and stays.
-Catalog requests carry `x-crush-id` alone. All three are logged verbatim by
-the wire recorder (`secret = 0`) — they are routing hashes, not secrets, and
-seeing them is the point of a wire dump.
+process. The header is *stable per machine*; nevermore deliberately does not
+replicate Crush's hardware fingerprint (different value, same contract), so it
+does not read the same as a Crush CLI request. The digest comes from
+`src/xxh3.c`, an implementation of the XXH3-64 algorithm from
+Cyan4973/xxHash's `doc/xxhash_spec.md` (`tests/test_xxh3.c` pins the reference
+known-answer values and every boundary length); seed 0, matching the gateway's
+expectation.
+
+When a request carries no conversation id, nevermore falls back to a
+provider-scoped one rather than omitting the headers — an absent header
+silently defeats caching, which is the failure mode worth designing against.
+The fallback id is one per process, so any turn driven without an agent id
+pins to a single cache node; Crush has no such path (its session id is always
+present), so this is nevermore-specific. `HYPER_NO_SESSION_CACHE` (non-empty)
+drops the two `x-session-*` headers (the C analog of quoth's
+`quoth-hyper-session-cache-p` defcustom); `x-crush-id` is identity rather than
+cache routing and stays. Catalog requests carry `x-crush-id` alone. All three
+are logged verbatim by the wire recorder (`secret = 0`) — they are routing
+hashes, not secrets, and seeing them is the point of a wire dump.
 
 ### 3.2 Request body
 
