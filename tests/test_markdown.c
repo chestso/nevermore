@@ -651,10 +651,13 @@ static void test_table_width_grows_then_final_box_aligned(void)
     h_flush(h);
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
 
-    /* Every committed box row has the same DISPLAY width (border rows
+    /* Every committed box row has the same DISPLAY width. Border rows
      * use 3-byte glyphs where content rows use spaces, so byte length
-     * is not the measure). The capture also holds live-path
-     * re-renders; the finalized table is the LAST top-corner onward. */
+     * is not the measure; SGR is zero-width. The capture also holds
+     * live-path re-renders; the finalized table is the LAST top-corner
+     * onward. Strip SGR before measuring so the attr bytes do not
+     * count as glyphs (the width math itself is attr-free by design:
+     * attrs are emitted around, never inside, the cell fields). */
     const char *out = h_read(h);
     const char *top = NULL;
     for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
@@ -666,12 +669,23 @@ static void test_table_width_grows_then_final_box_aligned(void)
         const char *e = strstr(p, "\r\n");
         if (!e)
             break;
-        char row[256];
+        char row[512];
         size_t rl = (size_t)(e - p);
         if (rl >= sizeof(row))
             rl = sizeof(row) - 1;
-        memcpy(row, p, rl);
-        row[rl] = '\0';
+        size_t o = 0;
+        for (size_t k = 0; k < rl; k++) {
+            if (p[k] == '\x1b') {
+                k++;
+                if (k < rl && p[k] == '[') {
+                    while (k < rl && p[k] != 'm')
+                        k++;
+                }
+                continue;
+            }
+            row[o++] = p[k];
+        }
+        row[o] = '\0';
         widths[nrows++] = (int)tui_utf8_display_width_ansi(row, strlen(row));
         p = e + 2;
     }
@@ -679,6 +693,230 @@ static void test_table_width_grows_then_final_box_aligned(void)
     for (int r = 1; r < nrows; r++)
         ASSERT_EQ(widths[r], widths[0]);
 
+    h_free(h);
+}
+
+/* A harness with an explicit stream count and a caller-supplied
+ * render_block override is not needed; the production renderers are
+ * installed and the streams are (content, reasoning). */
+static H *h_new_render_streams(size_t n_streams)
+{
+    H *h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+
+    static NmMarkdown ms[2];
+    static const TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    static const TuiClassifier *classifiers[2];
+    for (size_t i = 0; i < n_streams; i++) {
+        nm_markdown_init(&ms[i]);
+        classifiers[i] = nm_markdown_classifier(&ms[i]);
+    }
+
+    TuiTranscriptConfig cfg = {
+        .render_block = nm_markdown_render_block,
+        .render_live = nm_markdown_render_live,
+        .streams = streams,
+        .classifiers = classifiers,
+        .n_streams = n_streams,
+    };
+    h->t = tui_transcript_create(&cfg);
+    if (!h->text || !h->out || !h->t) {
+        if (h->t)
+            tui_transcript_free(h->t);
+        if (h->out)
+            fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt = tui_runtime_create((TuiComponent *)tui_transcript_component(h->t),
+                               h->t, &rcfg);
+    if (!h->rt) {
+        tui_transcript_free(h->t);
+        fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    tui_runtime_set_transcript(h->rt, h->t);
+    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    return h;
+}
+
+/* The live region at width/rows_cap (frame bytes, SGR included). */
+static const char *h_view(H *h, int width, int rows_cap)
+{
+    static DynamicBuffer *view;
+    if (!view)
+        view = dynamic_buffer_create(512);
+    dynamic_buffer_clear(view);
+    tui_transcript_view(h->t, view, width, rows_cap);
+    return view->data;
+}
+
+/* ---------------------------------------------------------------- */
+/* Styling (step 4)                                                 */
+/* ---------------------------------------------------------------- */
+
+/* Commit one stream's line and return a copy of the captured bytes
+ * (so the harness can be freed). */
+static const char *commit_one(size_t stream, const char *line)
+{
+    static char out[OUT_CAP];
+    H *h = h_new_render_streams(2);
+    if (!h)
+        return NULL;
+    h_send(h, tui_msg_stream_delta((int)stream, line, strlen(line)));
+    h_send(h, tui_msg_stream_end((int)stream));
+    h_flush(h);
+    snprintf(out, sizeof(out), "%s", h_read(h));
+    h_free(h);
+    return out;
+}
+
+static void test_reasoning_stream_is_dim(void)
+{
+    /* stream 1 (reasoning) dims; stream 0 (content) stays plain */
+    const char *dimmed = commit_one(1, "weighing options\n");
+    ASSERT_TRUE(strstr(dimmed, "\x1b[0;2mweighing options\x1b[0m\r\n") !=
+                NULL);
+
+    const char *plain = commit_one(0, "the answer\n");
+    ASSERT_TRUE(strstr(plain, "\x1b[0;2m") == NULL);
+    ASSERT_TRUE(strstr(plain, "the answer\r\n") != NULL);
+}
+
+static void test_dim_heading_keeps_both_attrs(void)
+{
+    /* A heading on the reasoning stream composes dim + coral + bold in
+     * ONE SGR run (no nesting), and a span reset restores the composed
+     * base, not plain. */
+    const char *out = commit_one(1, "## Title\n");
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;2;38;2;255;87;125m") != NULL);
+    ASSERT_TRUE(strstr(out, "## Title") != NULL);
+    /* reset before the row terminator (D8) */
+    ASSERT_TRUE(strstr(out, "\x1b[0m\r\n") != NULL);
+}
+
+static void test_inline_code_span(void)
+{
+    const char *out = commit_one(0, "run `make check` now\n");
+    /* Sardine #4FBEFE = 79;190;254 */
+    ASSERT_TRUE(strstr(out,
+                       "\x1b[0;38;2;79;190;254mmake check\x1b[0m") != NULL);
+    /* the surrounding text is intact around the span */
+    ASSERT_TRUE(strstr(out, "run ") != NULL);
+    ASSERT_TRUE(strstr(out, " now") != NULL);
+}
+
+static void test_inline_unterminated_span_is_literal(void)
+{
+    const char *out = commit_one(0, "a `no closer here\n");
+    ASSERT_TRUE(strstr(out, "a `no closer here\r\n") != NULL);
+    /* no code-span SGR emitted */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;79;190;254m") == NULL);
+}
+
+static void test_intraword_underscore_stays_literal(void)
+{
+    const char *out = commit_one(0, "snake_case_word here\n");
+    ASSERT_TRUE(strstr(out, "snake_case_word here\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;3m") == NULL); /* no italic */
+}
+
+static void test_bold_italic_strike_and_link(void)
+{
+    const char *bold = commit_one(0, "a **strong** word\n");
+    ASSERT_TRUE(strstr(bold, "\x1b[0;1mstrong\x1b[0m") != NULL);
+
+    const char *italic = commit_one(0, "an *emphatic* word\n");
+    ASSERT_TRUE(strstr(italic, "\x1b[0;3memphatic\x1b[0m") != NULL);
+
+    const char *both = commit_one(0, "a ***loud*** word\n");
+    ASSERT_TRUE(strstr(both, "\x1b[0;1;3mloud\x1b[0m") != NULL);
+
+    const char *strike = commit_one(0, "a ~~gone~~ word\n");
+    ASSERT_TRUE(strstr(strike, "\x1b[0;9mgone\x1b[0m") != NULL);
+
+    const char *link = commit_one(0, "see [docs](http://x) now\n");
+    ASSERT_TRUE(strstr(link, "\x1b[0;4;38;2;79;190;254mdocs\x1b[0m") != NULL);
+    ASSERT_TRUE(strstr(link, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
+}
+
+static void test_span_inside_heading_restores_heading_attr(void)
+{
+    /* after the code span, the heading attr is re-applied (coral+bold)
+     * so the trailing text is still heading-styled, not plain */
+    const char *out = commit_one(0, "# Title `code` tail\n");
+    /* the code span composes with the heading base: bold + sardine */
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;79;190;254mcode") != NULL);
+    /* the trailing " tail" is under the heading attr again (coral+bold) */
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;255;87;125m tail") != NULL);
+}
+
+static void test_fence_lines_are_styled(void)
+{
+    /* labeled fence: delimiter Oyster, info Mustard, body Smoke */
+    H *h = h_new_render_streams(1);
+    ASSERT_NOT_NULL(h);
+    h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
+    h_send(h, tui_msg_stream_delta(0, "int x;\n", 7));
+    h_send(h, tui_msg_stream_delta(0, "```\n", 4));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    const char *out = h_read(h);
+    /* delimiter Oyster #605F6B = 96;95;107; info Mustard = 245;239;52 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m```") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52mc") != NULL);
+    /* body Smoke #BFBCC8 = 191;188;200 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;191;188;200mint x;") != NULL);
+    h_free(h);
+}
+
+static void test_quote_and_list_styling(void)
+{
+    /* quote gutter Oyster, quoted text Smoke (both re-applied per run;
+     * the gutter run restores Smoke after its Oyster) */
+    const char *q = commit_one(0, "> quoted text\n");
+    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;96;95;107m\xe2\x94\x82 ") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;191;188;200m> quoted text") != NULL);
+
+    /* list bullet coral, text plain */
+    const char *l = commit_one(0, "- item text\n");
+    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;87;125m-") != NULL);
+    ASSERT_TRUE(strstr(l, "item text") != NULL);
+}
+
+static void test_live_table_on_reasoning_carries_dim(void)
+{
+    /* the live (frame) path for a block-granular table on stream 1
+     * must carry the dim through render_live (blk->stream) */
+    H *h = h_new_render_streams(2);
+    ASSERT_NOT_NULL(h);
+    h_send(h, tui_msg_stream_delta(1, "| a | b |\n", 10));
+    h_send(h, tui_msg_stream_delta(1, "| - | - |\n", 10));
+    h_flush(h);
+    const char *view = h_view(h, 60, 10);
+    ASSERT_TRUE(strstr(view, "\x1b[0;2;38;2;96;95;107m") != NULL);
+    h_free(h);
+}
+
+static void test_table_header_bold_and_borders_oyster(void)
+{
+    const char *out = NULL;
+    H *h = h_new_render_streams(1);
+    ASSERT_NOT_NULL(h);
+    const char *table = "| h1 | h2 |\n| -- | -- |\n| a | b |\n\n";
+    h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    out = h_read(h);
+    /* header cell bold, border Oyster */
+    ASSERT_TRUE(strstr(out, "\x1b[0;1mh1") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m\xe2\x94\x8c") != NULL);
     h_free(h);
 }
 
@@ -705,5 +943,16 @@ int main(void)
     RUN_TEST(test_table_reaches_scrollback_aligned);
     RUN_TEST(test_render_block_emits_content_not_framing);
     RUN_TEST(test_table_width_grows_then_final_box_aligned);
+    RUN_TEST(test_reasoning_stream_is_dim);
+    RUN_TEST(test_dim_heading_keeps_both_attrs);
+    RUN_TEST(test_inline_code_span);
+    RUN_TEST(test_inline_unterminated_span_is_literal);
+    RUN_TEST(test_intraword_underscore_stays_literal);
+    RUN_TEST(test_bold_italic_strike_and_link);
+    RUN_TEST(test_span_inside_heading_restores_heading_attr);
+    RUN_TEST(test_fence_lines_are_styled);
+    RUN_TEST(test_quote_and_list_styling);
+    RUN_TEST(test_live_table_on_reasoning_carries_dim);
+    RUN_TEST(test_table_header_bold_and_borders_oyster);
     TEST_SUMMARY();
 }

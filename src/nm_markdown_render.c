@@ -1,16 +1,28 @@
-/* nm_markdown_render.c - the plain markdown renderers.
+/* nm_markdown_render.c - nevermore's markdown renderers.
  *
- * Step 3 scope: recognizable structure, correct tables, verbatim
- * fences. No styling yet (step 4). Character-level scans only.
+ * Structure and styling in one pass. Character-level scans only (no
+ * regex, no allocation on the render path): runs are emitted straight
+ * to the sink.
  *
  * Row-sink contract notes (boba/stream.h):
  *   - tui_row_text wraps explicitly at the sink width, so prose and
- *     fence lines are emitted with a single text call and one
+ *     fence lines are emitted with one text call and one
  *     tui_row_end; boba owns the wrapping and every framing byte.
  *   - A block-mode table is emitted by the same geometry code from
  *     both render_block (final) and render_live (provisional,
  *     clipped to the tail rows_cap). Both call sites share one
  *     implementation, so the final and the live table cannot drift.
+ *
+ * Styling rules (docs/TRANSCRIPT-STYLING-PLAN.md D3-D6):
+ *   - The reasoning stream (blk->stream == NM_STREAM_ID_REASONING)
+ *     renders dim: every row is wrapped in the dim attr, and a span's
+ *     reset restores the row's BASE attr (heading color, quote tint)
+ *     rather than plain, so a dimmed heading keeps both.
+ *   - Inline spans are line-scoped: a span never crosses a line, an
+ *     unterminated opener renders literally, and there is no inline
+ *     state in the classifier.
+ *   - A styled row resets BEFORE tui_row_end (D8): an attr emitted
+ *     after row_end is only legal for boba's own live_attr reset.
  */
 
 #include "nm_markdown_render.h"
@@ -19,8 +31,104 @@
 
 #include <boba/unicode.h>
 
+#include "colors.h"
+
 #define MAX_COLS      16
 #define MIN_COL_WIDTH 1
+
+/* ---------------------------------------------------------------- */
+/* Attr composition                                                 */
+/* ---------------------------------------------------------------- */
+
+/* OR a span's fields onto the row's base attr (D4: spans compose by
+ * OR-ing, never by nesting SGR). */
+static TuiAttr attr_or(TuiAttr base, TuiAttr span)
+{
+    if (span.bold)
+        base.bold = 1;
+    if (span.dim)
+        base.dim = 1;
+    if (span.italic)
+        base.italic = 1;
+    if (span.underline)
+        base.underline = 1;
+    if (span.strikethrough)
+        base.strikethrough = 1;
+    if (span.has_fg) {
+        base.has_fg = 1;
+        base.fg_r = span.fg_r;
+        base.fg_g = span.fg_g;
+        base.fg_b = span.fg_b;
+    }
+    if (span.has_bg) {
+        base.has_bg = 1;
+        base.bg_r = span.bg_r;
+        base.bg_g = span.bg_g;
+        base.bg_b = span.bg_b;
+    }
+    return base;
+}
+
+/* The dim every row of a reasoning-stream block carries. */
+static TuiAttr stream_base_attr(const TuiBlock *blk)
+{
+    if (blk && blk->stream == NM_STREAM_ID_REASONING)
+        return nm_attr_dim();
+    return nm_attr_plain(); /* no attrs */
+}
+
+static int attr_is_plain(TuiAttr a)
+{
+    return !a.bold && !a.dim && !a.italic && !a.underline &&
+           !a.strikethrough && !a.has_fg && !a.has_bg;
+}
+
+static int attr_eq(TuiAttr a, TuiAttr b)
+{
+    return a.bold == b.bold && a.dim == b.dim && a.italic == b.italic &&
+           a.underline == b.underline &&
+           a.strikethrough == b.strikethrough && a.has_fg == b.has_fg &&
+           a.fg_r == b.fg_r && a.fg_g == b.fg_g && a.fg_b == b.fg_b &&
+           a.has_bg == b.has_bg && a.bg_r == b.bg_r && a.bg_g == b.bg_g &&
+           a.bg_b == b.bg_b;
+}
+
+/* Emit text under `attr`, then restore `base`. The base is considered
+ * already active (begin_row applied it), so an attr equal to the base
+ * needs no SGR at all. */
+static void emit_styled(TuiRowSink *sink, const char *text, size_t len,
+                        TuiAttr attr, TuiAttr base)
+{
+    if (len == 0)
+        return;
+    if (attr_is_plain(attr) || attr_eq(attr, base)) {
+        tui_row_text(sink, text, len);
+        return;
+    }
+    tui_row_attr(sink, attr);
+    tui_row_text(sink, text, len);
+    if (attr_is_plain(base))
+        tui_row_attr_reset(sink);
+    else
+        tui_row_attr(sink, base);
+}
+
+/* Start a row: apply the base attr once (a plain base emits nothing).
+ * Every run in the row may then assume the base is current. */
+static void begin_row(TuiRowSink *sink, TuiAttr base)
+{
+    if (!attr_is_plain(base))
+        tui_row_attr(sink, base);
+}
+
+/* End a row: a non-plain base attr resets before the terminator (D8) so
+ * the frame's SGR state cannot bleed into the next row or the input. */
+static void end_row(TuiRowSink *sink, TuiAttr base)
+{
+    if (!attr_is_plain(base))
+        tui_row_attr_reset(sink);
+    tui_row_end(sink);
+}
 
 /* ---------------------------------------------------------------- */
 /* Small scans                                                      */
@@ -63,6 +171,367 @@ static size_t clip_bytes(const char *s, size_t len, int maxw)
     }
     return i;
 }
+
+/* ---------------------------------------------------------------- */
+/* Inline spans (D4)                                                */
+/* ---------------------------------------------------------------- */
+
+/* A word char for the underscore flanking rule (GFM's cheap half). */
+static int is_word_char(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+}
+
+/* Length of the run of `c` starting at `s+i`. */
+static size_t run_len(const char *s, size_t len, size_t i, char c)
+{
+    size_t n = 0;
+    while (i + n < len && s[i + n] == c)
+        n++;
+    return n;
+}
+
+/* Find the closer for a delimiter run: the same character, an
+ * equal-or-longer run, with the underscore word-boundary rule on the
+ * OPENING side enforced by the caller. Returns the byte offset of the
+ * closer's first char, or 0 (not found). `min` is the opener's run
+ * length (the closer must be >=). */
+static size_t find_closer(const char *s, size_t len, size_t from, char c,
+                          size_t min)
+{
+    size_t i = from;
+    while (i < len) {
+        if (s[i] == '\\' && c != '`') {
+            i += 2; /* the dialect has no escapes, but do not open
+                     * a closer inside a would-be escape pair */
+            continue;
+        }
+        if (s[i] == c) {
+            size_t r = run_len(s, len, i, c);
+            if (r >= min) {
+                if (c == '_') {
+                    /* closing outer side must be a word boundary */
+                    char after = (i + r < len) ? s[i + r] : 0;
+                    if (after != 0 && is_word_char(after))
+                        return 0;
+                }
+                return i;
+            }
+            i += r;
+            continue;
+        }
+        i++;
+    }
+    return 0;
+}
+
+/* Emit one line's text with inline spans styled. `base` is the row's
+ * base attr (heading/list/quote); a span reset restores it. */
+static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
+                             TuiAttr base)
+{
+    size_t i = 0;
+    size_t plain = 0; /* start of the current unstyled run */
+
+    while (i < len) {
+        char c = s[i];
+        size_t span_start = 0, span_len = 0, content_at = 0;
+        size_t content_len = 0;
+        TuiAttr span = nm_attr_plain();
+
+        if (c == '`' && run_len(s, len, i, '`') == 1) {
+            /* single-backtick code span only (D4) */
+            size_t close = find_closer(s, len, i + 1, '`', 1);
+            if (close) {
+                span_start = i;
+                span_len = close + 1 - i;
+                content_at = i + 1;
+                content_len = close - (i + 1);
+                span = nm_attr_code();
+            }
+        } else if (c == '~') {
+            size_t r = run_len(s, len, i, '~');
+            if (r >= 2) {
+                size_t close = find_closer(s, len, i + r, '~', r);
+                if (close) {
+                    span_start = i;
+                    span_len = close + r - i;
+                    content_at = i + r;
+                    content_len = close - (i + r);
+                    span.strikethrough = 1;
+                }
+            }
+        } else if (c == '*' || c == '_') {
+            size_t r = run_len(s, len, i, c);
+            if (r >= 1 && r <= 3) {
+                if (c == '_') {
+                    /* intraword underscores stay literal: the outer
+                     * side of the run must be a word boundary */
+                    char before = i > 0 ? s[i - 1] : 0;
+                    if (before != 0 && is_word_char(before)) {
+                        i += r;
+                        continue;
+                    }
+                }
+                size_t close = find_closer(s, len, i + r, c, r);
+                if (close) {
+                    span_start = i;
+                    span_len = close + r - i;
+                    content_at = i + r;
+                    content_len = close - (i + r);
+                    if (r == 1)
+                        span.italic = 1;
+                    else if (r == 2)
+                        span.bold = 1;
+                    else {
+                        span.bold = 1;
+                        span.italic = 1;
+                    }
+                }
+            }
+        } else if (c == '[') {
+            /* [text](url): underline + sardine for text, dim (url) */
+            size_t close = 0;
+            for (size_t k = i + 1; k < len; k++) {
+                if (s[k] == ']' && k + 1 < len && s[k + 1] == '(') {
+                    close = k;
+                    break;
+                }
+            }
+            if (close) {
+                size_t paren = close + 1;
+                size_t paren_end = 0;
+                for (size_t k = paren + 1; k < len; k++) {
+                    if (s[k] == ')') {
+                        paren_end = k;
+                        break;
+                    }
+                }
+                if (paren_end) {
+                    /* text run, then ` (url)` dim */
+                    if (plain < i)
+                        emit_styled(sink, s + plain, i - plain, base, base);
+                    TuiAttr link = attr_or(base, nm_attr_code());
+                    link.underline = 1;
+                    emit_styled(sink, s + i + 1, close - (i + 1), link,
+                                base);
+                    TuiAttr url = attr_or(base, nm_attr_link_url());
+                    /* include the closing `)`: from `(` to `)` end */
+                    emit_styled(sink, s + close + 1, paren_end - close,
+                                url, base);
+                    i = paren_end + 1;
+                    plain = i;
+                    continue;
+                }
+            }
+        }
+
+        if (span_len) {
+            if (plain < span_start)
+                emit_styled(sink, s + plain, span_start - plain, base, base);
+            TuiAttr composed = attr_or(base, span);
+            emit_styled(sink, s + content_at, content_len, composed, base);
+            i = span_start + span_len;
+            plain = i;
+            continue;
+        }
+        i++;
+    }
+    if (plain < len)
+        emit_styled(sink, s + plain, len - plain, base, base);
+}
+
+/* ---------------------------------------------------------------- */
+/* Line kinds                                                       */
+/* ---------------------------------------------------------------- */
+
+/* Heading level from an ATX line (`#` run); 0 = not a heading. */
+static int heading_level(const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len && i < 4 && s[i] == ' ')
+        i++;
+    size_t h = i;
+    while (h < len && s[h] == '#')
+        h++;
+    if (h == i || h - i > 6)
+        return 0;
+    if (h < len && !is_space(s[h]))
+        return 0;
+    return (int)(h - i);
+}
+
+/* The heading's base attr from its level. */
+static TuiAttr heading_attr(int level)
+{
+    return level <= 2 ? nm_attr_heading_major() : nm_attr_heading_minor();
+}
+
+/* Emit `text` as one row per embedded line, each under `attr`. */
+static void emit_lines(const char *text, size_t len, TuiRowSink *sink,
+                       TuiAttr attr, int inline_spans)
+{
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || text[i] == '\n') {
+            begin_row(sink, attr);
+            if (i > start) {
+                if (inline_spans)
+                    emit_inline_runs(sink, text + start, i - start, attr);
+                else
+                    emit_styled(sink, text + start, i - start, attr, attr);
+            }
+            end_row(sink, attr);
+            start = i + 1;
+        }
+    }
+}
+
+/* One heading line: the whole line under the heading attr, inline
+ * spans allowed (their resets restore the heading attr). The marker
+ * text stays — the source line is what the user typed, and the
+ * scrollback should read as written. */
+static void emit_heading_line(const char *s, size_t len, TuiRowSink *sink,
+                              TuiAttr base)
+{
+    begin_row(sink, base);
+    if (len)
+        emit_inline_runs(sink, s, len, base);
+    end_row(sink, base);
+}
+
+/* List item: the marker (`-`, `*`, `+`, `1.`) is Coral, the content
+ * plain (or the row's base) with inline spans. */
+static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
+                           TuiAttr base, TuiAttr marker_attr)
+{
+    size_t i = 0;
+    while (i < len && i < 4 && s[i] == ' ')
+        i++;
+    size_t mark_len = 0;
+    if (i < len) {
+        char c = s[i];
+        if ((c == '-' || c == '*' || c == '+') && i + 1 < len &&
+            is_space(s[i + 1]))
+            mark_len = 1;
+        else if (c >= '0' && c <= '9') {
+            size_t d = i;
+            while (d < len && s[d] >= '0' && s[d] <= '9')
+                d++;
+            if (d < len && (s[d] == '.' || s[d] == ')') && d + 1 < len &&
+                is_space(s[d + 1]))
+                mark_len = d + 1 - i;
+        }
+    }
+    begin_row(sink, base);
+    if (mark_len) {
+        if (i > 0)
+            emit_styled(sink, s, i, base, base);
+        emit_styled(sink, s + i, mark_len, attr_or(base, marker_attr), base);
+        size_t rest = i + mark_len;
+        while (rest < len && is_space(s[rest]))
+            rest++;
+        if (rest < len)
+            emit_inline_runs(sink, s + rest, len - rest, base);
+    } else if (len) {
+        emit_inline_runs(sink, s, len, base);
+    }
+    end_row(sink, base);
+}
+
+/* Quote body lines get a `│ ` gutter (Oyster) and Smoke text. */
+static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
+                             TuiAttr base)
+{
+    TuiAttr gutter = attr_or(base, nm_attr_quote_gutter());
+    TuiAttr body = attr_or(base, nm_attr_quote_text());
+    size_t start = 0;
+    for (size_t i = 0; i <= len; i++) {
+        if (i == len || text[i] == '\n') {
+            begin_row(sink, body);
+            emit_styled(sink, "\xe2\x94\x82 ", 4, gutter, body);
+            if (i > start)
+                emit_inline_runs(sink, text + start, i - start, body);
+            end_row(sink, base);
+            start = i + 1;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* Fences (D6a)                                                     */
+/* ---------------------------------------------------------------- */
+
+/* Length of a leading fence run (` or ~), 0 when the line is not a
+ * delimiter. */
+static size_t fence_run_len(const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len && i < 4 && s[i] == ' ')
+        i++;
+    while (i < len && is_space(s[i]))
+        i++;
+    if (i >= len || (s[i] != '`' && s[i] != '~'))
+        return 0;
+    char c = s[i];
+    size_t n = 0;
+    while (i + n < len && s[i + n] == c)
+        n++;
+    return n >= 3 ? n : 0;
+}
+
+/* Emit a labeled-fence line: a delimiter (Oyster, with a Mustard info
+ * string), an info-string line, or body tint (Smoke). Open/close
+ * detection is content-based (D6's accepted caveat). */
+static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
+                            TuiAttr base)
+{
+    size_t run = fence_run_len(s, len);
+    if (run) {
+        TuiAttr delim = attr_or(base, nm_attr_fence_delim());
+        size_t i = 0;
+        while (i < len && i < 4 && s[i] == ' ')
+            i++;
+        while (i < len && is_space(s[i]))
+            i++;
+        begin_row(sink, base);
+        emit_styled(sink, s, i + run, delim, base);
+        /* info string after the run, up to the line end */
+        size_t rest = i + run;
+        while (rest < len && is_space(s[rest]))
+            rest++;
+        if (rest < len) {
+            TuiAttr info = attr_or(base, nm_attr_fence_info());
+            emit_styled(sink, s + rest, len - rest, info, base);
+        }
+        end_row(sink, base);
+        return;
+    }
+    TuiAttr body = attr_or(base, nm_attr_fence_body());
+    begin_row(sink, base);
+    emit_styled(sink, s, len, body, base);
+    end_row(sink, base);
+}
+
+/* ---------------------------------------------------------------- */
+/* Table geometry                                                   */
+/* ---------------------------------------------------------------- */
+
+typedef struct
+{
+    const char *cells[MAX_COLS];
+    size_t clens[MAX_COLS];
+    int ncols;
+} TableRow;
+
+typedef struct
+{
+    TableRow rows[256];
+    int nrows;
+    int ncols;
+    int align[MAX_COLS]; /* 0 left, 1 center, 2 right */
+} Table;
 
 /* Split a `|`-separated table row into trimmed cells. Returns the cell
  * count; `out_pipe` reports whether a separator was present. Mirrors
@@ -143,58 +612,6 @@ static int is_delim_row(const char *s, size_t len)
     return 1;
 }
 
-/* ---------------------------------------------------------------- */
-/* Line kinds                                                       */
-/* ---------------------------------------------------------------- */
-
-/* Emit `text` as one row per embedded line. */
-static void emit_lines(const char *text, size_t len, TuiRowSink *sink)
-{
-    size_t start = 0;
-    for (size_t i = 0; i <= len; i++) {
-        if (i == len || text[i] == '\n') {
-            if (i > start)
-                tui_row_text(sink, text + start, i - start);
-            tui_row_end(sink);
-            start = i + 1;
-        }
-    }
-}
-
-/* Quote body lines get a `│ ` gutter (cheap and unambiguous). */
-static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink)
-{
-    size_t start = 0;
-    for (size_t i = 0; i <= len; i++) {
-        if (i == len || text[i] == '\n') {
-            tui_row_text(sink, "\xe2\x94\x82 ", 4); /* U+2502 + space */
-            if (i > start)
-                tui_row_text(sink, text + start, i - start);
-            tui_row_end(sink);
-            start = i + 1;
-        }
-    }
-}
-
-/* ---------------------------------------------------------------- */
-/* Table geometry                                                   */
-/* ---------------------------------------------------------------- */
-
-typedef struct
-{
-    const char *cells[MAX_COLS];
-    size_t clens[MAX_COLS];
-    int ncols;
-} TableRow;
-
-typedef struct
-{
-    TableRow rows[256];
-    int nrows;
-    int ncols;
-    int align[MAX_COLS]; /* 0 left, 1 center, 2 right */
-} Table;
-
 /* Parse the block's text into rows; the delimiter row sets alignment. */
 static int table_parse(const char *text, size_t len, Table *t)
 {
@@ -274,47 +691,66 @@ static void table_widths(const Table *t, int *w, int width)
     }
 }
 
-/* A border row: left corner/tee, then `─`*(w+2) and a joint. */
-static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
-                        const char *left, const char *mid, const char *right)
+/* Emit a run of spaces (padding) under `cell`. */
+static void emit_spaces(TuiRowSink *sink, int n, TuiAttr cell, TuiAttr base)
 {
-    tui_row_text(sink, left, strlen(left));
+    static const char spaces[] =
+        "                                                                ";
+    while (n > 0) {
+        int chunk = n > 64 ? 64 : n;
+        emit_styled(sink, spaces, (size_t)chunk, cell, base);
+        n -= chunk;
+    }
+}
+
+/* A border row: left corner/tee, then `─`*(w+2) and a joint. Oyster
+ * (composed with the row's base attr, i.e. dim on reasoning). */
+static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
+                        const char *left, const char *mid, const char *right,
+                        TuiAttr base)
+{
+    TuiAttr border = attr_or(base, nm_attr_table_border());
+    begin_row(sink, base);
+    emit_styled(sink, left, strlen(left), border, base);
     for (int c = 0; c < t->ncols; c++) {
         for (int k = 0; k < w[c] + 2; k++)
-            tui_row_text(sink, "\xe2\x94\x80", 3); /* U+2500 */
-        tui_row_text(sink, c == t->ncols - 1 ? right : mid,
-                     strlen(c == t->ncols - 1 ? right : mid));
+            emit_styled(sink, "\xe2\x94\x80", 3, border, base); /* U+2500 */
+        emit_styled(sink, c == t->ncols - 1 ? right : mid,
+                    strlen(c == t->ncols - 1 ? right : mid), border, base);
     }
-    tui_row_end(sink);
+    end_row(sink, base);
 }
 
 /* A content row: `│` + (space + aligned field + space) per column,
- * with `│` between columns. */
+ * with `│` between columns. Borders Oyster; header cells bold; body
+ * cells plain (no spans inside cells — D5: the width math counts SGR
+ * bytes as glyphs). */
 static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,
-                           const TableRow *r)
+                           const TableRow *r, int is_header, TuiAttr base)
 {
+    TuiAttr border = attr_or(base, nm_attr_table_border());
+    TuiAttr cell = is_header ? attr_or(base, nm_attr_table_header()) : base;
+    begin_row(sink, base);
     for (int c = 0; c < t->ncols; c++) {
-        tui_row_text(sink, "\xe2\x94\x82", 3); /* │ */
-        tui_row_text(sink, " ", 1);
+        emit_styled(sink, "\xe2\x94\x82", 3, border, base);
+        emit_styled(sink, " ", 1, cell, base);
         int cw = c < r->ncols ? display_width(r->cells[c], r->clens[c]) : 0;
         if (cw > w[c])
             cw = w[c];
         int pad = w[c] - cw;
         int lp = t->align[c] == 2 ? pad : t->align[c] == 1 ? pad / 2
                                                            : 0;
-        for (int k = 0; k < lp; k++)
-            tui_row_text(sink, " ", 1);
+        emit_spaces(sink, lp, cell, base);
         if (c < r->ncols) {
             size_t keep = clip_bytes(r->cells[c], r->clens[c], w[c]);
             if (keep)
-                tui_row_text(sink, r->cells[c], keep);
+                emit_styled(sink, r->cells[c], keep, cell, base);
         }
-        for (int k = 0; k < pad - lp; k++)
-            tui_row_text(sink, " ", 1);
-        tui_row_text(sink, " ", 1);
+        emit_spaces(sink, pad - lp, cell, base);
+        emit_styled(sink, " ", 1, cell, base);
     }
-    tui_row_text(sink, "\xe2\x94\x82", 3); /* │ */
-    tui_row_end(sink);
+    emit_styled(sink, "\xe2\x94\x82", 3, border, base);
+    end_row(sink, base);
 }
 
 /* Total rendered row count: top + header + separator + body + bottom. */
@@ -327,7 +763,7 @@ static int table_total_rows(const Table *t)
 /* Render the table, optionally emitting only the last `rows_cap` rows
  * (render_live). `rows_cap <= 0` means all rows. */
 static void table_render(const Table *t, int width, int rows_cap,
-                         TuiRowSink *sink)
+                         TuiRowSink *sink, TuiAttr base)
 {
     if (t->nrows <= 0 || t->ncols <= 0)
         return;
@@ -341,19 +777,19 @@ static void table_render(const Table *t, int width, int rows_cap,
 
     if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x8c", "\xe2\x94\xac",
-                    "\xe2\x94\x90"); /* ┌ ┬ ┐ */
+                    "\xe2\x94\x90", base); /* ┌ ┬ ┐ */
     if (idx++ >= skip)
-        emit_table_row(sink, t, w, &t->rows[0]); /* header */
+        emit_table_row(sink, t, w, &t->rows[0], 1, base); /* header */
     if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x9c", "\xe2\x94\xbc",
-                    "\xe2\x94\xa4"); /* ├ ┼ ┤ */
+                    "\xe2\x94\xa4", base); /* ├ ┼ ┤ */
     for (int r = 1; r < t->nrows; r++, idx++) {
         if (idx >= skip)
-            emit_table_row(sink, t, w, &t->rows[r]);
+            emit_table_row(sink, t, w, &t->rows[r], 0, base);
     }
     if (idx >= skip)
         emit_border(sink, t, w, "\xe2\x94\x94", "\xe2\x94\xb4",
-                    "\xe2\x94\x98"); /* └ ┴ ┘ */
+                    "\xe2\x94\x98", base); /* └ ┴ ┘ */
 }
 
 /* ---------------------------------------------------------------- */
@@ -367,28 +803,76 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     (void)user_data;
     if (!blk || !sink)
         return;
+    TuiAttr base = stream_base_attr(blk);
     switch (blk->kind) {
     case TUI_BLOCK_TABLE:
     {
         Table t;
         if (table_parse(text, len, &t))
-            table_render(&t, width, 0, sink);
+            table_render(&t, width, 0, sink, base);
         else
-            emit_lines(text, len, sink);
+            emit_lines(text, len, sink, base, 1);
         break;
     }
     case TUI_BLOCK_QUOTE:
-        emit_quote_lines(text, len, sink);
+        emit_quote_lines(text, len, sink, base);
         break;
-    case TUI_BLOCK_PARAGRAPH:
     case TUI_BLOCK_HEADING:
+    {
+        /* one line per unit in line mode; still handle a multi-line
+         * unit defensively */
+        size_t start = 0;
+        for (size_t i = 0; i <= len; i++) {
+            if (i == len || text[i] == '\n') {
+                if (i > start) {
+                    TuiAttr ha = attr_or(base, heading_attr(
+                                                   heading_level(text + start,
+                                                                 i - start)));
+                    emit_heading_line(text + start, i - start, sink, ha);
+                } else {
+                    end_row(sink, base);
+                }
+                start = i + 1;
+            }
+        }
+        break;
+    }
     case TUI_BLOCK_LIST:
+    {
+        TuiAttr marker = nm_attr_list_bullet();
+        size_t start = 0;
+        for (size_t i = 0; i <= len; i++) {
+            if (i == len || text[i] == '\n') {
+                if (i > start)
+                    emit_list_line(text + start, i - start, sink, base,
+                                   marker);
+                else
+                    end_row(sink, base);
+                start = i + 1;
+            }
+        }
+        break;
+    }
     case TUI_BLOCK_FENCE:
+    {
+        size_t start = 0;
+        for (size_t i = 0; i <= len; i++) {
+            if (i == len || text[i] == '\n') {
+                if (i > start)
+                    emit_fence_line(text + start, i - start, sink, base);
+                else
+                    end_row(sink, base);
+                start = i + 1;
+            }
+        }
+        break;
+    }
+    case TUI_BLOCK_PARAGRAPH:
     case TUI_BLOCK_FENCE_PLAIN:
     case TUI_BLOCK_RAW:
     case TUI_BLOCK_IMAGE:
     default:
-        emit_lines(text, len, sink);
+        emit_lines(text, len, sink, base, 1);
         break;
     }
 }
@@ -406,5 +890,5 @@ void nm_markdown_render_live(const TuiBlock *live, const char *text,
         return;
     Table t;
     if (table_parse(text, len, &t))
-        table_render(&t, width, rows_cap, sink);
+        table_render(&t, width, rows_cap, sink, stream_base_attr(live));
 }

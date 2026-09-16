@@ -1268,6 +1268,11 @@ static void test_tab_on_plain_word_is_a_noop(void)
  * followed by an EL (frame rows are `\r\n`-separated and each row
  * ends before an `\x1b[K`). This is the file-level stand-in for
  * "count on the rendered screen", per the bug report's review. */
+/* Count transcript lines matching `line`, ignoring SGR styling around
+ * the matched text (the renderer now styles rows). A match is a
+ * transcript line when, after the needle, only SGR bytes remain before
+ * the \r\n and the row is not a live frame row (the next bytes are not
+ * an EL). */
 static size_t count_transcript_line(const char *hay, const char *line)
 {
     size_t n = 0;
@@ -1275,6 +1280,14 @@ static size_t count_transcript_line(const char *hay, const char *line)
     size_t ll = strlen(line);
     while ((p = strstr(p, line)) != NULL) {
         const char *eol = p + ll;
+        while (*eol == '\x1b' && eol[1] == '[') {
+            const char *q = eol + 2;
+            while (*q && *q != 'm')
+                q++;
+            if (*q != 'm')
+                break;
+            eol = q + 1;
+        }
         if (strncmp(eol, "\r\n", 2) == 0 &&
             strncmp(eol + 2, "\x1b[K", 3) != 0)
             n++;
@@ -1366,7 +1379,9 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
      * forced width the long line wraps explicitly (boba's row math),
      * so count the wrap fragments. */
     ASSERT_EQ(count_transcript_line(out, "## The others, for contrast"), 1u);
-    ASSERT_EQ(count_transcript_line(out, "- `history.c` is next"), 1u);
+    /* The list item now carries inline spans (`history.c` is a code
+     * span), so match its unstyled suffix. */
+    ASSERT_EQ(count_transcript_line(out, " is next"), 1u);
     /* The wrapped completed line's first and last rows each once. */
     ASSERT_EQ(count_transcript_line(out, "First completed line long enou"), 1u);
     ASSERT_EQ(count_transcript_line(out, "or sure here"), 1u);

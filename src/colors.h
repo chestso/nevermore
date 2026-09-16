@@ -21,6 +21,8 @@
 #ifndef NM_COLORS_H
 #define NM_COLORS_H
 
+#include <string.h>
+
 #include <boba/stream.h>
 
 /* ------------------------------------------------------------------ */
@@ -60,24 +62,27 @@
 #define NM_CT_SARDINE_G 190
 #define NM_CT_SARDINE_B 254
 
-static inline TuiAttr nm_attr_foreground(int r, int g, int b)
+static inline TuiAttr nm_attr_plain(void)
 {
     TuiAttr a;
-    a.bold = a.dim = a.italic = a.underline = 0;
+    memset(&a, 0, sizeof(a));
+    return a;
+}
+
+static inline TuiAttr nm_attr_foreground(int r, int g, int b)
+{
+    TuiAttr a = nm_attr_plain();
     a.has_fg = 1;
     a.fg_r = r;
     a.fg_g = g;
     a.fg_b = b;
-    a.has_bg = 0;
-    a.bg_r = a.bg_g = a.bg_b = 0;
     return a;
 }
 
 /* Reasoning (CoT) text. */
 static inline TuiAttr nm_attr_dim(void)
 {
-    TuiAttr a = nm_attr_foreground(0, 0, 0);
-    a.has_fg = 0;
+    TuiAttr a = nm_attr_plain();
     a.dim = 1;
     return a;
 }
@@ -124,8 +129,7 @@ static inline TuiAttr nm_attr_table_border(void)
 
 static inline TuiAttr nm_attr_table_header(void)
 {
-    TuiAttr a = nm_attr_foreground(0, 0, 0);
-    a.has_fg = 0;
+    TuiAttr a = nm_attr_plain();
     a.bold = 1;
     return a;
 }

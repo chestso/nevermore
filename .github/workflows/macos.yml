@@ -29,7 +29,7 @@ jobs:
           # new boba API (currently the streaming transcript component,
           # stream.h + terminal_profile.h). A floating master would let boba churn break this
           # repo's CI mid-work.
-          ref: 024ace438c42638eecf108c4f682540038a9c083
+          ref: f56c780a74f3f018ab9f51424ce13d66d9e01464
           path: boba
           fetch-depth: 0
 
