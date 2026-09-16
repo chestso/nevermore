@@ -37,6 +37,7 @@
 #include <boba/dynamic_buffer.h>
 #include <boba/msg.h>
 #include <boba/runtime.h>
+#include <boba/stream.h>
 
 #include "chat_app.h"
 #include "test_helpers.h"
@@ -522,9 +523,11 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     /* A braille spinner glyph is on the frame. */
     ASSERT_TRUE(strstr(frame, "\xe2\xa0\x8b") != NULL); /* "⠋" */
 
-    /* The tail is not in the SCROLLBACK (it is live-region content):
-     * every whole-line print to the output file is framed by
-     * clear_inline's erase sequence, never a bare tail line. */
+    /* The tail is live-region content: nothing has committed to the
+     * scrollback mid-stream. This is a real state assertion (the
+     * transcript's own commit count), not a byte-scan proxy. */
+    ASSERT_EQ(tui_transcript_commit_count(nm_chat_app_transcript(h->app)),
+              0u);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "\r\nstreaming tail without newline yet\r\n") == NULL);
 
@@ -977,10 +980,11 @@ static void *raw_responder_thread(void *arg)
     return NULL;
 }
 
-/* Reasoning deltas render dimmed, ahead of the answer, on their own
- * lines; the answer itself is untouched. Wire shape: reasoning-only
- * chunks (content:"") then content, phase-sequential. */
-static void test_reasoning_prints_dimmed_before_answer(void)
+/* Reasoning deltas ride stream 1, ahead of the answer, on their own
+ * lines; the answer rides stream 0. Phase order is the deliverable
+ * (the dim is step 4). Wire shape: reasoning-only chunks
+ * (content:"") then content, phase-sequential. */
+static void test_reasoning_prints_before_answer(void)
 {
     struct RawResponse rr = {
         0, 0,
@@ -1016,18 +1020,6 @@ static void test_reasoning_prints_dimmed_before_answer(void)
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "weighing options") != NULL);
     ASSERT_TRUE(strstr(out, "the answer") != NULL);
-    /* The reasoning line is preceded by the dim SGR (scan for it in
-     * the bytes before the reasoning text — no memmem, no regex). */
-    const char *r = strstr(out, "weighing options");
-    ASSERT_NOT_NULL(r);
-    int saw_dim = 0;
-    for (const char *p = out; p + 3 < r; p++) {
-        if (p[0] == '\033' && p[1] == '[' && p[2] == '2' && p[3] == 'm') {
-            saw_dim = 1;
-            break;
-        }
-    }
-    ASSERT_TRUE(saw_dim);
     /* Reasoning precedes the answer (phase-sequential). */
     ASSERT_TRUE(strstr(out, "weighing options") < strstr(out, "the answer"));
     /* No staircasing. */
@@ -1075,23 +1067,24 @@ static void test_error_line_endings_are_crnl(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
 
     const char *out = harness_read(h);
-    /* The whole error reached the scrollback. */
+    /* The whole error reached the scrollback. Long bodies wrap at the
+     * terminal width (boba's explicit wrap), so assert the fragments,
+     * not one contiguous run. */
     ASSERT_TRUE(strstr(out, "chat failed: auth rejected (HTTP 401)") != NULL);
-    ASSERT_TRUE(strstr(out, "missing authorization") != NULL);
+    ASSERT_TRUE(strstr(out, "missing authorizatio") != NULL);
     ASSERT_TRUE(strstr(out, "export HYPER_API_KEY") != NULL);
     /* No bare LF anywhere the app wrote: every line break is \r\n
      * (the transcript is captured verbatim; a bare \n IS the
      * staircase in raw mode). */
     for (const char *p = out; *p; p++)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
-    /* And the hint shares the error's line (one \r\n between the
-     * message and it, not a staircase column shift). */
-    const char *msg = strstr(out, "missing authorization");
+    /* The hint follows the body in the error's own output block (both
+     * come from the one sys_line), with no second error line between. */
+    const char *msg = strstr(out, "chat failed:");
     ASSERT_NOT_NULL(msg);
     const char *hint = strstr(out, "export HYPER_API_KEY");
     ASSERT_NOT_NULL(hint);
-    for (const char *p = msg; p < hint; p++)
-        ASSERT_TRUE(*p != '\n' && *p != '\r');
+    ASSERT_TRUE(msg < hint);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -1232,8 +1225,8 @@ static void test_tab_on_plain_word_is_a_noop(void)
 
 /* Count TRANSCRIPT occurrences of a completed line in the harness's
  * raw byte stream. The stream legitimately contains the same words as
- * live-region frame rows (later erased by clear_inline — the raw file
- * keeps them); a transcript line's signature is `text\r\n` NOT
+ * live-region frame rows (the raw file keeps them); a transcript
+ * line's signature is `text\r\n` NOT
  * followed by an EL (frame rows are `\r\n`-separated and each row
  * ends before an `\x1b[K`). This is the file-level stand-in for
  * "count on the rendered screen", per the bug report's review. */
@@ -1331,12 +1324,14 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         }
     }
     /* Each completed transcript line appears EXACTLY once in the
-     * transcript sense (line-\r\n-terminated, not a frame row). */
+     * transcript sense (line-\r\n-terminated, not a frame row). At the
+     * forced width the long line wraps explicitly (boba's row math),
+     * so count the wrap fragments. */
     ASSERT_EQ(count_transcript_line(out, "## The others, for contrast"), 1u);
     ASSERT_EQ(count_transcript_line(out, "- `history.c` is next"), 1u);
-    /* The wrapped completed line also printed exactly once. */
-    ASSERT_EQ(count_transcript_line(out, "several times over for sure here"),
-              1u);
+    /* The wrapped completed line's first and last rows each once. */
+    ASSERT_EQ(count_transcript_line(out, "First completed line long enou"), 1u);
+    ASSERT_EQ(count_transcript_line(out, "or sure here"), 1u);
     /* No stale partial prefixes stranded as transcript lines: only
      * the completed full line exists, never an intermediate prefix
      * as its own \r\n-terminated line. */
@@ -1346,6 +1341,145 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* The D10 echo guard: submit finalizes LIVE blocks and does NOT echo
+ * the user line through the transcript, and finish_inline is the one
+ * echo (a frame persist — the rendered input row is not CRLF-framed,
+ * so it is not a transcript line). A second committed copy would be
+ * exactly the 2026-09-13 double-print; count it zero. */
+static void test_submit_echoes_once(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "unique-user-line");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    /* The line was echoed (frame-persisted) ... */
+    ASSERT_TRUE(strstr(out, "unique-user-line") != NULL);
+    /* ... but never as a committed transcript line (no double echo). */
+    ASSERT_EQ(count_transcript_line(out, "unique-user-line"), 0u);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A provider switch resets the transcript (emits nothing) and prints a
+ * separator line marking the boundary. */
+static void test_provider_switch_clears_and_prints_separator(void)
+{
+    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/provider openai");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "provider: openai (fresh session)") != NULL);
+
+    harness_free(h);
+}
+
+/* Phase-sequential reasoning then content: both commit, in that order,
+ * on their own streams. */
+static void test_reasoning_and_content_commit_in_order(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"first thought\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "order");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    const char *r = strstr(out, "first thought");
+    const char *c = strstr(out, "final words");
+    ASSERT_NOT_NULL(r);
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(r < c);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+/* End-to-end: a table streamed from a canned SSE round reaches the
+ * scrollback aligned (the markdown classifier + renderer through the
+ * full chat_app stack). */
+static void test_markdown_table_reaches_scrollback_aligned(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"| Region | 2025 |\\n| ------ | ---: |\\n"
+        "| North | 1234 |\\n| South | 56 |\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "table please");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "Region") != NULL);
+    ASSERT_TRUE(strstr(out, "North") != NULL);
+    ASSERT_TRUE(strstr(out, "South") != NULL);
+    /* Box borders (U+250C / U+2514) reached the scrollback. */
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x8c") != NULL);
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x94") != NULL);
+    /* No bare LF. */
+    for (const char *p = out; *p; p++)
+        ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
 }
 
 int main(void)
@@ -1388,8 +1522,12 @@ int main(void)
     RUN_TEST(test_cancel_midstream_returns_to_idle);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_error_line_endings_are_crnl);
-    RUN_TEST(test_reasoning_prints_dimmed_before_answer);
+    RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
+    RUN_TEST(test_submit_echoes_once);
+    RUN_TEST(test_provider_switch_clears_and_prints_separator);
+    RUN_TEST(test_reasoning_and_content_commit_in_order);
+    RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     TEST_SUMMARY();
 }

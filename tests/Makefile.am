@@ -223,6 +223,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
+    ../src/nm_markdown.c ../src/nm_markdown_render.c \
     ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

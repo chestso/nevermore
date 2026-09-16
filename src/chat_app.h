@@ -6,30 +6,26 @@
  * while the agent streams. No alt-screen — nevermore behaves like a
  * chat in your shell, not like an editor.
  *
- * Transcript protocol (the load-bearing design):
+ * Transcript protocol (boba's streaming IR; docs/TRANSCRIPT-BLOCKS.md):
  *
- *   The terminal scrollback IS the output history; the component
- *   renders only the live region (input line, streaming tail,
- *   spinner, popup). All transcript printing happens from
- *   update-time / event-callback code (submit, agent callbacks),
- *   never from view().
+ *   The component owns a TuiTranscript with two nevermore streams
+ *   ("content" = the assistant answer, "reasoning" = CoT) plus boba's
+ *   system stream (-1) for every non-agent writer (tool panels,
+ *   command replies, error bodies). All output is posted as stream
+ *   messages; boba stages the units and the runtime's commit pass
+ *   writes everything finalized within one event drain as ONE atomic
+ *   transcript_write. The app never prints to the scrollback itself,
+ *   and never touches framing or cursor bytes — boba is the only
+ *   caller of the seam.
  *
- *   Streaming text is line-buffered: deltas accumulate in a tail
- *   buffer; complete lines are printed to the scrollback, the
- *   partial-line tail renders in the frame as live content. This
- *   keeps every scrollback print line-aligned (boba's inline frame
- *   repaint stays correct) while mid-line continuation across delta
- *   batches is preserved — printing raw deltas between frame
- *   repaints would need full terminal-emulation math to track the
- *   cursor, and abandoning frame lines per batch would litter the
- *   scrollback with stale spinner rows.
+ *   nevermore supplies the grammar: nm_markdown.c classifies each line
+ *   and nm_markdown_render.c draws the committed rows; only bytes whose
+ *   rendering can no longer change reach the scrollback. The live
+ *   region (streaming tail / provisional table) is drawn by view().
  *
- *   A print is: tui_runtime_transcript_write (boba's atomic seam:
- *   erase the frame in place, write the whole lines, re-render the
- *   live region below them — one call, one geometry baseline).
- *   Exactly one such print per event (end of update / end of agent
- *   step), coalesced through a pending buffer that only ever holds
- *   whole lines.
+ *   Submitting finalizes LIVE blocks (tui_msg_transcript_submit) and
+ *   tui_runtime_finish_inline is the one echo of the user's line.
+ *   Agent content deltas ride stream 0, reasoning stream 1.
  */
 
 #ifndef NM_CHAT_APP_H
@@ -63,9 +59,9 @@ void nm_chat_app_free(NmChatApp *app);
 /* boba component interface (init/update/view/free). */
 const TuiComponent *nm_chat_app_component(NmChatApp *app);
 
-/* Attach the runtime handle after tui_runtime_create. Required for
- * transcript printing (clear_inline + flush wakeups); without it the
- * app degrades to printing straight to stdout. */
+/* Attach the runtime handle after tui_runtime_create. Required for all
+ * transcript output; also attaches the app's TuiTranscript to the
+ * runtime (the runtime does not own it — the app does). */
 void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 
 /* Endpoint override (delegates to the agent; base NULL = provider
@@ -103,6 +99,11 @@ const char *nm_chat_app_provider(const NmChatApp *app);
 
 /* The prompt's textinput (main.c wires history load/save to it). */
 TuiTextInput *nm_chat_app_textinput(NmChatApp *app);
+
+/* The app's streaming transcript (boba's IR). Introspection/test seam;
+ * borrowed, valid while the app lives. */
+typedef struct TuiTranscript TuiTranscript;
+TuiTranscript *nm_chat_app_transcript(NmChatApp *app);
 
 /* Bytes currently buffered in the streaming tail (live-region
  * content, not yet complete lines). Test/introspection seam. */

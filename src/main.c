@@ -197,6 +197,11 @@ static int run_interactive(const char *provider_name, const char *model)
 
     nm_history_load(nm_chat_app_textinput(app));
 
+    /* The banner stays a printf (D11): it is emitted before the first
+     * flush, i.e. before any frame or transcript byte, so it is outside
+     * the transcript seam's jurisdiction. Routing it through the system
+     * stream would need a runtime handle before the transcript attaches
+     * and would make it a repaintable unit for no benefit. */
     printf("nevermore %s — %s · %s\n"
            "Type a prompt; %s/help%s for commands, %s/quit%s to leave.\n\n",
            NEVERMORE_VERSION, nm_chat_app_provider(app),

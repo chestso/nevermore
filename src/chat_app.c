@@ -6,30 +6,33 @@
  * alt screen, no mouse; the terminal scrollback is the output
  * history.
  *
- * Transcript protocol (the load-bearing design, see chat_app.h):
+ * Transcript protocol (boba's streaming IR; see docs/TRANSCRIPT-BLOCKS.md):
  *
- *   The component renders only the live region; everything the user
- *   should keep reads back from the scrollback, written by this file
- *   from update-time / event-callback code — never from view().
+ *   The component owns a TuiTranscript with two named streams —
+ *   "content" (assistant answer) and "reasoning" (CoT) — plus boba's
+ *   system stream (-1) for every non-agent writer: tool panels,
+ *   command replies, error bodies. All output goes through stream
+ *   messages; the transcript stages units and the runtime's commit
+ *   pass (at the top of tui_runtime_flush) writes every unit
+ *   finalized within one event drain as ONE atomic
+ *   transcript_write. This file never prints to the scrollback itself
+ *   and never touches cursor/framing bytes — boba is the only caller
+ *   of the seam.
  *
- *   Streaming text is line-buffered: deltas append to a tail buffer;
- *   complete lines move to a pending buffer that only ever holds
- *   whole lines. A print is tui_runtime_transcript_write (boba's
- *   atomic seam: erase the frame in place, write the pending lines,
- *   re-render the live region below them — one call, one geometry
- *   baseline, no window for an interleaved step to strand frame rows
- *   in the scrollback). The partial-line tail renders in the frame as
- *   live content, so mid-line continuation across delta batches is
- *   preserved without terminal-emulation math.
+ *   nevermore supplies the grammar: src/nm_markdown.c classifies each
+ *   line (fence / table / heading / list / quote) and
+ *   src/nm_markdown_render.c draws the committed rows. The scrollback
+ *   receives only bytes whose rendering can no longer change; the
+ *   live region (drawn by view()) holds the provisional tail.
  *
- *   Submitting is the one place the frame must PERSIST: the rendered
- *   input line (the user's message) stays in the scrollback via
- *   tui_runtime_finish_inline, and output prints below it.
+ *   Submitting: tui_msg_transcript_submit finalizes LIVE blocks and a
+ *   flush commits them; tui_runtime_finish_inline is the ONE echo of
+ *   the user's line (ditty's pattern).
  *
  * Callbacks: the agent fires on_delta/on_tool/on_state from inside
  * nm_agent_step; the step pump (nm_chat_app_step) is what the
- * runtime's external-fd callback invokes, and it coalesces everything
- * a step printed into ONE clear+write per event.
+ * runtime's external-fd callback invokes, and it flushes once so the
+ * whole step's units commit together.
  *
  * One chat app per process: the agent delivers its callbacks with the
  * agent's userdata, which doubles as the tools' workdir — so the app
@@ -46,24 +49,31 @@
 #include <boba/charmtones.h>
 #include <boba/components/list_popup.h>
 #include <boba/dynamic_buffer.h>
+#include <boba/stream.h>
 #include <boba/unicode.h>
 
 #include "chat_app.h"
 #include "json.h"
+#include "nm_markdown.h"
+#include "nm_markdown_render.h"
 #include "spinner.h"
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
+/* Stream ids are nevermore's vocabulary (boba dispatches positionally;
+ * -1 is boba's system stream). NM_STREAM_* stays a wire concept. */
+#define NM_STREAM_ID_CONTENT   0
+#define NM_STREAM_ID_REASONING 1
+#define NM_STREAM_COUNT        2
+
 /* Frame / transcript accents. Centralized color presets are a phase-5
- * colors.h item; these are the values that lands behind. Dimmed
- * reasoning text uses boba's SGR_DIM (ansi_sequences.h). */
+ * colors.h item; these are the values that lands behind. */
 #define SGR_OYSTER     "\033[38;2;96;95;107m"  /* oyster #605F6B */
 #define SGR_CORAL      "\033[38;2;255;87;125m" /* coral  #FF577D */
 #define SGR_TEXT_RESET "\033[0m"
 
 #define PROMPT              "❯ "
 #define CONTINUATION_PROMPT "  "
-#define TAIL_ROWS_MAX       200 /* live tail rows on the frame (capped) */
 
 /* Popup flavors. */
 typedef enum
@@ -97,8 +107,14 @@ struct NmChatApp
 
     TuiRuntime *rt; /* weak; set via nm_chat_app_set_runtime */
 
-    DynamicBuffer *pend; /* whole lines awaiting the next print */
-    DynamicBuffer *tail; /* partial line — live-region content */
+    /* boba's streaming transcript (owned; created here, attached to
+     * the runtime in set_runtime). All transcript output flows through
+     * it: content/reasoning via stream deltas, everything else via the
+     * system stream. */
+    TuiTranscript *transcript;
+    NmMarkdown markdown[NM_STREAM_COUNT];
+    const TuiClassifier *classifiers[NM_STREAM_COUNT];
+    TuiStreamSpec streams[NM_STREAM_COUNT];
 };
 
 /* The singleton (see file header). */
@@ -111,106 +127,73 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out);
 static void chat_app_free(TuiModel *model);
 
 /* ---------------------------------------------------------------- */
-/* Pending transcript (whole lines only, ever)                      */
+/* Transcript writers (boba's streaming IR owns the scrollback)     */
 /* ---------------------------------------------------------------- */
 
-/* Append a string to the pend buffer, normalizing line endings:
- * bare \n becomes \r\n, stray \r becomes \r\n (raw mode: the
- * terminal does not translate, so a bare LF staircases and a bare
- * CR overwrites the line from column 0). Wire-derived text reaches
- * this seam from several callers (error bodies, tool output) —
- * the seam enforces the transcript's whole-line contract, not
- * each caller. No allocation: byte walk, appends in place. */
-static void pend_str(NmChatApp *app, const char *s)
+/* Build a message, send it to the runtime (which dispatches it to
+ * this app's update, where the transcript component handles stream
+ * messages), and free it. A local TuiMsg built by hand must be freed
+ * by the caller; the posted path frees its own payload after dispatch
+ * (msg.h ownership contract). No flush here: flushing stays at the
+ * app's single points (end of update / end of step) so all units
+ * finalized within one event drain coalesce into one transcript_write. */
+static void send_msg(NmChatApp *app, TuiMsg msg)
 {
-    if (!app || !s || !*s)
+    if (!app || !app->rt)
         return;
-    const char *p = s;
-    while (*p) {
-        if (*p == '\r') {
-            if (p[1] == '\n') {
-                dynamic_buffer_append_str(app->pend, "\r\n");
-                p += 2;
-            } else {
-                dynamic_buffer_append_str(app->pend, "\r\n");
-                p++;
-            }
-        } else if (*p == '\n') {
-            dynamic_buffer_append_str(app->pend, "\r\n");
-            p++;
-        } else {
-            /* Append up to the next line-break candidate in one
-             * call (memory-reuse: no per-byte churn). */
-            const char *q = p;
-            while (*q && *q != '\r' && *q != '\n')
-                q++;
-            dynamic_buffer_append(app->pend, p, (size_t)(q - p));
-            p = q;
-        }
-    }
+    tui_runtime_send(app->rt, msg);
+    tui_msg_free(&msg);
 }
 
-static void pend_printf(NmChatApp *app, const char *fmt, ...)
+/* System-stream line writer: ONE CRLF-terminated line, normalized.
+ * boba normalizes LF->CRLF and drops framing bytes itself, so this is
+ * the single seam the old pend_str invariant now lives behind. One
+ * message per line (one RAW unit, finalized immediately). */
+static void sys_line(NmChatApp *app, const char *fmt, ...)
 {
     if (!app)
         return;
-    char buf[1024];
+    char buf[1088];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf), fmt, ap);
+    int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
     va_end(ap);
     if (n <= 0)
         return;
-    size_t len = (size_t)n >= sizeof(buf) ? sizeof(buf) - 1 : (size_t)n;
-    buf[len] = '\0';
-    /* Through pend_str: caller bytes are never assumed line-safe
-     * (format args can carry wire text). */
-    pend_str(app, buf);
+    size_t len = (size_t)n >= sizeof(buf) - 2 ? sizeof(buf) - 3 : (size_t)n;
+    buf[len] = '\r';
+    buf[len + 1] = '\n';
+    buf[len + 2] = '\0';
+    send_msg(app, tui_msg_stream_text(-1, buf, len + 2));
 }
 
-/* Move any complete lines out of the tail into the pending buffer,
- * translating \n to \r\n (raw mode: the terminal does not translate).
- * The remainder stays as live-region tail. */
-static void split_completed_lines(NmChatApp *app)
+/* System-stream multi-line body (error text, help). boba normalizes
+ * LF->CRLF inside the body; one trailing terminator is framed here. */
+static void sys_text(NmChatApp *app, const char *s)
 {
-    DynamicBuffer *tail = app->tail;
-    const char *data = tail->data;
-    size_t len = tail->len;
-    size_t start = 0;
-    for (size_t i = 0; i < len; i++) {
-        if (data[i] != '\n')
-            continue;
-        dynamic_buffer_append(app->pend, data + start, i - start);
-        dynamic_buffer_append_str(app->pend, "\r\n");
-        start = i + 1;
-    }
-    if (start > 0) {
-        memmove(tail->data, tail->data + start, tail->len - start);
-        tail->len -= start;
-    }
-}
-
-/* Force the tail out as a complete line (round over / tool boundary). */
-static void flush_tail(NmChatApp *app)
-{
-    if (app->tail->len == 0)
+    if (!app || !s || !*s)
         return;
-    dynamic_buffer_append(app->pend, app->tail->data, app->tail->len);
-    dynamic_buffer_append_str(app->pend, "\r\n");
-    app->tail->len = 0;
+    size_t len = strlen(s);
+    send_msg(app, tui_msg_stream_text(-1, s, len));
+    /* Final terminator so the next writer starts on a fresh line. */
+    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
 }
 
-/* The one print: erase the frame in place, write the pending whole
- * lines, and re-render the live region below them — all inside
- * boba's atomic tui_runtime_transcript_write (no geometry window
- * between the erase, the write, and the repaint; a step or tool
- * boundary can never interleave between them). */
-static void flush_transcript(NmChatApp *app)
+/* Agent-stream delta (content or reasoning). */
+static void stream_delta(NmChatApp *app, int stream_id, const char *s)
 {
-    if (!app || app->pend->len == 0)
+    if (!app || !s || !*s)
         return;
-    tui_runtime_transcript_write(app->rt, app->pend->data, app->pend->len);
-    dynamic_buffer_clear(app->pend);
+    send_msg(app, tui_msg_stream_delta(stream_id, s, strlen(s)));
+}
+
+/* Close every agent stream (turn / round boundary). */
+static void stream_end_all(NmChatApp *app)
+{
+    if (!app)
+        return;
+    send_msg(app, tui_msg_stream_end(NM_STREAM_ID_CONTENT));
+    send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
 }
 
 /* ---------------------------------------------------------------- */
@@ -227,21 +210,22 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
     NmChatApp *app = s_app;
     if (!app || !text || !*text)
         return;
-    if (channel == NM_STREAM_REASONING) {
-        /* Chain-of-thought renders dimmed, phase-sequential before
-         * the answer. Routed through the same pend seam (wire text
-         * normalization lives there). */
-        pend_str(app, SGR_DIM);
-        pend_str(app, text);
-        pend_str(app, SGR_TEXT_RESET);
-        split_completed_lines(app);
-        tui_runtime_wakeup(app->rt);
-        return;
+    /* Content rides stream 0, reasoning stream 1. The reasoning dim is
+     * step 4 (a per-stream renderer seam); step 3 delivers the stream
+     * and its global commit order. */
+    int stream_id = channel == NM_STREAM_REASONING ? NM_STREAM_ID_REASONING
+                                                   : NM_STREAM_ID_CONTENT;
+    /* Phase transition (observed wire truth: reasoning then content,
+     * never concurrent): when content begins, finalize reasoning so its
+     * order in the scrollback reflects when it was spoken. */
+    if (stream_id == NM_STREAM_ID_CONTENT &&
+        tui_transcript_stream_raw_len(app->transcript,
+                                      NM_STREAM_ID_REASONING) > 0) {
+        send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
     }
-    dynamic_buffer_append(app->tail, text, strlen(text));
-    split_completed_lines(app);
-    /* Tail growth is a view change: wake the loop so the live region
-     * repaints now, not on the next 100 ms spinner tick. */
+    stream_delta(app, stream_id, text);
+    /* A delta is a view change: wake the loop so the live region
+     * repaints now, not on the next spinner tick. */
     tui_runtime_wakeup(app->rt);
 }
 
@@ -293,12 +277,15 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
     const char *name = tool && tool->name ? tool->name : "?";
 
     if (event == NM_TOOL_EVENT_START) {
-        flush_tail(app);
+        /* A tool round boundary ends the streams (replaces flush_tail):
+         * the panel prints between the tool-call round and the answer
+         * round, in commit order. */
+        stream_end_all(app);
         char *sum = tool_summary(args_json);
         if (sum)
             truncate_text(sum, 64);
-        pend_printf(app, SGR_OYSTER "▌ %s%s%s" SGR_TEXT_RESET "\r\n", name,
-                    sum ? " · " : "", sum ? sum : "");
+        sys_line(app, SGR_OYSTER "▌ %s%s%s" SGR_TEXT_RESET, name,
+                 sum ? " · " : "", sum ? sum : "");
         free(sum);
         free(app->current_tool);
         app->current_tool = strdup(name);
@@ -308,9 +295,9 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         size_t first_len = nl ? (size_t)(nl - output) : strlen(output);
         if (first_len > 64)
             first_len = 64;
-        pend_printf(app, SGR_OYSTER "  ⎿ %s%.*s%s" SGR_TEXT_RESET "\r\n",
-                    result && result->ok ? "" : "error: ", (int)first_len,
-                    output, nl ? " …" : "");
+        sys_line(app, SGR_OYSTER "  ⎿ %s%.*s%s" SGR_TEXT_RESET,
+                 result && result->ok ? "" : "error: ", (int)first_len,
+                 output, nl ? " …" : "");
         free(app->current_tool);
         app->current_tool = NULL;
     }
@@ -328,19 +315,20 @@ void nm_chat_app_on_state(int state, void *userdata)
 
     switch (st) {
     case NM_AGENT_DONE:
-        flush_tail(app);
-        pend_str(app, "\r\n"); /* separator before the next prompt */
+        /* Close both streams; no separator line — the next submit's
+         * finish_inline provides the break. */
+        stream_end_all(app);
         break;
     case NM_AGENT_ERROR:
-        flush_tail(app);
-        pend_printf(app, SGR_CORAL "nevermore: %s" SGR_TEXT_RESET "\r\n",
-                    nm_agent_last_error(app->agent) ? nm_agent_last_error(app->agent)
-                                                    : "turn failed");
+        stream_end_all(app);
+        sys_line(app, SGR_CORAL "nevermore: %s" SGR_TEXT_RESET,
+                 nm_agent_last_error(app->agent) ? nm_agent_last_error(app->agent)
+                                                 : "turn failed");
         break;
     case NM_AGENT_IDLE:
-        /* Cancel path: a partial answer still prints (it was spoken). */
-        flush_tail(app);
-        pend_printf(app, SGR_OYSTER "⏹ interrupted" SGR_TEXT_RESET "\r\n");
+        /* Cancel path: a partial answer still commits (it was spoken). */
+        stream_end_all(app);
+        sys_line(app, SGR_OYSTER "⏹ interrupted" SGR_TEXT_RESET);
         break;
     default: /* STREAMING / RUNNING_TOOL: no transcript output */
         break;
@@ -402,9 +390,29 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
 
     app->tools = nm_toolset_new_defaults();
     app->spinner = nm_spinner_new();
-    app->pend = dynamic_buffer_create(256);
-    app->tail = dynamic_buffer_create(256);
-    if (!app->tools || !app->spinner || !app->pend || !app->tail)
+    if (!app->tools || !app->spinner)
+        goto oom;
+
+    /* The streaming transcript: content + reasoning streams, nevermore's
+     * markdown classifier per stream, the plain renderer pair. Attached
+     * to the runtime in nm_chat_app_set_runtime (the runtime handle does
+     * not exist yet at construction). */
+    for (int i = 0; i < NM_STREAM_COUNT; i++) {
+        nm_markdown_init(&app->markdown[i]);
+        app->classifiers[i] = nm_markdown_classifier(&app->markdown[i]);
+    }
+    app->streams[0].name = "content";
+    app->streams[1].name = "reasoning";
+    TuiTranscriptConfig tcfg = {
+        .render_block = nm_markdown_render_block,
+        .render_live = nm_markdown_render_live,
+        .streams = app->streams,
+        .classifiers = app->classifiers,
+        .n_streams = NM_STREAM_COUNT,
+        .user_data = NULL,
+    };
+    app->transcript = tui_transcript_create(&tcfg);
+    if (!app->transcript)
         goto oom;
 
     /* Textinput: multiline (Shift+Enter inserts), soft wrap, history
@@ -460,8 +468,8 @@ void nm_chat_app_free(NmChatApp *app)
     free(app->base_url);
     free(app->api_key);
     free(app->current_tool);
-    dynamic_buffer_destroy(app->pend);
-    dynamic_buffer_destroy(app->tail);
+    if (app->transcript)
+        tui_transcript_free(app->transcript);
     free(app);
 }
 
@@ -505,6 +513,11 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt)
     if (!app)
         return;
     app->rt = rt;
+    /* Attach the transcript: the runtime then runs its commit pass at
+     * the top of every flush. The runtime does NOT own the transcript
+     * (tui_runtime_set_transcript is explicit); the app frees it. */
+    if (rt && app->transcript)
+        tui_runtime_set_transcript(rt, app->transcript);
 }
 
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
@@ -542,7 +555,10 @@ void nm_chat_app_step(NmChatApp *app)
     if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
         return;
     nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
-    flush_transcript(app);
+    /* Flush so the batch staged by this step commits now (the runtime's
+     * commit pass runs at the top of flush); the run loop and the test
+     * harness both rely on a step being self-contained. */
+    tui_runtime_flush(app->rt);
 }
 
 void nm_chat_app_tick(NmChatApp *app)
@@ -585,10 +601,20 @@ TuiTextInput *nm_chat_app_textinput(NmChatApp *app)
     return app ? app->input : NULL;
 }
 
-/* Bytes buffered in the streaming tail (live-region content). */
+TuiTranscript *nm_chat_app_transcript(NmChatApp *app)
+{
+    return app ? app->transcript : NULL;
+}
+
+/* Bytes buffered in the content stream's raw buffer (uncommitted
+ * live-region content: lookahead + partial tail). Test/introspection
+ * seam. */
 size_t nm_chat_app_tail_len(const NmChatApp *app)
 {
-    return app ? app->tail->len : 0;
+    return app && app->transcript
+               ? tui_transcript_stream_raw_len(app->transcript,
+                                               NM_STREAM_ID_CONTENT)
+               : 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -597,12 +623,12 @@ size_t nm_chat_app_tail_len(const NmChatApp *app)
 
 static void print_help(NmChatApp *app)
 {
-    pend_str(app, "commands:\r\n");
-    pend_str(app, "  /help              this list\r\n");
-    pend_str(app, "  /model [id|query]  show, set, or pick a model (! id = exact)\r\n");
-    pend_str(app, "  /provider [name|q] show, switch, or pick a provider\r\n");
-    pend_str(app, "                     (fresh session)\r\n");
-    pend_str(app, "  /quit              leave (Ctrl+C twice works too)\r\n");
+    sys_text(app, "commands:\n"
+                  "  /help              this list\n"
+                  "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
+                  "  /provider [name|q] show, switch, or pick a provider\n"
+                  "                     (fresh session)\n"
+                  "  /quit              leave (Ctrl+C twice works too)");
 }
 
 /* Show a picker whose first entry is the currently active one: the
@@ -657,8 +683,7 @@ static void open_models_popup(NmChatApp *app, const char *query)
     const NmModel *models =
         app->provider->models(app->provider, app->base_url, app->api_key, &n);
     if (!models || n == 0) {
-        pend_str(app, "no models in the catalog\r\n");
-        flush_transcript(app);
+        sys_line(app, "no models in the catalog");
         return;
     }
     const char *ids[128];
@@ -667,8 +692,7 @@ static void open_models_popup(NmChatApp *app, const char *query)
         ids[i] = models[i].id;
     if (!popup_show_with_active(app, POPUP_MODELS, "models", app->model, ids,
                                 (int)cap, query)) {
-        pend_printf(app, "no models match '%s'\r\n", query);
-        flush_transcript(app);
+        sys_line(app, "no models match '%s'", query);
     }
 }
 
@@ -688,8 +712,7 @@ static void open_providers_popup(NmChatApp *app, const char *query)
     if (!popup_show_with_active(app, POPUP_PROVIDERS, "providers",
                                 app->provider ? app->provider->name : NULL,
                                 ids, (int)n, query)) {
-        pend_printf(app, "no providers match '%s'\r\n", query);
-        flush_transcript(app);
+        sys_line(app, "no providers match '%s'", query);
     }
 }
 
@@ -701,15 +724,27 @@ static void switch_provider(NmChatApp *app, const char *name)
         const NmProvider *providers[NM_PROVIDER_MAX];
         size_t n = 0;
         nm_provider_list(providers, &n);
-        pend_printf(app, SGR_CORAL "nevermore: unknown provider '%s' — one of:" SGR_TEXT_RESET,
-                    name);
-        for (size_t i = 0; i < n && i < NM_PROVIDER_MAX; i++)
-            pend_printf(app, " %s", providers[i]->name);
-        pend_str(app, "\r\n");
+        char buf[512];
+        int off = snprintf(buf, sizeof(buf),
+                           SGR_CORAL "nevermore: unknown provider '%s' — one of:" SGR_TEXT_RESET,
+                           name);
+        for (size_t i = 0; i < n && i < NM_PROVIDER_MAX && off > 0 &&
+                           (size_t)off < sizeof(buf);
+             i++) {
+            int m = snprintf(buf + off, sizeof(buf) - (size_t)off, " %s",
+                             providers[i]->name);
+            if (m < 0)
+                break;
+            off += m;
+        }
+        sys_line(app, "%s", buf);
         return;
     }
+    /* New chat: reset every stream (emits nothing) and mark the
+     * boundary; the agent rebuild wipes the session. */
+    send_msg(app, tui_msg_transcript_clear());
     build_agent(app, p);
-    pend_printf(app, "provider: %s (fresh session)\r\n", p->name);
+    sys_line(app, "— provider: %s (fresh session) —", p->name);
 }
 
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
@@ -750,7 +785,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             nm_agent_set_model(app->agent, id);
             free(app->model);
             app->model = strdup(id);
-            pend_printf(app, "model: %s (exact)\r\n", app->model);
+            sys_line(app, "model: %s (exact)", app->model);
             return;
         }
         /* Validation: refuse an unknown id instead of a silent 404
@@ -774,7 +809,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         nm_agent_set_model(app->agent, arg);
         free(app->model);
         app->model = strdup(arg);
-        pend_printf(app, "model: %s\r\n", app->model);
+        sys_line(app, "model: %s", app->model);
         return;
     }
     if (NAME_IS("provider")) {
@@ -792,9 +827,9 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         open_providers_popup(app, arg);
         return;
     }
-    pend_printf(app, SGR_CORAL "unknown command '%.*s' — /help lists "
-                               "commands" SGR_TEXT_RESET "\r\n",
-                (int)name_len, rest);
+    sys_line(app, SGR_CORAL "unknown command '%.*s' — /help lists "
+                            "commands" SGR_TEXT_RESET,
+             (int)name_len, rest);
 #undef NAME_IS
 }
 
@@ -812,11 +847,18 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     if (!saved)
         return;
     tui_textinput_history_add(app->input, saved);
-    tui_textinput_clear(app->input);
 
-    /* The rendered input line PERSISTS as the user's transcript entry
-     * (ditty's finish_inline pattern); output prints below it. */
+    /* The echo contract (D10): submit FINALIZES every LIVE block across
+     * all streams and does not echo; a flush commits those blocks above
+     * the prompt; finish_inline is the ONE echo of the user's line
+     * (ditty's pattern — the rendered input line persists into the
+     * scrollback). The input must still be rendered when finish_inline
+     * runs, so clearing happens after. Splitting the echo would
+     * double-print the user's line. */
+    send_msg(app, tui_msg_transcript_submit(saved, strlen(saved)));
+    tui_runtime_flush(app->rt);
     tui_runtime_finish_inline(app->rt);
+    tui_textinput_clear(app->input);
 
     if (saved[0] == '/') {
         run_command(app, saved, cmd_out);
@@ -1057,6 +1099,21 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         app->term_h = msg.data.size.height;
         tui_textinput_set_terminal_width(app->input, app->term_w);
         tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
+        tui_transcript_update(app->transcript, msg);
+        return tui_update_result_none();
+
+    /* Transcript messages are dispatched here (the app is the runtime's
+     * component); forward them to the transcript. NO flush: the unit
+     * staged here coalesces into the caller's single flush (end of
+     * step, end of key update, or submit's deliberate echo flush) —
+     * flushing per delta would put a transcript_write inside the
+     * agent's per-SSE-batch callback. */
+    case TUI_MSG_STREAM_DELTA:
+    case TUI_MSG_STREAM_TEXT:
+    case TUI_MSG_STREAM_END:
+    case TUI_MSG_TRANSCRIPT_SUBMIT:
+    case TUI_MSG_TRANSCRIPT_CLEAR:
+        tui_transcript_update(app->transcript, msg);
         return tui_update_result_none();
 
     case TUI_MSG_FOCUS:
@@ -1094,7 +1151,9 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         return tui_update_result_none();
     }
 
-    flush_transcript(app);
+    /* Flush so the batch staged by this update commits now (the commit
+     * pass runs at the top of flush; coalesces into one write). */
+    tui_runtime_flush(app->rt);
     return cmd ? tui_update_result(cmd) : tui_update_result_none();
 }
 
@@ -1102,54 +1161,20 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 /* View (live region only — never the transcript)                   */
 /* ---------------------------------------------------------------- */
 
-/* Streaming tail, wrapped to the terminal width, at most the last
- * rows_cap rows. One pass records row-start byte offsets; the emit
- * then walks those starts (a row runs to the next row's start).
- * Returns the number of rows emitted (0 = empty tail). */
-static int render_tail_rows(const NmChatApp *app, DynamicBuffer *out,
-                            int width, int rows_cap)
+/* Input rendered row count: boba counts frame rows by newlines, so
+ * 1 + logical newlines. Shared by the view and the transcript budget
+ * so the two cannot drift. */
+static int nm_chat_app_input_rows(const NmChatApp *app)
 {
-    const char *text = app->tail->data;
-    size_t len = app->tail->len;
-    if (!text || len == 0 || width <= 0)
-        return 0;
-
-    size_t starts[TAIL_ROWS_MAX];
-    int rows = 1; /* the first row starts at 0 */
-    starts[0] = 0;
-    int col = 0;
-    size_t i = 0;
-    while (i < len && rows < TAIL_ROWS_MAX) {
-        int clen = tui_utf8_char_len(text + i);
-        if (i + (size_t)clen > len)
-            break;
-        uint32_t cp = tui_utf8_decode(text + i, clen);
-        if (cp >= 0x20) { /* control bytes are dropped */
-            int w = tui_codepoint_width(cp);
-            if (col > 0 && col + w > width) {
-                starts[rows++] = i; /* this codepoint begins the row */
-                col = 0;
-            }
-            col += w;
-        }
-        i += (size_t)clen;
+    const char *text = tui_textinput_text(app->input);
+    if (!text)
+        return 1;
+    int rows = 1;
+    for (const char *p = text; *p; p++) {
+        if (*p == '\n')
+            rows++;
     }
-    /* `rows` = number of recorded row starts; the last row runs to len. */
-
-    int first = rows > rows_cap ? rows - rows_cap : 0;
-    for (int r = first; r < rows; r++) {
-        if (r > first) {
-            dynamic_buffer_append_str(out, "\r\n");
-            dynamic_buffer_append_str(out, EL_TO_END);
-        } else {
-            dynamic_buffer_append_str(out, "\r");
-            dynamic_buffer_append_str(out, EL_TO_END);
-        }
-        size_t end = (r + 1 < rows) ? starts[r + 1] : len;
-        if (end > starts[r])
-            dynamic_buffer_append(out, text + starts[r], end - starts[r]);
-    }
-    return rows - first;
+    return rows;
 }
 
 static const char *spinner_label(const NmChatApp *app)
@@ -1169,21 +1194,30 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     NmAgentState st = nm_agent_state(app->agent);
     int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
 
+    /* Live-region budget (D8): the transcript takes the terminal height
+     * minus the input rows, the status row (spinner while busy), and
+     * one slack row; floored at 1. The transcript's own planner clips
+     * to the tail, so passing the full budget is safe. */
+    int input_rows = nm_chat_app_input_rows(app);
+    int status_rows = busy ? 1 : 0;
+    int budget = app->term_h - input_rows - status_rows - 1;
+    if (budget < 1)
+        budget = 1;
+    int width = app->term_w > 0 ? app->term_w : 80;
+
+    /* The transcript is always drawn (live blocks can outlive a busy
+     * state), then the spinner / input / popup. On an empty live region
+     * rows == 0 and this reduces to the old behavior (a bare \r + EL,
+     * no phantom row). */
+    int rows = tui_transcript_live_rows(app->transcript, width, budget);
+    tui_transcript_view(app->transcript, out, width, budget);
+    if (rows > 0)
+        dynamic_buffer_append_str(out, "\r\n");
+    else
+        dynamic_buffer_append_str(out, "\r");
+    dynamic_buffer_append_str(out, EL_TO_END);
+
     if (busy) {
-        /* Live region: streaming tail + spinner row. The spinner
-         * row's separator is emitted ONLY when tail rows precede
-         * it — with an empty tail the spinner IS frame row 0 (no
-         * phantom leading blank row: boba counts frame rows by
-         * newlines, so a leading \r\n would paint a blank row that
-         * steals the row the first tail line should replace). */
-        int tail_rows = render_tail_rows(app, out,
-                                         app->term_w > 4 ? app->term_w : 80,
-                                         app->term_h > 3 ? app->term_h - 2 : 1);
-        if (tail_rows > 0)
-            dynamic_buffer_append_str(out, "\r\n");
-        else
-            dynamic_buffer_append_str(out, "\r");
-        dynamic_buffer_append_str(out, EL_TO_END);
         const char *frame = app->spinner_frame;
         if (frame)
             dynamic_buffer_append_str(out, frame);
@@ -1199,6 +1233,12 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     TuiView v = tui_view_default(out);
     v.render_mode = TUI_RENDER_INLINE;
     v.bracketed_paste = 1;
-    v.cursor = busy ? tui_cursor_hidden() : tui_textinput_cursor_pos(app->input);
+    if (busy) {
+        v.cursor = tui_cursor_hidden();
+    } else {
+        /* Offset the textinput cursor by the transcript's live rows. */
+        TuiCursor c = tui_textinput_cursor_pos(app->input);
+        v.cursor = tui_cursor_at(c.row + rows, c.col);
+    }
     return v;
 }
