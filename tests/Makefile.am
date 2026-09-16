@@ -262,7 +262,14 @@ check-programs: $(check_PROGRAMS)
 # fetches are unaffected.
 TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1
 
-EXTRA_DIST = test_helpers.h tls/test-cert.pem tls/test-key.pem tls/README.md
+EXTRA_DIST = test_helpers.h test_net_helpers.h tls/test-cert.pem tls/test-key.pem \
+    tls/README.md
+
+# The watchdog appends START/END pairs to test-progress.log by default
+# (a hang is diagnosable from CI artifacts). It is a generated file;
+# list it so `make distclean` removes it and distcheck's distcleancheck
+# passes.
+CLEANFILES = test-progress.log
 
 # Wire tests (dummy local servers, no real network) — separate target,
 # like quoth's `make test-wire`.

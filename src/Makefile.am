@@ -30,12 +30,29 @@ bin_PROGRAMS = nevermore
 
 # Internal headers (no separate public include/ — CLI app, no library).
 EXTRA_DIST = \
+    agent.h \
+    chat_app.h \
+    colors.h \
     connection_layout.h \
-    provider_internal.h \
+    context.h \
+    history.h \
+    json.h \
+    nevermore.h \
     nm_clock.h \
+    nm_markdown.h \
+    nm_markdown_render.h \
+    openai_client.h \
+    provider.h \
+    provider_internal.h \
+    session.h \
+    source.h \
+    spinner.h \
+    sse.h \
+    tools.h \
     tools_internal.h \
+    transport.h \
     transport_internal.h \
-    openai_client.h
+    wire_recorder.h
 
 # Portable process spawn: one file per OS.
 if HOST_WINDOWS
