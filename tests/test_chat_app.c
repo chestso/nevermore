@@ -558,62 +558,91 @@ static void test_model_command_sets_model(void)
 
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
 
-    /* No-arg form prints the current model. */
-    harness_type(h, "/model");
-    harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "gpt-oss:20b") != NULL);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
-
-    /* Arg form sets it. */
+    /* Arg form sets an exact catalog id. */
     harness_type(h, "/model llama3.2");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
     ASSERT_TRUE(strstr(harness_read(h), "llama3.2") != NULL);
 
+    /* A second identical submit does not wedge. */
+    harness_type(h, "/model qwen3-coder");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "qwen3-coder");
+
     harness_free(h);
 }
 
-static void test_models_popup_selects_model(void)
+/* Bare /model opens the picker; the ACTIVE model is the first entry
+ * and is pre-selected, so Enter-then-submit leaves it unchanged. */
+static void test_model_picker_active_first(void)
 {
-    AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
+    AppHarness *h = harness_new("ollama", "llama3.2", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/models");
+    harness_type(h, "/model");
     harness_enter(h);
-
-    /* The catalog popped up as a frame popup (view-side). */
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "gpt-oss:20b") != NULL);
     ASSERT_TRUE(strstr(frame, "llama3.2") != NULL);
+    ASSERT_TRUE(strstr(frame, "gpt-oss:20b") != NULL);
 
-    /* Down + Enter selects the second entry. */
-    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
+    /* Enter COMPOSES the command, never applies it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:120b");
+    const char *text = tui_textinput_text(nm_chat_app_textinput(h->app));
+    ASSERT_NOT_NULL(text);
+    ASSERT_STR_EQ(text, "/model llama3.2");
+    /* The picker composes; the agent keeps the model until submit. */
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
 
-    /* Escape during a later /models dismisses without changing. */
-    harness_type(h, "/models");
+    /* Submit re-applies the same model. */
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+
+    /* Escape during a later /model leaves the model alone. */
+    harness_type(h, "/model");
     harness_enter(h);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:120b");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
 
     harness_free(h);
 }
 
-static void test_models_popup_pre_filters_by_query(void)
+static void test_model_picker_selects_and_commits(void)
+{
+    AppHarness *h = harness_new("ollama", "llama3.2", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Bare /model: active model first, catalog after. Down to the
+     * next entry (gpt-oss:20b), Enter composes, submit commits. */
+    harness_type(h, "/model");
+    harness_enter(h);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model gpt-oss:20b");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2"); /* not yet */
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
+    ASSERT_TRUE(strstr(harness_read(h), "gpt-oss:20b") != NULL);
+
+    harness_free(h);
+}
+
+static void test_model_picker_pre_filters_by_query(void)
 {
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    /* /models with a query: the popup opens pre-filtered (boba's
-     * filter-as-view; the query is the stable interface). */
-    harness_type(h, "/models gpt");
+    /* /model with a query that is not an exact id: the popup opens
+     * pre-filtered (boba's filter-as-view; the query is the stable
+     * interface). "gpt" filters out llama3.2; the active model is
+     * prepended and matches, so it stays first. */
+    harness_type(h, "/model gpt-oss:120");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "gpt-oss:20b") != NULL);
-    ASSERT_TRUE(strstr(frame, "llama3.2") == NULL); /* filtered out */
-    ASSERT_TRUE(strstr(frame, "\"gpt\"") != NULL);  /* query in title */
+    ASSERT_TRUE(strstr(frame, "gpt-oss:120b") != NULL);
+    ASSERT_TRUE(strstr(frame, "llama3.2") == NULL);        /* filtered out */
+    ASSERT_TRUE(strstr(frame, "\"gpt-oss:120\"") != NULL); /* query in title */
 
     /* Escape dismisses; model untouched. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
@@ -622,27 +651,31 @@ static void test_models_popup_pre_filters_by_query(void)
     harness_free(h);
 }
 
-static void test_models_popup_enter_applies_first_match(void)
+static void test_model_picker_enter_composes_first_match(void)
 {
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/models llama");
+    harness_type(h, "/model llama");
     harness_enter(h);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model llama3.2");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
+    harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
     ASSERT_TRUE(strstr(harness_read(h), "llama3.2") != NULL);
 
     harness_free(h);
 }
 
-static void test_models_popup_no_match_prints_nothing(void)
+static void test_model_picker_no_match_prints_nothing(void)
 {
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* No match: no popup; a note prints instead; model unchanged. */
-    harness_type(h, "/models zzz-no-such-model");
+    harness_type(h, "/model zzz-no-such-model");
     harness_enter(h);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "gpt-oss") == NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
@@ -660,19 +693,33 @@ static void test_provider_popup_composes_into_input(void)
      * COMPOSES "/provider <name>" into the input (selection =
      * composition, submit = commit: switching rebuilds the agent
      * and wipes the session, so a modal apply is a fat-finger
-     * session killer). */
+     * session killer). The ACTIVE provider is the first entry. */
     harness_type(h, "/provider");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "ollama") != NULL);
     ASSERT_TRUE(strstr(frame, "openai") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
+    ASSERT_TRUE(strstr(frame, "opencode-zen") != NULL);
 
+    /* Enter on the pre-selected active entry composes it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
-    /* The input now holds the composed command, unsubmitted. */
     const char *text = tui_textinput_text(nm_chat_app_textinput(h->app));
     ASSERT_NOT_NULL(text);
+    ASSERT_STR_EQ(text, "/provider ollama");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+
+    /* Down to the second entry, Enter composes; submit commits the
+     * switch to exactly the composed name. Clear the input first —
+     * the previous compose left its text there. */
+    tui_textinput_clear(nm_chat_app_textinput(h->app));
+    harness_type(h, "/provider");
+    harness_enter(h);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    text = tui_textinput_text(nm_chat_app_textinput(h->app));
+    ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strncmp(text, "/provider ", 10) == 0);
-    /* Copy the composed name: the borrowed text dies with the submit. */
     char name[32] = { 0 };
     snprintf(name, sizeof(name), "%s", text + 10);
     /* Provider NOT switched yet (selection = composition). */
@@ -705,27 +752,17 @@ static void test_provider_popup_query_pre_filters(void)
     harness_free(h);
 }
 
-static void test_providers_alias_lists_providers(void)
+static void test_providers_alias_is_unknown_command(void)
 {
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    /* /providers [q] is the alias of the /provider picker: bare
-     * form opens the registry popup, same keys. */
+    /* /providers is retired: one command per noun. It is now an
+     * unknown command, naming the survivor. */
     harness_type(h, "/providers");
     harness_enter(h);
-    const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "openai") != NULL);
-    ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
-    /* The registry is the router's truth: both OpenCode tiers are
-     * listed (seven providers total). */
-    ASSERT_TRUE(strstr(frame, "opencode") != NULL);
-    ASSERT_TRUE(strstr(frame, "opencode-zen") != NULL);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
-
-    /* Escape dismisses without switching. */
-    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama");
+    ASSERT_TRUE(strstr(harness_read(h), "unknown command 'providers'") != NULL);
 
     harness_free(h);
 }
@@ -735,13 +772,12 @@ static void test_model_validation_refuses_unknown_id(void)
     AppHarness *h = harness_new("ollama", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    /* Not in the catalog: refuse, name /models, agent untouched. */
+    /* Not in the catalog: it is a QUERY, so the picker opens with no
+     * match and prints a note; the model is untouched. */
     harness_type(h, "/model zzz-no-such");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
-    const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "unknown model 'zzz-no-such'") != NULL);
-    ASSERT_TRUE(strstr(out, "/models") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "no models match 'zzz-no-such'") != NULL);
 
     /* In the catalog: set. */
     harness_type(h, "/model qwen3-coder");
@@ -815,6 +851,9 @@ static void test_help_command_lists_commands(void)
     ASSERT_TRUE(strstr(out, "/model") != NULL);
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
+    /* The retired plurals are no longer advertised. */
+    ASSERT_TRUE(strstr(out, "/models") == NULL);
+    ASSERT_TRUE(strstr(out, "/providers") == NULL);
 
     harness_free(h);
 }
@@ -1123,18 +1162,22 @@ static void test_tab_on_slash_prefix_opens_commands_popup(void)
     ASSERT_NOT_NULL(h);
 
     /* Regression (TUI crash): Tab after "/m" matches several slash
-     * commands (/model, /models), so the commands popup opens with
-     * the filter applied. The old loop strncmp'd the array's NULL
-     * sentinel here. */
-    harness_type(h, "/m");
+     * commands, so the commands popup opens with the filter applied.
+     * The old loop strncmp'd the array's NULL sentinel here. With
+     * the one-command-per-noun set, "/" is the multi-match prefix
+     * (/help /model /provider /quit) — the same code path. */
+    harness_type(h, "/");
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
     tui_runtime_flush(h->rt);
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "/model") != NULL);
-    ASSERT_TRUE(strstr(frame, "/models") != NULL);
+    ASSERT_TRUE(strstr(frame, "/provider") != NULL);
+    /* The retired plurals are gone from the completion set. */
+    ASSERT_TRUE(strstr(frame, "/models") == NULL);
+    ASSERT_TRUE(strstr(frame, "/providers") == NULL);
     /* The input text is unchanged (several matches: popup, no insert). */
-    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "/m");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "/");
 
     /* Escape dismisses the popup. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
@@ -1327,14 +1370,15 @@ int main(void)
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_quit_command_quits);
     RUN_TEST(test_model_command_sets_model);
-    RUN_TEST(test_models_popup_selects_model);
-    RUN_TEST(test_models_popup_pre_filters_by_query);
-    RUN_TEST(test_models_popup_enter_applies_first_match);
-    RUN_TEST(test_models_popup_no_match_prints_nothing);
+    RUN_TEST(test_model_picker_active_first);
+    RUN_TEST(test_model_picker_selects_and_commits);
+    RUN_TEST(test_model_picker_pre_filters_by_query);
+    RUN_TEST(test_model_picker_enter_composes_first_match);
+    RUN_TEST(test_model_picker_no_match_prints_nothing);
     RUN_TEST(test_provider_command_switches_provider);
     RUN_TEST(test_provider_popup_composes_into_input);
     RUN_TEST(test_provider_popup_query_pre_filters);
-    RUN_TEST(test_providers_alias_lists_providers);
+    RUN_TEST(test_providers_alias_is_unknown_command);
     RUN_TEST(test_model_validation_refuses_unknown_id);
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);

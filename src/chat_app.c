@@ -69,8 +69,8 @@
 typedef enum
 {
     POPUP_NONE,
-    POPUP_MODELS,    /* /models: Enter applies the selected model */
-    POPUP_PROVIDERS, /* /provider(s): Enter composes the command */
+    POPUP_MODELS,    /* /model: Enter composes the command */
+    POPUP_PROVIDERS, /* /provider: Enter composes the command */
     POPUP_COMMANDS   /* Tab on a "/..." word: insert the completion */
 } PopupKind;
 
@@ -599,11 +599,53 @@ static void print_help(NmChatApp *app)
 {
     pend_str(app, "commands:\r\n");
     pend_str(app, "  /help              this list\r\n");
-    pend_str(app, "  /model [id]        show or set the model (! id = exact)\r\n");
-    pend_str(app, "  /models [query]    pick from the catalog (popup)\r\n");
-    pend_str(app, "  /provider [name|q] pick or switch provider (fresh session)\r\n");
-    pend_str(app, "  /providers [q]     same picker as /provider\r\n");
+    pend_str(app, "  /model [id|query]  show, set, or pick a model (! id = exact)\r\n");
+    pend_str(app, "  /provider [name|q] show, switch, or pick a provider\r\n");
+    pend_str(app, "                     (fresh session)\r\n");
     pend_str(app, "  /quit              leave (Ctrl+C twice works too)\r\n");
+}
+
+/* Show a picker whose first entry is the currently active one: the
+ * parent passes the active value so the popup can prepend it when the
+ * catalog omits it (a user-set id, or a query that filters it out).
+ * boba's show() resets selection to the first item, so the active
+ * entry is selected whenever the (prepended) list starts with it.
+ * Returns 1 when shown, 0 when the filtered view was empty. */
+static int popup_show_with_active(NmChatApp *app, PopupKind kind,
+                                  const char *title, const char *active,
+                                  const char *const *items, int n_items,
+                                  const char *query)
+{
+    const char *seen[128];
+    int n = 0;
+    if (active && *active && n < 128)
+        seen[n++] = active; /* active first: its absence is the reason */
+    for (int i = 0; i < n_items && n < 128; i++) {
+        const char *it = items[i];
+        if (!it || !*it)
+            continue;
+        int dup = 0;
+        for (int j = 0; j < n; j++) {
+            if (strcmp(seen[j], it) == 0) {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup)
+            seen[n++] = it;
+    }
+    tui_list_popup_set_items(app->popup, seen, n);
+    tui_list_popup_set_title(app->popup, title);
+    tui_list_popup_set_filter(app->popup, query);
+    if (tui_list_popup_filtered_count(app->popup) == 0) {
+        /* No match: never show an empty modal — the caller prints a
+         * note. */
+        tui_list_popup_hide(app->popup);
+        return 0;
+    }
+    tui_list_popup_show(app->popup, 0);
+    app->popup_kind = kind;
+    return 1;
 }
 
 /* Open the models popup over the catalog source, pre-filtered by
@@ -619,26 +661,15 @@ static void open_models_popup(NmChatApp *app, const char *query)
         flush_transcript(app);
         return;
     }
-    const char **ids = malloc((n + 1) * sizeof(*ids));
-    if (!ids) {
-        flush_transcript(app);
-        return;
-    }
-    for (size_t i = 0; i < n; i++)
+    const char *ids[128];
+    size_t cap = n < 128 ? n : 128;
+    for (size_t i = 0; i < cap; i++)
         ids[i] = models[i].id;
-    tui_list_popup_set_items(app->popup, ids, (int)n);
-    free(ids);
-    tui_list_popup_set_title(app->popup, "models");
-    tui_list_popup_set_filter(app->popup, query);
-    if (tui_list_popup_filtered_count(app->popup) == 0) {
-        /* No match: never show an empty modal — print a note. */
-        tui_list_popup_hide(app->popup);
+    if (!popup_show_with_active(app, POPUP_MODELS, "models", app->model, ids,
+                                (int)cap, query)) {
         pend_printf(app, "no models match '%s'\r\n", query);
         flush_transcript(app);
-        return;
     }
-    tui_list_popup_show(app->popup, 0);
-    app->popup_kind = POPUP_MODELS;
 }
 
 /* Open the providers popup over the registry source (the same
@@ -654,17 +685,12 @@ static void open_providers_popup(NmChatApp *app, const char *query)
     const char *ids[NM_PROVIDER_MAX];
     for (size_t i = 0; i < n; i++)
         ids[i] = providers[i]->name;
-    tui_list_popup_set_items(app->popup, ids, (int)n);
-    tui_list_popup_set_title(app->popup, "providers");
-    tui_list_popup_set_filter(app->popup, query);
-    if (tui_list_popup_filtered_count(app->popup) == 0) {
-        tui_list_popup_hide(app->popup);
+    if (!popup_show_with_active(app, POPUP_PROVIDERS, "providers",
+                                app->provider ? app->provider->name : NULL,
+                                ids, (int)n, query)) {
         pend_printf(app, "no providers match '%s'\r\n", query);
         flush_transcript(app);
-        return;
     }
-    tui_list_popup_show(app->popup, 0);
-    app->popup_kind = POPUP_PROVIDERS;
 }
 
 static void switch_provider(NmChatApp *app, const char *name)
@@ -709,8 +735,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
     }
     if (NAME_IS("model")) {
         if (!*arg) {
-            pend_printf(app, "model: %s\r\n",
-                        app->model ? app->model : "(none)");
+            /* Bare /model: the picker (catalog source, active first). */
+            open_models_popup(app, NULL);
             return;
         }
         /* Exact-set escape hatch: "! <id>" sets any id without catalog
@@ -740,9 +766,9 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             }
         }
         if (!found) {
-            pend_printf(app, SGR_CORAL "nevermore: unknown model '%s' — "
-                                       "pick one with /models" SGR_TEXT_RESET "\r\n",
-                        arg);
+            /* Not an exact id: a query into the picker (pre-filtered
+             * view); a typo can never silently switch anything. */
+            open_models_popup(app, arg);
             return;
         }
         nm_agent_set_model(app->agent, arg);
@@ -751,18 +777,9 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         pend_printf(app, "model: %s\r\n", app->model);
         return;
     }
-    if (NAME_IS("models")) {
-        open_models_popup(app, *arg ? arg : NULL);
-        return;
-    }
-    if (NAME_IS("providers")) {
-        /* /providers [q]: alias of the /provider picker. */
-        open_providers_popup(app, *arg ? arg : NULL);
-        return;
-    }
     if (NAME_IS("provider")) {
         if (!*arg) {
-            /* Bare /provider: the picker (registry source popup). */
+            /* Bare /provider: the picker (registry source). */
             open_providers_popup(app, NULL);
             return;
         }
@@ -823,7 +840,7 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/models", "/provider", "/providers", "/quit", NULL
+        "/help", "/model", "/provider", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
@@ -850,30 +867,18 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
     app->popup_kind = POPUP_COMMANDS;
 }
 
-static void popup_select_model(NmChatApp *app)
+/* Enter in the models or providers picker: COMPOSE the full command
+ * into the input; submit commits. One rule, two nouns — a provider
+ * switch rebuilds the agent and wipes the session, so a modal
+ * Enter-on-picker would be a fat-finger session killer; the model
+ * picker follows the same rule so the two behave identically (and
+ * the edit stays reviewable before commit). */
+static void popup_compose_command(NmChatApp *app, const char *noun)
 {
-    const char *id = tui_list_popup_selected_text(app->popup);
-    if (id && *id) {
-        nm_agent_set_model(app->agent, id);
-        free(app->model);
-        app->model = strdup(id);
-        pend_printf(app, "model: %s\r\n", app->model);
-    }
-    tui_list_popup_hide(app->popup);
-    app->popup_kind = POPUP_NONE;
-}
-
-static void popup_compose_provider(NmChatApp *app)
-{
-    /* Provider popup: selection = COMPOSITION, submit = commit. A
-     * provider switch rebuilds the agent and wipes the session —
-     * a modal Enter-on-picker would be a fat-finger session
-     * killer. Enter writes "/provider <name>" into the input; the
-     * user submits to commit (and can still edit/abort). */
     const char *sel = tui_list_popup_selected_text(app->popup);
     if (sel && *sel) {
-        char composed[64];
-        snprintf(composed, sizeof(composed), "/provider %s", sel);
+        char composed[128];
+        snprintf(composed, sizeof(composed), "/%s %s", noun, sel);
         tui_textinput_clear(app->input);
         tui_textinput_set_text(app->input, composed);
     }
@@ -926,9 +931,9 @@ static void popup_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
     }
     if (key_code == TUI_KEY_ENTER && !(mods & TUI_MOD_SHIFT)) {
         if (app->popup_kind == POPUP_MODELS)
-            popup_select_model(app);
+            popup_compose_command(app, "model");
         else if (app->popup_kind == POPUP_PROVIDERS)
-            popup_compose_provider(app);
+            popup_compose_command(app, "provider");
         else {
             /* Commands: insert the selection at the remembered word. */
             const char *sel = tui_list_popup_selected_text(app->popup);
