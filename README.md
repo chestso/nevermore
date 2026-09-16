@@ -68,6 +68,11 @@ Environment variables win over the file. Point elsewhere with
 `NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
 default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
+`NEVERMORE_PROVIDER` / `NEVERMORE_MODEL` pick the default provider and
+model. `NEVERMORE_MAX_ROUNDS=<n>` caps the tool-call rounds in one turn
+(default 25) before the agent stops with "too many tool rounds"; the
+interactive chat also exposes it as `/rounds [n|default]`.
+
 ## Layout
 
 ```

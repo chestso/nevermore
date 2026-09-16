@@ -40,8 +40,6 @@
 
 #include "provider_internal.h"
 
-#define AGENT_MAX_ROUNDS 25 /* tool-call rounds before bailing out */
-
 struct NmAgent
 {
     const NmProvider *provider;
@@ -72,8 +70,9 @@ struct NmAgent
      * round buffer below is reused across rounds of the same turn
      * (memory-reuse principle: grown, not reallocated per delta). */
     NmChatStream *stream;
-    int round;  /* rounds started this turn */
-    char *text; /* this round's accumulated answer text */
+    int round;      /* rounds started this turn */
+    int max_rounds; /* cap; <=0 means the default */
+    char *text;     /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
     /* This round's accumulated reasoning text (echoed back on the
@@ -156,6 +155,20 @@ void nm_agent_set_model(NmAgent *a, const char *model)
         return;
     free(a->model);
     a->model = strdup(model);
+}
+
+void nm_agent_set_max_rounds(NmAgent *a, int max_rounds)
+{
+    if (!a)
+        return;
+    a->max_rounds = max_rounds > 0 ? max_rounds : 0;
+}
+
+int nm_agent_max_rounds(const NmAgent *a)
+{
+    if (!a || a->max_rounds <= 0)
+        return NM_AGENT_DEFAULT_MAX_ROUNDS;
+    return a->max_rounds;
 }
 
 NmAgentState nm_agent_state(const NmAgent *a)
@@ -308,8 +321,14 @@ static void chat_failure(NmAgent *a, const NmChatResult *r, char *out,
  * Returns 0 on success. */
 static int begin_round(NmAgent *a)
 {
-    if (a->round >= AGENT_MAX_ROUNDS) {
-        set_error(a, "too many tool rounds without a final answer");
+    int cap = nm_agent_max_rounds(a);
+    if (a->round >= cap) {
+        char msg[128];
+        snprintf(msg, sizeof(msg),
+                 "too many tool rounds without a final answer "
+                 "(cap %d; set NEVERMORE_MAX_ROUNDS or /rounds)",
+                 cap);
+        set_error(a, msg);
         return -1;
     }
 

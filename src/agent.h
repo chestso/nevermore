@@ -31,6 +31,10 @@ typedef enum
 
 typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
 
+/* Default cap on tool-call rounds per turn (see
+ * nm_agent_set_max_rounds). */
+#define NM_AGENT_DEFAULT_MAX_ROUNDS 25
+
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata);
 void nm_agent_free(NmAgent *a);
@@ -44,6 +48,14 @@ void nm_agent_set_endpoint(NmAgent *a, const char *base_url,
 /* Change the model id; the next round/turn uses it. Session and
  * in-flight state are untouched. */
 void nm_agent_set_model(NmAgent *a, const char *model);
+
+/* Tool-call rounds allowed in one turn before the loop bails out with
+ * "too many tool rounds without a final answer" (NM_AGENT_ERROR). The
+ * default is NM_AGENT_DEFAULT_MAX_ROUNDS; setter values <= 0 restore
+ * it. Takes effect on the next round (a turn already in flight honors
+ * the new cap from its next begin_round). */
+void nm_agent_set_max_rounds(NmAgent *a, int max_rounds);
+int nm_agent_max_rounds(const NmAgent *a);
 
 /* Register UI callbacks. */
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */

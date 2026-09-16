@@ -40,6 +40,7 @@
 #include <boba/stream.h>
 
 #include "chat_app.h"
+#include "agent.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
 
@@ -853,10 +854,47 @@ static void test_help_command_lists_commands(void)
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "/model") != NULL);
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
+    ASSERT_TRUE(strstr(out, "/rounds") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
     /* The retired plurals are no longer advertised. */
     ASSERT_TRUE(strstr(out, "/models") == NULL);
     ASSERT_TRUE(strstr(out, "/providers") == NULL);
+
+    harness_free(h);
+}
+
+/* /rounds shows and sets the tool-round cap on the live agent;
+ * "default" (and 0) restore the built-in value. */
+static void test_rounds_command_shows_and_sets_cap(void)
+{
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Bare: the active cap and the default. */
+    harness_type(h, "/rounds");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    char want[64];
+    snprintf(want, sizeof(want), "tool rounds: %d",
+             NM_AGENT_DEFAULT_MAX_ROUNDS);
+    ASSERT_TRUE(strstr(out, want) != NULL);
+
+    /* Set a small cap; it lands on the live agent. */
+    harness_type(h, "/rounds 3");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "tool rounds: 3") != NULL);
+
+    /* Garbage is refused; the cap is untouched. */
+    harness_type(h, "/rounds nope");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "expected a positive count") != NULL);
+
+    /* "default" restores the built-in value. */
+    harness_type(h, "/rounds default");
+    harness_enter(h);
+    snprintf(want, sizeof(want), "tool rounds: %d",
+             NM_AGENT_DEFAULT_MAX_ROUNDS);
+    ASSERT_TRUE(strstr(harness_read(h), want) != NULL);
 
     harness_free(h);
 }
@@ -1516,6 +1554,7 @@ int main(void)
     RUN_TEST(test_model_validation_refuses_unknown_id);
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
+    RUN_TEST(test_rounds_command_shows_and_sets_cap);
     RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);

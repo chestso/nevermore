@@ -98,6 +98,7 @@ struct NmChatApp
     char *model;
     char *base_url; /* our copy; (re)applied to built agents */
     char *api_key;  /* our copy */
+    int max_rounds; /* tool-round cap; <=0 = agent default */
 
     NmToolset *tools;
     NmAgent *agent;
@@ -356,6 +357,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, (NmAgentStateFn)nm_chat_app_on_state);
     nm_agent_set_endpoint(a, app->base_url, app->api_key);
+    nm_agent_set_max_rounds(a, app->max_rounds);
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
@@ -532,6 +534,15 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
     nm_agent_set_endpoint(app->agent, app->base_url, app->api_key);
 }
 
+void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
+{
+    if (!app)
+        return;
+    app->max_rounds = max_rounds > 0 ? max_rounds : 0;
+    if (app->agent)
+        nm_agent_set_max_rounds(app->agent, app->max_rounds);
+}
+
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
 
 /* The app's aggregate wait interest (N4 v1: the live agent stream;
@@ -628,6 +639,8 @@ static void print_help(NmChatApp *app)
                   "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
+                  "  /rounds [n|default] show or set the tool-round cap\n"
+                  "                     (defaults to NEVERMORE_MAX_ROUNDS)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
 }
 
@@ -827,6 +840,39 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         open_providers_popup(app, arg);
         return;
     }
+    if (NAME_IS("rounds")) {
+        if (!*arg) {
+            sys_line(app, "tool rounds: %d (default %d)",
+                     nm_agent_max_rounds(app->agent),
+                     NM_AGENT_DEFAULT_MAX_ROUNDS);
+            return;
+        }
+        /* "0" / "default" restore the built-in cap; otherwise a
+         * positive decimal. Character-level scan: reject anything
+         * with a non-digit or a value we cannot parse. */
+        if (strcmp(arg, "default") == 0) {
+            nm_chat_app_set_max_rounds(app, 0);
+            sys_line(app, "tool rounds: %d (default)",
+                     nm_agent_max_rounds(app->agent));
+            return;
+        }
+        int v = 0;
+        for (const char *p = arg; *p; p++) {
+            if (*p < '0' || *p > '9' || v > 100000) {
+                v = -1;
+                break;
+            }
+            v = v * 10 + (*p - '0');
+        }
+        if (v <= 0) {
+            sys_line(app, SGR_CORAL "rounds: expected a positive count "
+                                    "or 'default'" SGR_TEXT_RESET);
+            return;
+        }
+        nm_chat_app_set_max_rounds(app, v);
+        sys_line(app, "tool rounds: %d", nm_agent_max_rounds(app->agent));
+        return;
+    }
     sys_line(app, SGR_CORAL "unknown command '%.*s' — /help lists "
                             "commands" SGR_TEXT_RESET,
              (int)name_len, rest);
@@ -882,7 +928,7 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/quit", NULL
+        "/help", "/model", "/provider", "/rounds", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

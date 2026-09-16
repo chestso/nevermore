@@ -951,6 +951,63 @@ static void test_agent_set_model_changes_wire_model(void)
     close(sc.fd);
 }
 
+/* Tool-round cap: with max_rounds = 1, a turn whose only round is a
+ * tool call bails out with the "too many tool rounds" error instead of
+ * opening a second round. The default is the header constant. */
+static void test_agent_max_rounds_caps_tool_rounds(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1; /* round 1 is a tool call; round 2 must not start */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"no_such_tool\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Default before any setter. */
+    ASSERT_EQ(nm_agent_max_rounds(agent), NM_AGENT_DEFAULT_MAX_ROUNDS);
+
+    /* Cap to one round; the first tool round already exhausts it. */
+    nm_agent_set_max_rounds(agent, 1);
+    ASSERT_EQ(nm_agent_max_rounds(agent), 1);
+
+    int rc = nm_agent_turn(agent, "keep calling tools");
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "too many tool rounds") != NULL);
+    /* Only the one scripted round hit the wire. */
+    ASSERT_EQ(g_n_requests, 1);
+
+    /* A non-positive setter restores the default. */
+    nm_agent_set_max_rounds(agent, 0);
+    ASSERT_EQ(nm_agent_max_rounds(agent), NM_AGENT_DEFAULT_MAX_ROUNDS);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -976,6 +1033,7 @@ int main(void)
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_set_model_changes_wire_model);
+    RUN_TEST(test_agent_max_rounds_caps_tool_rounds);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);

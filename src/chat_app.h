@@ -69,6 +69,11 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 
+/* Tool-call round cap for the agent this app builds and the live
+ * agent (<=0 = agent default, NM_AGENT_DEFAULT_MAX_ROUNDS). main.c
+ * wires $NEVERMORE_MAX_ROUNDS here. */
+void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
+
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):
  *   fill_external_fds   -> nm_chat_app_interest (translated in main.c)

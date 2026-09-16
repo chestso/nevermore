@@ -9,9 +9,9 @@
  *
  * Configuration discovery: $NEVERMORE_CONFIG (file) or
  * ~/.config/nevermore/config, plus provider env vars:
- *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, HYPER_API_KEY,
- *   OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
- *   OPENCODE_API_KEY.
+ *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, NEVERMORE_MAX_ROUNDS,
+ *   HYPER_API_KEY, OLLAMA_API_KEY, OPENAI_API_KEY,
+ *   OPENROUTER_API_KEY, OPENCODE_API_KEY.
  * A key with no env var set resolves from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
  * nm_provider_api_key; env always wins.
@@ -108,6 +108,22 @@ static void ask_on_state(NmAgentState state, void *userdata)
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
 }
 
+/* $NEVERMORE_MAX_ROUNDS: cap on tool-call rounds per turn (the
+ * "too many tool rounds without a final answer" bail-out). Absent or
+ * non-positive = the agent default (NM_AGENT_DEFAULT_MAX_ROUNDS).
+ * strtol, not atoi: 0/negative/garbage all mean "leave the default". */
+static int env_max_rounds(void)
+{
+    const char *s = getenv("NEVERMORE_MAX_ROUNDS");
+    if (!s || !*s)
+        return 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || v <= 0 || v > 100000)
+        return 0;
+    return (int)v;
+}
+
 /* ---------------------------------------------------------------- */
 /* Interactive chat (phase 4): boba runtime + the chat_app component */
 /* ---------------------------------------------------------------- */
@@ -174,6 +190,9 @@ static int run_interactive(const char *provider_name, const char *model)
         fprintf(stderr, "nevermore: failed to initialize the chat\n");
         return 1;
     }
+    int max_rounds = env_max_rounds();
+    if (max_rounds > 0)
+        nm_chat_app_set_max_rounds(app, max_rounds);
     const NmProvider *p = nm_provider_by_name(provider_name);
     nm_chat_app_set_endpoint(app, NULL, nm_provider_api_key(p));
 
@@ -319,6 +338,9 @@ int main(int argc, char *argv[])
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
         nm_agent_set_endpoint(agent, NULL, api_key);
+        int max_rounds = env_max_rounds();
+        if (max_rounds > 0)
+            nm_agent_set_max_rounds(agent, max_rounds);
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);
