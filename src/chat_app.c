@@ -61,15 +61,20 @@
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
-/* Stream ids are nevermore's vocabulary (boba dispatches positionally;
- * -1 is boba's system stream). NM_STREAM_* stays a wire concept. */
-#define NM_STREAM_ID_CONTENT   0
-#define NM_STREAM_ID_REASONING 1
-#define NM_STREAM_COUNT        2
+/* Stream ids live in nm_markdown_render.h: they are the renderer pair's
+ * vocabulary now (the renderer reads blk->stream to decide the reasoning
+ * dim), and this file consumes them from there. boba dispatches
+ * positionally; -1 is boba's system stream. NM_STREAM_* stays a wire
+ * concept. */
 
 /* Output colors are semantic roles (src/colors.h): NM_SGR_TOOL is the
- * Oyster accent every system-stream writer uses today (panel, result,
- * interrupted, separator), NM_SGR_ERROR the Coral error body. */
+ * Oyster accent for the panel/separator, NM_SGR_RESULT the Smoke tool
+ * result line, NM_SGR_ERROR the Coral error body. */
+
+/* The reasoning stream's live-region attr, declared once and borrowed
+ * by the transcript spec (chat_app.c is its owner for the app's
+ * lifetime). Constructors return by value and cannot be borrowed. */
+static const TuiAttr NM_DIM = { .dim = 1 };
 
 #define PROMPT              "❯ "
 #define CONTINUATION_PROMPT "  "
@@ -210,9 +215,9 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
     NmChatApp *app = s_app;
     if (!app || !text || !*text)
         return;
-    /* Content rides stream 0, reasoning stream 1. The reasoning dim is
-     * step 4 (a per-stream renderer seam); step 3 delivers the stream
-     * and its global commit order. */
+    /* Content rides stream 0, reasoning stream 1; the renderer dims
+     * stream 1 (nm_markdown_render.c reads blk->stream), so the phase
+     * boundary below also fixes commit order. */
     int stream_id = channel == NM_STREAM_REASONING ? NM_STREAM_ID_REASONING
                                                    : NM_STREAM_ID_CONTENT;
     /* Phase transition (observed wire truth: reasoning then content,
@@ -295,7 +300,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         size_t first_len = nl ? (size_t)(nl - output) : strlen(output);
         if (first_len > 64)
             first_len = 64;
-        sys_line(app, NM_SGR_TOOL "  ⎿ %s%.*s%s" NM_SGR_RESET,
+        sys_line(app, NM_SGR_RESULT "  ⎿ %s%.*s%s" NM_SGR_RESET,
                  result && result->ok ? "" : "error: ", (int)first_len,
                  output, nl ? " …" : "");
         free(app->current_tool);
@@ -395,7 +400,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         goto oom;
 
     /* The streaming transcript: content + reasoning streams, nevermore's
-     * markdown classifier per stream, the plain renderer pair. Attached
+     * markdown classifier per stream, the styled renderer pair. Attached
      * to the runtime in nm_chat_app_set_runtime (the runtime handle does
      * not exist yet at construction). */
     for (int i = 0; i < NM_STREAM_COUNT; i++) {
@@ -404,6 +409,12 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     }
     app->streams[0].name = "content";
     app->streams[1].name = "reasoning";
+    /* The reasoning stream dims in the live region too: boba paints
+     * the line-granular live rows itself, so the app declares the attr
+     * (TuiStreamSpec.live_attr) and boba applies it (D2). The value is
+     * a static const — the spec borrows the pointer for the
+     * transcript's lifetime. */
+    app->streams[1].live_attr = &NM_DIM;
     TuiTranscriptConfig tcfg = {
         .render_block = nm_markdown_render_block,
         .render_live = nm_markdown_render_live,
@@ -424,6 +435,14 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         goto oom;
     tui_textinput_set_prompt(app->input, PROMPT);
     tui_textinput_set_continuation_prompt(app->input, CONTINUATION_PROMPT);
+    /* Coral prompt (the D5 role): a TuiStyle on the textinput, not an
+     * SGR literal — the input is a boba frame element. */
+    tui_textinput_set_focused_prompt_style(
+        app->input,
+        tui_style_foreground(tui_style_new(), tui_ct_coral()));
+    tui_textinput_set_blurred_prompt_style(
+        app->input,
+        tui_style_foreground(tui_style_new(), tui_ct_coral()));
     tui_textinput_set_terminal_width(app->input, app->term_w);
     tui_textinput_set_soft_wrap(app->input, 1);
     tui_textinput_set_history_size(app->input, 500);
@@ -1264,9 +1283,16 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
 
     if (busy) {
         const char *frame = app->spinner_frame;
-        if (frame)
+        if (frame) {
+            /* Oyster label (the D5 role) — app-owned frame chrome, so an
+             * SGR prefix + reset around the whole row is legitimate; the
+             * reset is before the row's end (D8), and this row is the
+             * frame's last (the input returns next flush). */
+            dynamic_buffer_append_str(out, NM_SGR_TOOL);
             dynamic_buffer_append_str(out, frame);
-        dynamic_buffer_append_printf(out, " %s…", spinner_label(app));
+            dynamic_buffer_append_printf(out, " %s…", spinner_label(app));
+            dynamic_buffer_append_str(out, NM_SGR_RESET);
+        }
     } else {
         tui_textinput_view(app->input, out);
         if (tui_list_popup_is_visible(app->popup)) {

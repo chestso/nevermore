@@ -1059,7 +1059,17 @@ static void test_reasoning_prints_before_answer(void)
     ASSERT_TRUE(strstr(out, "weighing options") != NULL);
     ASSERT_TRUE(strstr(out, "the answer") != NULL);
     /* Reasoning precedes the answer (phase-sequential). */
-    ASSERT_TRUE(strstr(out, "weighing options") < strstr(out, "the answer"));
+    const char *reason = strstr(out, "weighing options");
+    const char *answer = strstr(out, "the answer");
+    ASSERT_TRUE(reason < answer);
+    /* Reasoning is dim (exact composed sequence; a bare ";2" needle
+     * false-positives on every truecolor sequence). */
+    const char *dim = strstr(out, "\x1b[0;2m");
+    ASSERT_NOT_NULL(dim);
+    ASSERT_TRUE(dim < reason);
+    /* The answer itself carries no dim. */
+    const char *answer_dim = strstr(answer, "\x1b[0;2m");
+    ASSERT_TRUE(answer_dim == NULL || answer_dim > answer + 12);
     /* No staircasing. */
     for (const char *p = out; *p; p++)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
