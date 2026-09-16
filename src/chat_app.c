@@ -53,6 +53,7 @@
 #include <boba/unicode.h>
 
 #include "chat_app.h"
+#include "colors.h"
 #include "json.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
@@ -66,11 +67,9 @@
 #define NM_STREAM_ID_REASONING 1
 #define NM_STREAM_COUNT        2
 
-/* Frame / transcript accents. Centralized color presets are a phase-5
- * colors.h item; these are the values that lands behind. */
-#define SGR_OYSTER     "\033[38;2;96;95;107m"  /* oyster #605F6B */
-#define SGR_CORAL      "\033[38;2;255;87;125m" /* coral  #FF577D */
-#define SGR_TEXT_RESET "\033[0m"
+/* Output colors are semantic roles (src/colors.h): NM_SGR_TOOL is the
+ * Oyster accent every system-stream writer uses today (panel, result,
+ * interrupted, separator), NM_SGR_ERROR the Coral error body. */
 
 #define PROMPT              "❯ "
 #define CONTINUATION_PROMPT "  "
@@ -285,7 +284,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         char *sum = tool_summary(args_json);
         if (sum)
             truncate_text(sum, 64);
-        sys_line(app, SGR_OYSTER "▌ %s%s%s" SGR_TEXT_RESET, name,
+        sys_line(app, NM_SGR_TOOL "▌ %s%s%s" NM_SGR_RESET, name,
                  sum ? " · " : "", sum ? sum : "");
         free(sum);
         free(app->current_tool);
@@ -296,7 +295,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         size_t first_len = nl ? (size_t)(nl - output) : strlen(output);
         if (first_len > 64)
             first_len = 64;
-        sys_line(app, SGR_OYSTER "  ⎿ %s%.*s%s" SGR_TEXT_RESET,
+        sys_line(app, NM_SGR_TOOL "  ⎿ %s%.*s%s" NM_SGR_RESET,
                  result && result->ok ? "" : "error: ", (int)first_len,
                  output, nl ? " …" : "");
         free(app->current_tool);
@@ -322,14 +321,14 @@ void nm_chat_app_on_state(int state, void *userdata)
         break;
     case NM_AGENT_ERROR:
         stream_end_all(app);
-        sys_line(app, SGR_CORAL "nevermore: %s" SGR_TEXT_RESET,
+        sys_line(app, NM_SGR_ERROR "nevermore: %s" NM_SGR_RESET,
                  nm_agent_last_error(app->agent) ? nm_agent_last_error(app->agent)
                                                  : "turn failed");
         break;
     case NM_AGENT_IDLE:
         /* Cancel path: a partial answer still commits (it was spoken). */
         stream_end_all(app);
-        sys_line(app, SGR_OYSTER "⏹ interrupted" SGR_TEXT_RESET);
+        sys_line(app, NM_SGR_TOOL "⏹ interrupted" NM_SGR_RESET);
         break;
     default: /* STREAMING / RUNNING_TOOL: no transcript output */
         break;
@@ -739,7 +738,7 @@ static void switch_provider(NmChatApp *app, const char *name)
         nm_provider_list(providers, &n);
         char buf[512];
         int off = snprintf(buf, sizeof(buf),
-                           SGR_CORAL "nevermore: unknown provider '%s' — one of:" SGR_TEXT_RESET,
+                           NM_SGR_ERROR "nevermore: unknown provider '%s' — one of:" NM_SGR_RESET,
                            name);
         for (size_t i = 0; i < n && i < NM_PROVIDER_MAX && off > 0 &&
                            (size_t)off < sizeof(buf);
@@ -865,16 +864,16 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             v = v * 10 + (*p - '0');
         }
         if (v <= 0) {
-            sys_line(app, SGR_CORAL "rounds: expected a positive count "
-                                    "or 'default'" SGR_TEXT_RESET);
+            sys_line(app, NM_SGR_ERROR "rounds: expected a positive count "
+                                       "or 'default'" NM_SGR_RESET);
             return;
         }
         nm_chat_app_set_max_rounds(app, v);
         sys_line(app, "tool rounds: %d", nm_agent_max_rounds(app->agent));
         return;
     }
-    sys_line(app, SGR_CORAL "unknown command '%.*s' — /help lists "
-                            "commands" SGR_TEXT_RESET,
+    sys_line(app, NM_SGR_ERROR "unknown command '%.*s' — /help lists "
+                               "commands" NM_SGR_RESET,
              (int)name_len, rest);
 #undef NAME_IS
 }
