@@ -120,6 +120,17 @@ struct NmChatApp
     NmMarkdown markdown[NM_STREAM_COUNT];
     const TuiClassifier *classifiers[NM_STREAM_COUNT];
     TuiStreamSpec streams[NM_STREAM_COUNT];
+
+    /* Phase state: 1 while the reasoning stream has received deltas in
+     * this turn and has not been finalized. The explicit flag is the
+     * liveness signal a raw-buffer length cannot be: boba's trim keeps
+     * the last completed line (prev is part of the watermark), so
+     * raw_len stays non-zero for the REST of the turn. A guard keyed
+     * on it fired on every content delta, and stream_end on any stream
+     * runs transcript_close_row — which ends the shared staging row
+     * and breaks a byte-emitted fence body at every delta
+     * (the 2026-09-16 per-token line-break report). */
+    int reasoning_open;
 };
 
 /* The singleton (see file header). */
@@ -184,11 +195,28 @@ static void sys_text(NmChatApp *app, const char *s)
     send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
 }
 
+/* Close the reasoning stream at the content boundary (phase
+ * transition; observed wire truth: reasoning then content, never
+ * concurrent), so its order in the scrollback reflects when it was
+ * spoken. Idempotent: stream_end on an idle stream is a no-op, and the
+ * explicit flag is the liveness signal (a raw-buffer length cannot be
+ * one — boba's trim keeps the last completed line, so raw_len stays
+ * non-zero for the rest of the turn). */
+static void close_reasoning_phase(NmChatApp *app)
+{
+    if (!app || !app->reasoning_open)
+        return;
+    app->reasoning_open = 0;
+    send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
+}
+
 /* Agent-stream delta (content or reasoning). */
 static void stream_delta(NmChatApp *app, int stream_id, const char *s)
 {
     if (!app || !s || !*s)
         return;
+    if (stream_id == NM_STREAM_ID_REASONING)
+        app->reasoning_open = 1;
     send_msg(app, tui_msg_stream_delta(stream_id, s, strlen(s)));
 }
 
@@ -197,6 +225,7 @@ static void stream_end_all(NmChatApp *app)
 {
     if (!app)
         return;
+    app->reasoning_open = 0;
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_CONTENT));
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
 }
@@ -220,14 +249,10 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
      * boundary below also fixes commit order. */
     int stream_id = channel == NM_STREAM_REASONING ? NM_STREAM_ID_REASONING
                                                    : NM_STREAM_ID_CONTENT;
-    /* Phase transition (observed wire truth: reasoning then content,
-     * never concurrent): when content begins, finalize reasoning so its
-     * order in the scrollback reflects when it was spoken. */
-    if (stream_id == NM_STREAM_ID_CONTENT &&
-        tui_transcript_stream_raw_len(app->transcript,
-                                      NM_STREAM_ID_REASONING) > 0) {
-        send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
-    }
+    /* Phase transition: content starting finalizes the reasoning
+     * stream first (see close_reasoning_phase). */
+    if (stream_id == NM_STREAM_ID_CONTENT)
+        close_reasoning_phase(app);
     stream_delta(app, stream_id, text);
     /* A delta is a view change: wake the loop so the live region
      * repaints now, not on the next spinner tick. */

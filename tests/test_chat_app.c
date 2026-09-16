@@ -1406,6 +1406,109 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     close(sc.fd);
 }
 
+/* Regression (the 2026-09-16 report: "boba/nevermore is making
+ * linebreaks at terminal width"): reasoning streamed one SSE delta per
+ * token, a fence body line split across deltas. Every line inside the
+ * fence landed on its own transcript row, so
+ *   nevermore -p opencode:go -m deepseek-v4.1-flash
+ * printed as never/more/ /-/p/ open/code/: /go...
+ *
+ * Root cause: nm_chat_app_on_delta decided "the reasoning stream is
+ * still live" with tui_transcript_stream_raw_len(...) > 0. A buffer
+ * length is not a liveness signal — boba's trim keeps the last
+ * completed line (prev_off is part of the watermark), so the guard
+ * stays true for the REST of the turn. Every content delta therefore
+ * sent stream_end(reasoning), and stream_end on ANY stream runs
+ * transcript_close_row — which closes the shared staging row. That is
+ * invisible between rendered units (each unit already ends its own
+ * row) but corrupts the byte-emitted path (an unlabeled fence's bytes
+ * are staged incrementally and deliberately left row-open), so the
+ * fence body broke at every delta:
+ *   nevermore -p opencode:go -m deepseek-v4.1-flash
+ * printed as never / more / " -" / p / open / code...
+ *
+ * The fix is an explicit per-turn flag (reasoning_open). The test
+ * streams reasoning first (making the old guard true), then content
+ * whose unlabeled fence body line is split across deltas, and asserts
+ * the line survives as ONE row. */
+/* Does `frag` reach the scrollback as an APPEND to the row it
+ * continues? boba's extend path writes
+ *   ESC [ 1 A  CR  ESC [ <digits> C  <text>
+ * with the text IMMEDIATELY after the cursor-forward. The bug inserted
+ * a row break between them (a spurious transcript_close_row), so the
+ * fragment landed on the NEXT row as its own CRLF-framed line:
+ *   ESC [ 1 A  CR  ESC [ <digits> C  CRLF  <text>
+ * So: an extension is the cursor move directly followed by the
+ * fragment; the row-break form is the bug. */
+static int fragment_extends_row(const char *hay, const char *frag)
+{
+    const char *p = hay;
+    while ((p = strstr(p, "\x1b[1A\r\x1b[")) != NULL) {
+        const char *d = p + 7; /* past ESC[1A CR ESC[ */
+        while (*d >= '0' && *d <= '9')
+            d++;
+        if (*d != 'C') {
+            p++;
+            continue;
+        }
+        if (strncmp(d + 1, frag, strlen(frag)) == 0)
+            return 1;
+        p++;
+    }
+    return 0;
+}
+
+static void test_fence_line_not_split_by_reasoning_stream_end(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    tui_runtime_send(h->rt, tui_msg_window_size(130, 30));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    /* Reasoning must leave bytes RETAINED in its raw buffer, which is
+     * what the old guard keyed on: the reference dump's reasoning ends
+     * mid-line (the content phase starts before the line's newline
+     * arrives), so the partial tail keeps raw_len > 0. */
+    nm_chat_app_on_delta(NM_STREAM_REASONING,
+                         "thinking about the Go toolchain", NULL, 0, NULL);
+    tui_runtime_flush(h->rt);
+
+    /* Content: the fence opener, then the body line split token by
+     * token exactly as the reference dump's SSE does, then the
+     * closer. Every one of these deltas is CONTENT while (under the
+     * old logic) the reasoning stream still read as live. */
+    const char *c[] = { "```\nnever", "more", " -", "p", " open",
+                        "code", ":go -m deepseek", "-v4.1-flash",
+                        "\n```\n" };
+    for (size_t i = 0; i < sizeof(c) / sizeof(c[0]); i++) {
+        nm_chat_app_on_delta(NM_STREAM_CONTENT, c[i], NULL, 0, NULL);
+        tui_runtime_flush(h->rt);
+    }
+
+    const char *out = harness_read(h);
+    if (getenv("NM_DUMP_OUT")) {
+        FILE *d = fopen(getenv("NM_DUMP_OUT"), "wb");
+        if (d) {
+            fwrite(out, 1, strlen(out), d);
+            fclose(d);
+        }
+    }
+    /* The bug's signature: each fragment became its own CRLF-framed
+     * transcript row, so the fence body reads as "```\r\nnever\r\nmore
+     * \r\n -\r\np...". A correct run keeps the row open across deltas:
+     * the FIRST fragment ends the opener's row, and every later one is
+     * appended to the growing row (the extend path). */
+    ASSERT_TRUE(strstr(out, "```\r\nnever\r\nmore") == NULL);
+    ASSERT_TRUE(fragment_extends_row(out, "more"));
+    ASSERT_TRUE(fragment_extends_row(out, " -"));
+    ASSERT_TRUE(fragment_extends_row(out, "p"));
+    ASSERT_TRUE(fragment_extends_row(out, " open"));
+    ASSERT_TRUE(fragment_extends_row(out, "code"));
+
+    harness_free(h);
+}
+
 /* The D10 echo guard: submit finalizes LIVE blocks and does NOT echo
  * the user line through the transcript, and finish_inline is the one
  * echo (a frame persist — the rendered input row is not CRLF-framed,
@@ -1589,6 +1692,7 @@ int main(void)
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
+    RUN_TEST(test_fence_line_not_split_by_reasoning_stream_end);
     RUN_TEST(test_submit_echoes_once);
     RUN_TEST(test_provider_switch_clears_and_prints_separator);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
