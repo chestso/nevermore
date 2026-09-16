@@ -212,7 +212,8 @@ test_history_LDADD = $(BOBA_LIBS)
 # Markdown: nevermore's line classifier (pure C, no I/O) + the boba
 # transcript integration (classifier verdicts -> commit behavior).
 # Links boba because the renderer writes through a TuiRowSink.
-test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c
+test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
+    ../src/nm_markdown_render.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
 

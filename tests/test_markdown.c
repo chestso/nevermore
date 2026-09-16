@@ -21,8 +21,10 @@
 #include <boba/dynamic_buffer.h>
 #include <boba/runtime.h>
 #include <boba/stream.h>
+#include <boba/unicode.h>
 
 #include "nm_markdown.h"
+#include "nm_markdown_render.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -520,6 +522,166 @@ static void test_reasoning_stream_is_independent(void)
     h_free(h);
 }
 
+/* ---------------------------------------------------------------- */
+/* Renderer half: the real plain renderer through a transcript      */
+/* ---------------------------------------------------------------- */
+
+/* A second harness whose config uses the production renderers, so the
+ * committed bytes are what the app will actually print. */
+static H *h_new_render(void)
+{
+    H *h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+
+    static NmMarkdown m0;
+    nm_markdown_init(&m0);
+    static const TuiStreamSpec streams[1] = { { "content" } };
+    static const TuiClassifier *classifiers[1];
+    classifiers[0] = nm_markdown_classifier(&m0);
+
+    TuiTranscriptConfig cfg = {
+        .render_block = nm_markdown_render_block,
+        .render_live = nm_markdown_render_live,
+        .streams = streams,
+        .classifiers = classifiers,
+        .n_streams = 1,
+    };
+    h->t = tui_transcript_create(&cfg);
+    if (!h->text || !h->out || !h->t) {
+        if (h->t)
+            tui_transcript_free(h->t);
+        if (h->out)
+            fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt = tui_runtime_create((TuiComponent *)tui_transcript_component(h->t),
+                               h->t, &rcfg);
+    if (!h->rt) {
+        tui_transcript_free(h->t);
+        fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    tui_runtime_set_transcript(h->rt, h->t);
+    tui_runtime_send(h->rt, tui_msg_window_size(40, 10));
+    return h;
+}
+
+static void test_table_reaches_scrollback_aligned(void)
+{
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+
+    /* Stream a table header + delimiter + body, then finalize. Nothing
+     * commits until the table finalizes (block granularity). */
+    const char *table =
+        "| Region | 2025 |\n"
+        "| ------ | ---: |\n"
+        "| North  | 1234 |\n"
+        "| South  |   56 |\n"
+        "\n";
+    h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
+
+    const char *out = h_read(h);
+    /* The box is drawn with the header and both body rows. */
+    ASSERT_TRUE(strstr(out, "Region") != NULL);
+    ASSERT_TRUE(strstr(out, "North") != NULL);
+    ASSERT_TRUE(strstr(out, "South") != NULL);
+    /* Top-left corner and bottom-left corner (U+250C / U+2514). */
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x8c") != NULL);
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x94") != NULL);
+    /* No bare LF (the transcript is CRLF-framed). */
+    for (const char *p = out; *p; p++)
+        ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
+
+    h_free(h);
+}
+
+static void test_render_block_emits_content_not_framing(void)
+{
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+
+    h_send(h, tui_msg_stream_delta(0, "just a paragraph line\n", 22));
+    h_flush(h);
+    h_send(h, tui_msg_stream_delta(0, "next line\n", 10));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    /* The committed rows are exactly the content plus their
+     * terminator: had the renderer emitted any styling or framing
+     * byte, the exact substring below would not be present. */
+    ASSERT_TRUE(strstr(out, "just a paragraph line\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "next line\r\n") != NULL);
+
+    h_free(h);
+}
+
+static void test_table_width_grows_then_final_box_aligned(void)
+{
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+
+    /* A narrow first body row commits nothing (block granularity) and a
+     * wider later row cannot retroactively widen anything: the box is
+     * computed once, from the whole table, at finalize. */
+    h_send(h, tui_msg_stream_delta(0, "| a | b |\n",
+                                   strlen("| a | b |\n")));
+    h_flush(h);
+    h_send(h, tui_msg_stream_delta(0, "| - | - |\n",
+                                   strlen("| - | - |\n")));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 0u);
+    h_send(h, tui_msg_stream_delta(0, "| wider cell | x |\n",
+                                   strlen("| wider cell | x |\n")));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 0u);
+    h_send(h, tui_msg_stream_delta(0, "\n", 1));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
+
+    /* Every committed box row has the same DISPLAY width (border rows
+     * use 3-byte glyphs where content rows use spaces, so byte length
+     * is not the measure). The capture also holds live-path
+     * re-renders; the finalized table is the LAST top-corner onward. */
+    const char *out = h_read(h);
+    const char *top = NULL;
+    for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
+        top = q; /* last top-left corner */
+    ASSERT_NOT_NULL(top);
+    int widths[32];
+    int nrows = 0;
+    for (const char *p = top; *p && nrows < 32;) {
+        const char *e = strstr(p, "\r\n");
+        if (!e)
+            break;
+        char row[256];
+        size_t rl = (size_t)(e - p);
+        if (rl >= sizeof(row))
+            rl = sizeof(row) - 1;
+        memcpy(row, p, rl);
+        row[rl] = '\0';
+        widths[nrows++] = (int)tui_utf8_display_width_ansi(row, strlen(row));
+        p = e + 2;
+    }
+    ASSERT_TRUE(nrows >= 5); /* top, header, sep, body, bottom */
+    for (int r = 1; r < nrows; r++)
+        ASSERT_EQ(widths[r], widths[0]);
+
+    h_free(h);
+}
+
 int main(void)
 {
     printf("test_markdown:\n");
@@ -540,5 +702,8 @@ int main(void)
     RUN_TEST(test_fence_plain_streams_verbatim_bytes);
     RUN_TEST(test_once_lookahead_never_reparses_committed);
     RUN_TEST(test_reasoning_stream_is_independent);
+    RUN_TEST(test_table_reaches_scrollback_aligned);
+    RUN_TEST(test_render_block_emits_content_not_framing);
+    RUN_TEST(test_table_width_grows_then_final_box_aligned);
     TEST_SUMMARY();
 }

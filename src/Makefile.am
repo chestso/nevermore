@@ -98,6 +98,8 @@ nevermore_SOURCES = \
     session.c \
     nm_markdown.h \
     nm_markdown.c \
+    nm_markdown_render.h \
+    nm_markdown_render.c \
     chat_app.h \
     chat_app.c \
     history.h \
