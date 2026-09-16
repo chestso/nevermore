@@ -648,9 +648,164 @@ static void test_hyper_models_fetch(void)
     pthread_join(th, NULL);
 
     /* GET /v1/models, and tokenless (no Authorization header —
-     * the catalog answers without a key, HYPER-API.md §5). */
+     * the catalog answers without a key, HYPER-API.md §5). It still
+     * carries x-crush-id (Crush sends it on every request); the
+     * session-affinity pair is chat-only. */
     ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
     ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL);
+    ASSERT_TRUE(strstr(last_request, "x-crush-id: ") != NULL);
+    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") == NULL);
+}
+
+/* Cache affinity: every hyper chat request carries the three routing
+ * headers (HYPER-API.md §3.1), and the two session headers are the
+ * same XXH3-64 hash of the request's conversation id — stable across
+ * the blocking and step paths. */
+static void test_hyper_chat_carries_affinity_headers(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+
+    const char *conv = "nm-0123456789abcdef0123456789abcdef";
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+        conv, capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+
+    ASSERT_TRUE(strstr(last_request, "x-session-id: ed926fff3042616d") != NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "x-session-affinity: ed926fff3042616d") != NULL);
+    /* x-crush-id is present and non-empty (its value is machine-local). */
+    const char *crush = strstr(last_request, "x-crush-id: ");
+    ASSERT_NOT_NULL(crush);
+    ASSERT_TRUE(crush[sizeof("x-crush-id: ") - 1] != '\r');
+    ASSERT_TRUE(crush[sizeof("x-crush-id: ") - 1] != '\0');
+    /* None is redacted: these are routing hashes, not secrets. */
+    ASSERT_TRUE(strstr(last_request, "<redacted>") == NULL);
+}
+
+/* A request without a conversation id still sends the affinity
+ * headers, pinning the fallback path (a missing header would silently
+ * disable caching). */
+static void test_hyper_chat_null_conversation_id_falls_back(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+
+    const char *sid = strstr(last_request, "x-session-id: ");
+    const char *aff = strstr(last_request, "x-session-affinity: ");
+    ASSERT_NOT_NULL(sid);
+    ASSERT_NOT_NULL(aff);
+    /* Same hash in both, non-empty, and not the input id verbatim. */
+    ASSERT_TRUE(sid[sizeof("x-session-id: ") - 1] != '\r');
+    ASSERT_TRUE(strncmp(sid + sizeof("x-session-id: ") - 1,
+                        aff + sizeof("x-session-affinity: ") - 1,
+                        16) == 0);
+}
+
+/* HYPER_NO_SESSION_CACHE drops the two cache headers; x-crush-id is
+ * identity, not cache routing, and stays. */
+static void test_hyper_session_cache_opt_out(void)
+{
+    test_setenv("HYPER_NO_SESSION_CACHE", "1");
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+        "nm-0123456789abcdef0123456789abcdef", capture_delta, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    test_unsetenv("HYPER_NO_SESSION_CACHE");
+
+    ASSERT_TRUE(strstr(last_request, "x-session-id:") == NULL);
+    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") == NULL);
+    ASSERT_TRUE(strstr(last_request, "x-crush-id:") != NULL);
+}
+
+/* The affinity hash of the same conversation id is stable across the
+ * blocking and step paths — the point of affinity is that every turn
+ * hashes identically. The step path is driven here; the blocking path
+ * is pinned by test_hyper_chat_carries_affinity_headers. */
+static void test_hyper_affinity_stable_across_paths(void)
+{
+    const char *conv = "nm-0123456789abcdef0123456789abcdef";
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+        conv, capture_delta, &cap
+    };
+    NmChatResult err = { 0 };
+    NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
+    ASSERT_NOT_NULL(h);
+    NmChatResult res = { 0 };
+    NmChatStatus st = NM_CHAT_PENDING;
+    int guard = 0;
+    while (st == NM_CHAT_PENDING && guard++ < 2000) {
+        st = p->chat_step(h, &res);
+        if (st == NM_CHAT_PENDING)
+            usleep(10 * 1000);
+    }
+    ASSERT_EQ(st, NM_CHAT_OK);
+    p->chat_end(h);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "x-session-affinity: ed926fff3042616d") != NULL);
 }
 
 static void test_hyper_needs_auth(void)
@@ -1228,6 +1383,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_models_live_then_fallback);
     RUN_TEST(test_hyper_chat_end_to_end);
     RUN_TEST(test_hyper_chat_begin_step);
+    RUN_TEST(test_hyper_chat_carries_affinity_headers);
+    RUN_TEST(test_hyper_chat_null_conversation_id_falls_back);
+    RUN_TEST(test_hyper_session_cache_opt_out);
+    RUN_TEST(test_hyper_affinity_stable_across_paths);
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);

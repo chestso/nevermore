@@ -1319,6 +1319,65 @@ static void test_extra_headers_redaction_marker(void)
     free(log);
 }
 
+/* Wire dump: the hyper affinity headers (x-session-id /
+ * x-session-affinity / x-crush-id) are routing hashes, not secrets —
+ * the recorder logs them VERBATIM, which is the point of dumping the
+ * wire for a cache-affinity problem. This pins the recorder half of
+ * the feature: a marked-as-secret header would be redacted, but these
+ * three must not be. */
+static void test_affinity_headers_logged_verbatim(void)
+{
+    taplog_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("hyper", "gpt-oss-120b"), 1);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = { lfd, req, sizeof(req), 0, extra_sse_response() };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    /* Exactly what provider_hyper.c builds: the session pair (same
+     * hash, two names) + the per-machine id, all unmarked. */
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmExtraHeader extras[3] = {
+        { "x-session-id", "ed926fff3042616d", 0 },
+        { "x-session-affinity", "ed926fff3042616d", 0 },
+        { "x-crush-id", "0123456789abcdef", 0 },
+    };
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "sk-hyper-secret",
+                            "nevermore (nevermore agent)", extras, 3 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req2 = {
+        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta,
+        &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    close(lfd);
+    nm_wire_recorder_shutdown();
+
+    char *log = taplog_read();
+    ASSERT_NOT_NULL(log);
+
+    /* All three present as JSON header entries, values verbatim. */
+    ASSERT_TRUE(strstr(log, "x-session-id") != NULL);
+    ASSERT_TRUE(strstr(log, "ed926fff3042616d") != NULL);
+    ASSERT_TRUE(strstr(log, "x-session-affinity") != NULL);
+    ASSERT_TRUE(strstr(log, "x-crush-id") != NULL);
+    ASSERT_TRUE(strstr(log, "0123456789abcdef") != NULL);
+    /* The auth header is still redacted — affinity did not weaken the
+     * redaction contract. */
+    ASSERT_TRUE(strstr(log, "sk-hyper-secret") == NULL);
+    ASSERT_TRUE(strstr(log, "<redacted>") != NULL);
+    free(log);
+}
+
 static void test_wiretap_401_records_error_with_status(void)
 {
     taplog_reset();
@@ -1437,5 +1496,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_extra_headers_null_changes_nothing);
     RUN_TEST(test_fetch_json_carries_extra_headers);
     RUN_TEST(test_extra_headers_redaction_marker);
+    RUN_TEST(test_affinity_headers_logged_verbatim);
     TEST_SUMMARY();
 }

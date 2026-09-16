@@ -103,6 +103,8 @@ nevermore_SOURCES = \
     wire_recorder.c \
     sse.c \
     json.c \
+    xxh3.h \
+    xxh3.c \
     agent.c \
     conversation_id.c \
     context.h \

@@ -4,6 +4,7 @@
 check_PROGRAMS = \
     test_sse \
     test_json \
+    test_xxh3 \
     test_authinfo \
     test_provider \
     test_source \
@@ -84,6 +85,11 @@ test_sse_CFLAGS = $(TEST_CFLAGS)
 test_json_SOURCES = test_json.c ../src/json.c
 test_json_CFLAGS = $(TEST_CFLAGS)
 
+# XXH3-64 (seed 0) against reference-generated vectors: pure C, no
+# network, no deps. Pins the Hyper affinity header digest values.
+test_xxh3_SOURCES = test_xxh3.c ../src/xxh3.c
+test_xxh3_CFLAGS = $(TEST_CFLAGS)
+
 # authinfo key lookup (pure C: stdio/stdlib/string only, no sockets).
 test_authinfo_SOURCES = test_authinfo.c ../src/authinfo.c
 test_authinfo_CFLAGS = $(TEST_CFLAGS)
@@ -92,7 +98,7 @@ test_authinfo_CFLAGS = $(TEST_CFLAGS)
 # vtables call into the shared openai_client, so it links too).
 test_provider_SOURCES = test_provider.c ../src/nevermore.c \
     ../src/authinfo.c \
-    ../src/conversation_id.c \
+    ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
@@ -107,7 +113,7 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 # data seam. Same link set as test_provider (sources wrap providers).
 test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
     ../src/authinfo.c \
-    ../src/conversation_id.c \
+    ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
@@ -142,7 +148,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c \
+    ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
@@ -183,7 +189,7 @@ test_tools_LDADD = -lpthread
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
-test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
+test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/context.c \
     ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
@@ -224,7 +230,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c \
-    ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
+    ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \

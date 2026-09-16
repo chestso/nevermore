@@ -37,6 +37,7 @@ run_build() {
 
 run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
+run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_session tests/test_session.c src/session.c
 run_build test_context tests/test_context.c src/context.c
@@ -52,7 +53,7 @@ run_build test_wire_recorder tests/test_wire_recorder.c src/wire_recorder.c \
 	$TLS_SRC -lws2_32 -lpthread
 
 run_build test_provider tests/test_provider.c src/nevermore.c \
-	src/authinfo.c src/conversation_id.c \
+	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -63,7 +64,7 @@ run_build test_provider tests/test_provider.c src/nevermore.c \
 	-lws2_32 -lsecur32 -lcrypt32
 
 run_build test_source tests/test_source.c src/source.c src/nevermore.c \
-	src/authinfo.c src/conversation_id.c \
+	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -76,7 +77,7 @@ run_build test_source tests/test_source.c src/source.c src/nevermore.c \
 run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \
-	src/authinfo.c src/conversation_id.c \
+	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -88,7 +89,7 @@ run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/os_compat_win.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \
-	src/authinfo.c src/conversation_id.c \
+	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
