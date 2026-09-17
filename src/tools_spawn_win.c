@@ -31,6 +31,20 @@ static wchar_t *utf8_to_wide(const char *s)
     return w;
 }
 
+/* The child's stdin is NUL, never the console: a command that reads
+ * stdin must not steal the TUI's keystrokes, and STARTF_USESTDHANDLES
+ * hands the child whatever handle we name. Inheritable, since a child
+ * receives the STARTUPINFO handles by inheritance — the POSIX twin
+ * wires /dev/null (see spawn_wire_stdio there). NULL on failure; the
+ * caller then falls back to the inherited console handle. */
+static HANDLE open_null_stdin(void)
+{
+    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+    return CreateFileW(L"NUL", GENERIC_READ,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, &sa, OPEN_EXISTING,
+                       0, NULL);
+}
+
 int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 {
     *output = NULL;
@@ -82,15 +96,20 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wpipe;
     si.hStdError = wpipe;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE nullin = open_null_stdin();
+    si.hStdInput = nullin ? nullin : GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi = { 0 };
     if (!CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si,
                         &pi)) {
+        if (nullin)
+            CloseHandle(nullin);
         LocalFree(wcmd);
         CloseHandle(rpipe);
         CloseHandle(wpipe);
         return -1;
     }
+    if (nullin)
+        CloseHandle(nullin); /* our copy; the child owns its inherit */
     LocalFree(wcmd);
     CloseHandle(wpipe); /* our copy; the child owns its inherit */
 
@@ -187,15 +206,20 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wpipe;
     si.hStdError = wpipe;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    HANDLE nullin = open_null_stdin();
+    si.hStdInput = nullin ? nullin : GetStdHandle(STD_INPUT_HANDLE);
     PROCESS_INFORMATION pi = { 0 };
     if (!CreateProcessW(NULL, wcmd, NULL, NULL, TRUE, 0, NULL, NULL, &si,
                         &pi)) {
+        if (nullin)
+            CloseHandle(nullin);
         LocalFree(wcmd);
         CloseHandle(rpipe);
         CloseHandle(wpipe);
         return nm_tool_result_error("failed to start command");
     }
+    if (nullin)
+        CloseHandle(nullin); /* our copy; the child owns its inherit */
     LocalFree(wcmd);
     CloseHandle(wpipe); /* our copy; the child owns its inherit */
 

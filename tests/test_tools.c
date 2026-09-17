@@ -11,8 +11,11 @@
 #define getpid      _getpid
 #define mkdir(d, m) _mkdir(d)
 #else
+#include <fcntl.h>
+#include <signal.h>
 #include <sys/select.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -1031,6 +1034,160 @@ static void test_run_command_cancel_kills_the_process_group(void)
     nm_toolset_free(ts);
 }
 
+/* run_command children must NOT inherit the terminal's stdin. They run
+ * in their own background process group (POSIX_SPAWN_SETPGROUP), so a
+ * read of the tty gets SIGTTIN and stops the child mid-command, and a
+ * read of any open pipe (the harness's, on CI) blocks until that
+ * writer closes. The spawn wires /dev/null in instead, so a read sees
+ * EOF at once.
+ *
+ * A bounded hold makes that observable in bounded time rather than as
+ * a hang: the pin turns the harness's stdin into a pipe whose write
+ * end a forked helper holds open for STDIN_HOLD_SECS, so a child that
+ * inherits it sits there that long — pre-fix these tests FAIL on the
+ * elapsed-time assert instead of wedging the suite; post-fix the child
+ * reads /dev/null and never touches the pipe. The parent must close
+ * its own copy of the write end (it would otherwise stay open — and
+ * the read end stay ready — until stdin_pin_end, past both the bound
+ * and the helper's exit, turning the negative into the hang this test
+ * exists to catch). The write end is FD_CLOEXEC so the spawned child
+ * cannot inherit it (it would never see EOF otherwise); the read end
+ * is dup2'd onto fd 0, which clears CLOEXEC there. */
+#define STDIN_HOLD_SECS 3
+
+struct StdinPin
+{
+    int saved;    /* the harness's real stdin */
+    int fds[2];   /* the pipe the child would block on */
+    pid_t writer; /* holds fds[1] open, then exits */
+};
+
+static void stdin_pin_begin(struct StdinPin *pin)
+{
+    pin->saved = -1;
+    pin->writer = -1;
+    pin->fds[0] = pin->fds[1] = -1;
+    if (pipe(pin->fds) != 0)
+        return;
+    fcntl(pin->fds[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pin->fds[1], F_SETFD, FD_CLOEXEC);
+    pin->saved = dup(STDIN_FILENO);
+    dup2(pin->fds[0], STDIN_FILENO);
+    pin->writer = fork();
+    if (pin->writer == 0) {
+        sleep(STDIN_HOLD_SECS); /* hold the write end, then EOF by exit */
+        _exit(0);
+    }
+    /* Only the helper keeps the write end: the parent's copy would
+     * hold the pipe ready past the helper's exit (and past these
+     * tests' elapsed-time bound), so a child that inherited the read
+     * end could never reach EOF. */
+    close(pin->fds[1]);
+    pin->fds[1] = -1;
+}
+
+static void stdin_pin_end(struct StdinPin *pin)
+{
+    if (pin->writer > 0) {
+        kill(pin->writer, SIGKILL); /* no reason to wait out the hold */
+        waitpid(pin->writer, NULL, 0);
+    }
+    if (pin->saved >= 0) {
+        dup2(pin->saved, STDIN_FILENO);
+        close(pin->saved);
+    }
+    if (pin->fds[0] >= 0)
+        close(pin->fds[0]);
+    if (pin->fds[1] >= 0)
+        close(pin->fds[1]);
+}
+
+static long long elapsed_us(const struct timeval *a, const struct timeval *b)
+{
+    return (long long)(b->tv_sec - a->tv_sec) * 1000000LL +
+           (long long)(b->tv_usec - a->tv_usec);
+}
+
+/* The synchronous capture path (nm_spawn_capture_os). */
+static void test_run_command_stdin_is_dev_null(void)
+{
+    struct StdinPin pin;
+    stdin_pin_begin(&pin);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    NmToolResult r = nm_toolset_execute(ts, "run_command",
+                                        "{\"cmd\":\"if read x; then echo "
+                                        "got:$x; else echo eof; fi\"}",
+                                        NULL);
+    gettimeofday(&t1, NULL);
+    long long us = elapsed_us(&t0, &t1);
+
+    stdin_pin_end(&pin);
+    nm_toolset_free(ts);
+
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    /* /dev/null: `read` fails at once, so the shell takes the else. */
+    ASSERT_TRUE(strstr(r.output, "eof") != NULL);
+    /* ...and it never waited on the held-open pipe. */
+    ASSERT_TRUE(us < 1500 * 1000);
+    nm_tool_result_free(&r);
+}
+
+/* The async path (spawn_begin), whose wiring is a second caller of the
+ * same stdio seam. */
+static void test_run_command_async_stdin_is_dev_null(void)
+{
+    struct StdinPin pin;
+    stdin_pin_begin(&pin);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd", nm_json_new_string("if read x; then echo "
+                                                 "got:$x; else echo eof; fi"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    NmToolResult r = { 0, NULL };
+    int status = NM_TOOL_RUNNING;
+    while ((status = t->step(e, &r)) == NM_TOOL_RUNNING) {
+        int fd = t->exec_fd(e);
+        if (fd >= 0) {
+            fd_set fds;
+            struct timeval tv = { 0, 20 * 1000 };
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            select(fd + 1, &fds, NULL, NULL, &tv);
+        }
+        gettimeofday(&t1, NULL);
+        if (elapsed_us(&t0, &t1) > 1500 * 1000)
+            break; /* pre-fix: the child is sitting on the held pipe */
+    }
+    gettimeofday(&t1, NULL);
+    long long us = elapsed_us(&t0, &t1);
+
+    t->end(e);
+    stdin_pin_end(&pin);
+    nm_toolset_free(ts);
+
+    ASSERT_EQ(status, NM_TOOL_DONE);
+    ASSERT_TRUE(us < 1500 * 1000);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "eof") != NULL);
+    nm_tool_result_free(&r);
+}
+
 #endif /* !_WIN32 */
 
 int main(void)
@@ -1070,6 +1227,8 @@ int main(void)
     RUN_TEST(test_run_command_cancel_is_prompt);
     RUN_TEST(test_run_command_cancel_kills_the_child);
     RUN_TEST(test_run_command_cancel_kills_the_process_group);
+    RUN_TEST(test_run_command_stdin_is_dev_null);
+    RUN_TEST(test_run_command_async_stdin_is_dev_null);
 #endif
     TEST_SUMMARY();
 }

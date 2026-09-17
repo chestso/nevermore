@@ -60,6 +60,34 @@ static const char *resolve_prog(const char *prog, char *buf, size_t bufsz)
     return NULL;
 }
 
+/* Wire the child's stdio through the spawn file actions: stdout+stderr
+ * both land on the pipe's write end (combined capture), stdin is
+ * /dev/null.
+ *
+ * stdin must NOT be inherited. The async spawn puts the child in its
+ * own background process group (POSIX_SPAWN_SETPGROUP): a read of the
+ * terminal's stdin there gets SIGTTIN and stops the child mid-command,
+ * and a command whose stdin is any open pipe (the TUI's, or a test
+ * harness's) would block until that writer closed — nevermore never
+ * closes it, so the read never returns. A tool caller has no console
+ * to hand down, so /dev/null is the honest semantic: a read sees EOF
+ * at once. addopen names STDIN_FILENO directly, so the open cannot
+ * land on some incidental free fd and leak. Order matters — the close
+ * of the pipe's read end (which can BE fd 0 when stdin was closed)
+ * precedes the /dev/null open, or a subsequent open could reuse the
+ * still-live read fd. */
+static void spawn_wire_stdio(posix_spawn_file_actions_t *fa,
+                             const int fds[2])
+{
+    posix_spawn_file_actions_addclose(fa, fds[0]);
+    posix_spawn_file_actions_addopen(fa, STDIN_FILENO, "/dev/null", O_RDONLY,
+                                     0);
+    posix_spawn_file_actions_adddup2(fa, fds[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(fa, fds[1], STDERR_FILENO);
+    if (fds[1] != STDOUT_FILENO && fds[1] != STDERR_FILENO)
+        posix_spawn_file_actions_addclose(fa, fds[1]);
+}
+
 int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 {
     *output = NULL;
@@ -71,11 +99,7 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addclose(&fa, fds[0]);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
-    if (fds[1] != STDOUT_FILENO && fds[1] != STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fa, fds[1]);
+    spawn_wire_stdio(&fa, fds);
 
     /* posix_spawn's PATH search is not reliable across platforms
      * (some glibc/SELinux combinations execve the bare name, which
@@ -266,11 +290,7 @@ static NmToolExec *spawn_begin(const char *const *argv)
 
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
-    posix_spawn_file_actions_addclose(&fa, fds[0]);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, fds[1], STDERR_FILENO);
-    if (fds[1] != STDOUT_FILENO && fds[1] != STDERR_FILENO)
-        posix_spawn_file_actions_addclose(&fa, fds[1]);
+    spawn_wire_stdio(&fa, fds);
 
     char pathbuf[4096];
     const char *prog = resolve_prog(argv[0], pathbuf, sizeof(pathbuf));
