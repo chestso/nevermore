@@ -1563,6 +1563,34 @@ static void test_provider_switch_clears_and_prints_separator(void)
     harness_free(h);
 }
 
+/* The app installs its per-stream highlighter state as the
+ * transcript's user_data, so a labeled fence body streamed through the
+ * app's own delta path carries token colors (keyword Hazy, number
+ * Mustard). */
+static void test_fence_body_tokens_highlighted_through_app(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    tui_runtime_send(h->rt, tui_msg_window_size(130, 30));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "```c\n", NULL, 0, NULL);
+    tui_runtime_flush(h->rt);
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "int x = 42;\n", NULL, 0, NULL);
+    tui_runtime_flush(h->rt);
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "```\n", NULL, 0, NULL);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* keyword Hazy #8B75FF = 139;117;255 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
+    /* number Mustard #F5EF34 = 245;239;52 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m42") != NULL);
+
+    harness_free(h);
+}
+
 /* Phase-sequential reasoning then content: both commit, in that order,
  * on their own streams. */
 static void test_reasoning_and_content_commit_in_order(void)
@@ -1695,6 +1723,7 @@ int main(void)
     RUN_TEST(test_fence_line_not_split_by_reasoning_stream_end);
     RUN_TEST(test_submit_echoes_once);
     RUN_TEST(test_provider_switch_clears_and_prints_separator);
+    RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     TEST_SUMMARY();

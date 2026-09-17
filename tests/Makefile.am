@@ -19,6 +19,7 @@ check_PROGRAMS = \
     test_spinner \
     test_history \
     test_markdown \
+    test_highlight \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -221,11 +222,20 @@ test_history_LDADD = $(BOBA_LIBS)
 
 # Markdown: nevermore's line classifier (pure C, no I/O) + the boba
 # transcript integration (classifier verdicts -> commit behavior).
-# Links boba because the renderer writes through a TuiRowSink.
+# Links boba because the renderer writes through a TuiRowSink; the
+# renderer's fence path calls the highlighter, so nm_highlight.c links
+# too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
-    ../src/nm_markdown_render.c
+    ../src/nm_markdown_render.c ../src/nm_highlight.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
+
+# Fence token highlighter: pure C (no boba, no I/O) — the resumable
+# per-line tokenizer behind the labeled-fence body styling (IR step
+# 4b). Unit-tests every language's token classes, cross-line block
+# comment state, and language detection.
+test_highlight_SOURCES = test_highlight.c ../src/nm_highlight.c
+test_highlight_CFLAGS = $(TEST_CFLAGS)
 
 # Chat app: the inline TUI component, driven through boba without a
 # terminal (runtime over tmpfile output, hand-fed messages) against
@@ -233,7 +243,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
-    ../src/nm_markdown.c ../src/nm_markdown_render.c \
+    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

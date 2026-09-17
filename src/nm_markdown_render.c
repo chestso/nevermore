@@ -509,7 +509,7 @@ static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
 }
 
 /* ---------------------------------------------------------------- */
-/* Fences (D6a)                                                     */
+/* Fences (D6a + step 4b highlighting)                              */
 /* ---------------------------------------------------------------- */
 
 /* Length of a leading fence run (` or ~), 0 when the line is not a
@@ -530,11 +530,50 @@ static size_t fence_run_len(const char *s, size_t len)
     return n >= 3 ? n : 0;
 }
 
+/* Fence body highlighting: report one line's token runs to the sink.
+ * Runs are contiguous (nm_highlight_line guarantees coverage), so each
+ * is emitted under the fence body tint composed with the token's
+ * role. `body` is the plain-code tint; a token attr replaces its
+ * foreground. */
+typedef struct
+{
+    TuiRowSink *sink;
+    const char *line;
+    TuiAttr base; /* the row's base attr (dim on reasoning) */
+    TuiAttr body; /* the fence body tint, composed onto base */
+} HlCtx;
+
+static TuiAttr hl_attr_for(NmHighlightKind kind)
+{
+    switch (kind) {
+    case NM_HL_KEYWORD:
+        return nm_attr_hl_keyword();
+    case NM_HL_STRING:
+        return nm_attr_hl_string();
+    case NM_HL_COMMENT:
+        return nm_attr_hl_comment();
+    case NM_HL_NUMBER:
+        return nm_attr_hl_number();
+    case NM_HL_PLAIN:
+    default:
+        return nm_attr_plain();
+    }
+}
+
+static void hl_emit(void *ud, size_t off, size_t len, NmHighlightKind kind)
+{
+    HlCtx *c = ud;
+    TuiAttr a = attr_or(c->body, hl_attr_for(kind));
+    emit_styled(c->sink, c->line + off, len, a, c->base);
+}
+
 /* Emit a labeled-fence line: a delimiter (Oyster, with a Mustard info
- * string), an info-string line, or body tint (Smoke). Open/close
- * detection is content-based (D6's accepted caveat). */
+ * string), or a body line (Smoke tint, tokens highlighted when `hl`
+ * knows the language). Open/close detection is content-based (D6's
+ * accepted caveat); a delimiter line (re)starts the highlighter from
+ * its info string, so a close (empty info) leaves it idle. */
 static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
-                            TuiAttr base)
+                            TuiAttr base, NmHighlight *hl)
 {
     size_t run = fence_run_len(s, len);
     if (run) {
@@ -544,12 +583,14 @@ static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
             i++;
         while (i < len && is_space(s[i]))
             i++;
-        begin_row(sink, base);
-        emit_styled(sink, s, i + run, delim, base);
         /* info string after the run, up to the line end */
         size_t rest = i + run;
         while (rest < len && is_space(s[rest]))
             rest++;
+        if (hl)
+            nm_highlight_begin(hl, s + rest, len - rest);
+        begin_row(sink, base);
+        emit_styled(sink, s, i + run, delim, base);
         if (rest < len) {
             TuiAttr info = attr_or(base, nm_attr_fence_info());
             emit_styled(sink, s + rest, len - rest, info, base);
@@ -559,7 +600,12 @@ static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
     }
     TuiAttr body = attr_or(base, nm_attr_fence_body());
     begin_row(sink, base);
-    emit_styled(sink, s, len, body, base);
+    if (nm_highlight_active(hl)) {
+        HlCtx ctx = { sink, s, base, body };
+        nm_highlight_line(hl, s, len, hl_emit, &ctx);
+    } else {
+        emit_styled(sink, s, len, body, base);
+    }
     end_row(sink, base);
 }
 
@@ -845,11 +891,33 @@ static void table_render(const Table *t, int width, int rows_cap,
 /* Callbacks                                                        */
 /* ---------------------------------------------------------------- */
 
+/* Renderer-side per-stream state. `user_data` is a borrowed
+ * NmMarkdownRenderState (or NULL — fences then stay plain-tinted, so
+ * the renderer pair is usable standalone). Cross-line highlighter
+ * state is per stream: a fence on content must not share a block
+ * comment with one on reasoning. */
+void nm_markdown_render_state_init(NmMarkdownRenderState *rs)
+{
+    if (!rs)
+        return;
+    for (int i = 0; i < NM_STREAM_COUNT; i++)
+        nm_highlight_init(&rs->hl[i]);
+}
+
+/* The highlighter for `blk`'s stream, or NULL when there is no state or
+ * the stream is out of range (boba's system stream -1, a future id). */
+static NmHighlight *hl_for(const TuiBlock *blk, void *user_data)
+{
+    NmMarkdownRenderState *rs = user_data;
+    if (!rs || blk->stream < 0 || blk->stream >= NM_STREAM_COUNT)
+        return NULL;
+    return &rs->hl[blk->stream];
+}
+
 void nm_markdown_render_block(const TuiBlock *blk, const char *text,
                               size_t len, int width, TuiRowSink *sink,
                               void *user_data)
 {
-    (void)user_data;
     if (!blk || !sink)
         return;
     TuiAttr base = stream_base_attr(blk);
@@ -904,11 +972,12 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     }
     case TUI_BLOCK_FENCE:
     {
+        NmHighlight *hl = hl_for(blk, user_data);
         size_t start = 0;
         for (size_t i = 0; i <= len; i++) {
             if (i == len || text[i] == '\n') {
                 if (i > start)
-                    emit_fence_line(text + start, i - start, sink, base);
+                    emit_fence_line(text + start, i - start, sink, base, hl);
                 else
                     end_row(sink, base);
                 start = i + 1;

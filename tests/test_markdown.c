@@ -747,6 +747,61 @@ static H *h_new_render_streams(size_t n_streams)
     return h;
 }
 
+/* A renderer harness with the highlighter state installed: the app
+ * passes &NmMarkdownRenderState as TuiTranscriptConfig.user_data, so
+ * labeled-fence bodies carry token colors. The state is static because
+ * the config borrows the pointer for the transcript's lifetime. */
+static H *h_new_render_hl(size_t n_streams)
+{
+    H *h = calloc(1, sizeof(*h));
+    if (!h)
+        return NULL;
+    h->text = malloc(OUT_CAP);
+    h->out = tmpfile();
+
+    static NmMarkdown ms[2];
+    static NmMarkdownRenderState rs;
+    nm_markdown_render_state_init(&rs);
+    static const TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    static const TuiClassifier *classifiers[2];
+    for (size_t i = 0; i < n_streams; i++) {
+        nm_markdown_init(&ms[i]);
+        classifiers[i] = nm_markdown_classifier(&ms[i]);
+    }
+
+    TuiTranscriptConfig cfg = {
+        .render_block = nm_markdown_render_block,
+        .render_live = nm_markdown_render_live,
+        .streams = streams,
+        .classifiers = classifiers,
+        .n_streams = n_streams,
+        .user_data = &rs,
+    };
+    h->t = tui_transcript_create(&cfg);
+    if (!h->text || !h->out || !h->t) {
+        if (h->t)
+            tui_transcript_free(h->t);
+        if (h->out)
+            fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    TuiRuntimeConfig rcfg = { .raw_mode = 0, .output = h->out };
+    h->rt = tui_runtime_create((TuiComponent *)tui_transcript_component(h->t),
+                               h->t, &rcfg);
+    if (!h->rt) {
+        tui_transcript_free(h->t);
+        fclose(h->out);
+        free(h->text);
+        free(h);
+        return NULL;
+    }
+    tui_runtime_set_transcript(h->rt, h->t);
+    tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
+    return h;
+}
+
 /* The live region at width/rows_cap (frame bytes, SGR included). */
 static const char *h_view(H *h, int width, int rows_cap)
 {
@@ -920,6 +975,102 @@ static void test_table_header_bold_and_borders_oyster(void)
     h_free(h);
 }
 
+/* ---------------------------------------------------------------- */
+/* Fence token highlighting (step 4b)                               */
+/* ---------------------------------------------------------------- */
+
+/* Commit one fence body line through the highlight-enabled harness. */
+static const char *commit_hl_line(const char *line)
+{
+    static char out[OUT_CAP];
+    H *h = h_new_render_hl(1);
+    if (!h)
+        return NULL;
+    h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
+    h_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    h_send(h, tui_msg_stream_delta(0, "```\n", 4));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    snprintf(out, sizeof(out), "%s", h_read(h));
+    h_free(h);
+    return out;
+}
+
+static void test_fence_body_tokens_are_highlighted(void)
+{
+    const char *out = commit_hl_line("int x = 42; // c\n");
+    ASSERT_NOT_NULL(out);
+    /* keyword Hazy #8B75FF = 139;117;255 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
+    /* number Mustard #F5EF34 = 245;239;52 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m42") != NULL);
+    /* comment Oyster #605F6B = 96;95;107 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m// c") != NULL);
+    /* plain code keeps the Smoke body tint #BFBCC8 = 191;188;200 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;191;188;200m x = ") != NULL);
+}
+
+static void test_fence_block_comment_spans_committed_lines(void)
+{
+    H *h = h_new_render_hl(1);
+    ASSERT_NOT_NULL(h);
+    h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
+    h_send(h, tui_msg_stream_delta(0, "/* open\n", 8));
+    h_send(h, tui_msg_stream_delta(0, "still comment */\n", 17));
+    h_send(h, tui_msg_stream_delta(0, "int y;\n", 7));
+    h_send(h, tui_msg_stream_delta(0, "```\n", 4));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    const char *out = h_read(h);
+    /* the block comment opens on one committed line and the following
+     * line is still comment-colored ... */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m/* open") != NULL);
+    ASSERT_TRUE(strstr(out,
+                       "\x1b[0;38;2;96;95;107mstill comment */") != NULL);
+    /* ... and normal code resumes on the following line */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
+    h_free(h);
+}
+
+static void test_fence_highlight_state_is_per_stream(void)
+{
+    H *h = h_new_render_hl(2);
+    ASSERT_NOT_NULL(h);
+    /* content opens a block comment that never closes ... */
+    h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
+    h_send(h, tui_msg_stream_delta(0, "/* open\n", 8));
+    /* ... reasoning's own fence must not inherit it: int stays a
+     * keyword (dim + Hazy), not comment-colored */
+    h_send(h, tui_msg_stream_delta(1, "```c\n", 5));
+    h_send(h, tui_msg_stream_delta(1, "int z;\n", 7));
+    h_send(h, tui_msg_stream_delta(1, "```\n", 4));
+    h_send(h, tui_msg_stream_end(0));
+    h_send(h, tui_msg_stream_end(1));
+    h_flush(h);
+    const char *out = h_read(h);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m/* open") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;2;38;2;139;117;255mint") != NULL);
+    h_free(h);
+}
+
+static void test_unlabeled_fence_body_is_verbatim(void)
+{
+    /* an unlabeled fence is byte-granular: no token colors, and the
+     * info-string path is skipped entirely */
+    H *h = h_new_render_hl(1);
+    ASSERT_NOT_NULL(h);
+    h_send(h, tui_msg_stream_delta(0, "```\n", 4));
+    h_send(h, tui_msg_stream_delta(0, "int x = 42;\n", 12));
+    h_send(h, tui_msg_stream_delta(0, "```\n", 4));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    const char *out = h_read(h);
+    ASSERT_TRUE(strstr(out, "int x = 42;") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m") == NULL);
+    h_free(h);
+}
+
 static void test_list_marker_keeps_separating_space(void)
 {
     /* The space between the marker and the item text is part of the
@@ -1028,5 +1179,9 @@ int main(void)
     RUN_TEST(test_nested_inline_spans_compose);
     RUN_TEST(test_live_table_on_reasoning_carries_dim);
     RUN_TEST(test_table_header_bold_and_borders_oyster);
+    RUN_TEST(test_fence_body_tokens_are_highlighted);
+    RUN_TEST(test_fence_block_comment_spans_committed_lines);
+    RUN_TEST(test_fence_highlight_state_is_per_stream);
+    RUN_TEST(test_unlabeled_fence_body_is_verbatim);
     TEST_SUMMARY();
 }

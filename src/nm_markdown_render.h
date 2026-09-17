@@ -26,12 +26,31 @@
 
 #include <boba/stream.h>
 
+#include "nm_highlight.h"
+
 /* nevermore's stream vocabulary, addressed positionally by boba's
  * transcript (-1 is boba's system stream). These are the ids the
  * renderers see in TuiBlock.stream and the ones chat_app posts to. */
 #define NM_STREAM_ID_CONTENT   0
 #define NM_STREAM_ID_REASONING 1
 #define NM_STREAM_COUNT        2
+
+/* Renderer-side per-stream state, reached through
+ * TuiTranscriptConfig.user_data. It exists for the fence token
+ * highlighter (step 4b), whose cross-line state (an open block
+ * comment) is per stream: a fence on content must not share it with
+ * one on reasoning.
+ *
+ * The app owns one and keeps it alive for the transcript's lifetime;
+ * a NULL user_data is fine (the renderers then leave fence bodies
+ * plain-tinted), so the pair stays usable standalone. */
+typedef struct NmMarkdownRenderState
+{
+    NmHighlight hl[NM_STREAM_COUNT];
+} NmMarkdownRenderState;
+
+/* Zero-initialize `rs` (every stream idle). */
+void nm_markdown_render_state_init(NmMarkdownRenderState *rs);
 
 /* Finalized emission unit -> rows. */
 void nm_markdown_render_block(const TuiBlock *blk, const char *text,

@@ -61,6 +61,12 @@
 #define NM_CT_SARDINE_R 79
 #define NM_CT_SARDINE_G 190
 #define NM_CT_SARDINE_B 254
+#define NM_CT_HAZY_R    139
+#define NM_CT_HAZY_G    117
+#define NM_CT_HAZY_B    255
+#define NM_CT_GUAC_R    18
+#define NM_CT_GUAC_G    199
+#define NM_CT_GUAC_B    143
 
 static inline TuiAttr nm_attr_plain(void)
 {
@@ -159,6 +165,30 @@ static inline TuiAttr nm_attr_fence_info(void)
 static inline TuiAttr nm_attr_fence_body(void)
 {
     return nm_attr_foreground(NM_CT_SMOKE_R, NM_CT_SMOKE_G, NM_CT_SMOKE_B);
+}
+
+/* Fence token highlights (step 4b): keyword Hazy, string Guac,
+ * comment Oyster (recedes past the Smoke body tint), number Mustard.
+ * Composed onto the fence body attr, so plain code keeps its tint. */
+static inline TuiAttr nm_attr_hl_keyword(void)
+{
+    return nm_attr_foreground(NM_CT_HAZY_R, NM_CT_HAZY_G, NM_CT_HAZY_B);
+}
+
+static inline TuiAttr nm_attr_hl_string(void)
+{
+    return nm_attr_foreground(NM_CT_GUAC_R, NM_CT_GUAC_G, NM_CT_GUAC_B);
+}
+
+static inline TuiAttr nm_attr_hl_comment(void)
+{
+    return nm_attr_foreground(NM_CT_OYSTER_R, NM_CT_OYSTER_G, NM_CT_OYSTER_B);
+}
+
+static inline TuiAttr nm_attr_hl_number(void)
+{
+    return nm_attr_foreground(NM_CT_MUSTARD_R, NM_CT_MUSTARD_G,
+                              NM_CT_MUSTARD_B);
 }
 
 #endif /* NM_COLORS_H */

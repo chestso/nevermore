@@ -120,6 +120,10 @@ struct NmChatApp
     NmMarkdown markdown[NM_STREAM_COUNT];
     const TuiClassifier *classifiers[NM_STREAM_COUNT];
     TuiStreamSpec streams[NM_STREAM_COUNT];
+    /* Renderer-side per-stream state (the fence token highlighter's
+     * cross-line state), reached by the renderer pair through
+     * TuiTranscriptConfig.user_data. */
+    NmMarkdownRenderState render_state;
 
     /* Phase state: 1 while the reasoning stream has received deltas in
      * this turn and has not been finalized. The explicit flag is the
@@ -432,6 +436,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         nm_markdown_init(&app->markdown[i]);
         app->classifiers[i] = nm_markdown_classifier(&app->markdown[i]);
     }
+    nm_markdown_render_state_init(&app->render_state);
     app->streams[0].name = "content";
     app->streams[1].name = "reasoning";
     /* The reasoning stream dims in the live region too: boba paints
@@ -446,7 +451,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         .streams = app->streams,
         .classifiers = app->classifiers,
         .n_streams = NM_STREAM_COUNT,
-        .user_data = NULL,
+        .user_data = &app->render_state,
     };
     app->transcript = tui_transcript_create(&tcfg);
     if (!app->transcript)
@@ -1201,7 +1206,15 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
     case TUI_MSG_STREAM_TEXT:
     case TUI_MSG_STREAM_END:
     case TUI_MSG_TRANSCRIPT_SUBMIT:
+        tui_transcript_update(app->transcript, msg);
+        return tui_update_result_none();
+
     case TUI_MSG_TRANSCRIPT_CLEAR:
+        /* boba resets its per-stream state (buffers, blocks, and the
+         * classifiers' reset hook); the highlighter state is app-owned,
+         * so a clear must reset it here too — a new chat's first fence
+         * must not inherit an open block comment from the last one. */
+        nm_markdown_render_state_init(&app->render_state);
         tui_transcript_update(app->transcript, msg);
         return tui_update_result_none();
 

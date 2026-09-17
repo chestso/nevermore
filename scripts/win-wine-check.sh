@@ -58,6 +58,7 @@ run_build test_provider tests/test_provider.c src/nevermore.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
+	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
 	src/transport.c src/transport_socket.c src/wire_recorder.c \
 	$TLS_SRC \
@@ -69,6 +70,7 @@ run_build test_source tests/test_source.c src/source.c src/nevermore.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
+	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
 	src/transport.c src/transport_socket.c src/wire_recorder.c \
 	$TLS_SRC \
@@ -82,6 +84,7 @@ run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
+	src/provider_test.c \
 	-lws2_32 -lpthread
 
 run_build test_agent tests/test_agent.c src/agent.c src/session.c \
@@ -94,9 +97,12 @@ run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
+	src/provider_test.c \
 	-lws2_32 -lpthread
 
 run_build test_spinner tests/test_spinner.c src/spinner.c
+
+run_build test_highlight tests/test_highlight.c src/nm_highlight.c
 
 # test_history needs boba's textinput. No MinGW-built boba exists on
 # this box (boba has no Windows CI of its own; nevermore's MSYS2
