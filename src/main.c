@@ -245,8 +245,11 @@ static int run_interactive(const char *provider_name, const char *model,
         nm_chat_app_set_max_rounds(app, max_rounds);
     if (env_flag("NEVERMORE_ECHO_REASONING"))
         nm_chat_app_set_echo_reasoning(app, 1);
-    const NmProvider *p = nm_provider_by_name(provider_name);
-    nm_chat_app_set_endpoint(app, base_url, nm_provider_api_key(p));
+    /* Base URL override only: the API key is left NULL so the app
+     * resolves it per provider (env then ~/.authinfo) — a /provider
+     * switch must resolve the new provider's own key, never reuse the
+     * startup provider's. */
+    nm_chat_app_set_endpoint(app, base_url, NULL);
 
     TuiRuntimeConfig cfg = { 0 };
     cfg.raw_mode = 1;

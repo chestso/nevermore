@@ -41,9 +41,29 @@
 
 #include "chat_app.h"
 #include "agent.h"
+#include "authinfo.h"
 #include "colors.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+
+/* MinGW has no setenv (POSIX); the tests only ever set/replace. */
+static void test_setenv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+static void test_unsetenv(const char *name)
+{
+#ifdef _WIN32
+    _putenv_s(name, "");
+#else
+    unsetenv(name);
+#endif
+}
 
 /* ---------------------------------------------------------------- */
 /* Canned server (test_agent's, single-round convenience wrapper)   */
@@ -2175,6 +2195,54 @@ static void test_provider_switch_clears_and_prints_separator(void)
     harness_free(h);
 }
 
+/* Regression: a /provider switch must resolve the NEW provider's key.
+ * build_agent used to hand each agent app->api_key — the key resolved
+ * once for the startup provider — so a switch carried the previous
+ * provider's key (or, with no override, none at all) to the new
+ * endpoint. */
+static void test_provider_switch_resolves_new_provider_key(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    /* A keyed startup provider with its own key. */
+    test_setenv("OPENAI_API_KEY", "sk-old-openai");
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* Switch to a different keyed provider carrying a different key. */
+    test_setenv("OPENROUTER_API_KEY", "sk-new-openrouter");
+    g_request[0] = '\0';
+    harness_type(h, "/provider openrouter");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
+
+    /* The next turn must authorize with the NEW provider's key. */
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_TRUE(strstr(g_request,
+                       "Authorization: Bearer sk-new-openrouter") != NULL);
+    ASSERT_TRUE(strstr(g_request, "sk-old-openai") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    test_unsetenv("OPENAI_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
+}
+
 /* The app installs its per-stream highlighter state as the
  * transcript's user_data, so a labeled fence body streamed through the
  * app's own delta path carries token colors (keyword Pink, number
@@ -2315,6 +2383,11 @@ int main(void)
         fprintf(stderr, "  FAIL: scratch cwd\n");
         return 1;
     }
+    /* Pin ~/.authinfo away from the real file: the app resolves each
+     * provider's key (env then authinfo) when it builds an agent, so a
+     * dev box's real keys would otherwise leak into the canned-server
+     * tests. Env keys the tests set still win. */
+    nm_authinfo_set_path("/nonexistent/nm-chat-app-authinfo");
     printf("test_chat_app:\n");
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_submit_echoes_and_prints_answer);
@@ -2358,6 +2431,7 @@ int main(void)
     RUN_TEST(test_fence_line_not_split_by_reasoning_stream_end);
     RUN_TEST(test_submit_echoes_once);
     RUN_TEST(test_provider_switch_clears_and_prints_separator);
+    RUN_TEST(test_provider_switch_resolves_new_provider_key);
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);

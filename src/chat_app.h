@@ -64,8 +64,12 @@ const TuiComponent *nm_chat_app_component(NmChatApp *app);
  * runtime (the runtime does not own it — the app does). */
 void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 
-/* Endpoint override (delegates to the agent; base NULL = provider
- * default, key copied). */
+/* Endpoint override: base_url (NULL = provider default) and an
+ * explicit API key (NULL = let the app resolve it from the provider —
+ * env then ~/.authinfo). The base URL and an explicit key are copied
+ * and re-applied to every agent the app builds; a NULL key is
+ * re-resolved per provider, so a /provider switch never reuses the
+ * previous provider's key. */
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 

@@ -100,7 +100,7 @@ struct NmChatApp
     const NmProvider *provider; /* registry-owned */
     char *model;
     char *base_url;     /* our copy; (re)applied to built agents */
-    char *api_key;      /* our copy */
+    char *api_key;      /* explicit key override; NULL = resolve per provider */
     int max_rounds;     /* tool-round cap; <=0 = agent default */
     int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
 
@@ -540,6 +540,18 @@ void nm_chat_app_on_state(int state, void *userdata)
 /* Construction / destruction                                       */
 /* ---------------------------------------------------------------- */
 
+/* The API key for provider `p`: the app-level override when one is set
+ * (tests / callers that know better), else resolved from the provider
+ * itself (env then ~/.authinfo). Resolution is per provider and never
+ * cached on the app — a /provider switch must not carry the previous
+ * provider's key to the new endpoint. */
+static const char *endpoint_key(const NmChatApp *app, const NmProvider *p)
+{
+    if (app->api_key)
+        return app->api_key;
+    return nm_provider_api_key(p);
+}
+
 /* Build (or rebuild) the agent over the given provider. Callbacks are
  * the app's own; userdata stays NULL so tools resolve paths against
  * the process cwd (the agent's userdata doubles as the tools'
@@ -552,7 +564,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_delta(a, nm_chat_app_on_delta);
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, (NmAgentStateFn)nm_chat_app_on_state);
-    nm_agent_set_endpoint(a, app->base_url, app->api_key);
+    nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     nm_agent_set_max_rounds(a, app->max_rounds);
     nm_agent_set_echo_reasoning(a, app->echo_reasoning);
     if (app->agent)
@@ -747,7 +759,9 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
     app->base_url = base_url && *base_url ? strdup(base_url) : NULL;
     free(app->api_key);
     app->api_key = api_key && *api_key ? strdup(api_key) : NULL;
-    nm_agent_set_endpoint(app->agent, app->base_url, app->api_key);
+    if (app->agent)
+        nm_agent_set_endpoint(app->agent, app->base_url,
+                              endpoint_key(app, app->provider));
 }
 
 void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
@@ -927,8 +941,8 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
 static void open_models_popup(NmChatApp *app, const char *query)
 {
     size_t n = 0;
-    const NmModel *models =
-        app->provider->models(app->provider, app->base_url, app->api_key, &n);
+    const NmModel *models = app->provider->models(
+        app->provider, app->base_url, endpoint_key(app, app->provider), &n);
     if (!models || n == 0) {
         sys_line(app, "no models in the catalog");
         return;
@@ -1044,7 +1058,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
          * on the next turn; name the picker. */
         size_t n = 0;
         const NmModel *models = app->provider->models(
-            app->provider, app->base_url, app->api_key, &n);
+            app->provider, app->base_url, endpoint_key(app, app->provider), &n);
         int found = 0;
         for (size_t i = 0; i < n; i++) {
             if (strcmp(models[i].id, arg) == 0) {
