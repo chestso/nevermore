@@ -135,6 +135,21 @@ struct NmChatApp
      * and breaks a byte-emitted fence body at every delta
      * (the 2026-09-16 per-token line-break report). */
     int reasoning_open;
+
+    /* Per-stream trailing-newline hold-back (see stream_text): the
+     * streamed text is normalized so it never ends in newline bytes. A
+     * trailing run is held here and only forwarded once non-newline
+     * content follows; at stream end it is discarded and replaced by
+     * the one blank-line separator (sys_blank). Allocations are reused
+     * across deltas (hold_len resets, hold_cap stays). */
+    char *hold[NM_STREAM_COUNT];
+    size_t hold_len[NM_STREAM_COUNT];
+    size_t hold_cap[NM_STREAM_COUNT];
+
+    /* 1 while agent text has been forwarded since the last separator:
+     * the blank line is owed. Cleared when the separator is emitted, so
+     * repeated stream ends in one turn cannot stack blank lines. */
+    int pending_sep;
 };
 
 /* The singleton (see file header). */
@@ -199,6 +214,108 @@ static void sys_text(NmChatApp *app, const char *s)
     send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
 }
 
+/* One blank transcript row: the separator that follows content/reasoning
+ * streaming (the "blank line following" invariant). Emitted on the
+ * system stream, so boba frames the terminator (raw mode needs CRLF). */
+static void sys_blank(NmChatApp *app)
+{
+    if (!app)
+        return;
+    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
+}
+
+/* Separator, once per content/reasoning run. pending_sep is the "owed"
+ * flag: it is set when agent text is forwarded and cleared here, so a
+ * turn that ends several streams (reasoning then content, or a tool
+ * boundary plus the final round) still gets exactly ONE blank line.
+ * Nothing is emitted when the run carried no text. */
+static void emit_separator(NmChatApp *app)
+{
+    if (!app || !app->pending_sep)
+        return;
+    app->pending_sep = 0;
+    sys_blank(app);
+}
+
+/* Hold-back buffer (see stream_text): append a trailing newline run.
+ * Grows geometrically, reused across deltas. */
+static void hold_append(NmChatApp *app, int stream_id, const char *s,
+                        size_t n)
+{
+    if (n == 0)
+        return;
+    size_t need = app->hold_len[stream_id] + n;
+    if (need > app->hold_cap[stream_id]) {
+        size_t ncap = app->hold_cap[stream_id] ? app->hold_cap[stream_id] : 16;
+        while (ncap < need)
+            ncap *= 2;
+        char *nb = realloc(app->hold[stream_id], ncap);
+        if (!nb)
+            return;
+        app->hold[stream_id] = nb;
+        app->hold_cap[stream_id] = ncap;
+    }
+    memcpy(app->hold[stream_id] + app->hold_len[stream_id], s, n);
+    app->hold_len[stream_id] += n;
+}
+
+/* Forward a held newline run: interior now (non-newline bytes follow),
+ * so it must reach the transcript before them. */
+static void hold_flush(NmChatApp *app, int stream_id)
+{
+    if (app->hold_len[stream_id] == 0)
+        return;
+    send_msg(app, tui_msg_stream_delta(stream_id, app->hold[stream_id],
+                                       app->hold_len[stream_id]));
+    app->hold_len[stream_id] = 0;
+}
+
+/* Drop a held run (stream end). */
+static void hold_discard(NmChatApp *app, int stream_id)
+{
+    app->hold_len[stream_id] = 0;
+}
+
+/* Agent-stream delta (content = stream 0, reasoning = stream 1),
+ * normalized so the streamed text never ends a run in blank lines. A
+ * delta is split as body + [one line terminator] + [held newline run]:
+ * the terminator rides straight through (a single "\n" delta behaves
+ * exactly as before — the stream's final line still commits with boba's
+ * one-line lookahead), while any further trailing newlines are held. An
+ * all-newline delta is entirely trailing, so it is all held. A held run
+ * is forwarded the instant interior content follows (so committed order
+ * and byte content are unchanged); at stream end it is discarded and
+ * replaced by the ONE blank-line separator (sys_blank). Without the
+ * hold, a body ending in blank lines — an unterminated fence's trailing
+ * blanks, which boba stages verbatim — would commit those blank rows
+ * and the separator would stack on top ("too many"). */
+static void stream_text(NmChatApp *app, int stream_id, const char *s,
+                        size_t n)
+{
+    if (!app || !s || n == 0)
+        return;
+    if (stream_id == NM_STREAM_ID_REASONING)
+        app->reasoning_open = 1;
+    size_t tail = 0;
+    while (tail < n && (s[n - 1 - tail] == '\n' || s[n - 1 - tail] == '\r'))
+        tail++;
+    size_t body = n - tail;
+    if (body == 0) {
+        /* nothing but newlines: still trailing, hold every byte */
+        hold_append(app, stream_id, s, n);
+        return;
+    }
+    /* The first line break in the run is a terminator, not a blank
+     * line: keep it with the body ("\r\n" counts as one break). */
+    size_t term = 0;
+    if (tail > 0)
+        term = (tail >= 2 && s[body] == '\r' && s[body + 1] == '\n') ? 2 : 1;
+    hold_flush(app, stream_id); /* interior now, not trailing */
+    send_msg(app, tui_msg_stream_delta(stream_id, s, body + term));
+    app->pending_sep = 1;
+    hold_append(app, stream_id, s + body + term, tail - term);
+}
+
 /* Close the reasoning stream at the content boundary (phase
  * transition; observed wire truth: reasoning then content, never
  * concurrent), so its order in the scrollback reflects when it was
@@ -212,19 +329,12 @@ static void close_reasoning_phase(NmChatApp *app)
         return;
     app->reasoning_open = 0;
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
+    hold_discard(app, NM_STREAM_ID_REASONING);
+    emit_separator(app);
 }
 
-/* Agent-stream delta (content or reasoning). */
-static void stream_delta(NmChatApp *app, int stream_id, const char *s)
-{
-    if (!app || !s || !*s)
-        return;
-    if (stream_id == NM_STREAM_ID_REASONING)
-        app->reasoning_open = 1;
-    send_msg(app, tui_msg_stream_delta(stream_id, s, strlen(s)));
-}
-
-/* Close every agent stream (turn / round boundary). */
+/* Close every agent stream (turn / round boundary), then the one blank
+ * line that follows the run. */
 static void stream_end_all(NmChatApp *app)
 {
     if (!app)
@@ -232,6 +342,9 @@ static void stream_end_all(NmChatApp *app)
     app->reasoning_open = 0;
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_CONTENT));
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
+    hold_discard(app, NM_STREAM_ID_CONTENT);
+    hold_discard(app, NM_STREAM_ID_REASONING);
+    emit_separator(app);
 }
 
 /* ---------------------------------------------------------------- */
@@ -257,7 +370,7 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
      * stream first (see close_reasoning_phase). */
     if (stream_id == NM_STREAM_ID_CONTENT)
         close_reasoning_phase(app);
-    stream_delta(app, stream_id, text);
+    stream_text(app, stream_id, text, strlen(text));
     /* A delta is a view change: wake the loop so the live region
      * repaints now, not on the next spinner tick. */
     tui_runtime_wakeup(app->rt);
@@ -349,8 +462,8 @@ void nm_chat_app_on_state(int state, void *userdata)
 
     switch (st) {
     case NM_AGENT_DONE:
-        /* Close both streams; no separator line — the next submit's
-         * finish_inline provides the break. */
+        /* Close both streams, then the one blank line that separates the
+         * answer from whatever follows. */
         stream_end_all(app);
         break;
     case NM_AGENT_ERROR:
@@ -518,6 +631,8 @@ void nm_chat_app_free(NmChatApp *app)
     free(app->base_url);
     free(app->api_key);
     free(app->current_tool);
+    for (int i = 0; i < NM_STREAM_COUNT; i++)
+        free(app->hold[i]);
     if (app->transcript)
         tui_transcript_free(app->transcript);
     free(app);
@@ -802,8 +917,13 @@ static void switch_provider(NmChatApp *app, const char *name)
         return;
     }
     /* New chat: reset every stream (emits nothing) and mark the
-     * boundary; the agent rebuild wipes the session. */
+     * boundary; the agent rebuild wipes the session. The hold-back and
+     * owed-separator state reset with the transcript. */
     send_msg(app, tui_msg_transcript_clear());
+    hold_discard(app, NM_STREAM_ID_CONTENT);
+    hold_discard(app, NM_STREAM_ID_REASONING);
+    app->pending_sep = 0;
+    app->reasoning_open = 0;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
 }

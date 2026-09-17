@@ -391,6 +391,18 @@ static void test_submit_echoes_and_prints_answer(void)
     close(sc.fd);
 }
 
+/* The "remove if too many" half: a body that ends in blank lines — here
+ * an unterminated fence, whose trailing blanks boba would otherwise
+ * commit verbatim — still yields exactly ONE blank line, never a stack.
+ * Defined after the raw responder helpers below. */
+static void test_separator_collapses_trailing_blank_lines(void);
+
+/* Reasoning then content: the separator follows each run — one blank
+ * line between the (dim) reasoning and the answer, one after the
+ * answer — and never doubles at the turn end. Defined after the raw
+ * responder helpers below. */
+static void test_separator_between_reasoning_and_answer(void);
+
 static void test_delta_line_continuation_is_preserved(void)
 {
     /* The regression test for the line-buffer protocol: two deltas
@@ -1139,6 +1151,125 @@ static void test_error_line_endings_are_crnl(void)
     close(rr.fd);
 }
 
+static void test_separator_between_reasoning_and_answer(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "why");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    /* Reasoning, one blank, answer, one blank — never doubled. The
+     * reasoning row is dim, so its SGR reset precedes the terminator
+     * (D8); the answer row is plain. */
+    ASSERT_TRUE(strstr(out, "weighing options\x1b[0m\r\n\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "final words\r\n\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "final words\r\n\r\n\r\n") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+static void test_separator_collapses_trailing_blank_lines(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        /* Unlabeled (byte-emitted) fence, never closed. The trailing
+         * blank lines arrive as their OWN all-newline delta — the
+         * pathological "too many" source, and the split (content, then
+         * pure newlines) that the hold-back must still collapse. */
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"```\\ncode\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "code please");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    /* The fence body committed, followed by exactly ONE blank row: the
+     * two trailing blank lines the model emitted are collapsed, never
+     * stacked onto the separator. */
+    ASSERT_TRUE(strstr(out, "```\r\ncode\r\n\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "code\r\n\r\n\r\n") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+/* The "add one if missing" half: at the end of content streaming exactly
+ * ONE blank line follows the answer. The model's own trailing newlines
+ * (here two) collapse; the separator contributes the one. */
+static void test_separator_blank_line_after_answer(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "Hello world\r\n\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, "Hello world\r\n\r\n\r\n") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
 static void test_tool_round_prints_panels(void)
 {
     FILE *f = fopen(FIXTURE_PATH, "wb");
@@ -1703,6 +1834,9 @@ int main(void)
     }
     printf("test_chat_app:\n");
     RUN_TEST(test_submit_echoes_and_prints_answer);
+    RUN_TEST(test_separator_blank_line_after_answer);
+    RUN_TEST(test_separator_collapses_trailing_blank_lines);
+    RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
