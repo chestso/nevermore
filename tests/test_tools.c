@@ -333,6 +333,54 @@ static void test_edit_file_multiline_literal(void)
     nm_toolset_free(ts);
 }
 
+/* Regression: the mini-diff of the replaced span used to be sized as
+ * olen + nlen + 16, but a multi-line new_string needs a marker and a
+ * terminator per fragment (2n + 1 bytes); the body buffer overran and
+ * the free() after it aborted with "free(): corrupted unsorted chunks"
+ * (caught by the 4b session, 2026-09-17). Heap-corruption bugs only
+ * show under a sanitizer — keep this multi-line and run test_tools
+ * under ASan. */
+static void test_edit_file_multiline_diff_fits(void)
+{
+    char *path = scratch_path("edit6.txt");
+    FILE *f = fopen(path, "wb");
+    fputs("MARK\n", f);
+    for (int i = 0; i < 39; i++)
+        fputs("line\n", f);
+    fclose(f);
+
+    /* 300 LF-separated fragments: 599 content bytes but 299 newlines,
+     * so the rendering needs ~2x the span. */
+    char repl[700];
+    size_t n = 0;
+    for (int i = 0; i < 300; i++) {
+        if (i)
+            repl[n++] = '\n';
+        repl[n++] = 'x';
+    }
+    repl[n] = '\0';
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("MARK"));
+    nm_json_set(jargs, "new_string", nm_json_new_string(repl));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
+    free(path);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    /* The diff is present and complete: 300 '+' lines. */
+    size_t plus = 0;
+    for (const char *p = r.output; (p = strchr(p, '+')); p++)
+        plus++;
+    ASSERT_TRUE(plus >= 300);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 /* ---------------------------------------------------------------- */
 /* list_dir / search_dir                                             */
 /* ---------------------------------------------------------------- */
@@ -460,6 +508,7 @@ int main(void)
     RUN_TEST(test_edit_file_replace_all);
     RUN_TEST(test_edit_file_no_match);
     RUN_TEST(test_edit_file_multiline_literal);
+    RUN_TEST(test_edit_file_multiline_diff_fits);
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
     RUN_TEST(test_run_command_exit_zero);

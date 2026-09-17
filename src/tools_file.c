@@ -198,6 +198,25 @@ static int utf8_valid(const unsigned char *b, size_t n)
 /* read_file                                                         */
 /* ---------------------------------------------------------------- */
 
+/* Bytes a `-`/`+` mini-diff line rendering of `s` occupies: every LF
+ * split adds a marker byte, and a non-empty fragment adds a line
+ * terminator. The one exact size for the span, shared by the allocator
+ * and the emission loop so the two can never drift apart (the old
+ * hand-written `olen + nlen + 16` budget did — a multi-line new_string
+ * overran the body buffer). Empty for an empty span, matching the
+ * emission loop's `while (*q)` guard. */
+static size_t diff_render_len(const char *s)
+{
+    size_t n = 0;
+    for (const char *q = s; *q; n++) {
+        const char *nl = strchr(q, '\n');
+        size_t ll = nl ? (size_t)(nl - q) : strlen(q);
+        n += ll + 1; /* marker + content */
+        q = nl ? nl + 1 : q + ll;
+    }
+    return n;
+}
+
 /* Literal needle scan over the whole text (no regex): 0-based start
  * index of the first hit at/after `from', or -1. */
 static long find_literal(const char *hay, size_t hay_len, const char *needle,
@@ -587,8 +606,12 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
 
     /* Status line: path, count, match lines; then a mini context
      * diff of the replaced span (port of quoth's context-diff — the
-     * span is short by construction). */
-    size_t need = strlen(path) + 128 + nhits * 12 + olen + nlen + 16;
+     * span is short by construction). The diff's exact size is
+     * computed, never estimated: a multi-line new_string can need
+     * several times olen + nlen once markers and terminators are
+     * counted. */
+    size_t need = strlen(path) + 128 + nhits * 12 +
+                  diff_render_len(old) + diff_render_len(new) + 16;
     char *body = malloc(need);
     if (!body) {
         free(hits);
