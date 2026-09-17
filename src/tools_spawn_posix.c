@@ -401,6 +401,7 @@ const NmTool nm_tool_run_command = {
     .name = "run_command",
     .description = "Run a shell command and capture its combined output "
                    "and exit status",
+    .emoji = "🖥️",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
     .begin = run_command_begin,

@@ -382,12 +382,19 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
 
 /* Render a tool call's plan (the tool name + every argument) into the
  * system stream, one styled row per plan line: the header row carries
- * the `▌` marker (Comment, the tool role) and argument rows are
- * indented (Foreground). Character-level, no regex. Per-tool-call alloc
- * (one per tool event, never per token). */
-static void sys_tool_plan(NmChatApp *app, const char *name,
+ * the tool's own full-width emoji lead (Comment, the tool role) and
+ * argument rows are indented (Foreground). The emoji is part of the
+ * tool definition (NmTool.emoji) - presentation only, never sent on
+ * the wire - so a new tool picks its glyph where it is registered.
+ * Character-level, no regex. Per-tool-call alloc (one per tool event,
+ * never per token). */
+static void sys_tool_plan(NmChatApp *app, const NmTool *tool,
                           const char *args_json)
 {
+    const char *name = tool && tool->name ? tool->name : "?";
+    const char *emoji = tool && tool->emoji && *tool->emoji
+                            ? tool->emoji
+                            : NM_TOOL_EMOJI_FALLBACK;
     char *plan = nm_tool_plan(name, args_json);
     if (!plan)
         return;
@@ -397,7 +404,8 @@ static void sys_tool_plan(NmChatApp *app, const char *name,
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (first)
-            sys_line(app, NM_SGR_TOOL "▌ %.*s" NM_SGR_RESET, (int)len, p);
+            sys_line(app, NM_SGR_TOOL "%s %.*s" NM_SGR_RESET, emoji, (int)len,
+                     p);
         else
             sys_line(app, NM_SGR_RESULT "%.*s" NM_SGR_RESET, (int)len, p);
         first = 0;
@@ -467,7 +475,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
          * the panel prints between the tool-call round and the answer
          * round, in commit order. */
         stream_end_all(app);
-        sys_tool_plan(app, name, args_json);
+        sys_tool_plan(app, tool, args_json);
         free(app->current_tool);
         app->current_tool = strdup(name);
     } else {

@@ -99,9 +99,14 @@ static void ask_on_tool(const NmTool *tool, const char *args_json,
     const char *name = tool ? tool->name : "?";
 
     if (event == NM_TOOL_EVENT_START) {
-        /* Show the plan before the tool runs: name + every argument. */
+        /* Show the plan before the tool runs: the tool's emoji lead
+         * (its definition's, presentation-only) then name + every
+         * argument. */
+        const char *emoji = tool && tool->emoji && *tool->emoji
+                                ? tool->emoji
+                                : NM_TOOL_EMOJI_FALLBACK;
         char *plan = nm_tool_plan(name, args_json);
-        fprintf(stderr, "[tool] %s\n", plan ? plan : name);
+        fprintf(stderr, "[tool] %s %s\n", emoji, plan ? plan : name);
         free(plan);
         return;
     }

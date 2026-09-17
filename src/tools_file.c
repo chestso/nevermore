@@ -1001,6 +1001,7 @@ const NmTool nm_tool_read_file = {
     .name = "read_file",
     .description = "Read a UTF-8 text file, byte-exact, optionally "
                    "line-numbered and windowed (offset/limit)",
+    .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,
 };
@@ -1008,12 +1009,14 @@ const NmTool nm_tool_edit_file = {
     .name = "edit_file",
     .description = "Edit a file by literal find/replace; the old_string "
                    "must match uniquely unless replace_all",
+    .emoji = "✏️",
     .params_schema = edit_file_schema,
     .execute = edit_file_exec,
 };
 const NmTool nm_tool_list_dir = {
     .name = "list_dir",
     .description = "List directory entries (directories suffixed with /)",
+    .emoji = "📂",
     .params_schema = list_dir_schema,
     .execute = list_dir_exec,
 };
@@ -1021,6 +1024,7 @@ const NmTool nm_tool_search_dir = {
     .name = "search_dir",
     .description = "Search files recursively for a literal string (no "
                    "regex); reports path:line:content",
+    .emoji = "🔍",
     .params_schema = search_dir_schema,
     .execute = search_dir_exec,
 };

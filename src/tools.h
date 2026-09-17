@@ -47,12 +47,22 @@ typedef enum
     NM_TOOL_DONE = 1     /* *out holds the final result */
 } NmToolStatus;
 
+/* Lead glyph for a tool that omits its own emoji (defensive; every
+ * built-in sets one). Presentation-only, like the field itself. */
+#define NM_TOOL_EMOJI_FALLBACK "🔧"
+
 /* One tool: name, JSON schema for the provider, an executor, and an
  * optional async executor (see above). */
 typedef struct NmTool
 {
     const char *name;          /* wire name, e.g. "read_file" */
     const char *description;   /* what the model sees */
+    const char *emoji;         /* presentation-only lead glyph for the
+                                * transcript plan row: a full-width
+                                * emoji, one per tool. NEVER serialized
+                                * into the provider "tools" array
+                                * (nm_toolset_to_json reads only name,
+                                * description, params_schema). */
     const char *params_schema; /* JSON Schema for "parameters", or NULL */
     NmToolResult (*execute)(const NmTool *tool, const char *args_json,
                             void *userdata);

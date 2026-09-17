@@ -1452,6 +1452,10 @@ static void test_tool_round_prints_panels(void)
      * so the edit's old/new strings are visible before the result. */
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "edit_file") != NULL);
+    /* The plan row leads with the tool's own emoji - part of the tool
+     * definition (NmTool.emoji), in the tool (Comment) role - rather
+     * than a shared bullet glyph. */
+    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "✏️ edit_file") != NULL);
     ASSERT_TRUE(strstr(out, "nm-test-chat.txt") != NULL);
     ASSERT_TRUE(strstr(out, "old_string: quick brown") != NULL);
     ASSERT_TRUE(strstr(out, "new_string: slow red") != NULL);

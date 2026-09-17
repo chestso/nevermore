@@ -104,6 +104,35 @@ static void test_schema_json(void)
     nm_toolset_free(ts);
 }
 
+/* Every default tool defines a presentation emoji, and that emoji is
+ * NOT part of the wire definition: the serialized "tools" array must
+ * never carry it (the model sees name/description/parameters only). */
+static void test_tool_emoji_presentation_only(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    ASSERT_NOT_NULL(ts);
+    for (size_t i = 0; i < nm_toolset_len(ts); i++) {
+        const NmTool *t = nm_toolset_get(ts, i);
+        ASSERT_NOT_NULL(t);
+        ASSERT_NOT_NULL(t->emoji);
+        ASSERT_TRUE(t->emoji[0] != '\0');
+    }
+
+    const char *read_emoji = nm_toolset_find(ts, "read_file")->emoji;
+    ASSERT_NOT_NULL(read_emoji);
+
+    const char *json = nm_toolset_to_json(ts);
+    ASSERT_NOT_NULL(json);
+    /* No "emoji" key was invented, and no tool's glyph leaked. */
+    ASSERT_NULL(strstr(json, "emoji"));
+    for (size_t i = 0; i < nm_toolset_len(ts); i++) {
+        const NmTool *t = nm_toolset_get(ts, i);
+        ASSERT_NULL(strstr(json, t->emoji));
+    }
+    ASSERT_NULL(strstr(json, read_emoji));
+    nm_toolset_free(ts);
+}
+
 /* ---------------------------------------------------------------- */
 /* read_file                                                         */
 /* ---------------------------------------------------------------- */
@@ -782,6 +811,7 @@ int main(void)
     RUN_TEST(test_registry_defaults);
     RUN_TEST(test_unknown_tool_error);
     RUN_TEST(test_schema_json);
+    RUN_TEST(test_tool_emoji_presentation_only);
     RUN_TEST(test_read_file_byte_exact);
     RUN_TEST(test_read_file_line_numbers_and_window);
     RUN_TEST(test_read_file_missing);

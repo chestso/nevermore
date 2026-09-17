@@ -89,8 +89,8 @@
 /* SGR strings (raw byte writers)                                      */
 /* ------------------------------------------------------------------ */
 
-/* Dracula Comment - tool panel `▌`, the interrupted marker, the
- * provider separator, the spinner label. */
+/* Dracula Comment - the tool plan header (its emoji lead), the
+ * interrupted marker, the provider separator, the spinner label. */
 #define NM_SGR_TOOL "\033[38;2;98;114;164m"
 
 /* Dracula Foreground - the tool result body, secondary text. */
