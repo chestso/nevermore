@@ -300,14 +300,17 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     long total_lines = 0;
     {
         /* total_lines: LF-split; a trailing fragment (no final LF)
-         * is a line; an empty file has zero lines. */
+         * is a line, a final LF is NOT a phantom extra line, and an
+         * empty file has zero lines. The phantom line used to make a
+         * complete read of a well-formed file report "lines N-N
+         * omitted (1 line)". */
         size_t j = 0;
         while (j < len) {
             if (text[j] == '\n')
                 total_lines++;
             j++;
         }
-        if (len > 0)
+        if (len > 0 && text[len - 1] != '\n')
             total_lines++;
         while (start < len && line < offset) {
             if (text[start] == '\n')
@@ -315,7 +318,11 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             start++;
         }
     }
-    if (len > 0 && line < offset) {
+    /* An offset past the last line is an error. Compare against the
+     * line count, not the walk's `line` (which is total_lines + 1 when
+     * the file ends with a final LF — the same phantom-line thinking
+     * that made a complete read report an omitted line). */
+    if (len > 0 && offset > total_lines) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
             snprintf(msg, strlen(path) + 64,
@@ -380,26 +387,22 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         i = eol + 1;
     }
 
-    /* Truncation marker when window lines were dropped (budget or
-     * limit): names the dropped range and the resume offset (quoth's
-     * marker shape). */
+    /* Truncation marker when lines were actually dropped (budget or
+     * limit): names the omitted range and the resume offset (quoth's
+     * marker shape). A window that reaches the last line emits
+     * nothing — the old `limit == 0` special case counted 0 lines and
+     * still printed "lines A-B omitted (0 lines)". */
     long window_end = offset + keep_lines - 1;
-    long first_dropped = offset + keep_lines;
-    long dropped = (total_lines > window_end && limit == 0)
-                       ? total_lines - window_end
-                       : 0;
-    /* For a limit-truncated or budget-truncated window the marker
-     * names what the *requested window* dropped; a plain full-file
-     * read that ran past the budget names the file tail. */
+    long remaining = total_lines > window_end ? total_lines - window_end : 0;
     size_t marker_len = 0;
     char marker[128];
-    if (dropped > 0 || i < len) {
+    if (remaining > 0) {
         marker_len = (size_t)snprintf(
             marker, sizeof(marker),
             "... lines %ld-%ld omitted (%ld %s). Use offset=%ld to "
             "resume ...\n",
-            first_dropped, total_lines, dropped,
-            dropped == 1 ? "line" : "lines", first_dropped);
+            window_end + 1, total_lines, remaining,
+            remaining == 1 ? "line" : "lines", window_end + 1);
     }
 
     /* Append the resume marker through the shared truncation seam

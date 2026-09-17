@@ -241,6 +241,91 @@ static void test_read_file_truncates_with_resume_marker(void)
     nm_toolset_free(ts);
 }
 
+/* The marker's count is the number of lines actually omitted, and a
+ * window that reaches the last line omits nothing: no marker. Two
+ * bugs lived here — a final LF counted a phantom trailing line, so a
+ * COMPLETE read of a well-formed file claimed "lines N-N omitted (1
+ * line)"; and a limit-truncated window forced the count to 0, printing
+ * the self-contradictory "lines 4-5 omitted (0 lines)". */
+static void test_read_file_resume_marker_counts_omitted_lines(void)
+{
+    char *path = scratch_path("read3.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("one\ntwo\nthree\nfour\nfive\n", f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs;
+    char *args;
+    NmToolResult r;
+
+    /* Window lines 2-3 of 5: lines 4-5 are omitted, and the marker
+     * says so ("Use offset=4" resumes at the first dropped line). */
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "offset", nm_json_new_number(2));
+    nm_json_set(jargs, "limit", nm_json_new_number(2));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "two") != NULL);
+    ASSERT_TRUE(strstr(r.output,
+                       "... lines 4-5 omitted (2 lines). "
+                       "Use offset=4 to resume ...") != NULL);
+    nm_tool_result_free(&r);
+
+    /* The same window ending AT the last line omits nothing. */
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "offset", nm_json_new_number(4));
+    nm_json_set(jargs, "limit", nm_json_new_number(2));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "four") != NULL);
+    ASSERT_TRUE(strstr(r.output, "five") != NULL);
+    ASSERT_TRUE(strstr(r.output, "omitted") == NULL);
+    nm_tool_result_free(&r);
+
+    /* A whole small file: every line, no marker. */
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_TRUE(strstr(r.output, "one") != NULL);
+    ASSERT_TRUE(strstr(r.output, "five") != NULL);
+    ASSERT_TRUE(strstr(r.output, "omitted") == NULL);
+    nm_tool_result_free(&r);
+
+    /* An offset past the last line is an error naming the real line
+     * count (5, not the phantom 6). */
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "offset", nm_json_new_number(6));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "offset 6 is past the last line (5)") !=
+                NULL);
+    nm_tool_result_free(&r);
+
+    free(path);
+    nm_toolset_free(ts);
+}
+
 /* ---------------------------------------------------------------- */
 /* edit_file                                                         */
 /* ---------------------------------------------------------------- */
@@ -816,6 +901,7 @@ int main(void)
     RUN_TEST(test_read_file_line_numbers_and_window);
     RUN_TEST(test_read_file_missing);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
+    RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);
     RUN_TEST(test_edit_file_unique_replace);
     RUN_TEST(test_edit_file_ambiguous_fails_loudly);
     RUN_TEST(test_edit_file_replace_all);
