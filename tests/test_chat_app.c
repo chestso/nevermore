@@ -41,6 +41,7 @@
 
 #include "chat_app.h"
 #include "agent.h"
+#include "nm_config.h"
 #include "authinfo.h"
 #include "colors.h"
 #include "test_helpers.h"
@@ -78,6 +79,13 @@ static void test_unsetenv(const char *name)
 #define FIXTURE_PATH "C:/Users/Public/nm-test-chat.txt"
 #else
 #define FIXTURE_PATH "/tmp/nm-test-chat.txt"
+#endif
+
+/* mkdir shim for the config scratch dirs (MinGW has no mkdir(d, mode)). */
+#ifdef _WIN32
+#define chat_mkdir(d) _mkdir(d)
+#else
+#define chat_mkdir(d) mkdir((d), 0755)
 #endif
 
 static char g_request[REQ_CAP];
@@ -304,6 +312,94 @@ static void harness_type(AppHarness *h, const char *s)
         tui_runtime_send(h->rt, tui_msg_char(*p, 0));
         tui_runtime_flush(h->rt);
     }
+}
+
+/* ---------------------------------------------------------------- */
+/* Config write-back harness                                         */
+/* ---------------------------------------------------------------- */
+
+/* The provider-name validator main.c installs (config.c has no registry
+ * of its own). */
+static int chat_valid_provider(const char *name)
+{
+    return nm_provider_by_name(name) != NULL;
+}
+
+static char g_cfg_root[600];
+static char g_cfg_user[700];
+static char g_cfg_shadow[700];
+
+/* Pin both config paths into the test's own scratch dir — never the
+ * real ~/.config or ~/.local/state. */
+static void pin_cfg_paths(const char *sub)
+{
+    snprintf(g_cfg_root, sizeof(g_cfg_root), "%s/cfg-%s",
+             test_scratch_dir(), sub);
+    chat_mkdir(g_cfg_root);
+    snprintf(g_cfg_user, sizeof(g_cfg_user), "%s/config", g_cfg_root);
+    snprintf(g_cfg_shadow, sizeof(g_cfg_shadow), "%s/shadow", g_cfg_root);
+    nm_config_set_paths(g_cfg_user, g_cfg_shadow);
+}
+
+static const char *cfg_read_shadow(void)
+{
+    static char buf[4096];
+    buf[0] = '\0';
+    FILE *f = fopen(g_cfg_shadow, "rb");
+    if (!f)
+        return buf;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+static int cfg_file_present(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+static void write_file_at(const char *path, const char *content)
+{
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "  setup: cannot write %s\n", path);
+        return;
+    }
+    fwrite(content, 1, strlen(content), f);
+    fclose(f);
+}
+
+/* The user config's bytes, verbatim (the "never touched" assertion). */
+static const char *cfg_user_bytes(void)
+{
+    static char buf[4096];
+    buf[0] = '\0';
+    FILE *f = fopen(g_cfg_user, "rb");
+    if (!f)
+        return buf;
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* Load a config for `h` and wire it exactly like main.c does: install
+ * it on the app, then apply the resolved rounds/echo values. */
+static NmConfig *cfg_for(AppHarness *h)
+{
+    NmConfig *cfg = nm_config_load();
+    nm_config_set_env(cfg);
+    nm_chat_app_set_config(h->app, cfg);
+    nm_chat_app_set_max_rounds(h->app,
+                               nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+    nm_chat_app_set_echo_reasoning(
+        h->app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
+    return cfg;
 }
 
 static void harness_enter(AppHarness *h)
@@ -928,13 +1024,13 @@ static void test_help_command_lists_commands(void)
 }
 
 /* /rounds shows and sets the tool-round cap on the live agent;
- * "default" (and 0) restore the built-in value. */
+ * "reset" drops the shadow line and reveals the layer below. */
 static void test_rounds_command_shows_and_sets_cap(void)
 {
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    /* Bare: the active cap and the default. */
+    /* Bare: the active cap and the built-in default. */
     harness_type(h, "/rounds");
     harness_enter(h);
     const char *out = harness_read(h);
@@ -952,13 +1048,17 @@ static void test_rounds_command_shows_and_sets_cap(void)
     harness_type(h, "/rounds nope");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "expected a positive count") != NULL);
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 3);
 
-    /* "default" restores the built-in value. */
-    harness_type(h, "/rounds default");
+    /* "reset" drops the shadow line and reveals the layer below (no
+     * config here: the built-in default). */
+    harness_type(h, "/rounds reset");
     harness_enter(h);
-    snprintf(want, sizeof(want), "tool rounds: %d",
+    snprintf(want, sizeof(want), "tool rounds: %d (shadow reset)",
              NM_AGENT_DEFAULT_MAX_ROUNDS);
     ASSERT_TRUE(strstr(harness_read(h), want) != NULL);
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)),
+              NM_AGENT_DEFAULT_MAX_ROUNDS);
 
     harness_free(h);
 }
@@ -2356,6 +2456,132 @@ static void test_markdown_table_reaches_scrollback_aligned(void)
     close(rr.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Config write-back: the runtime shadow                          */
+/* ---------------------------------------------------------------- */
+
+/* A runtime change lands in the shadow file and reports where it went.
+ * The user config file's bytes are never touched — the app writes
+ * exactly one file. */
+static void test_config_runtime_change_writes_shadow(void)
+{
+    pin_cfg_paths("write");
+    write_file_at(g_cfg_user, "model = from-user\n");
+
+    AppHarness *h = harness_new("openai", "from-user", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/rounds 7");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "tool rounds: 7") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "saved to the session shadow") !=
+                NULL);
+
+    harness_type(h, "/reasoning on");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "reasoning echo: on") != NULL);
+
+    /* The shadow holds exactly what the user typed. */
+    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning = on\n");
+    /* The user file is byte-identical: the app wrote exactly one file. */
+    ASSERT_TRUE(cfg_file_present(g_cfg_user));
+    ASSERT_STR_EQ(cfg_user_bytes(), "model = from-user\n");
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* Environment pins the run: the change still lands in the shadow (that
+ * is the file's meaning), and the report says it is inert. */
+static void test_config_env_pin_is_reported(void)
+{
+    pin_cfg_paths("envpin");
+    test_setenv("NEVERMORE_MAX_ROUNDS", "9");
+
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 9);
+
+    harness_type(h, "/rounds 3");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "NEVERMORE_MAX_ROUNDS pins this run") != NULL);
+    /* Persisted anyway: the shadow is what the user typed. */
+    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 3\n");
+    /* The live agent still honors the environment. */
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 3);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    test_unsetenv("NEVERMORE_MAX_ROUNDS");
+}
+
+/* /config reports provenance; /config reset drops shadow lines. */
+static void test_config_command_reports_and_resets(void)
+{
+    pin_cfg_paths("report");
+    write_file_at(g_cfg_user, "model = from-user\n");
+
+    AppHarness *h = harness_new("openai", "from-user", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    /* "! id" is the exact-set path (the id need not be in the catalog). */
+    harness_type(h, "/model ! from-user");
+    harness_enter(h);
+    ASSERT_STR_EQ(cfg_read_shadow(), "model = from-user\n");
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, g_cfg_user) != NULL);
+    ASSERT_TRUE(strstr(out, g_cfg_shadow) != NULL);
+    /* model resolves to the shadow (just set); rounds has no layer. */
+    ASSERT_TRUE(strstr(out, "(session shadow)") != NULL);
+    ASSERT_TRUE(strstr(out, "(built-in default)") != NULL);
+
+    harness_type(h, "/config reset model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: model reset") != NULL);
+    ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    /* Resetting all removes the file. */
+    harness_type(h, "/model ! from-user");
+    harness_enter(h);
+    ASSERT_TRUE(cfg_file_present(g_cfg_shadow));
+    harness_type(h, "/config reset all");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: all keys reset") != NULL);
+    ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* With no config handle the commands still work and nothing is
+ * written anywhere (the hermetic default the other tests rely on). */
+static void test_config_absent_is_no_persistence(void)
+{
+    pin_cfg_paths("absent");
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/rounds 5");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "tool rounds: 5") != NULL);
+    ASSERT_FALSE(strstr(out, "shadow") != NULL);
+    ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "no config") != NULL);
+
+    harness_free(h);
+}
+
 /* The offline-catalog tripwire: the model tests below assert against
  * the STATIC ollama catalog, so a live fetch would replace it (see
  * test_net_helpers.h). */
@@ -2388,6 +2614,13 @@ int main(void)
      * dev box's real keys would otherwise leak into the canned-server
      * tests. Env keys the tests set still win. */
     nm_authinfo_set_path("/nonexistent/nm-chat-app-authinfo");
+    /* Provider names in config files are validated through the registry
+     * hook main.c installs (config.c links no registry of its own). */
+    nm_config_set_provider_validator(chat_valid_provider);
+    /* No config paths leak in from the real home directory: every
+     * config test pins both, and the others never set one. */
+    nm_config_set_paths("/nonexistent/nm-chat-app-config",
+                        "/nonexistent/nm-chat-app-shadow");
     printf("test_chat_app:\n");
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_submit_echoes_and_prints_answer);
@@ -2412,6 +2645,10 @@ int main(void)
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
     RUN_TEST(test_rounds_command_shows_and_sets_cap);
+    RUN_TEST(test_config_runtime_change_writes_shadow);
+    RUN_TEST(test_config_env_pin_is_reported);
+    RUN_TEST(test_config_command_reports_and_resets);
+    RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);

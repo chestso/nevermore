@@ -52,6 +52,7 @@
 #include <boba/unicode.h>
 
 #include "chat_app.h"
+#include "nm_config.h"
 #include "colors.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
@@ -103,6 +104,12 @@ struct NmChatApp
     char *api_key;      /* explicit key override; NULL = resolve per provider */
     int max_rounds;     /* tool-round cap; <=0 = agent default */
     int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
+
+    /* The resolved config (nm_config.h), borrowed; NULL = no
+     * persistence. The app WRITES runtime changes to its shadow file
+     * and reads nothing from it — main.c has already applied every
+     * resolved setting to the agent. */
+    NmConfig *cfg;
 
     NmToolset *tools;
     NmAgent *agent;
@@ -773,6 +780,13 @@ void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
         nm_agent_set_max_rounds(app->agent, app->max_rounds);
 }
 
+void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg)
+{
+    if (!app)
+        return;
+    app->cfg = cfg;
+}
+
 void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
 {
     if (!app)
@@ -854,6 +868,11 @@ const char *nm_chat_app_provider(const NmChatApp *app)
     return app && app->provider ? app->provider->name : NULL;
 }
 
+NmAgent *nm_chat_app_agent(const NmChatApp *app)
+{
+    return app ? app->agent : NULL;
+}
+
 /* The prompt's textinput — for main.c's history load/save wiring. */
 TuiTextInput *nm_chat_app_textinput(NmChatApp *app)
 {
@@ -887,8 +906,9 @@ static void print_help(NmChatApp *app)
                   "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
-                  "  /rounds [n|default] show or set the tool-round cap\n"
-                  "                     (defaults to NEVERMORE_MAX_ROUNDS)\n"
+                  "  /rounds [n|reset]  show or set the tool-round cap\n"
+                  "  /reasoning [on|off|reset]  echo reasoning traces back\n"
+                  "  /config [reset [k|all]]    where each setting comes from\n"
                   "  /quit              leave (Ctrl+C twice works too)");
 }
 
@@ -977,7 +997,8 @@ static void open_providers_popup(NmChatApp *app, const char *query)
     }
 }
 
-static void switch_provider(NmChatApp *app, const char *name)
+/* Returns 1 when the switch happened, 0 when the name is unknown. */
+static int switch_provider(NmChatApp *app, const char *name)
 {
     const NmProvider *p = nm_provider_by_name(name);
     if (!p) {
@@ -999,7 +1020,7 @@ static void switch_provider(NmChatApp *app, const char *name)
             off += m;
         }
         sys_line(app, "%s", buf);
-        return;
+        return 0;
     }
     /* New chat: reset every stream (emits nothing) and mark the
      * boundary; the agent rebuild wipes the session. The hold-back and
@@ -1011,6 +1032,105 @@ static void switch_provider(NmChatApp *app, const char *name)
     app->reasoning_open = 0;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
+    return 1;
+}
+
+/* ---------------------------------------------------------------- */
+/* Config write-back (the shadow layer)                             */
+/* ---------------------------------------------------------------- */
+
+/* Persist a runtime change and report it. The shadow records exactly
+ * what the user typed (that is the file's whole meaning); the report
+ * line then says where the change lands — and, when a higher layer
+ * (environment or the command line) pins this run, that it is inert
+ * until that layer is unset. Without a config handle nothing is
+ * persisted and `line` prints bare (tests, embedded use). */
+static void persist_and_report(NmChatApp *app, const char *key,
+                               const char *value, const char *line)
+{
+    if (!app->cfg) {
+        sys_line(app, "%s", line);
+        return;
+    }
+    NmCfgSource upper = nm_config_source(app->cfg, key);
+    if (nm_config_shadow_set(app->cfg, key, value) != 0) {
+        sys_line(app, "%s — not saved (shadow file unavailable)", line);
+        return;
+    }
+    if (upper == NM_CFG_ENV || upper == NM_CFG_CLI) {
+        const char *pin = upper == NM_CFG_ENV ? nm_config_env_name(key)
+                                              : "the command line";
+        sys_line(app, "%s — saved to the session shadow, but %s pins this "
+                      "run (unset it to make the choice effective)",
+                 line, pin ? pin : "a higher layer");
+    } else {
+        sys_line(app, "%s — saved to the session shadow", line);
+    }
+}
+
+/* The effective value for a key, with the config's layer resolution
+ * applied (used by `reset`: resetting reveals the layer below, not the
+ * built-in default). */
+static int resolved_rounds(NmChatApp *app)
+{
+    return app->cfg ? nm_config_get_int(app->cfg, NM_CFG_KEY_ROUNDS, 0) : 0;
+}
+
+static int resolved_reasoning(NmChatApp *app)
+{
+    return app->cfg ? nm_config_get_bool(app->cfg, NM_CFG_KEY_REASONING, 0)
+                    : app->echo_reasoning;
+}
+
+/* /config: where each setting comes from. The paths first (that is the
+ * question the command answers), then one row per key. */
+static void print_config(NmChatApp *app)
+{
+    if (!app->cfg) {
+        sys_line(app, "no config: this session does not persist settings");
+        return;
+    }
+    sys_line(app, "user    %s%s", nm_config_user_path(),
+             nm_config_user_present(app->cfg) ? "" : " (absent)");
+    int n = nm_config_shadow_count(app->cfg);
+    sys_line(app, "shadow  %s (%d key%s)", nm_config_shadow_path(), n,
+             n == 1 ? "" : "s");
+    for (size_t i = 0; nm_config_key_at(i); i++) {
+        const char *k = nm_config_key_at(i);
+        const char *v = nm_config_get(app->cfg, k);
+        sys_line(app, "  %-10s %-14s (%s)", k, v ? v : "-",
+                 nm_config_source_name(nm_config_source(app->cfg, k)));
+    }
+}
+
+/* /config reset [key|all]: drop shadow lines so the layer below
+ * applies again. `key` NULL = every key. */
+static void config_reset(NmChatApp *app, const char *key)
+{
+    if (!app->cfg) {
+        sys_line(app, "no config: this session does not persist settings");
+        return;
+    }
+    if (key && !nm_config_env_name(key) && strcmp(key, NM_CFG_KEY_MODEL) != 0) {
+        sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
+                 key);
+        return;
+    }
+    if (nm_config_shadow_reset(app->cfg, key) != 0) {
+        sys_line(app, NM_SGR_ERROR
+                 "config: could not write the shadow file" NM_SGR_RESET);
+        return;
+    }
+    if (key)
+        sys_line(app, "config: %s reset", key);
+    else
+        sys_line(app, "config: all keys reset");
+    /* Re-resolve what the live agent needs (rounds and the echo flag
+     * are agent state; model/provider are set by their own commands). */
+    if (!key || strcmp(key, NM_CFG_KEY_ROUNDS) == 0)
+        nm_chat_app_set_max_rounds(app, resolved_rounds(app));
+    if (!key || strcmp(key, NM_CFG_KEY_REASONING) == 0)
+        nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
 }
 
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
@@ -1051,7 +1171,9 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             nm_agent_set_model(app->agent, id);
             free(app->model);
             app->model = strdup(id);
-            sys_line(app, "model: %s (exact)", app->model);
+            char line[256];
+            snprintf(line, sizeof(line), "model: %s (exact)", app->model);
+            persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
             return;
         }
         /* Validation: refuse an unknown id instead of a silent 404
@@ -1075,7 +1197,9 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         nm_agent_set_model(app->agent, arg);
         free(app->model);
         app->model = strdup(arg);
-        sys_line(app, "model: %s", app->model);
+        char line[256];
+        snprintf(line, sizeof(line), "model: %s", app->model);
+        persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
         return;
     }
     if (NAME_IS("provider")) {
@@ -1086,7 +1210,11 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         }
         const NmProvider *p = nm_provider_by_name(arg);
         if (p) {
-            switch_provider(app, arg);
+            if (switch_provider(app, arg)) {
+                char line[256];
+                snprintf(line, sizeof(line), "provider: %s", arg);
+                persist_and_report(app, NM_CFG_KEY_PROVIDER, arg, line);
+            }
             return;
         }
         /* Not an exact name: treat as a query into the picker. */
@@ -1095,17 +1223,25 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
     }
     if (NAME_IS("rounds")) {
         if (!*arg) {
-            sys_line(app, "tool rounds: %d (default %d)",
+            sys_line(app, "tool rounds: %d (built-in default %d)",
                      nm_agent_max_rounds(app->agent),
                      NM_AGENT_DEFAULT_MAX_ROUNDS);
             return;
         }
-        /* "0" / "default" restore the built-in cap; otherwise a
-         * positive decimal. Character-level scan: reject anything
-         * with a non-digit or a value we cannot parse. */
-        if (strcmp(arg, "default") == 0) {
-            nm_chat_app_set_max_rounds(app, 0);
-            sys_line(app, "tool rounds: %d (default)",
+        /* "0" / "reset" drop the shadow line and reveal the layer
+         * below (the user config, or the built-in default) — "default"
+         * was a lie under shadow semantics. Otherwise a positive
+         * decimal, character-level scanned. */
+        if (strcmp(arg, "reset") == 0) {
+            if (app->cfg) {
+                if (nm_config_shadow_reset(app->cfg, NM_CFG_KEY_ROUNDS) != 0) {
+                    sys_line(app, NM_SGR_ERROR
+                             "rounds: could not write the shadow file" NM_SGR_RESET);
+                    return;
+                }
+            }
+            nm_chat_app_set_max_rounds(app, resolved_rounds(app));
+            sys_line(app, "tool rounds: %d (shadow reset)",
                      nm_agent_max_rounds(app->agent));
             return;
         }
@@ -1119,11 +1255,76 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         }
         if (v <= 0) {
             sys_line(app, NM_SGR_ERROR "rounds: expected a positive count "
-                                       "or 'default'" NM_SGR_RESET);
+                                       "or 'reset'" NM_SGR_RESET);
             return;
         }
         nm_chat_app_set_max_rounds(app, v);
-        sys_line(app, "tool rounds: %d", nm_agent_max_rounds(app->agent));
+        char line[128];
+        snprintf(line, sizeof(line), "tool rounds: %d",
+                 nm_agent_max_rounds(app->agent));
+        persist_and_report(app, NM_CFG_KEY_ROUNDS, arg, line);
+        return;
+    }
+    if (NAME_IS("reasoning")) {
+        if (!*arg) {
+            sys_line(app, "reasoning echo: %s (built-in default off)",
+                     nm_agent_echo_reasoning(app->agent) ? "on" : "off");
+            return;
+        }
+        if (strcmp(arg, "reset") == 0) {
+            if (app->cfg &&
+                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_REASONING) != 0) {
+                sys_line(app, NM_SGR_ERROR "reasoning: could not write the "
+                                           "shadow file" NM_SGR_RESET);
+                return;
+            }
+            nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
+            sys_line(app, "reasoning echo: %s (shadow reset)",
+                     app->echo_reasoning ? "on" : "off");
+            return;
+        }
+        if (!nm_config_valid_reasoning(arg)) {
+            sys_line(app, NM_SGR_ERROR
+                     "reasoning: expected on, off or reset" NM_SGR_RESET);
+            return;
+        }
+        /* The whole spelling decides, never the first letter: "on" and
+         * "off" share one. */
+        char v[8];
+        size_t vn = 0;
+        for (; arg[vn] && vn < sizeof(v) - 1; vn++) {
+            char ch = arg[vn];
+            v[vn] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
+        }
+        v[vn] = '\0';
+        int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
+                 strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
+        nm_chat_app_set_echo_reasoning(app, on);
+        char line[128];
+        snprintf(line, sizeof(line), "reasoning echo: %s", on ? "on" : "off");
+        persist_and_report(app, NM_CFG_KEY_REASONING, on ? "on" : "off", line);
+        return;
+    }
+    if (NAME_IS("config")) {
+        if (!*arg) {
+            print_config(app);
+            return;
+        }
+        const char *what = arg;
+        const char *kw = what;
+        while (*kw && *kw != ' ' && *kw != '\t')
+            kw++;
+        size_t kwlen = (size_t)(kw - what);
+        while (*kw == ' ' || *kw == '\t')
+            kw++;
+        if (kwlen == 5 && strncmp(what, "reset", 5) == 0) {
+            if (!*kw || strcmp(kw, "all") == 0)
+                config_reset(app, NULL);
+            else
+                config_reset(app, kw);
+            return;
+        }
+        sys_line(app, NM_SGR_ERROR "config: expected 'reset [key|all]'" NM_SGR_RESET);
         return;
     }
     sys_line(app, NM_SGR_ERROR "unknown command '%.*s' — /help lists "
@@ -1181,7 +1382,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/rounds", "/quit", NULL
+        "/help", "/model", "/provider", "/rounds", "/reasoning", "/config",
+        "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

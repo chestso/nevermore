@@ -43,6 +43,7 @@
 #include "transport.h"
 
 typedef struct NmChatApp NmChatApp;
+typedef struct NmConfig NmConfig;
 
 /* Create the app: resolves the provider by name, builds the toolset
  * and the agent (wired to the app's own delta/tool/state callbacks).
@@ -75,8 +76,16 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
 
 /* Tool-call round cap for the agent this app builds and the live
  * agent (<=0 = agent default, NM_AGENT_DEFAULT_MAX_ROUNDS). main.c
- * wires $NEVERMORE_MAX_ROUNDS here. */
+ * wires the resolved config here. */
 void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
+
+/* The resolved config (nm_config.h), BORROWED: the app writes runtime
+ * changes (/model, /provider, /rounds, /reasoning) to its shadow file
+ * and never reads a value from it — main.c has already applied the
+ * resolved settings. NULL (the default, and what tests get) means no
+ * persistence: the commands still work in-process and print plain
+ * lines, and nothing is written anywhere. */
+void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
 
 /* Reasoning echo-back for the agent this app builds and the live
  * agent: re-send the transcript's reasoning traces to the provider
@@ -114,6 +123,7 @@ void nm_chat_app_on_state(int state, void *userdata);
 NmAgentState nm_chat_app_state(const NmChatApp *app);
 const char *nm_chat_app_model(const NmChatApp *app);
 const char *nm_chat_app_provider(const NmChatApp *app);
+NmAgent *nm_chat_app_agent(const NmChatApp *app);
 
 /* The prompt's textinput (main.c wires history load/save to it). */
 TuiTextInput *nm_chat_app_textinput(NmChatApp *app);
