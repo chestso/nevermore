@@ -168,6 +168,110 @@ void nm_tool_result_free(NmToolResult *r)
     r->output = NULL;
 }
 
+/* ---------------------------------------------------------------- */
+/* Tool-call plan rendering (the "show what we plan to do" seam)     */
+/* ---------------------------------------------------------------- */
+
+/* Minimal growable byte buffer. A plan is built once per tool event
+ * (never per token), so a small local builder is enough; it is freed
+ * with the plan. */
+typedef struct PlanBuf
+{
+    char *p;
+    size_t len, cap;
+} PlanBuf;
+
+static int plan_reserve(PlanBuf *b, size_t extra)
+{
+    if (b->len + extra + 1 <= b->cap)
+        return 0;
+    size_t ncap = b->cap ? b->cap : 128;
+    while (ncap < b->len + extra + 1)
+        ncap *= 2;
+    char *np = realloc(b->p, ncap);
+    if (!np)
+        return -1;
+    b->p = np;
+    b->cap = ncap;
+    return 0;
+}
+
+static void plan_append(PlanBuf *b, const char *s, size_t n)
+{
+    if (n == 0 || plan_reserve(b, n) != 0)
+        return;
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+
+static void plan_puts(PlanBuf *b, const char *s)
+{
+    plan_append(b, s, strlen(s));
+}
+
+/* Byte length of a value to show, clamped to `max' without splitting a
+ * UTF-8 sequence (back off to the last lead byte). */
+static size_t plan_clamp_len(const char *s, size_t n, size_t max)
+{
+    if (n <= max)
+        return n;
+    size_t cut = max;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80)
+        cut--;
+    return cut;
+}
+
+static void plan_value(PlanBuf *b, const NmJson *v)
+{
+    char *dump = v ? nm_json_dump(v) : NULL;
+    if (!dump)
+        return;
+    const char *s = dump;
+    size_t n = strlen(dump);
+    /* Strings show unquoted (JSON escaping already kept them one
+     * line: \n, \t, ... arrive escaped). */
+    if (nm_json_type(v) == NM_JSON_STRING && n >= 2 && s[0] == '"' &&
+        s[n - 1] == '"') {
+        s++;
+        n -= 2;
+    }
+    size_t cut = plan_clamp_len(s, n, NM_TOOL_PLAN_VALUE_MAX);
+    plan_append(b, s, cut);
+    if (cut < n)
+        plan_puts(b, "…");
+    free(dump);
+}
+
+char *nm_tool_plan(const char *name, const char *args_json)
+{
+    PlanBuf b = { NULL, 0, 0 };
+    plan_puts(&b, name ? name : "?");
+
+    NmJson *args = NULL;
+    if (args_json && *args_json) {
+        const char *err = NULL;
+        args = nm_json_parse(args_json, strlen(args_json), &err);
+    }
+    if (args && nm_json_type(args) == NM_JSON_OBJECT) {
+        size_t nk = nm_json_len(args);
+        for (size_t i = 0; i < nk; i++) {
+            const char *key = nm_json_key(args, i);
+            if (!key)
+                continue;
+            plan_puts(&b, "\n  ");
+            plan_puts(&b, key);
+            plan_puts(&b, ": ");
+            plan_value(&b, nm_json_get(args, key));
+        }
+    }
+    nm_json_free(args);
+
+    if (!b.p)
+        return strdup(name ? name : "?"); /* OOM: name-only fallback */
+    return b.p;
+}
+
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code)
 {
     /* Implemented per-OS: tools_spawn_posix.c / tools_spawn_win.c. */

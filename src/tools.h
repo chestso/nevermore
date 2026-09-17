@@ -69,6 +69,23 @@ NmToolResult nm_tool_result_text(const char *text);
 
 void nm_tool_result_free(NmToolResult *r);
 
+/* Render a human-readable plan for a tool call: the tool name on the
+ * first line, then one indented "key: value" line per argument in the
+ * order the model emitted it.
+ *
+ *   edit_file
+ *     path: src/x.c
+ *     old_string: quick brown
+ *     new_string: slow red
+ *
+ * String values are shown unquoted with control bytes escaped (\n,
+ * \t); non-string values are shown as compact JSON. Every value is
+ * clamped to NM_TOOL_PLAN_VALUE_MAX bytes with a trailing "…". Absent
+ * or unparseable args yield the name line alone. Heap-owned; the
+ * caller frees. */
+#define NM_TOOL_PLAN_VALUE_MAX 512
+char *nm_tool_plan(const char *name, const char *args_json);
+
 /* ---------------------------------------------------------------- */
 /* Built-in tools (registered by nm_toolset_add_defaults())          */
 /* ---------------------------------------------------------------- */

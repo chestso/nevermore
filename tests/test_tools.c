@@ -494,6 +494,84 @@ static void test_spawn_capture_api(void)
     free(output);
 }
 
+/* ---------------------------------------------------------------- */
+/* Tool-call plan rendering (nm_tool_plan)                           */
+/* ---------------------------------------------------------------- */
+
+static void test_tool_plan_lists_args_in_order(void)
+{
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string("src/x.c"));
+    nm_json_set(jargs, "offset", nm_json_new_number(3));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    char *plan = nm_tool_plan("read_file", args);
+    free(args);
+    ASSERT_NOT_NULL(plan);
+    /* Name line, then one indented key: value line per argument, in
+     * the order the model emitted them; strings unquoted, numbers as
+     * compact JSON. */
+    ASSERT_STR_EQ(plan, "read_file\n  path: src/x.c\n  offset: 3");
+    free(plan);
+}
+
+static void test_tool_plan_escapes_newlines(void)
+{
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd", nm_json_new_string("make -j4\n./run"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    char *plan = nm_tool_plan("run_command", args);
+    free(args);
+    /* A multi-line value stays on one plan line (JSON escapes it). */
+    ASSERT_STR_EQ(plan, "run_command\n  cmd: make -j4\\n./run");
+    free(plan);
+}
+
+static void test_tool_plan_clamps_long_values(void)
+{
+    char big[NM_TOOL_PLAN_VALUE_MAX + 100];
+    memset(big, 'a', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd", nm_json_new_string(big));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    char *plan = nm_tool_plan("run_command", args);
+    free(args);
+    ASSERT_NOT_NULL(plan);
+    /* prefix + NM_TOOL_PLAN_VALUE_MAX value bytes + a 3-byte ellipsis */
+    size_t prefix = strlen("run_command\n  cmd: ");
+    ASSERT_EQ(strlen(plan), prefix + NM_TOOL_PLAN_VALUE_MAX + 3);
+    ASSERT_TRUE(strncmp(plan + prefix, big, NM_TOOL_PLAN_VALUE_MAX) == 0);
+    ASSERT_TRUE(strcmp(plan + prefix + NM_TOOL_PLAN_VALUE_MAX, "…") == 0);
+    free(plan);
+}
+
+static void test_tool_plan_degenerate_args(void)
+{
+    char *p;
+    p = nm_tool_plan("read_file", NULL);
+    ASSERT_STR_EQ(p, "read_file");
+    free(p);
+    p = nm_tool_plan("read_file", "");
+    ASSERT_STR_EQ(p, "read_file");
+    free(p);
+    p = nm_tool_plan("read_file", "{ not json");
+    ASSERT_STR_EQ(p, "read_file");
+    free(p);
+    /* Non-object args (an array) yield the name alone. */
+    p = nm_tool_plan("read_file", "[]");
+    ASSERT_STR_EQ(p, "read_file");
+    free(p);
+    p = nm_tool_plan(NULL, NULL);
+    ASSERT_STR_EQ(p, "?");
+    free(p);
+}
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -514,5 +592,9 @@ int main(void)
     RUN_TEST(test_run_command_exit_zero);
     RUN_TEST(test_run_command_exit_nonzero);
     RUN_TEST(test_spawn_capture_api);
+    RUN_TEST(test_tool_plan_lists_args_in_order);
+    RUN_TEST(test_tool_plan_escapes_newlines);
+    RUN_TEST(test_tool_plan_clamps_long_values);
+    RUN_TEST(test_tool_plan_degenerate_args);
     TEST_SUMMARY();
 }
