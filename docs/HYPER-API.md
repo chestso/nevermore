@@ -190,7 +190,7 @@ or `nil` to omit).
 **nevermore mirrors it too** (`src/provider_hyper.c`): every chat request
 carries the affinity pair — `XXH3-64` of the conversation id, sent under both
 names — plus `x-crush-id`, `XXH3-64("<hostname>@<HOME>")`, derived once per
-process. The header is *stable per machine*; nevermore deliberately does not
+process. The header is _stable per machine_; nevermore deliberately does not
 replicate Crush's hardware fingerprint (different value, same contract), so it
 does not read the same as a Crush CLI request. The digest comes from
 `src/xxh3.c`, an implementation of the XXH3-64 algorithm from
