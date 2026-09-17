@@ -192,11 +192,16 @@ static size_t run_len(const char *s, size_t len, size_t i, char c)
     return n;
 }
 
-/* Find the closer for a delimiter run: the same character, an
- * equal-or-longer run, with the underscore word-boundary rule on the
- * OPENING side enforced by the caller. Returns the byte offset of the
- * closer's first char, or 0 (not found). `min` is the opener's run
- * length (the closer must be >=). */
+/* Find the closer for a delimiter run: the same character in a run of
+ * exactly the opener's length (`min`), with the underscore
+ * word-boundary rule on the CLOSING side. Returns the byte offset of
+ * the closer's first char, or 0 (not found).
+ *
+ * The exact-length rule is what lets an outer single `*` span an inner
+ * strong run (`*foo **bar** baz*`): the `**` run is not a run of one,
+ * so it is not a closer for the single-star opener, and the opener
+ * reaches the final `*`. The inner `**…**` then pairs up under the
+ * recursion. */
 static size_t find_closer(const char *s, size_t len, size_t from, char c,
                           size_t min)
 {
@@ -209,7 +214,7 @@ static size_t find_closer(const char *s, size_t len, size_t from, char c,
         }
         if (s[i] == c) {
             size_t r = run_len(s, len, i, c);
-            if (r >= min) {
+            if (r == min) {
                 if (c == '_') {
                     /* closing outer side must be a word boundary */
                     char after = (i + r < len) ? s[i + r] : 0;
@@ -226,6 +231,38 @@ static size_t find_closer(const char *s, size_t len, size_t from, char c,
     return 0;
 }
 
+static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
+                             TuiAttr base);
+
+/* Emit a span's content under `composed`. Non-verbatim spans recurse
+ * (nested spans compose onto one SGR run — never nested SGR); a code
+ * span is verbatim (CommonMark: its content is never re-scanned, so
+ * `*foo*` inside backticks stays literal).
+ *
+ * The recursion assumes its base is already the active attr (the
+ * emit_styled contract), so `composed` is applied before the call and
+ * `base` restored after. */
+static void emit_span_content(TuiRowSink *sink, const char *s, size_t len,
+                              TuiAttr composed, TuiAttr base, int verbatim)
+{
+    if (len == 0)
+        return;
+    if (verbatim) {
+        emit_styled(sink, s, len, composed, base);
+        return;
+    }
+    int pushed = !attr_is_plain(composed) && !attr_eq(composed, base);
+    if (pushed)
+        tui_row_attr(sink, composed);
+    emit_inline_runs(sink, s, len, composed);
+    if (pushed) {
+        if (attr_is_plain(base))
+            tui_row_attr_reset(sink);
+        else
+            tui_row_attr(sink, base);
+    }
+}
+
 /* Emit one line's text with inline spans styled. `base` is the row's
  * base attr (heading/list/quote); a span reset restores it. */
 static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
@@ -238,6 +275,7 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
         char c = s[i];
         size_t span_start = 0, span_len = 0, content_at = 0;
         size_t content_len = 0;
+        int verbatim = 0; /* code spans are verbatim (not rescanned) */
         TuiAttr span = nm_attr_plain();
 
         if (c == '`' && run_len(s, len, i, '`') == 1) {
@@ -249,6 +287,7 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                 content_at = i + 1;
                 content_len = close - (i + 1);
                 span = nm_attr_code();
+                verbatim = 1;
             }
         } else if (c == '~') {
             size_t r = run_len(s, len, i, '~');
@@ -309,13 +348,14 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                     }
                 }
                 if (paren_end) {
-                    /* text run, then ` (url)` dim */
+                    /* text run (spans compose inside it), then the
+                     * `(url)` dim */
                     if (plain < i)
                         emit_styled(sink, s + plain, i - plain, base, base);
                     TuiAttr link = attr_or(base, nm_attr_code());
                     link.underline = 1;
-                    emit_styled(sink, s + i + 1, close - (i + 1), link,
-                                base);
+                    emit_span_content(sink, s + i + 1, close - (i + 1), link,
+                                      base, 0);
                     TuiAttr url = attr_or(base, nm_attr_link_url());
                     /* include the closing `)`: from `(` to `)` end */
                     emit_styled(sink, s + close + 1, paren_end - close,
@@ -331,7 +371,8 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
             if (plain < span_start)
                 emit_styled(sink, s + plain, span_start - plain, base, base);
             TuiAttr composed = attr_or(base, span);
-            emit_styled(sink, s + content_at, content_len, composed, base);
+            emit_span_content(sink, s + content_at, content_len, composed,
+                              base, verbatim);
             i = span_start + span_len;
             plain = i;
             continue;
@@ -428,8 +469,16 @@ static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
     if (mark_len) {
         if (i > 0)
             emit_styled(sink, s, i, base, base);
-        emit_styled(sink, s + i, mark_len, attr_or(base, marker_attr), base);
-        size_t rest = i + mark_len;
+        /* The marker run carries the marker AND its single separating
+         * space: the source's whitespace run collapses to one (the
+         * CommonMark list-item shape), and the space rides the marker
+         * attr so the content run starts exactly at the item text. */
+        size_t mark_end = i + mark_len;
+        if (mark_end < len && is_space(s[mark_end]))
+            mark_end++;
+        emit_styled(sink, s + i, mark_end - i, attr_or(base, marker_attr),
+                    base);
+        size_t rest = mark_end;
         while (rest < len && is_space(s[rest]))
             rest++;
         if (rest < len)

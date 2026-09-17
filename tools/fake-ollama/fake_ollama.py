@@ -72,6 +72,7 @@ SCENARIOS = {
         {"content": "Two line.\n\n"},
         {"content": "- `history.c` is next\n"},
         {"content": "- and `session.c`\n\n"},
+        {"content": "Nested **bold with *italic* inside** inline.\n\n"},
         {"content": "Done.\n\n"},
     ],
 }

@@ -885,10 +885,10 @@ static void test_quote_and_list_styling(void)
     ASSERT_TRUE(strstr(q, "\x1b[0;38;2;96;95;107m\xe2\x94\x82 ") != NULL);
     ASSERT_TRUE(strstr(q, "\x1b[0;38;2;191;188;200m> quoted text") != NULL);
 
-    /* list bullet coral, text plain */
+    /* list bullet coral (with its separating space), text plain */
     const char *l = commit_one(0, "- item text\n");
-    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;87;125m-") != NULL);
-    ASSERT_TRUE(strstr(l, "item text") != NULL);
+    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;87;125m- \x1b[0mitem text") !=
+                NULL);
 }
 
 static void test_live_table_on_reasoning_carries_dim(void)
@@ -918,6 +918,78 @@ static void test_table_header_bold_and_borders_oyster(void)
     ASSERT_TRUE(strstr(out, "\x1b[0;1mh1") != NULL);
     ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m\xe2\x94\x8c") != NULL);
     h_free(h);
+}
+
+static void test_list_marker_keeps_separating_space(void)
+{
+    /* The space between the marker and the item text is part of the
+     * rendered line. It rides the marker attr, so the content run
+     * starts exactly at the item text: "- item text", not
+     * "-item text". */
+    const char *bullet = commit_one(0, "- item text\n");
+    ASSERT_TRUE(strstr(bullet,
+                       "\x1b[0;38;2;255;87;125m- \x1b[0mitem text\r\n") !=
+                NULL);
+
+    const char *ordered = commit_one(0, "1. first\n");
+    ASSERT_TRUE(strstr(ordered,
+                       "\x1b[0;38;2;255;87;125m1. \x1b[0mfirst\r\n") != NULL);
+
+    /* a bullet whose content is a code span: marker + space, then the
+     * span, then the trailing text */
+    const char *code = commit_one(0, "- `history.c` is next\n");
+    ASSERT_TRUE(strstr(code, "\x1b[0;38;2;255;87;125m- \x1b[0m"
+                             "\x1b[0;38;2;79;190;254mhistory.c\x1b[0m"
+                             " is next\r\n") != NULL);
+}
+
+static void test_nested_inline_spans_compose(void)
+{
+    /* code inside italic: the inner span styles, the outer composes
+     * onto ONE SGR run (never nested SGR), and the italic base is
+     * restored after the inner span */
+    const char *ic = commit_one(0, "*italic with `code` inside*\n");
+    ASSERT_TRUE(strstr(ic, "\x1b[0;3mitalic with "
+                           "\x1b[0;3;38;2;79;190;254mcode\x1b[0;3m "
+                           "inside\x1b[0m\r\n") != NULL);
+
+    /* code inside bold */
+    const char *bc = commit_one(0, "**bold `code`**\n");
+    ASSERT_TRUE(strstr(bc, "\x1b[0;1mbold "
+                           "\x1b[0;1;38;2;79;190;254mcode\x1b[0;1m") !=
+                NULL);
+
+    /* italic inside bold: bold + italic compose on the inner run */
+    const char *bi = commit_one(0, "x **with *nested* italic** y\n");
+    ASSERT_TRUE(strstr(bi, "\x1b[0;1mwith \x1b[0;1;3mnested\x1b[0;1m "
+                           "italic\x1b[0m y\r\n") != NULL);
+
+    /* a single em containing a strong: the strong is not dropped by
+     * the outer span (the exact-run closer lets the em reach the final
+     * `*`, and the strong pairs up under the recursion) */
+    const char *es = commit_one(0, "*foo **bar** baz*\n");
+    ASSERT_TRUE(strstr(es, "\x1b[0;3mfoo \x1b[0;1;3mbar\x1b[0;3m baz"
+                           "\x1b[0m\r\n") != NULL);
+
+    /* strike + italic */
+    const char *si = commit_one(0, "~~struck *em*~~\n");
+    ASSERT_TRUE(strstr(si, "\x1b[0;9mstruck \x1b[0;3;9mem\x1b[0;9m") != NULL);
+
+    /* code content is verbatim: markers inside it are not rescanned */
+    const char *cv = commit_one(0, "a `*foo*` b\n");
+    ASSERT_TRUE(strstr(cv, "\x1b[0;38;2;79;190;254m*foo*\x1b[0m b\r\n") !=
+                NULL);
+
+    /* link text recurses: italic composes with the link attr; the url
+     * stays dim */
+    const char *lt = commit_one(0, "[*em*](http://x)\n");
+    ASSERT_TRUE(strstr(lt, "\x1b[0;3;4;38;2;79;190;254mem") != NULL);
+    ASSERT_TRUE(strstr(lt, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
+
+    /* a link inside bold: the text composes bold + underline + sardine */
+    const char *lb = commit_one(0, "**[docs](http://x)**\n");
+    ASSERT_TRUE(strstr(lb, "\x1b[0;1;4;38;2;79;190;254mdocs") != NULL);
+    ASSERT_TRUE(strstr(lb, "\x1b[0;1;2m(http://x)\x1b[0;1m") != NULL);
 }
 
 int main(void)
@@ -952,6 +1024,8 @@ int main(void)
     RUN_TEST(test_span_inside_heading_restores_heading_attr);
     RUN_TEST(test_fence_lines_are_styled);
     RUN_TEST(test_quote_and_list_styling);
+    RUN_TEST(test_list_marker_keeps_separating_space);
+    RUN_TEST(test_nested_inline_spans_compose);
     RUN_TEST(test_live_table_on_reasoning_carries_dim);
     RUN_TEST(test_table_header_bold_and_borders_oyster);
     TEST_SUMMARY();
