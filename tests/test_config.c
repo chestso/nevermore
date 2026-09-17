@@ -57,8 +57,8 @@ static int test_valid_provider(const char *name)
 /* ---------------------------------------------------------------- */
 
 static char g_root[512];
-static char g_user[600];
-static char g_shadow[600];
+static char g_user[1040]; /* dir (1024) + "/config" */
+static char g_shadow[1040];
 
 static void scratch_init(void)
 {
@@ -74,7 +74,7 @@ static void scratch_init(void)
 /* Pin both paths for one test; `sub` keeps tests from sharing files. */
 static void pin_paths(const char *sub)
 {
-    char dir[600];
+    char dir[1024];
     snprintf(dir, sizeof(dir), "%s/%s", g_root, sub);
     mkdir(dir, 0755);
     snprintf(g_user, sizeof(g_user), "%s/config", dir);
@@ -369,9 +369,9 @@ static void test_shadow_set_validates(void)
 /* The shadow directory is created on demand (mkdir -p). */
 static void test_shadow_creates_directory(void)
 {
-    char dir[600];
+    char dir[1024];
     snprintf(dir, sizeof(dir), "%s/deep/nested", g_root);
-    char user[700];
+    char user[1040];
     snprintf(user, sizeof(user), "%s/config", dir);
     snprintf(g_shadow, sizeof(g_shadow), "%s/shadow", dir);
     nm_config_set_paths(user, g_shadow);
@@ -384,19 +384,33 @@ static void test_shadow_creates_directory(void)
     nm_config_free(c);
 }
 
-/* No resolvable path: nothing is written (no persistence), and the
- * in-memory layer still changed. */
-static void test_no_path_is_not_persisted(void)
+/* An unwritable location: the write is reported as -1 (the caller says
+ * "not saved") and the in-memory layer still carries what the user
+ * typed — the command worked, only the persistence did not.
+ *
+ * The blocker is a regular FILE standing where the directory must go,
+ * not an absolute path like /nonexistent: on Windows that is
+ * <drive>:\nonexistent, and an MSYS2 CI runner can create it (the
+ * first version of this test failed on CI for exactly that reason). A
+ * file in the way fails on every platform, for a structural reason. */
+static void test_unwritable_path_is_reported(void)
 {
-    nm_config_set_paths("/nonexistent/nm-test-config/config",
-                        "/nonexistent/nm-test-config/shadow");
+    char blocker[1024];
+    char user[1024];
+    char shadow[1024];
+    snprintf(blocker, sizeof(blocker), "%s/blocker", g_root);
+    write_file_at(blocker, "not a directory\n");
+    snprintf(user, sizeof(user), "%s/blocker/config", g_root);
+    snprintf(shadow, sizeof(shadow), "%s/blocker/shadow", g_root);
+    nm_config_set_paths(user, shadow);
+
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    /* /nonexistent is not writable: the write fails loudly as -1. */
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "m"), -1);
-    /* The in-memory layer still carries what the user typed. */
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "m");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
+    /* Nothing was created beside the blocker. */
+    ASSERT_FALSE(file_present(shadow));
     nm_config_free(c);
 }
 
@@ -482,7 +496,7 @@ int main(void)
     RUN_TEST(test_shadow_reset_key_and_all);
     RUN_TEST(test_shadow_set_validates);
     RUN_TEST(test_shadow_creates_directory);
-    RUN_TEST(test_no_path_is_not_persisted);
+    RUN_TEST(test_unwritable_path_is_reported);
     RUN_TEST(test_path_env_overrides);
     RUN_TEST(test_provider_validator_hook);
     RUN_TEST(test_key_vocabulary);

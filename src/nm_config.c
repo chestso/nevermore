@@ -597,13 +597,20 @@ static int mkdir_p(const char *dir)
             char saved = tmp[i];
             tmp[i] = '\0';
 #ifdef _WIN32
-            if (GetFileAttributesA(tmp) == INVALID_FILE_ATTRIBUTES) {
+            DWORD attrs = GetFileAttributesA(tmp);
+            if (attrs == INVALID_FILE_ATTRIBUTES) {
                 if (!CreateDirectoryA(tmp, NULL) &&
                     GetLastError() != ERROR_ALREADY_EXISTS)
                     return -1;
+            } else if (!(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+                return -1; /* a file is in the way: not our directory */
             }
 #else
             if (mkdir(tmp, 0755) != 0 && errno != EEXIST)
+                return -1;
+            /* EEXIST can also mean a FILE with that name. */
+            struct stat st;
+            if (stat(tmp, &st) != 0 || !S_ISDIR(st.st_mode))
                 return -1;
 #endif
             tmp[i] = saved;
