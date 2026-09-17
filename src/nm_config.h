@@ -1,0 +1,165 @@
+/* nm_config.h - central configuration: user file + runtime shadow layer
+ *
+ * One name per knob, one resolution order. Lowest to highest:
+ *
+ *   1 built-in defaults      compiled in
+ *   2 user config            ~/.config/nevermore/config       (by hand)
+ *   3 runtime shadow         ~/.local/state/nevermore/config  (the app)
+ *   4 environment            NEVERMORE_*                      (invoker)
+ *   5 explicit CLI flags     -p / -m                          (this run)
+ *
+ * The app NEVER edits the user's config file. An in-app change
+ * (/model, /provider, /rounds, /reasoning) is written to the shadow
+ * file, which is read at higher precedence than the user config and is
+ * disposable by design: it holds ONLY the keys the user changed at
+ * runtime, so deleting it (or /config reset all) reveals the user
+ * config again.
+ *
+ * Environment wins over both persisted layers on purpose: a script's
+ * NEVERMORE_MODEL=x must not be silently overridden by whatever was
+ * last typed in a TUI session. CLI flags still beat env (otherwise
+ * -p/-m are dead in any shell that exports NEVERMORE_PROVIDER).
+ *
+ * Grammar (character-level scan, no regex, no quoting, no sections):
+ *
+ *   # comment to end of line; blank lines ignored
+ *   provider  = openai
+ *   model     = glm-5.3
+ *   rounds    = 40
+ *   reasoning = on
+ *
+ * The value is the rest of the line, trimmed, taken verbatim. Unknown
+ * keys warn once and are ignored; an invalid value warns and falls
+ * through to the next layer, so a stale file can never brick startup.
+ * No secrets, ever: API keys live in the environment or ~/.authinfo.
+ *
+ * base_url is deliberately NOT a config key — it is a testing and
+ * exploratory knob (NEVERMORE_BASE_URL), not a durable profile.
+ *
+ * Memory model: one NmConfig with fixed tables and static path
+ * buffers, allocated once per process; the rewrite reuses one line
+ * buffer. No per-event allocation.
+ */
+
+#ifndef NM_CONFIG_H
+#define NM_CONFIG_H
+
+#include <stddef.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* The four knobs. One spelling each — no aliases, no NEVERMORE_ prefix
+ * in the file. */
+#define NM_CFG_KEY_PROVIDER  "provider"
+#define NM_CFG_KEY_MODEL     "model"
+#define NM_CFG_KEY_ROUNDS    "rounds"
+#define NM_CFG_KEY_REASONING "reasoning"
+
+typedef enum
+{
+    NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */
+    NM_CFG_USER,        /* the user's config file */
+    NM_CFG_SHADOW,      /* the runtime shadow file */
+    NM_CFG_ENV,         /* the environment */
+    NM_CFG_CLI          /* -p / -m */
+} NmCfgSource;
+
+typedef struct NmConfig NmConfig;
+
+/* Load the user config, then the shadow over it. Never fails on a
+ * missing/unreadable/malformed file (absent = no keys; bad lines warn
+ * on stderr and are skipped). NULL only on OOM. */
+NmConfig *nm_config_load(void);
+void nm_config_free(NmConfig *c);
+
+/* Winning value for a key (borrowed, valid while `c` lives), or NULL
+ * when no layer sets it. The winning layer: nm_config_source. */
+const char *nm_config_get(const NmConfig *c, const char *key);
+NmCfgSource nm_config_source(const NmConfig *c, const char *key);
+
+/* Truthiness for `reasoning`: 1/true/on/yes, case-insensitive. Unset or
+ * unparseable yields `fallback` (set_env already dropped garbage). */
+int nm_config_get_bool(const NmConfig *c, const char *key, int fallback);
+
+/* Positive decimal, clamped to 100000; `fallback` when unset. */
+int nm_config_get_int(const NmConfig *c, const char *key, int fallback);
+
+/* Human name of a layer, for /config and messages. */
+const char *nm_config_source_name(NmCfgSource s);
+
+/* The environment variable behind a key ("NEVERMORE_MODEL"), for
+ * "why is my change inert" messages. NULL for an unknown key. */
+const char *nm_config_env_name(const char *key);
+
+/* Key vocabulary, for a view that does not want to repeat the list.
+ * NULL past the end. */
+const char *nm_config_key_at(size_t i);
+
+/* Apply the environment layer (validated: a non-positive/garbage
+ * rounds value and an unparseable reasoning value are ignored, so a
+ * typo can never silently flip provider-facing behavior). Called by
+ * main.c after load. */
+void nm_config_set_env(NmConfig *c);
+
+/* Apply the explicit-flag layer. Trusted (no validation): an unknown
+ * provider name is the invoker's explicit intent and the consumer
+ * reports it loudly. `value` NULL/empty clears the layer. */
+void nm_config_set_cli(NmConfig *c, const char *key, const char *value);
+
+/* Runtime write-back: update the shadow layer AND rewrite the shadow
+ * file atomically (tmp + rename), so the file always holds exactly the
+ * keys the user changed at the prompt. `value` NULL or "" removes the
+ * key (same as nm_config_shadow_reset). Values are validated and
+ * normalized here (reasoning -> "on"/"off").
+ *
+ * Returns 0 on success, -1 when the key is unknown, the value is
+ * invalid, or the file could not be written (the in-memory layer still
+ * changed). No shadow path (unresolvable home) = -1: no persistence. */
+int nm_config_shadow_set(NmConfig *c, const char *key, const char *value);
+
+/* Drop one key from the shadow (NULL = every key). The file is
+ * removed once it holds no keys. Same return contract. */
+int nm_config_shadow_reset(NmConfig *c, const char *key);
+
+/* How many keys the shadow layer holds. */
+int nm_config_shadow_count(const NmConfig *c);
+
+/* Does the user config file exist? (The /config view's annotation.) */
+int nm_config_user_present(const NmConfig *c);
+
+/* Resolved paths, borrowed static storage:
+ * $NEVERMORE_CONFIG, else $XDG_CONFIG_HOME/nevermore/config, else
+ * ~/.config/nevermore/config; $NEVERMORE_SHADOW_CONFIG, else
+ * $XDG_STATE_HOME/nevermore/config, else ~/.local/state/nevermore/
+ * config (%USERPROFILE%\.config / %LOCALAPPDATA% on Windows). Empty
+ * when the home directory cannot be resolved (then nothing is read
+ * or written). */
+const char *nm_config_user_path(void);
+const char *nm_config_shadow_path(void);
+
+/* Test seam (nm_authinfo_set_path pattern): override either path before
+ * nm_config_load. NULL/empty = restore the default chain. Never point
+ * a test at the real home directory. */
+void nm_config_set_paths(const char *user_path, const char *shadow_path);
+
+/* Validation, shared with main.c/chat_app.c so the rules live in one
+ * place. A provider name is validated through the hook below: config.c
+ * has no registry dependency (its unit test links nothing but this
+ * file), and main.c installs the registry check before nm_config_load
+ * so a stale file or shadow cannot name a provider that does not
+ * exist. With no hook installed any non-empty name is accepted. */
+int nm_config_valid_provider(const char *name);
+
+/* Install the provider-name validator (NULL = restore "non-empty").
+ * Call before nm_config_load. */
+void nm_config_set_provider_validator(int (*fn)(const char *name));
+int nm_config_valid_rounds(const char *value);
+int nm_config_valid_reasoning(const char *value);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif // NM_CONFIG_H

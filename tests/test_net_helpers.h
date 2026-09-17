@@ -80,6 +80,22 @@ static int test_chdir_to_scratch(void)
 #endif
 }
 
+/* The scratch cwd test_chdir_to_scratch() selected (the current
+ * directory), for tests that need their own subdirectory beside it —
+ * a config file, a fixture tree — without guessing the temp root. */
+static const char *test_scratch_dir(void) TEST_NET_HELPERS_UNUSED;
+static const char *test_scratch_dir(void)
+{
+    static char dir[512];
+#ifdef _WIN32
+    snprintf(dir, sizeof(dir), "C:/Users/Public/nm-test-cwd-%d",
+             (int)getpid());
+#else
+    snprintf(dir, sizeof(dir), "/tmp/nm-test-cwd-%d", (int)getpid());
+#endif
+    return dir;
+}
+
 /* Pin the model catalogs offline for the whole test process.
  *
  * Why: a catalog lookup with NO endpoint override resolves the

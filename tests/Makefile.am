@@ -6,6 +6,7 @@ check_PROGRAMS = \
     test_json \
     test_xxh3 \
     test_authinfo \
+    test_config \
     test_provider \
     test_source \
     test_wire \
@@ -94,6 +95,11 @@ test_xxh3_CFLAGS = $(TEST_CFLAGS)
 # authinfo key lookup (pure C: stdio/stdlib/string only, no sockets).
 test_authinfo_SOURCES = test_authinfo.c ../src/authinfo.c
 test_authinfo_CFLAGS = $(TEST_CFLAGS)
+
+# Central config (user file + runtime shadow layer): pure C, no boba,
+# no network, no registry (the provider-name validator is a hook).
+test_config_SOURCES = test_config.c ../src/nm_config.c
+test_config_CFLAGS = $(TEST_CFLAGS)
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
@@ -242,7 +248,8 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # canned SSE servers. The full source stack rides along: the app owns
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
-test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/spinner.c \
+test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/nm_config.c \
+    ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
