@@ -847,11 +847,11 @@ static void test_reasoning_stream_is_dim(void)
 
 static void test_dim_heading_keeps_both_attrs(void)
 {
-    /* A heading on the reasoning stream composes dim + coral + bold in
+    /* A heading on the reasoning stream composes dim + pink + bold in
      * ONE SGR run (no nesting), and a span reset restores the composed
      * base, not plain. */
     const char *out = commit_one(1, "## Title\n");
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;2;38;2;255;87;125m") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;2;38;2;255;121;198m") != NULL);
     ASSERT_TRUE(strstr(out, "## Title") != NULL);
     /* reset before the row terminator (D8) */
     ASSERT_TRUE(strstr(out, "\x1b[0m\r\n") != NULL);
@@ -860,9 +860,9 @@ static void test_dim_heading_keeps_both_attrs(void)
 static void test_inline_code_span(void)
 {
     const char *out = commit_one(0, "run `make check` now\n");
-    /* Sardine #4FBEFE = 79;190;254 */
+    /* Green #50FA7B = 80;250;123 */
     ASSERT_TRUE(strstr(out,
-                       "\x1b[0;38;2;79;190;254mmake check\x1b[0m") != NULL);
+                       "\x1b[0;38;2;80;250;123mmake check\x1b[0m") != NULL);
     /* the surrounding text is intact around the span */
     ASSERT_TRUE(strstr(out, "run ") != NULL);
     ASSERT_TRUE(strstr(out, " now") != NULL);
@@ -873,7 +873,7 @@ static void test_inline_unterminated_span_is_literal(void)
     const char *out = commit_one(0, "a `no closer here\n");
     ASSERT_TRUE(strstr(out, "a `no closer here\r\n") != NULL);
     /* no code-span SGR emitted */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;79;190;254m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;80;250;123m") == NULL);
 }
 
 static void test_intraword_underscore_stays_literal(void)
@@ -898,24 +898,24 @@ static void test_bold_italic_strike_and_link(void)
     ASSERT_TRUE(strstr(strike, "\x1b[0;9mgone\x1b[0m") != NULL);
 
     const char *link = commit_one(0, "see [docs](http://x) now\n");
-    ASSERT_TRUE(strstr(link, "\x1b[0;4;38;2;79;190;254mdocs\x1b[0m") != NULL);
+    ASSERT_TRUE(strstr(link, "\x1b[0;4;38;2;80;250;123mdocs\x1b[0m") != NULL);
     ASSERT_TRUE(strstr(link, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
 }
 
 static void test_span_inside_heading_restores_heading_attr(void)
 {
-    /* after the code span, the heading attr is re-applied (coral+bold)
+    /* after the code span, the heading attr is re-applied (pink+bold)
      * so the trailing text is still heading-styled, not plain */
     const char *out = commit_one(0, "# Title `code` tail\n");
-    /* the code span composes with the heading base: bold + sardine */
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;79;190;254mcode") != NULL);
-    /* the trailing " tail" is under the heading attr again (coral+bold) */
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;255;87;125m tail") != NULL);
+    /* the code span composes with the heading base: bold + green */
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;80;250;123mcode") != NULL);
+    /* the trailing " tail" is under the heading attr again (pink+bold) */
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;255;121;198m tail") != NULL);
 }
 
 static void test_fence_lines_are_styled(void)
 {
-    /* labeled fence: delimiter Oyster, info Mustard, body Smoke */
+    /* labeled fence: delimiter Comment, info Yellow, body Foreground */
     H *h = h_new_render_streams(1);
     ASSERT_NOT_NULL(h);
     h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
@@ -924,25 +924,25 @@ static void test_fence_lines_are_styled(void)
     h_send(h, tui_msg_stream_end(0));
     h_flush(h);
     const char *out = h_read(h);
-    /* delimiter Oyster #605F6B = 96;95;107; info Mustard = 245;239;52 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m```") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52mc") != NULL);
-    /* body Smoke #BFBCC8 = 191;188;200 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;191;188;200mint x;") != NULL);
+    /* delimiter Comment #6272A4 = 98;114;164; info Yellow = 241;250;140 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m```") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;241;250;140mc") != NULL);
+    /* body Foreground #F8F8F2 = 248;248;242 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;248;248;242mint x;") != NULL);
     h_free(h);
 }
 
 static void test_quote_and_list_styling(void)
 {
-    /* quote gutter Oyster, quoted text Smoke (both re-applied per run;
-     * the gutter run restores Smoke after its Oyster) */
+    /* quote gutter Comment, quoted text Foreground (both re-applied per run;
+     * the gutter run restores Foreground after its Comment) */
     const char *q = commit_one(0, "> quoted text\n");
-    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;96;95;107m\xe2\x94\x82 ") != NULL);
-    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;191;188;200m> quoted text") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;98;114;164m\xe2\x94\x82 ") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;248;248;242m> quoted text") != NULL);
 
-    /* list bullet coral (with its separating space), text plain */
+    /* list bullet pink (with its separating space), text plain */
     const char *l = commit_one(0, "- item text\n");
-    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;87;125m- \x1b[0mitem text") !=
+    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;121;198m- \x1b[0mitem text") !=
                 NULL);
 }
 
@@ -956,11 +956,11 @@ static void test_live_table_on_reasoning_carries_dim(void)
     h_send(h, tui_msg_stream_delta(1, "| - | - |\n", 10));
     h_flush(h);
     const char *view = h_view(h, 60, 10);
-    ASSERT_TRUE(strstr(view, "\x1b[0;2;38;2;96;95;107m") != NULL);
+    ASSERT_TRUE(strstr(view, "\x1b[0;2;38;2;98;114;164m") != NULL);
     h_free(h);
 }
 
-static void test_table_header_bold_and_borders_oyster(void)
+static void test_table_header_bold_and_borders_comment(void)
 {
     const char *out = NULL;
     H *h = h_new_render_streams(1);
@@ -969,9 +969,9 @@ static void test_table_header_bold_and_borders_oyster(void)
     h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
     h_flush(h);
     out = h_read(h);
-    /* header cell bold, border Oyster */
+    /* header cell bold, border Comment */
     ASSERT_TRUE(strstr(out, "\x1b[0;1mh1") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m\xe2\x94\x8c") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m\xe2\x94\x8c") != NULL);
     h_free(h);
 }
 
@@ -1000,14 +1000,14 @@ static void test_fence_body_tokens_are_highlighted(void)
 {
     const char *out = commit_hl_line("int x = 42; // c\n");
     ASSERT_NOT_NULL(out);
-    /* keyword Hazy #8B75FF = 139;117;255 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
-    /* number Mustard #F5EF34 = 245;239;52 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m42") != NULL);
-    /* comment Oyster #605F6B = 96;95;107 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m// c") != NULL);
-    /* plain code keeps the Smoke body tint #BFBCC8 = 191;188;200 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;191;188;200m x = ") != NULL);
+    /* keyword Pink #FF79C6 = 255;121;198 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;121;198mint") != NULL);
+    /* number Orange #FFB86C = 255;184;108 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;184;108m42") != NULL);
+    /* comment Comment #6272A4 = 98;114;164 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m// c") != NULL);
+    /* plain code keeps the Foreground body tint #F8F8F2 = 248;248;242 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;248;248;242m x = ") != NULL);
 }
 
 static void test_fence_block_comment_spans_committed_lines(void)
@@ -1024,11 +1024,11 @@ static void test_fence_block_comment_spans_committed_lines(void)
     const char *out = h_read(h);
     /* the block comment opens on one committed line and the following
      * line is still comment-colored ... */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m/* open") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m/* open") != NULL);
     ASSERT_TRUE(strstr(out,
-                       "\x1b[0;38;2;96;95;107mstill comment */") != NULL);
+                       "\x1b[0;38;2;98;114;164mstill comment */") != NULL);
     /* ... and normal code resumes on the following line */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;121;198mint") != NULL);
     h_free(h);
 }
 
@@ -1040,7 +1040,7 @@ static void test_fence_highlight_state_is_per_stream(void)
     h_send(h, tui_msg_stream_delta(0, "```c\n", 5));
     h_send(h, tui_msg_stream_delta(0, "/* open\n", 8));
     /* ... reasoning's own fence must not inherit it: int stays a
-     * keyword (dim + Hazy), not comment-colored */
+     * keyword (dim + Pink), not comment-colored */
     h_send(h, tui_msg_stream_delta(1, "```c\n", 5));
     h_send(h, tui_msg_stream_delta(1, "int z;\n", 7));
     h_send(h, tui_msg_stream_delta(1, "```\n", 4));
@@ -1048,8 +1048,8 @@ static void test_fence_highlight_state_is_per_stream(void)
     h_send(h, tui_msg_stream_end(1));
     h_flush(h);
     const char *out = h_read(h);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;96;95;107m/* open") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;2;38;2;139;117;255mint") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m/* open") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;2;38;2;255;121;198mint") != NULL);
     h_free(h);
 }
 
@@ -1066,8 +1066,8 @@ static void test_unlabeled_fence_body_is_verbatim(void)
     h_flush(h);
     const char *out = h_read(h);
     ASSERT_TRUE(strstr(out, "int x = 42;") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255m") == NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;121;198m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;184;108m") == NULL);
     h_free(h);
 }
 
@@ -1079,18 +1079,18 @@ static void test_list_marker_keeps_separating_space(void)
      * "-item text". */
     const char *bullet = commit_one(0, "- item text\n");
     ASSERT_TRUE(strstr(bullet,
-                       "\x1b[0;38;2;255;87;125m- \x1b[0mitem text\r\n") !=
+                       "\x1b[0;38;2;255;121;198m- \x1b[0mitem text\r\n") !=
                 NULL);
 
     const char *ordered = commit_one(0, "1. first\n");
     ASSERT_TRUE(strstr(ordered,
-                       "\x1b[0;38;2;255;87;125m1. \x1b[0mfirst\r\n") != NULL);
+                       "\x1b[0;38;2;255;121;198m1. \x1b[0mfirst\r\n") != NULL);
 
     /* a bullet whose content is a code span: marker + space, then the
      * span, then the trailing text */
     const char *code = commit_one(0, "- `history.c` is next\n");
-    ASSERT_TRUE(strstr(code, "\x1b[0;38;2;255;87;125m- \x1b[0m"
-                             "\x1b[0;38;2;79;190;254mhistory.c\x1b[0m"
+    ASSERT_TRUE(strstr(code, "\x1b[0;38;2;255;121;198m- \x1b[0m"
+                             "\x1b[0;38;2;80;250;123mhistory.c\x1b[0m"
                              " is next\r\n") != NULL);
 }
 
@@ -1101,13 +1101,13 @@ static void test_nested_inline_spans_compose(void)
      * restored after the inner span */
     const char *ic = commit_one(0, "*italic with `code` inside*\n");
     ASSERT_TRUE(strstr(ic, "\x1b[0;3mitalic with "
-                           "\x1b[0;3;38;2;79;190;254mcode\x1b[0;3m "
+                           "\x1b[0;3;38;2;80;250;123mcode\x1b[0;3m "
                            "inside\x1b[0m\r\n") != NULL);
 
     /* code inside bold */
     const char *bc = commit_one(0, "**bold `code`**\n");
     ASSERT_TRUE(strstr(bc, "\x1b[0;1mbold "
-                           "\x1b[0;1;38;2;79;190;254mcode\x1b[0;1m") !=
+                           "\x1b[0;1;38;2;80;250;123mcode\x1b[0;1m") !=
                 NULL);
 
     /* italic inside bold: bold + italic compose on the inner run */
@@ -1128,18 +1128,18 @@ static void test_nested_inline_spans_compose(void)
 
     /* code content is verbatim: markers inside it are not rescanned */
     const char *cv = commit_one(0, "a `*foo*` b\n");
-    ASSERT_TRUE(strstr(cv, "\x1b[0;38;2;79;190;254m*foo*\x1b[0m b\r\n") !=
+    ASSERT_TRUE(strstr(cv, "\x1b[0;38;2;80;250;123m*foo*\x1b[0m b\r\n") !=
                 NULL);
 
     /* link text recurses: italic composes with the link attr; the url
      * stays dim */
     const char *lt = commit_one(0, "[*em*](http://x)\n");
-    ASSERT_TRUE(strstr(lt, "\x1b[0;3;4;38;2;79;190;254mem") != NULL);
+    ASSERT_TRUE(strstr(lt, "\x1b[0;3;4;38;2;80;250;123mem") != NULL);
     ASSERT_TRUE(strstr(lt, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
 
-    /* a link inside bold: the text composes bold + underline + sardine */
+    /* a link inside bold: the text composes bold + underline + green */
     const char *lb = commit_one(0, "**[docs](http://x)**\n");
-    ASSERT_TRUE(strstr(lb, "\x1b[0;1;4;38;2;79;190;254mdocs") != NULL);
+    ASSERT_TRUE(strstr(lb, "\x1b[0;1;4;38;2;80;250;123mdocs") != NULL);
     ASSERT_TRUE(strstr(lb, "\x1b[0;1;2m(http://x)\x1b[0;1m") != NULL);
 }
 
@@ -1178,7 +1178,7 @@ int main(void)
     RUN_TEST(test_list_marker_keeps_separating_space);
     RUN_TEST(test_nested_inline_spans_compose);
     RUN_TEST(test_live_table_on_reasoning_carries_dim);
-    RUN_TEST(test_table_header_bold_and_borders_oyster);
+    RUN_TEST(test_table_header_bold_and_borders_comment);
     RUN_TEST(test_fence_body_tokens_are_highlighted);
     RUN_TEST(test_fence_block_comment_spans_committed_lines);
     RUN_TEST(test_fence_highlight_state_is_per_stream);

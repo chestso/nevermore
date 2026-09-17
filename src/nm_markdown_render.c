@@ -331,7 +331,7 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                 }
             }
         } else if (c == '[') {
-            /* [text](url): underline + sardine for text, dim (url) */
+            /* [text](url): underline + green for text, dim (url) */
             size_t close = 0;
             for (size_t k = i + 1; k < len; k++) {
                 if (s[k] == ']' && k + 1 < len && s[k + 1] == '(') {
@@ -443,7 +443,7 @@ static void emit_heading_line(const char *s, size_t len, TuiRowSink *sink,
     end_row(sink, base);
 }
 
-/* List item: the marker (`-`, `*`, `+`, `1.`) is Coral, the content
+/* List item: the marker (`-`, `*`, `+`, `1.`) is Pink, the content
  * plain (or the row's base) with inline spans. */
 static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
                            TuiAttr base, TuiAttr marker_attr)
@@ -490,7 +490,7 @@ static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
     end_row(sink, base);
 }
 
-/* Quote body lines get a `│ ` gutter (Oyster) and Smoke text. */
+/* Quote body lines get a `│ ` gutter (Comment) and Foreground text. */
 static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
                              TuiAttr base)
 {
@@ -568,8 +568,8 @@ static void hl_emit(void *ud, size_t off, size_t len, NmHighlightKind kind)
     emit_styled(c->sink, c->line + off, len, a, c->base);
 }
 
-/* Emit a labeled-fence line: a delimiter (Oyster, with a Mustard info
- * string), or a body line (Smoke tint, tokens highlighted when `hl`
+/* Emit a labeled-fence line: a delimiter (Comment, with a Yellow info
+ * string), or a body line (Foreground tint, tokens highlighted when `hl`
  * knows the language). Open/close detection is content-based (D6's
  * accepted caveat); a delimiter line (re)starts the highlighter from
  * its info string, so a close (empty info) leaves it idle. */
@@ -799,7 +799,7 @@ static void emit_spaces(TuiRowSink *sink, int n, TuiAttr cell, TuiAttr base)
     }
 }
 
-/* A border row: left corner/tee, then `─`*(w+2) and a joint. Oyster
+/* A border row: left corner/tee, then `─`*(w+2) and a joint. Comment
  * (composed with the row's base attr, i.e. dim on reasoning). */
 static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
                         const char *left, const char *mid, const char *right,
@@ -818,7 +818,7 @@ static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
 }
 
 /* A content row: `│` + (space + aligned field + space) per column,
- * with `│` between columns. Borders Oyster; header cells bold; body
+ * with `│` between columns. Borders Comment; header cells bold; body
  * cells plain (no spans inside cells — D5: the width math counts SGR
  * bytes as glyphs). */
 static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,

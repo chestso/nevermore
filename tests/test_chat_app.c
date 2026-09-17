@@ -1467,8 +1467,8 @@ static void test_tool_round_prints_panels(void)
     ASSERT_NOT_NULL(plan_at);
     ASSERT_NOT_NULL(res_at);
     ASSERT_TRUE(plan_at < res_at);
-    /* The elbow sits in its own role (Zinc), not the panel's Oyster
-     * and not the body's Smoke; the raw bytes are the proof. */
+    /* The elbow sits in its own role (Cyan), not the panel's Comment
+     * and not the body's Foreground; the raw bytes are the proof. */
     ASSERT_TRUE(strstr(out, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT) != NULL);
     /* The result body is the full tool output, not a one-line slug. */
     ASSERT_TRUE(strstr(res_at, "Edited") != NULL ||
@@ -1870,8 +1870,8 @@ static void test_provider_switch_clears_and_prints_separator(void)
 
 /* The app installs its per-stream highlighter state as the
  * transcript's user_data, so a labeled fence body streamed through the
- * app's own delta path carries token colors (keyword Hazy, number
- * Mustard). */
+ * app's own delta path carries token colors (keyword Pink, number
+ * Orange). */
 static void test_fence_body_tokens_highlighted_through_app(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
@@ -1888,10 +1888,10 @@ static void test_fence_body_tokens_highlighted_through_app(void)
     tui_runtime_flush(h->rt);
 
     const char *out = harness_read(h);
-    /* keyword Hazy #8B75FF = 139;117;255 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;139;117;255mint") != NULL);
-    /* number Mustard #F5EF34 = 245;239;52 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;245;239;52m42") != NULL);
+    /* keyword Pink #FF79C6 = 255;121;198 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;121;198mint") != NULL);
+    /* number Orange #FFB86C = 255;184;108 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;184;108m42") != NULL);
 
     harness_free(h);
 }

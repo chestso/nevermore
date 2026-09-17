@@ -46,7 +46,6 @@
 #include <string.h>
 
 #include <boba/ansi_sequences.h>
-#include <boba/charmtones.h>
 #include <boba/components/list_popup.h>
 #include <boba/dynamic_buffer.h>
 #include <boba/stream.h>
@@ -66,9 +65,10 @@
  * positionally; -1 is boba's system stream. NM_STREAM_* stays a wire
  * concept. */
 
-/* Output colors are semantic roles (src/colors.h): NM_SGR_TOOL is the
- * Oyster accent for the panel/separator, NM_SGR_RESULT the Smoke tool
- * result line, NM_SGR_ERROR the Coral error body. */
+/* Output colors are semantic roles (src/colors.h, the Dracula palette):
+ * NM_SGR_TOOL is the Comment accent for the panel/separator,
+ * NM_SGR_RESULT the Foreground tool result line, NM_SGR_ERROR the Red
+ * error body. */
 
 /* The reasoning stream's live-region attr, declared once and borrowed
  * by the transcript spec (chat_app.c is its owner for the app's
@@ -382,8 +382,8 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
 
 /* Render a tool call's plan (the tool name + every argument) into the
  * system stream, one styled row per plan line: the header row carries
- * the `▌` marker (Oyster, the tool role) and argument rows are
- * indented (Smoke). Character-level, no regex. Per-tool-call alloc
+ * the `▌` marker (Comment, the tool role) and argument rows are
+ * indented (Foreground). Character-level, no regex. Per-tool-call alloc
  * (one per tool event, never per token). */
 static void sys_tool_plan(NmChatApp *app, const char *name,
                           const char *args_json)
@@ -410,8 +410,8 @@ static void sys_tool_plan(NmChatApp *app, const char *name,
 
 /* Render a tool result body under the `╰─` elbow: every line of the
  * output, indented, each row reset before its end. The first row
- * carries the elbow in its own role (Zinc, never the panel's Oyster
- * or the body's Smoke - see colors.h) then the body in the result
+ * carries the elbow in its own role (Cyan, never the panel's Comment
+ * or the body's Foreground - see colors.h) then the body in the result
  * role, plus an "error: " prefix when the call failed; later rows
  * indent by the elbow's display width (5 columns) so every row's text
  * starts in the same column. Built into the app's reused buffer and
@@ -618,14 +618,14 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         goto oom;
     tui_textinput_set_prompt(app->input, PROMPT);
     tui_textinput_set_continuation_prompt(app->input, CONTINUATION_PROMPT);
-    /* Coral prompt (the D5 role): a TuiStyle on the textinput, not an
+    /* Accent prompt (the D5 role): a TuiStyle on the textinput, not an
      * SGR literal — the input is a boba frame element. */
     tui_textinput_set_focused_prompt_style(
         app->input,
-        tui_style_foreground(tui_style_new(), tui_ct_coral()));
+        tui_style_foreground(tui_style_new(), nm_color_prompt()));
     tui_textinput_set_blurred_prompt_style(
         app->input,
-        tui_style_foreground(tui_style_new(), tui_ct_coral()));
+        tui_style_foreground(tui_style_new(), nm_color_prompt()));
     tui_textinput_set_terminal_width(app->input, app->term_w);
     tui_textinput_set_soft_wrap(app->input, 1);
     tui_textinput_set_history_size(app->input, 500);
@@ -637,12 +637,12 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     if (!app->popup)
         goto oom;
     tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
-    tui_list_popup_set_colors(app->popup, tui_ct_oyster(), /* border */
-                              tui_ct_oyster(),             /* title */
-                              tui_ct_charple(),            /* selected bg */
-                              tui_ct_butter(),             /* selected fg */
-                              tui_ct_coral(),              /* marker */
-                              tui_ct_smoke());             /* item text */
+    tui_list_popup_set_colors(app->popup, nm_color_popup_border(), /* border */
+                              nm_color_popup_title(),              /* title */
+                              nm_color_popup_selected_bg(),        /* sel bg */
+                              nm_color_popup_selected_fg(),        /* sel fg */
+                              nm_color_popup_marker(),             /* marker */
+                              nm_color_popup_item());              /* item */
 
     if (build_agent(app, provider) != 0)
         goto oom;
@@ -1484,7 +1484,7 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     if (busy) {
         const char *frame = app->spinner_frame;
         if (frame) {
-            /* Oyster label (the D5 role) — app-owned frame chrome, so an
+            /* Comment label (the D5 role) — app-owned frame chrome, so an
              * SGR prefix + reset around the whole row is legitimate; the
              * reset is before the row's end (D8), and this row is the
              * frame's last (the input returns next flush). */
