@@ -219,8 +219,9 @@ static void default_user_path(char *out, size_t cap)
 
 /* $XDG_STATE_HOME/nevermore/config or ~/.local/state/nevermore/config
  * — history.c's chain, so the shadow sits next to history/ and wire/.
- * %USERPROFILE%\AppData\Local\nevermore\config on Windows (no shlobj:
- * the wire recorder's fallback chain). */
+ * %USERPROFILE%\AppData\Local\nevermore\config on Windows when no
+ * XDG_STATE_HOME is set (no shlobj: the wire recorder's fallback
+ * chain). */
 static void default_shadow_path(char *out, size_t cap)
 {
     out[0] = '\0';
@@ -233,17 +234,21 @@ static void default_shadow_path(char *out, size_t cap)
         snprintf(out, cap, "%s", env);
         return;
     }
+    /* $XDG_STATE_HOME is the documented state-dir knob on every
+     * platform (history.c honors it too); a Windows session that sets
+     * it is running under MSYS2, where "/" paths are what its tools
+     * expect. Fall back to the native %LOCALAPPDATA% shape. */
+    const char *xdg = getenv("XDG_STATE_HOME");
+    if (xdg && *xdg) {
+        snprintf(out, cap, "%s/nevermore/config", xdg);
+        return;
+    }
 #ifdef _WIN32
     const char *home = getenv("USERPROFILE");
     if (!home || !*home)
         return;
     snprintf(out, cap, "%s\\AppData\\Local\\nevermore\\config", home);
 #else
-    const char *xdg = getenv("XDG_STATE_HOME");
-    if (xdg && *xdg) {
-        snprintf(out, cap, "%s/nevermore/config", xdg);
-        return;
-    }
     const char *home = getenv("HOME");
     if (!home || !*home)
         return;

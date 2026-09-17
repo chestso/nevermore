@@ -39,6 +39,7 @@ run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
 run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
+run_build test_config tests/test_config.c src/nm_config.c
 run_build test_session tests/test_session.c src/session.c
 run_build test_context tests/test_context.c src/context.c
 
