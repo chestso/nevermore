@@ -7,12 +7,13 @@
  *   nevermore models               list the provider's model catalog
  *   nevermore --version
  *
- * Configuration discovery: $NEVERMORE_CONFIG (file) or
- * ~/.config/nevermore/config, plus provider env vars:
- *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, NEVERMORE_MAX_ROUNDS,
- *   NEVERMORE_ECHO_REASONING, HYPER_API_KEY, OLLAMA_API_KEY,
- *   OPENAI_API_KEY, OPENROUTER_API_KEY, OPENCODE_API_KEY.
- * A key with no env var set resolves from ~/.authinfo
+ * Configuration (nm_config.h) resolves once, lowest to highest:
+ *   built-in default < user config ~/.config/nevermore/config
+ *   < runtime shadow ~/.local/state/nevermore/config (written by the
+ *   chat's /model /provider /rounds /reasoning) < environment < -p/-m.
+ * Provider keys come from the environment (HYPER_API_KEY,
+ * OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+ * OPENCODE_API_KEY) or, when unset, from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
  * nm_provider_api_key; env always wins.
  */
@@ -28,6 +29,7 @@
 #include "tools.h"
 #include "history.h"
 #include "chat_app.h"
+#include "nm_config.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
@@ -131,46 +133,12 @@ static void ask_on_state(NmAgentState state, void *userdata)
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
 }
 
-/* $NEVERMORE_ECHO_REASONING: re-send assistant reasoning traces to
- * the provider as reasoning_content on later requests carrying the
- * turn. OFF by default — the trace is received and displayed either
- * way, it is just not fed back into the conversation. (The reason to
- * have the knob at all is docs/HYPER-API.md's unverified claim that
- * hyper needs the field back; see nm_agent_set_echo_reasoning.)
- * Truthy values:
- * 1 / true / on / yes (case-insensitive); anything else (unset,
- * empty, "0", garbage) leaves it off, so a typo can never silently
- * enable — or disable — provider-facing behavior. */
-static int env_flag(const char *name)
+/* The registry check config.c validates provider names through (it
+ * links no registry of its own, so its unit test stays dependency-free;
+ * main.c installs the real one before any config is read). */
+static int provider_name_is_known(const char *name)
 {
-    const char *s = getenv(name);
-    if (!s || !*s)
-        return 0;
-    char v[8]; /* lowercase copy; longer values cannot match a name */
-    size_t n = 0;
-    for (; s[n] && n < sizeof(v) - 1; n++) {
-        char c = s[n];
-        v[n] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
-    }
-    v[n] = '\0';
-    return strcmp(v, "1") == 0 || strcmp(v, "true") == 0 ||
-           strcmp(v, "on") == 0 || strcmp(v, "yes") == 0;
-}
-
-/* $NEVERMORE_MAX_ROUNDS: cap on tool-call rounds per turn (the
- * "too many tool rounds without a final answer" bail-out). Absent or
- * non-positive = the agent default (NM_AGENT_DEFAULT_MAX_ROUNDS).
- * strtol, not atoi: 0/negative/garbage all mean "leave the default". */
-static int env_max_rounds(void)
-{
-    const char *s = getenv("NEVERMORE_MAX_ROUNDS");
-    if (!s || !*s)
-        return 0;
-    char *end = NULL;
-    long v = strtol(s, &end, 10);
-    if (end == s || v <= 0 || v > 100000)
-        return 0;
-    return (int)v;
+    return nm_provider_by_name(name) != NULL;
 }
 
 /* ---------------------------------------------------------------- */
@@ -226,7 +194,7 @@ static int stdin_is_tty(void)
 }
 
 static int run_interactive(const char *provider_name, const char *model,
-                           const char *base_url)
+                           const char *base_url, NmConfig *cfg)
 {
     if (!stdin_is_tty()) {
         fprintf(stderr,
@@ -240,28 +208,30 @@ static int run_interactive(const char *provider_name, const char *model,
         fprintf(stderr, "nevermore: failed to initialize the chat\n");
         return 1;
     }
-    int max_rounds = env_max_rounds();
-    if (max_rounds > 0)
-        nm_chat_app_set_max_rounds(app, max_rounds);
-    if (env_flag("NEVERMORE_ECHO_REASONING"))
-        nm_chat_app_set_echo_reasoning(app, 1);
+    /* The resolved config: the app writes runtime changes to its shadow
+     * and reads nothing from it (the values below are already applied
+     * to the agent it builds). */
+    nm_chat_app_set_config(app, cfg);
+    nm_chat_app_set_max_rounds(app, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+    nm_chat_app_set_echo_reasoning(
+        app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
     /* Base URL override only: the API key is left NULL so the app
      * resolves it per provider (env then ~/.authinfo) — a /provider
      * switch must resolve the new provider's own key, never reuse the
      * startup provider's. */
     nm_chat_app_set_endpoint(app, base_url, NULL);
 
-    TuiRuntimeConfig cfg = { 0 };
-    cfg.raw_mode = 1;
-    cfg.output = stdout;
-    cfg.fill_external_fds = chat_fill_external_fds;
-    cfg.on_external_ready = chat_external_ready;
-    cfg.on_tick = chat_tick;
-    cfg.get_tick_timeout_ms = chat_tick_timeout;
-    cfg.event_data = app;
+    TuiRuntimeConfig rt_cfg = { 0 };
+    rt_cfg.raw_mode = 1;
+    rt_cfg.output = stdout;
+    rt_cfg.fill_external_fds = chat_fill_external_fds;
+    rt_cfg.on_external_ready = chat_external_ready;
+    rt_cfg.on_tick = chat_tick;
+    rt_cfg.get_tick_timeout_ms = chat_tick_timeout;
+    rt_cfg.event_data = app;
 
     TuiRuntime *rt = tui_runtime_create(
-        (TuiComponent *)nm_chat_app_component(app), app, &cfg);
+        (TuiComponent *)nm_chat_app_component(app), app, &rt_cfg);
     if (!rt) {
         nm_chat_app_free(app);
         fprintf(stderr, "nevermore: failed to create the TUI runtime\n");
@@ -312,9 +282,9 @@ static void wire_debug_startup(const char *provider_name, const char *model)
 
 int main(int argc, char *argv[])
 {
-    const char *provider_name = getenv("NEVERMORE_PROVIDER");
-    const char *model = getenv("NEVERMORE_MODEL");
     const char *base_url = getenv("NEVERMORE_BASE_URL");
+    const char *cli_provider = NULL;
+    const char *cli_model = NULL;
     const char *prompt = NULL;
     int want_models = 0;
 
@@ -324,13 +294,13 @@ int main(int argc, char *argv[])
                 fprintf(stderr, "nevermore: --provider needs a value\n");
                 return 1;
             }
-            provider_name = argv[i];
+            cli_provider = argv[i];
         } else if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) {
             if (++i >= argc) {
                 fprintf(stderr, "nevermore: --model needs a value\n");
                 return 1;
             }
-            model = argv[i];
+            cli_model = argv[i];
         } else if (strcmp(argv[i], "models") == 0) {
             want_models = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -348,11 +318,30 @@ int main(int argc, char *argv[])
         }
     }
 
+    /* One resolution, one place (nm_config.h): user file < runtime
+     * shadow < environment < -p/-m. The shadow is what a previous
+     * session typed; the environment still wins over it so a scripted
+     * run is reproducible. */
+    nm_config_set_provider_validator(provider_name_is_known);
+    NmConfig *cfg = nm_config_load();
+    if (!cfg) {
+        fprintf(stderr, "nevermore: out of memory\n");
+        return 1;
+    }
+    nm_config_set_env(cfg);
+    nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, cli_provider);
+    nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, cli_model);
+
+    const char *provider_name =
+        nm_config_get(cfg, NM_CFG_KEY_PROVIDER);
     if (!provider_name)
         provider_name = "ollama:local"; /* zero-config default: local daemon */
+    const char *model = nm_config_get(cfg, NM_CFG_KEY_MODEL);
+
     const NmProvider *provider = nm_provider_by_name(provider_name);
     if (!provider) {
         fprintf(stderr, "nevermore: unknown provider '%s'\n", provider_name);
+        nm_config_free(cfg);
         return 1;
     }
 
@@ -368,6 +357,7 @@ int main(int argc, char *argv[])
             printf("%-40s %s\n", models[i].id,
                    models[i].label ? models[i].label : "");
         nm_provider_free_models(provider, models);
+        nm_config_free(cfg);
         return 0;
     }
 
@@ -394,11 +384,10 @@ int main(int argc, char *argv[])
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
         nm_agent_set_endpoint(agent, base_url, api_key);
-        int max_rounds = env_max_rounds();
-        if (max_rounds > 0)
-            nm_agent_set_max_rounds(agent, max_rounds);
-        if (env_flag("NEVERMORE_ECHO_REASONING"))
-            nm_agent_set_echo_reasoning(agent, 1);
+        nm_agent_set_max_rounds(
+            agent, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+        nm_agent_set_echo_reasoning(
+            agent, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);
@@ -410,10 +399,14 @@ int main(int argc, char *argv[])
         }
         nm_agent_free(agent); /* session owned by the agent */
         nm_toolset_free(tools);
+        nm_config_free(cfg);
         return rc == 0 ? 0 : 1;
     }
 
     /* Interactive chat: boba owns the event loop; the agent streams
-     * through the app's fd/step/tick callbacks. */
-    return run_interactive(provider_name, model, base_url);
+     * through the app's fd/step/tick callbacks. The app writes runtime
+     * changes back to cfg's shadow; main frees it after the loop. */
+    int rc = run_interactive(provider_name, model, base_url, cfg);
+    nm_config_free(cfg);
+    return rc;
 }
