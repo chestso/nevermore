@@ -107,6 +107,52 @@ NmToolResult nm_tool_result_text(const char *text)
     return r;
 }
 
+/* Keep the head of `body` and append `marker`, the whole thing capped
+ * at `max` bytes. The one truncation primitive: read_file appends a
+ * resumable notice, generic tool output a plain one. */
+char *nm_truncate_tail(const char *body, size_t max, const char *marker)
+{
+    if (!body)
+        body = "";
+    if (!marker)
+        marker = "";
+    size_t len = strlen(body);
+    size_t mlen = strlen(marker);
+    size_t keep = (max > mlen) ? max - mlen : 0;
+    if (keep > len)
+        keep = len;
+    char *out = malloc(keep + mlen + 1);
+    if (!out)
+        return NULL;
+    if (keep)
+        memcpy(out, body, keep);
+    if (mlen)
+        memcpy(out + keep, marker, mlen);
+    out[keep + mlen] = '\0';
+    return out;
+}
+
+/* Head-only clamp of a rendered tool body at NM_TOOL_MAX_OUTPUT, with
+ * a byte-count omission notice (no head/tail split). */
+char *nm_clamp_output(const char *text)
+{
+    if (!text)
+        text = "";
+    size_t len = strlen(text);
+    if (len <= NM_TOOL_MAX_OUTPUT)
+        return strdup(text);
+    /* Build the notice, then recompute its byte count so the number
+     * matches what the marker's length leaves room for. */
+    char marker[64];
+    size_t mlen = (size_t)snprintf(marker, sizeof(marker),
+                                   "\n... %zu bytes omitted ...\n",
+                                   len - NM_TOOL_MAX_OUTPUT);
+    size_t kept = NM_TOOL_MAX_OUTPUT - (mlen < NM_TOOL_MAX_OUTPUT ? mlen : 0);
+    snprintf(marker, sizeof(marker), "\n... %zu bytes omitted ...\n",
+             len - kept);
+    return nm_truncate_tail(text, NM_TOOL_MAX_OUTPUT, marker);
+}
+
 NmToolset *nm_toolset_new_defaults(void)
 {
     NmToolset *ts = nm_toolset_new();

@@ -8,8 +8,13 @@
  * zero or ambiguous matches are error results naming the match lines,
  * so a stale copy fails loudly instead of clobbering the file.
  *
- * Every result rides the output budget: whole lines, head first, an
- * omission marker naming the resume offset.
+ * Every result rides the output budget (NM_TOOL_MAX_OUTPUT): the head
+ * is kept and the tail dropped, with a marker. read_file's marker
+ * names the dropped lines and the resume offset (its window can be
+ * continued); the other tools' output is not resumable, so theirs
+ * names what was cut instead. All of it flows through the shared
+ * truncation seam in tools.c (nm_truncate_tail / nm_clamp_output), so
+ * the rendered transcript and the session history see the same bytes.
  */
 
 #include <stdio.h>
@@ -22,41 +27,16 @@
 
 #include "tools_internal.h"
 
-#define FILE_TOOL_MAX_OUTPUT 30000 /* quoth's tool output budget */
-
 /* ---------------------------------------------------------------- */
 /* Result shaping (quoth's format-result convention)                */
 /* ---------------------------------------------------------------- */
 
-/* Cap a rendered body at FILE_TOOL_MAX_OUTPUT chars, head/tail with
- * an omission marker (70/30 head/tail split, like quoth). */
-static char *clamp_output(const char *text)
-{
-    size_t len = strlen(text);
-    if (len <= FILE_TOOL_MAX_OUTPUT)
-        return strdup(text);
-    size_t head = FILE_TOOL_MAX_OUTPUT * 7 / 10;
-    size_t tail = FILE_TOOL_MAX_OUTPUT - head;
-    size_t omitted = len - FILE_TOOL_MAX_OUTPUT;
-    char *out = malloc(FILE_TOOL_MAX_OUTPUT + 64);
-    if (!out)
-        return NULL;
-    size_t o = 0;
-    memcpy(out, text, head);
-    o = head;
-    o += (size_t)snprintf(out + o, 64, "\n... %zu bytes omitted ...\n",
-                          omitted);
-    memcpy(out + o, text + len - tail, tail);
-    o += tail;
-    out[o] = '\0';
-    return out;
-}
-
-/* Format a finished result: status line + Output: section. `body`
+/* Format a finished result: status line + Output: section. The body
+ * rides the shared head-only clamp (nm_clamp_output, tools.c); `body`
  * may be NULL (structural "(empty)" marker, never fake text). */
 static NmToolResult format_result(const char *body, int exit_code)
 {
-    char *clamped = body ? clamp_output(body) : NULL;
+    char *clamped = body ? nm_clamp_output(body) : NULL;
     size_t need = 64 + (clamped ? strlen(clamped) : 0);
     char *out = malloc(need);
     if (!out) {
@@ -197,6 +177,11 @@ static int utf8_valid(const unsigned char *b, size_t n)
 /* ---------------------------------------------------------------- */
 /* read_file                                                         */
 /* ---------------------------------------------------------------- */
+
+/* Headroom kept out of the window budget for read_file's resume marker
+ * (the message is the one truncation notice that continues from an
+ * offset), so window + marker stay inside NM_TOOL_MAX_OUTPUT. */
+#define READ_MARKER_RESERVE 128
 
 /* Bytes a `-`/`+` mini-diff line rendering of `s` occupies: every LF
  * split adds a marker byte, and a non-empty fragment adds a line
@@ -353,7 +338,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         size_t line_len = (eol < len) ? eol - i + 1 : len - i;
         /* +7 for a cat -n prefix (6 digits + TAB) when numbered. */
         size_t cost = line_len + (numbered ? 7 : 0);
-        if (consumed + cost > FILE_TOOL_MAX_OUTPUT)
+        if (consumed + cost > NM_TOOL_MAX_OUTPUT - READ_MARKER_RESERVE)
             break;
         consumed += cost;
         keep_lines++;
@@ -417,12 +402,12 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             dropped == 1 ? "line" : "lines", first_dropped);
     }
 
-    char *full = malloc(bo + marker_len + 1);
-    if (full) {
-        memcpy(full, body, bo);
-        memcpy(full + bo, marker, marker_len);
-        full[bo + marker_len] = '\0';
-    }
+    /* Append the resume marker through the shared truncation seam
+     * (window head + caller message, capped at the budget). */
+    body[bo] = '\0';
+    char *full = marker_len
+                     ? nm_truncate_tail(body, NM_TOOL_MAX_OUTPUT, marker)
+                     : strdup(body);
     NmToolResult r = format_result((full && full[0]) ? full : NULL, 0);
     free(full);
     free(body);
@@ -707,7 +692,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
     if (!path)
         return nm_tool_result_error("missing or empty path");
 
-    char *body = malloc(FILE_TOOL_MAX_OUTPUT + 1024);
+    char *body = malloc(NM_TOOL_MAX_OUTPUT + 1024);
     size_t bo = 0;
     if (!body) {
         free(path);
@@ -748,10 +733,10 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         const char *mark = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                                ? "/"
                                : "";
-        bo += (size_t)snprintf(body + bo, FILE_TOOL_MAX_OUTPUT - bo,
+        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT - bo,
                                "%s%s\n", name, mark);
         nentries++;
-    } while (FindNextFileW(h, &fd) && bo < FILE_TOOL_MAX_OUTPUT);
+    } while (FindNextFileW(h, &fd) && bo < NM_TOOL_MAX_OUTPUT);
     FindClose(h);
 #else
     DIR *d = opendir(path);
@@ -771,17 +756,32 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         const char *mark = (stat(full, &st) == 0 && S_ISDIR(st.st_mode))
                                ? "/"
                                : "";
-        bo += (size_t)snprintf(body + bo, FILE_TOOL_MAX_OUTPUT + 1024 - bo,
+        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT + 1024 - bo,
                                "%s%s\n", ent->d_name, mark);
         nentries++;
-        if (bo >= FILE_TOOL_MAX_OUTPUT)
+        if (bo >= NM_TOOL_MAX_OUTPUT)
             break;
     }
     closedir(d);
 #endif
     (void)nentries;
     free(path);
-    NmToolResult r = format_result(bo ? body : NULL, 0);
+    /* The listing stopped at the budget: say so through the shared
+     * truncation seam (the tool output cannot be resumed from an
+     * offset, so the notice names the budget, not a cursor). */
+    int truncated = bo >= NM_TOOL_MAX_OUTPUT;
+    char *shaped = NULL;
+    if (truncated) {
+        char marker[96];
+        snprintf(marker, sizeof(marker),
+                 "\n... output truncated at the %d-byte budget ...\n",
+                 NM_TOOL_MAX_OUTPUT);
+        shaped = nm_truncate_tail(body, NM_TOOL_MAX_OUTPUT, marker);
+    } else if (bo) {
+        shaped = strdup(body);
+    }
+    NmToolResult r = format_result(shaped, 0);
+    free(shaped);
     free(body);
     return r;
 }
@@ -817,7 +817,7 @@ static void search_file(const char *path, const char *needle,
                 *bo += (size_t)snprintf(body + *bo, 512, "%s:%ld:%.*s\n",
                                         path, lineno, (int)clen,
                                         text + line_start);
-                if (*bo >= FILE_TOOL_MAX_OUTPUT)
+                if (*bo >= NM_TOOL_MAX_OUTPUT)
                     break;
             }
             lineno++;
@@ -835,7 +835,7 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
                             size_t *bo, int depth)
 #endif
 {
-    if (depth > 8 || *bo >= FILE_TOOL_MAX_OUTPUT)
+    if (depth > 8 || *bo >= NM_TOOL_MAX_OUTPUT)
         return;
     /* Skip VCS/build noise: .git, node_modules, build dirs. */
 #ifdef _WIN32
@@ -865,7 +865,7 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
         } else {
             search_file(full, needle, body, bo);
         }
-    } while (FindNextFileW(h, &fd) && *bo < FILE_TOOL_MAX_OUTPUT);
+    } while (FindNextFileW(h, &fd) && *bo < NM_TOOL_MAX_OUTPUT);
     FindClose(h);
 #else
     DIR *d = opendir(dir);
@@ -873,7 +873,7 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
         return;
     struct dirent *ent;
     char full[4096];
-    while ((ent = readdir(d)) != NULL && *bo < FILE_TOOL_MAX_OUTPUT) {
+    while ((ent = readdir(d)) != NULL && *bo < NM_TOOL_MAX_OUTPUT) {
         if (strcmp(ent->d_name, ".") == 0 || strcmp(ent->d_name, "..") == 0)
             continue;
         snprintf(full, sizeof(full), "%s/%s", dir, ent->d_name);
@@ -915,7 +915,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("missing or empty needle");
     }
 
-    char *body = malloc(FILE_TOOL_MAX_OUTPUT + 1024);
+    char *body = malloc(NM_TOOL_MAX_OUTPUT + 1024);
     if (!body) {
         free(path);
         free(needle);
@@ -925,7 +925,20 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
     search_dir_walk(path, needle, body, &bo, 0);
     free(path);
     free(needle);
-    NmToolResult r = format_result(bo ? body : NULL, 0);
+    /* Same seam as list_dir: the walk stopped at the budget, so name
+     * the budget (search hits are not resumable from an offset). */
+    char *shaped = NULL;
+    if (bo >= NM_TOOL_MAX_OUTPUT) {
+        char marker[96];
+        snprintf(marker, sizeof(marker),
+                 "\n... output truncated at the %d-byte budget ...\n",
+                 NM_TOOL_MAX_OUTPUT);
+        shaped = nm_truncate_tail(body, NM_TOOL_MAX_OUTPUT, marker);
+    } else if (bo) {
+        shaped = strdup(body);
+    }
+    NmToolResult r = format_result(shaped, 0);
+    free(shaped);
     free(body);
     return r;
 }

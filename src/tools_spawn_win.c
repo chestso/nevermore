@@ -234,17 +234,23 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
 
     buf[len] = '\0';
 
-    size_t body_len = len + 64;
-    char *body = malloc(body_len);
-    if (!body) {
+    size_t raw_len = len + 64;
+    char *raw = malloc(raw_len);
+    if (!raw) {
         free(buf);
         return nm_tool_result_error("out of memory");
     }
     if (len)
-        snprintf(body, body_len, "Output:\n%s", buf);
+        snprintf(raw, raw_len, "Output:\n%s", buf);
     else
-        snprintf(body, body_len, "Output: (empty)\n");
+        snprintf(raw, raw_len, "Output: (empty)\n");
     free(buf);
+    /* Shared head-only clamp: the captured body rides the same budget
+     * as every other tool result (rendered + session history alike). */
+    char *body = nm_clamp_output(raw);
+    free(raw);
+    if (!body)
+        return nm_tool_result_error("out of memory");
     NmToolResult r = { (int)st == 0, body };
     return r;
 }

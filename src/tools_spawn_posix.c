@@ -153,14 +153,19 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 static NmToolResult run_command_result(const char *output, size_t len,
                                        int code)
 {
-    char *body = malloc(len + 64);
+    char *raw = malloc(len + 64);
+    if (!raw)
+        return nm_tool_result_error("out of memory");
+    if (len)
+        snprintf(raw, len + 64, "Output:\n%s", output);
+    else
+        snprintf(raw, 64, "Output: (empty)\n");
+    /* Shared head-only clamp: the captured body rides the same budget
+     * as every other tool result (rendered + session history alike). */
+    char *body = nm_clamp_output(raw);
+    free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    size_t o = 0;
-    if (len)
-        o += (size_t)snprintf(body + o, len + 64, "Output:\n%s", output);
-    else
-        o += (size_t)snprintf(body + o, 64, "Output: (empty)\n");
     NmToolResult r = { code == 0, body };
     return r;
 }

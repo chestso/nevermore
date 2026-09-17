@@ -175,6 +175,43 @@ static void test_read_file_missing(void)
     nm_toolset_free(ts);
 }
 
+/* A file past the output budget: read_file keeps the head, drops the
+ * tail, and names the resume offset. The tail must NOT reappear — the
+ * old 70/30 head/tail split re-included it. */
+static void test_read_file_truncates_with_resume_marker(void)
+{
+    char *path = scratch_path("read_big.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    for (int i = 1; i <= 4000; i++)
+        fprintf(f, "line %04d\n", i);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    free(path);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    /* Head kept... */
+    ASSERT_TRUE(strstr(r.output, "line 0001") != NULL);
+    /* ...tail dropped (no head/tail re-inclusion)... */
+    ASSERT_TRUE(strstr(r.output, "line 4000") == NULL);
+    /* ...and the resumable marker names the dropped range + offset. */
+    ASSERT_TRUE(strstr(r.output, "lines ") != NULL);
+    ASSERT_TRUE(strstr(r.output, "Use offset=") != NULL);
+    /* Whole result — window plus marker — stays inside the budget
+     * (the prefix/status line is the only slack). */
+    ASSERT_TRUE(strlen(r.output) < (size_t)NM_TOOL_MAX_OUTPUT + 64);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 /* ---------------------------------------------------------------- */
 /* edit_file                                                         */
 /* ---------------------------------------------------------------- */
@@ -430,6 +467,89 @@ static void test_search_dir_literal(void)
     nm_toolset_free(ts);
 }
 
+/* A search past the output budget: hits stay, a budget notice is added
+ * (search output is not resumable from an offset), and the whole
+ * result stays inside the budget. */
+static void test_search_dir_truncates_with_budget_notice(void)
+{
+    char *path = scratch_path("search_big.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    for (int i = 1; i <= 5000; i++)
+        fputs("needle here\n", f);
+    fclose(f);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(scratch_dir()));
+    nm_json_set(jargs, "needle", nm_json_new_string("needle"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    free(args);
+    free(path);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "needle") != NULL);
+    ASSERT_TRUE(strstr(r.output, "output truncated at the") != NULL);
+    ASSERT_TRUE(strlen(r.output) < (size_t)NM_TOOL_MAX_OUTPUT + 64);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* ---------------------------------------------------------------- */
+/* Truncation (shared seam)                                          */
+/* ---------------------------------------------------------------- */
+
+static void test_truncate_tail_fits_and_caps(void)
+{
+    /* Fits under the cap: body kept whole, marker appended. */
+    char *a = nm_truncate_tail("abc", 100, "<cut>");
+    ASSERT_NOT_NULL(a);
+    ASSERT_STR_EQ(a, "abc<cut>");
+    free(a);
+
+    /* Over the cap: keep the head (max - marker) and the marker. */
+    char *b = nm_truncate_tail("abcdef", 4, "..");
+    ASSERT_NOT_NULL(b);
+    ASSERT_STR_EQ(b, "ab..");
+    free(b);
+
+    /* Marker longer than the cap: head collapses, marker still lands. */
+    char *c = nm_truncate_tail("abcdef", 2, "....");
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(c, "....");
+    free(c);
+}
+
+static void test_clamp_output_head_only(void)
+{
+    /* A body past the budget: head kept, distinctive tail dropped, a
+     * byte-count notice appended. */
+    size_t n = (size_t)NM_TOOL_MAX_OUTPUT + 5000;
+    char *big = malloc(n + 1);
+    ASSERT_NOT_NULL(big);
+    memset(big, 'A', n);
+    memcpy(big + n - 8, "ENDMARK!", 8);
+    big[n] = '\0';
+
+    char *out = nm_clamp_output(big);
+    free(big);
+    ASSERT_NOT_NULL(out);
+    ASSERT_EQ(out[0], 'A');
+    ASSERT_TRUE(strstr(out, "bytes omitted") != NULL);
+    /* The tail is gone — the old 70/30 split kept the last 30%. */
+    ASSERT_TRUE(strstr(out, "ENDMARK") == NULL);
+    ASSERT_TRUE(strlen(out) <= (size_t)NM_TOOL_MAX_OUTPUT);
+    free(out);
+
+    /* Under budget: a plain copy. */
+    char *small = nm_clamp_output("hello");
+    ASSERT_NOT_NULL(small);
+    ASSERT_STR_EQ(small, "hello");
+    free(small);
+}
+
 /* ---------------------------------------------------------------- */
 /* run_command (spawn)                                                */
 /* ---------------------------------------------------------------- */
@@ -638,6 +758,22 @@ static void test_run_command_async_bad_args(void)
     ASSERT_NULL(e);
     nm_toolset_free(ts);
 }
+
+/* Captured output past the budget: run_command rides the same shared
+ * clamp as every other tool result. */
+static void test_run_command_output_is_clamped(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "run_command",
+                                        "{\"cmd\":\"seq 1 20000\"}", NULL);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "bytes omitted") != NULL);
+    ASSERT_TRUE(strstr(r.output, "1\n2\n3\n") != NULL); /* head kept */
+    ASSERT_TRUE(strlen(r.output) < (size_t)NM_TOOL_MAX_OUTPUT + 64);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
 #endif /* !_WIN32 */
 
 int main(void)
@@ -649,6 +785,7 @@ int main(void)
     RUN_TEST(test_read_file_byte_exact);
     RUN_TEST(test_read_file_line_numbers_and_window);
     RUN_TEST(test_read_file_missing);
+    RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_edit_file_unique_replace);
     RUN_TEST(test_edit_file_ambiguous_fails_loudly);
     RUN_TEST(test_edit_file_replace_all);
@@ -657,6 +794,9 @@ int main(void)
     RUN_TEST(test_edit_file_multiline_diff_fits);
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
+    RUN_TEST(test_search_dir_truncates_with_budget_notice);
+    RUN_TEST(test_truncate_tail_fits_and_caps);
+    RUN_TEST(test_clamp_output_head_only);
     RUN_TEST(test_run_command_exit_zero);
     RUN_TEST(test_run_command_exit_nonzero);
     RUN_TEST(test_spawn_capture_api);
@@ -667,6 +807,7 @@ int main(void)
 #ifndef _WIN32
     RUN_TEST(test_run_command_async);
     RUN_TEST(test_run_command_async_bad_args);
+    RUN_TEST(test_run_command_output_is_clamped);
 #endif
     TEST_SUMMARY();
 }
