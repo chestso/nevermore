@@ -696,6 +696,81 @@ static void test_table_width_grows_then_final_box_aligned(void)
     h_free(h);
 }
 
+/* Width of the last committed box's top border row (SGR stripped). */
+static int last_box_row_width(H *h)
+{
+    const char *out = h_read(h);
+    const char *top = NULL;
+    for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
+        top = q; /* last top-left corner */
+    if (!top)
+        return -1;
+    const char *e = strstr(top, "\r\n");
+    if (!e)
+        return -1;
+    char row[512];
+    size_t rl = (size_t)(e - top);
+    if (rl >= sizeof(row))
+        rl = sizeof(row) - 1;
+    size_t o = 0;
+    for (size_t k = 0; k < rl; k++) {
+        if (top[k] == '\x1b') {
+            k++;
+            if (k < rl && top[k] == '[') {
+                while (k < rl && top[k] != 'm')
+                    k++;
+            }
+            continue;
+        }
+        row[o++] = top[k];
+    }
+    row[o] = '\0';
+    return (int)tui_utf8_display_width_ansi(row, strlen(row));
+}
+
+/* Render a one-column table with the given cell text and return the
+ * display width of its top border row (i.e. the box width). */
+static int one_col_box_width(const char *header, const char *body)
+{
+    char table[256];
+    snprintf(table, sizeof(table), "| %s |\n| - |\n| %s |\n\n", header, body);
+    H *h = h_new_render();
+    if (!h)
+        return -1;
+    h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    int w = -1;
+    if (tui_transcript_commit_count(h->t) == 1u)
+        w = last_box_row_width(h);
+    h_free(h);
+    return w;
+}
+
+/* Table cells are measured in grapheme clusters, not codepoints. Both
+ * halves below compare a symbol table against the ASCII table whose
+ * display width must be identical. */
+static void test_table_cell_width_is_cluster_based(void)
+{
+    /* U+2713 is East Asian Narrow: three of them occupy three columns,
+     * exactly like "xxx" — not the six a blanket pictograph range
+     * (0x2600-0x27BF) hands back. */
+    int narrow_sym = one_col_box_width("\xE2\x9C\x93\xE2\x9C\x93\xE2\x9C\x93", "x");
+    int narrow_ascii = one_col_box_width("xxx", "x");
+    ASSERT_TRUE(narrow_sym > 0);
+    ASSERT_EQ(narrow_sym, narrow_ascii);
+
+    /* A VS16 emoji presentation sequence is TWO columns: U+270F plus
+     * U+FE0F plus "x" is three, like "yyx". Measured per codepoint the
+     * selector vanishes (width 0) and the cell is a column short, so the
+     * padded content row no longer matches its own border. */
+    int cluster_sym = one_col_box_width("\xE2\x9C\x8F\xEF\xB8\x8F"
+                                        "x",
+                                        "y");
+    int cluster_ascii = one_col_box_width("yyx", "y");
+    ASSERT_TRUE(cluster_sym > 0);
+    ASSERT_EQ(cluster_sym, cluster_ascii);
+}
+
 /* A harness with an explicit stream count and a caller-supplied
  * render_block override is not needed; the production renderers are
  * installed and the streams are (content, reasoning). */
@@ -1166,6 +1241,7 @@ int main(void)
     RUN_TEST(test_table_reaches_scrollback_aligned);
     RUN_TEST(test_render_block_emits_content_not_framing);
     RUN_TEST(test_table_width_grows_then_final_box_aligned);
+    RUN_TEST(test_table_cell_width_is_cluster_based);
     RUN_TEST(test_reasoning_stream_is_dim);
     RUN_TEST(test_dim_heading_keeps_both_attrs);
     RUN_TEST(test_inline_code_span);

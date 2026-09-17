@@ -137,19 +137,18 @@ static void end_row(TuiRowSink *sink, TuiAttr base)
 
 static int is_space(char c) { return c == ' ' || c == '\t'; }
 
-/* Display width of a byte range, counting printable codepoints. */
+/* Display width of a byte range, counting whole grapheme clusters. */
 static int display_width(const char *s, size_t len)
 {
     int w = 0;
     size_t i = 0;
     while (i < len) {
-        int cl = tui_utf8_char_len(s + i);
-        if (cl <= 0 || i + (size_t)cl > len)
+        size_t cl = 0;
+        int cw = tui_next_cluster(s + i, len - i, &cl);
+        if (cl == 0)
             break;
-        uint32_t cp = tui_utf8_decode(s + i, cl);
-        if (cp >= 0x20)
-            w += tui_codepoint_width(cp);
-        i += (size_t)cl;
+        w += cw;
+        i += cl;
     }
     return w;
 }
@@ -160,15 +159,14 @@ static size_t clip_bytes(const char *s, size_t len, int maxw)
     int w = 0;
     size_t i = 0;
     while (i < len) {
-        int cl = tui_utf8_char_len(s + i);
-        if (cl <= 0 || i + (size_t)cl > len)
+        size_t cl = 0;
+        int cw = tui_next_cluster(s + i, len - i, &cl);
+        if (cl == 0)
             break;
-        uint32_t cp = tui_utf8_decode(s + i, cl);
-        int cw = cp >= 0x20 ? tui_codepoint_width(cp) : 0;
         if (w + cw > maxw)
             break;
         w += cw;
-        i += (size_t)cl;
+        i += cl;
     }
     return i;
 }

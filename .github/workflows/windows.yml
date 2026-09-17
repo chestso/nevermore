@@ -30,9 +30,10 @@ jobs:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
           # new boba API (currently the streaming transcript component,
-          # stream.h + terminal_profile.h). A floating master would let boba churn break this
-          # repo's CI mid-work.
-          ref: 52ddeb942c6e04d26090f3b75b18bd8ad4321d3e
+          # stream.h + terminal_profile.h, and the cluster-aware width
+          # seam, unicode.h). A floating master would let boba churn
+          # break this repo's CI mid-work.
+          ref: 5aa81a30a17d73059d997d1a3ebe8243db7ecd8d
           path: boba
           fetch-depth: 0
 
