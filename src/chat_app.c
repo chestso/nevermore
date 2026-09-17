@@ -110,6 +110,9 @@ struct NmChatApp
     char *current_tool;        /* RUNNING_TOOL label hint */
     NmAgentState last_state;   /* detect the RUNNING_TOOL -> next transition
                                 * (the tool-block separator) */
+    /* Reused across tool results: the styled multi-line result body
+     * (one system message, memory-reuse principle). */
+    DynamicBuffer *tool_body;
 
     TuiRuntime *rt; /* weak; set via nm_chat_app_set_runtime */
 
@@ -405,6 +408,44 @@ static void sys_tool_plan(NmChatApp *app, const char *name,
     free(plan);
 }
 
+/* Render a tool result body under the `⎿` row: every line of the
+ * output, indented and in the result role (Smoke), each row reset
+ * before its end. The first row carries the marker and an "error: "
+ * prefix when the call failed; later rows are indented four spaces.
+ * Built into the app's reused buffer and sent as ONE system message
+ * (boba normalizes LF->CRLF). Per-tool-call reuse, never per token. */
+static void sys_tool_result(NmChatApp *app, const char *output, int ok)
+{
+    if (!app || !app->tool_body)
+        return;
+    DynamicBuffer *b = app->tool_body;
+    dynamic_buffer_clear(b);
+
+    const char *p = output ? output : "";
+    int first = 1;
+    while (*p || first) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (len && p[len - 1] == '\r')
+            len--; /* drop a CR before the LF */
+        dynamic_buffer_append_str(b, NM_SGR_RESULT);
+        dynamic_buffer_append_str(b, first ? "  ⎿ " : "    ");
+        if (first && !ok)
+            dynamic_buffer_append_str(b, "error: ");
+        dynamic_buffer_append(b, p, len);
+        dynamic_buffer_append_str(b, NM_SGR_RESET "\r\n");
+        first = 0;
+        if (!nl)
+            break;
+        p = nl + 1;
+        if (!*p)
+            break; /* no phantom row for the output's final newline */
+    }
+    if (dynamic_buffer_len(b))
+        send_msg(app, tui_msg_stream_text(-1, dynamic_buffer_data(b),
+                                          dynamic_buffer_len(b)));
+}
+
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
                          void *userdata)
@@ -424,14 +465,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         free(app->current_tool);
         app->current_tool = strdup(name);
     } else {
-        const char *output = result && result->output ? result->output : "";
-        const char *nl = strchr(output, '\n');
-        size_t first_len = nl ? (size_t)(nl - output) : strlen(output);
-        if (first_len > 64)
-            first_len = 64;
-        sys_line(app, NM_SGR_RESULT "  ⎿ %s%.*s%s" NM_SGR_RESET,
-                 result && result->ok ? "" : "error: ", (int)first_len,
-                 output, nl ? " …" : "");
+        sys_tool_result(app, result ? result->output : "", result && result->ok);
         free(app->current_tool);
         app->current_tool = NULL;
     }
@@ -537,7 +571,8 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
 
     app->tools = nm_toolset_new_defaults();
     app->spinner = nm_spinner_new();
-    if (!app->tools || !app->spinner)
+    app->tool_body = dynamic_buffer_create(256);
+    if (!app->tools || !app->spinner || !app->tool_body)
         goto oom;
 
     /* The streaming transcript: content + reasoning streams, nevermore's
@@ -626,6 +661,7 @@ void nm_chat_app_free(NmChatApp *app)
         nm_agent_free(app->agent); /* owns the session */
     nm_toolset_free(app->tools);
     nm_spinner_free(app->spinner);
+    dynamic_buffer_destroy(app->tool_body);
     free(app->model);
     free(app->base_url);
     free(app->api_key);

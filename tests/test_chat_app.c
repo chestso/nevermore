@@ -1353,8 +1353,8 @@ static void test_tool_round_prints_panels(void)
     ASSERT_TRUE(strstr(out, "edited the file") != NULL);
 
     /* Principle: the plan is committed BEFORE the tool runs (so it
-     * precedes the result line), and the tool block is followed by one
-     * blank line before whatever comes next. */
+     * precedes the result line), the whole result body follows, and
+     * the tool block ends with one blank line before the answer. */
     char *clean = strip_frames(out);
     ASSERT_NOT_NULL(clean);
     const char *plan_at = strstr(clean, "new_string: slow red");
@@ -1362,10 +1362,11 @@ static void test_tool_round_prints_panels(void)
     ASSERT_NOT_NULL(plan_at);
     ASSERT_NOT_NULL(res_at);
     ASSERT_TRUE(plan_at < res_at);
-    const char *res_nl = strchr(res_at, '\n');
-    ASSERT_NOT_NULL(res_nl);
-    ASSERT_TRUE(res_nl[1] == '\n'); /* the row after the result is blank */
-    ASSERT_TRUE(strstr(res_at, "edited the file") != NULL);
+    /* The result body is the full tool output, not a one-line slug. */
+    ASSERT_TRUE(strstr(res_at, "Edited") != NULL ||
+                strstr(res_at, "Output") != NULL);
+    /* A blank row separates the tool block from the answer. */
+    ASSERT_TRUE(strstr(clean, "\n\nedited the file") != NULL);
     free(clean);
 
     /* The file edit actually happened. */
