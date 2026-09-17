@@ -48,6 +48,7 @@ nevermore                          # interactive chat (boba TUI)
 nevermore ask "explain this repo"  # one-shot
 nevermore models                   # provider model catalog
 NEVERMORE_PROVIDER=openrouter nevermore ask "..."
+nevermore -p openai -m glm-5.3     # one run, ignoring the saved config
 ```
 
 Provider keys come from the environment (`HYPER_API_KEY`,
@@ -68,16 +69,57 @@ Environment variables win over the file. Point elsewhere with
 `NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
 default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
-`NEVERMORE_PROVIDER` / `NEVERMORE_MODEL` pick the default provider and
-model. `NEVERMORE_MAX_ROUNDS=<n>` caps the tool-call rounds in one turn
-(default 25) before the agent stops with "too many tool rounds"; the
-interactive chat also exposes it as `/rounds [n|default]`.
+## Configuration
+
+Settings resolve once, lowest to highest:
+
+1. built-in defaults
+2. **user config** — `~/.config/nevermore/config`, yours, written by
+   hand (`$XDG_CONFIG_HOME` honored; `%USERPROFILE%\.config` on Windows)
+3. **runtime shadow** — `~/.local/state/nevermore/config`, written by
+   the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
+4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
+   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`
+5. **command line** — `-p` / `-m`
+
+The environment deliberately outranks both files: a scripted
+`NEVERMORE_MODEL=x nevermore` must not be silently overridden by what
+you last typed in a chat. When a change is inert for that reason, the
+chat says so.
+
+A change made in the chat (`/model`, `/provider`, `/rounds`,
+`/reasoning`) never edits your config file. It is written to the shadow
+file, which holds only the keys you changed at the prompt — so `rm
+~/.local/state/nevermore/config` (or `/config reset all`) puts the user
+config back in charge, with nothing else to unwind.
+
+```
+# ~/.config/nevermore/config — '#' comment, blank lines ignored
+provider  = openai
+model     = glm-5.3
+rounds    = 40
+reasoning = on
+```
+
+Four keys, one spelling each. The value is the rest of the line,
+trimmed and taken verbatim — no quoting, no inline comments. Unknown
+keys and invalid values warn and are skipped, so a stale file can never
+break startup. No secrets: API keys stay in the environment or
+`~/.authinfo`.
+
+`NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
+elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
+endpoint for one run — a testing knob, deliberately not a config key.
+
+In the chat: `/config` shows where each setting comes from,
+`/config reset [key|all]` clears shadow lines, and `/rounds reset` /
+`/reasoning reset` do the same for one key.
 
 ## Layout
 
 ```
-src/                the nevermore binary: entry point, providers, wire
-                    client, transport, SSE, JSON, agent loop, tools,
+src/                the nevermore binary: entry point, config, providers,
+                    wire client, transport, SSE, JSON, agent loop, tools,
                     session, TUI (headers live alongside sources —
                     CLI app, no library)
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
