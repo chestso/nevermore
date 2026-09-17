@@ -124,6 +124,14 @@ Delta shape (Go, `glm-5.3-flash`, probed):
     `delta.reasoning_details:[{type:"reasoning.text",text,
 format,index}]`. The non-streaming body also carries a
     top-level `reasoning`.
+  - **`minimax-m3` (Go): no reasoning channel at all** (re-probed
+    2026-09-16, alongside a live nevermore smoke). Its CoT arrives
+    inline in `delta.content`, wrapped in literal
+    `<think>`…`</think>` tags, so nevermore renders it as content
+    (undimmed) rather than on the reasoning stream. The key is a
+    **per-model** distinction, not per-tier: `glm-5.3` (same Go
+    tier, same probe) uses `delta.reasoning_content`. Do not
+    assume "Go ⇒ reasoning_content".
     Nevermore reads `delta.content` (and now the reasoning channel;
     see `docs/OPENCODE-PROVIDER-PLAN.md` §7) from here; a client that
     does not surface reasoning must not treat an empty `content:""`
