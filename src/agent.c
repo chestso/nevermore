@@ -84,8 +84,12 @@ struct NmAgent
     size_t n_calls;
     /* Tool phase (state RUNNING_TOOL): the round's calls are announced
      * (START emitted) in finish_round, then executed one per step so
-     * the caller can flush the plan before each runs. */
+     * the caller can flush the plan before each runs. An async tool
+     * (begin/step/exec_fd/end) runs across steps: exec is the live
+     * handle, exec_tool its vtable. */
     size_t tool_exec_idx;
+    NmToolExec *exec;
+    const NmTool *exec_tool;
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -127,6 +131,8 @@ void nm_agent_free(NmAgent *a)
         return;
     if (a->stream && a->provider->chat_end)
         a->provider->chat_end(a->stream);
+    if (a->exec && a->exec_tool && a->exec_tool->end)
+        a->exec_tool->end(a->exec); /* reap a live async tool */
     free(a->model);
     free(a->api_key);
     free(a->last_error);
@@ -432,24 +438,61 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     return 0;
 }
 
-/* Tool phase: execute the next announced call and append its result
- * (synchronous today; one call per step so the caller flushes the plan
- * and the result in order). When every call is done, free the round's
- * copies and open the next round. Returns 0 to continue, -1 fatal. */
+/* Emit the END event for a finished call, record its result, and free
+ * it (the session copies the text). */
+static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
+                             NmToolResult *res)
+{
+    if (a->on_tool)
+        a->on_tool(nm_toolset_find(a->tools, tc->name), tc->args_json,
+                   NM_TOOL_EVENT_END, res, a->userdata);
+    nm_session_append_tool_result(a->session, tc->id, tc->name, res->output);
+    nm_tool_result_free(res);
+}
+
+/* Tool phase: execute the next announced call and append its result.
+ * A tool with an async executor (begin) runs across steps — start it,
+ * then drain until NM_TOOL_DONE, so the event loop (and the spinner)
+ * stays live; everything else runs synchronously. When every call is
+ * done, free the round's copies and open the next round. Returns 0 to
+ * continue, -1 fatal. */
 static int tool_step(NmAgent *a)
 {
     if (a->tool_exec_idx < a->n_calls) {
         const NmToolCall *tc = &a->calls[a->tool_exec_idx];
+        const NmTool *t = nm_toolset_find(a->tools, tc->name);
+
+        /* Drain a running async exec. */
+        if (a->exec) {
+            NmToolResult res = { 0, NULL };
+            NmToolStatus st = a->exec_tool->step(a->exec, &res);
+            if (st == NM_TOOL_RUNNING)
+                return 0; /* more to read; the fd stays subscribed */
+            finish_tool_call(a, tc, &res);
+            a->exec_tool->end(a->exec);
+            a->exec = NULL;
+            a->exec_tool = NULL;
+            a->tool_exec_idx++;
+            return 0;
+        }
+
+        /* Start an async exec when the tool offers one. */
+        if (t && t->begin) {
+            NmToolExec *e = t->begin(t, tc->args_json, a->userdata);
+            if (e) {
+                a->exec = e;
+                a->exec_tool = t;
+                return 0; /* drain on the next step (fd subscribed) */
+            }
+            /* begin declined (bad args / spawn failure): run the
+             * synchronous execute, which reports the error. */
+        }
+
         NmToolResult tres =
             nm_toolset_execute(a->tools, tc->name,
                                tc->args_json ? tc->args_json : "{}",
                                a->userdata /* tools workdir */);
-        if (a->on_tool)
-            a->on_tool(nm_toolset_find(a->tools, tc->name), tc->args_json,
-                       NM_TOOL_EVENT_END, &tres, a->userdata);
-        nm_session_append_tool_result(a->session, tc->id, tc->name,
-                                      tres.output);
-        nm_tool_result_free(&tres);
+        finish_tool_call(a, tc, &tres);
         a->tool_exec_idx++;
         return 0;
     }
@@ -514,19 +557,41 @@ int nm_agent_step(NmAgent *a)
 
 int nm_agent_fd(NmAgent *a)
 {
-    if (!a || !a->stream || !a->provider->chat_stream_fd)
+    if (!a)
+        return -1;
+    /* The active async tool's output pipe takes precedence during the
+     * tool phase (the stream is closed then). */
+    if (a->exec && a->exec_tool && a->exec_tool->exec_fd)
+        return a->exec_tool->exec_fd(a->exec);
+    if (!a->stream || !a->provider->chat_stream_fd)
         return -1;
     return a->provider->chat_stream_fd(a->stream);
 }
 
-/* The active stream's wait interest (async connect/send phases;
- * mirrors transport's NmConnectionInterest). 0 = nothing to wait
- * on (idle, or a provider without the step API). */
+/* The active wait interest: the async tool's output pipe (readable) or
+ * the stream's connect/send/response phase (mirrors transport's
+ * NmConnectionInterest). 0 = nothing to wait on (idle, synchronous tool
+ * phase, or a provider without the step API). */
 unsigned nm_agent_interest(NmAgent *a)
 {
-    if (!a || !a->stream || !a->provider->chat_stream_interest)
+    if (!a)
+        return 0;
+    if (a->exec)
+        return NM_INTEREST_READ; /* wait for the child's output */
+    if (!a->stream || !a->provider->chat_stream_interest)
         return 0;
     return a->provider->chat_stream_interest(a->stream);
+}
+
+/* Drop (and reap) a live async tool exec. */
+static void clear_exec(NmAgent *a)
+{
+    if (a->exec) {
+        if (a->exec_tool && a->exec_tool->end)
+            a->exec_tool->end(a->exec);
+        a->exec = NULL;
+        a->exec_tool = NULL;
+    }
 }
 
 void nm_agent_cancel(NmAgent *a)
@@ -537,6 +602,7 @@ void nm_agent_cancel(NmAgent *a)
         a->provider->chat_end(a->stream);
         a->stream = NULL;
     }
+    clear_exec(a);
     round_reset(a);
     a->round = 0;
     set_state(a, NM_AGENT_IDLE);

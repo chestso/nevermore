@@ -257,7 +257,14 @@ static const char run_command_schema[] =
     "(reserved; the agent's working directory applies).\"}},"
     "\"required\":[\"cmd\"]}";
 
-const NmTool nm_tool_run_command = { "run_command",
-                                     "Run a shell command and capture its "
-                                     "combined output and exit status",
-                                     run_command_schema, run_command_exec };
+/* No async path on Windows yet: the anonymous-pipe read handle cannot
+ * ride boba's socket-event subscription set, so run_command stays
+ * synchronous here (begin = NULL -> the agent uses execute). POSIX
+ * (tools_spawn_posix.c) is the event-driven path. */
+const NmTool nm_tool_run_command = {
+    .name = "run_command",
+    .description = "Run a shell command and capture its combined output "
+                   "and exit status",
+    .params_schema = run_command_schema,
+    .execute = run_command_exec,
+};

@@ -193,7 +193,8 @@ static size_t g_reasoning_len;
 static int g_tool_starts;
 static int g_tool_ends;
 static char g_tool_args[512];
-static char g_tool_seq[64]; /* 'S'/'E' in callback order */
+static char g_tool_output[512]; /* last END result body */
+static char g_tool_seq[64];     /* 'S'/'E' in callback order */
 static size_t g_tool_seq_len;
 static int g_final_state;
 
@@ -206,6 +207,7 @@ static void reset_capture(void)
     g_tool_starts = 0;
     g_tool_ends = 0;
     g_tool_args[0] = '\0';
+    g_tool_output[0] = '\0';
     g_tool_seq[0] = '\0';
     g_tool_seq_len = 0;
     g_final_state = -1;
@@ -242,7 +244,6 @@ static void cap_tool(const NmTool *tool, const char *args_json,
                      NmToolEvent event, const NmToolResult *result,
                      void *userdata)
 {
-    (void)result;
     (void)userdata;
     if (g_tool_seq_len + 1 < sizeof(g_tool_seq)) {
         g_tool_seq[g_tool_seq_len++] =
@@ -255,6 +256,9 @@ static void cap_tool(const NmTool *tool, const char *args_json,
             snprintf(g_tool_args, sizeof(g_tool_args), "%s", args_json);
     } else {
         g_tool_ends++;
+        if (result && result->output)
+            snprintf(g_tool_output, sizeof(g_tool_output), "%s",
+                     result->output);
     }
 }
 
@@ -752,6 +756,137 @@ static void test_agent_announces_all_tools_before_executing(void)
     remove(FIXTURE);
 }
 
+#ifndef _WIN32
+/* run_command runs asynchronously: a tool round yields an fd (the
+ * child's output pipe) while the state stays RUNNING_TOOL, instead of
+ * blocking the event loop; the turn still completes with the command's
+ * output as the result. */
+static void test_agent_run_command_is_async(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 0.3; echo hi-async\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "poke the shell"), 0);
+
+    /* Drive the stream round until the tool phase begins (the round's
+     * final step announces the call and sets RUNNING_TOOL). */
+    int spins = 0;
+    while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
+        int fd = nm_agent_fd(agent);
+        unsigned in = nm_agent_interest(agent);
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        if (nm_agent_step(agent) != 0)
+            break;
+    }
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+
+    /* The NEXT step starts the exec and yields an fd (the child's
+     * pipe), not a blocked call. */
+    ASSERT_EQ(nm_agent_step(agent), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
+    ASSERT_TRUE((nm_agent_interest(agent) & NM_INTEREST_READ) != 0);
+
+    /* Finish the turn. */
+    ASSERT_EQ(agent_drive(agent, 5000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_tool_seq, "SE");
+    ASSERT_TRUE(strstr(g_tool_output, "hi-async") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The blocking pump (ask mode) drives the same async path: it must wait
+ * on the child's pipe and return DONE. */
+static void test_agent_turn_runs_async_command(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 0.2; echo hi-async\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "poke the shell"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "done");
+    ASSERT_STR_EQ(g_tool_seq, "SE");
+    ASSERT_TRUE(strstr(g_tool_output, "hi-async") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+#endif /* !_WIN32 */
+
 /* Reasoning: collected on the reasoning channel, echoed back as
  * reasoning_content on the next request carrying the turn, and never
  * mixed into the answer text. The canned server scripts reasoning in
@@ -1096,6 +1231,10 @@ int main(void)
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_all_tools_before_executing);
+#ifndef _WIN32
+    RUN_TEST(test_agent_run_command_is_async);
+    RUN_TEST(test_agent_turn_runs_async_command);
+#endif
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);

@@ -1307,6 +1307,82 @@ static char *strip_frames(const char *in)
     return out;
 }
 
+#ifndef _WIN32
+/* A run_command tool round runs asynchronously: while the child runs the
+ * agent sits in RUNNING_TOOL with the child's output pipe as its fd, so
+ * boba keeps ticking and the spinner paints the "executing" tier. */
+static void test_tool_runs_async_and_spinner_ticks(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 0.3; echo hi-cmd\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "run it");
+    harness_enter(h);
+
+    /* Step until the command is running (RUNNING_TOOL with a live fd). */
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            nm_chat_app_fd(h->app) >= 0)
+            break;
+        int fd = nm_chat_app_fd(h->app);
+        unsigned in = nm_chat_app_interest(h->app).flags;
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+
+    /* The spinner tier paints "executing" while the child runs. */
+    nm_chat_app_tick(h->app);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, "executing") != NULL);
+
+    /* And the turn completes, with the command output committed. */
+    ASSERT_EQ(harness_drive(h, 2000), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "hi-cmd") != NULL);
+    free(clean);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+#endif /* !_WIN32 */
+
 static void test_tool_round_prints_panels(void)
 {
     FILE *f = fopen(FIXTURE_PATH, "wb");
@@ -1919,6 +1995,9 @@ int main(void)
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
+#ifndef _WIN32
+    RUN_TEST(test_tool_runs_async_and_spinner_ticks);
+#endif
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
     RUN_TEST(test_fence_line_not_split_by_reasoning_stream_end);
     RUN_TEST(test_submit_echoes_once);

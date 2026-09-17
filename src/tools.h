@@ -35,7 +35,20 @@ typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
                                NmToolEvent event, const NmToolResult *result,
                                void *userdata);
 
-/* One tool: name, JSON schema for the provider, an executor. */
+/* Optional asynchronous execution (spawn-based tools). When a tool sets
+ * begin, the agent drives begin/step/exec_fd/end instead of execute, so
+ * a long-running tool never blocks the event loop (the spinner keeps
+ * ticking, the child's output pipe is a subscribed fd). */
+typedef struct NmToolExec NmToolExec;
+
+typedef enum
+{
+    NM_TOOL_RUNNING = 0, /* still working; step again when the fd is ready */
+    NM_TOOL_DONE = 1     /* *out holds the final result */
+} NmToolStatus;
+
+/* One tool: name, JSON schema for the provider, an executor, and an
+ * optional async executor (see above). */
 typedef struct NmTool
 {
     const char *name;          /* wire name, e.g. "read_file" */
@@ -43,6 +56,15 @@ typedef struct NmTool
     const char *params_schema; /* JSON Schema for "parameters", or NULL */
     NmToolResult (*execute)(const NmTool *tool, const char *args_json,
                             void *userdata);
+    /* Async path (NULL for synchronous tools). begin returns a handle,
+     * or NULL to fall back to execute (bad args / spawn failure).
+     * exec_fd is the wait fd (or -1); step fills *out and reports
+     * NM_TOOL_DONE when finished; end frees the handle. */
+    NmToolExec *(*begin)(const NmTool *tool, const char *args_json,
+                         void *userdata);
+    NmToolStatus (*step)(NmToolExec *e, NmToolResult *out);
+    int (*exec_fd)(NmToolExec *e);
+    void (*end)(NmToolExec *e);
 } NmTool;
 
 NmToolset *nm_toolset_new(void);

@@ -11,6 +11,8 @@
 #define getpid      _getpid
 #define mkdir(d, m) _mkdir(d)
 #else
+#include <sys/select.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 
@@ -572,6 +574,72 @@ static void test_tool_plan_degenerate_args(void)
     free(p);
 }
 
+#ifndef _WIN32
+/* The async run_command path (tools_spawn_posix.c): begin spawns the
+ * child with a non-blocking output pipe; step drains and reports DONE
+ * at EOF. A command that has not produced output yet must yield
+ * NM_TOOL_RUNNING with a live fd — that is the whole point (no blocking
+ * read in the event loop). */
+static void test_run_command_async(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(t->begin);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd",
+                nm_json_new_string("sleep 0.3; printf 'hello async\\n'; "
+                                   "exit 3"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    ASSERT_TRUE(t->exec_fd(e) >= 0);
+
+    /* First step: the child is still sleeping, so RUNNING (not a
+     * blocking wait). */
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+    ASSERT_TRUE(t->exec_fd(e) >= 0);
+
+    /* Drain until DONE, waiting on the fd like the event loop does. */
+    int steps = 0;
+    while (t->step(e, &r) == NM_TOOL_RUNNING) {
+        ASSERT_TRUE(++steps < 100000);
+        int fd = t->exec_fd(e);
+        if (fd >= 0) {
+            fd_set fds;
+            struct timeval tv = { 0, 200 * 1000 };
+            FD_ZERO(&fds);
+            FD_SET(fd, &fds);
+            select(fd + 1, &fds, NULL, NULL, &tv);
+        }
+    }
+    t->end(e);
+
+    ASSERT_EQ(r.ok, 0); /* exit 3 is a failure */
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "hello async") != NULL);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A bad/empty cmd makes begin decline (NULL), so the agent falls back
+ * to execute, which reports the error. */
+static void test_run_command_async_bad_args(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NULL(t->begin(t, "{not json", NULL));
+    NmToolExec *e = t->begin(t, "{}", NULL);
+    ASSERT_NULL(e);
+    nm_toolset_free(ts);
+}
+#endif /* !_WIN32 */
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -596,5 +664,9 @@ int main(void)
     RUN_TEST(test_tool_plan_escapes_newlines);
     RUN_TEST(test_tool_plan_clamps_long_values);
     RUN_TEST(test_tool_plan_degenerate_args);
+#ifndef _WIN32
+    RUN_TEST(test_run_command_async);
+    RUN_TEST(test_run_command_async_bad_args);
+#endif
     TEST_SUMMARY();
 }

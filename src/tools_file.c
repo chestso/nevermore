@@ -984,22 +984,30 @@ static const char search_dir_schema[] =
     "find; no regex.\"}},"
     "\"required\":[\"path\",\"needle\"]}";
 
-const NmTool nm_tool_read_file = { "read_file",
-                                   "Read a UTF-8 text file, byte-exact, "
-                                   "optionally line-numbered and windowed "
-                                   "(offset/limit)",
-                                   read_file_schema, read_file_exec };
-const NmTool nm_tool_edit_file = { "edit_file",
-                                   "Edit a file by literal find/replace; "
-                                   "the old_string must match uniquely "
-                                   "unless replace_all",
-                                   edit_file_schema, edit_file_exec };
-const NmTool nm_tool_list_dir = { "list_dir",
-                                  "List directory entries (directories "
-                                  "suffixed with /)",
-                                  list_dir_schema, list_dir_exec };
-const NmTool nm_tool_search_dir = { "search_dir",
-                                    "Search files recursively for a "
-                                    "literal string (no regex); reports "
-                                    "path:line:content",
-                                    search_dir_schema, search_dir_exec };
+const NmTool nm_tool_read_file = {
+    .name = "read_file",
+    .description = "Read a UTF-8 text file, byte-exact, optionally "
+                   "line-numbered and windowed (offset/limit)",
+    .params_schema = read_file_schema,
+    .execute = read_file_exec,
+};
+const NmTool nm_tool_edit_file = {
+    .name = "edit_file",
+    .description = "Edit a file by literal find/replace; the old_string "
+                   "must match uniquely unless replace_all",
+    .params_schema = edit_file_schema,
+    .execute = edit_file_exec,
+};
+const NmTool nm_tool_list_dir = {
+    .name = "list_dir",
+    .description = "List directory entries (directories suffixed with /)",
+    .params_schema = list_dir_schema,
+    .execute = list_dir_exec,
+};
+const NmTool nm_tool_search_dir = {
+    .name = "search_dir",
+    .description = "Search files recursively for a literal string (no "
+                   "regex); reports path:line:content",
+    .params_schema = search_dir_schema,
+    .execute = search_dir_exec,
+};
