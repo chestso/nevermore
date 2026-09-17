@@ -919,9 +919,10 @@ static void test_ollama_local_catalog_uses_local_default(void)
 {
     /* The two providers keep separate catalog caches (different
      * endpoints); the cloud's canned-wire fetch above must not have
-     * poisoned the local daemon's view. Offline here (the live gate
-     * is on under make check), so the local provider falls back to
-     * the static list — not the cloud's cached models. */
+     * poisoned the local daemon's view. Offline here (the offline
+     * catalog pin makes the default-base probe a no-op), so the local
+     * provider falls back to the static list — not the cloud's cached
+     * models. */
     const NmProvider *local = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(local);
     size_t n = 0;
@@ -1383,7 +1384,7 @@ static void test_opencode_models_fetch_maps_ids(void)
 }
 
 /* The static fallback is per-tier: Zen's differs from Go's (the
- * offline gate under make check means default-base calls are no-ops). */
+ * offline catalog pin makes default-base calls no-ops). */
 static void test_opencode_models_static_fallback_per_tier(void)
 {
     const NmProvider *go = nm_provider_by_name("opencode:go");
@@ -1399,6 +1400,12 @@ static void test_opencode_models_static_fallback_per_tier(void)
     ASSERT_TRUE(strcmp(g[0].id, z[0].id) != 0);
 }
 
+/* The offline-catalog tripwire: several tests here read a provider
+ * catalog with NO endpoint override and expect the static fallback,
+ * so a live default-base probe would both block and answer with
+ * today's service list (see test_net_helpers.h). */
+TEST_OFFLINE_CATALOG_PIN_CHECK()
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1407,7 +1414,15 @@ int main(int argc, char *argv[])
         fprintf(stderr, "test_provider: WSAStartup failed\n");
         return 1;
     }
+    /* Every default-base catalog call below must be a no-op: the
+     * canned-wire fetches pass an explicit loopback base_url and are
+     * unaffected by the gate. */
+    if (test_pin_offline_catalog() != 0) {
+        fprintf(stderr, "test_provider: offline catalog pin failed\n");
+        return 1;
+    }
     printf("test_provider:\n");
+    RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);

@@ -335,6 +335,27 @@ static int harness_drive(AppHarness *h, int max_spins)
  * the round's text collector has content (bounded) — the server's
  * accept+send races the poll, and readability alone can fire before
  * any payload bytes have landed. */
+/* One step, plus the flush the event loop would do. No payload wait:
+ * for tests that intentionally STALL (no SSE payload at all), where
+ * harness_step_once would burn its whole budget waiting for a tail
+ * that never comes (5 s of the watchdog's 10 s per binary). */
+static void harness_single_step(AppHarness *h)
+{
+    int fd = nm_chat_app_fd(h->app);
+    if (fd >= 0) {
+        fd_set fds;
+        struct timeval tv = { 0, 50 * 1000 };
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        select(fd + 1, &fds, NULL, NULL, &tv);
+    }
+    nm_chat_app_step(h->app);
+    tui_runtime_flush(h->rt);
+}
+
+/* Step until the app's collector has tail bytes, then flush. Bounded
+ * (100 × 50 ms select) — the payload-waiting sibling of
+ * harness_single_step. */
 static void harness_step_once(AppHarness *h)
 {
     for (int i = 0; i < 100; i++) {
@@ -477,7 +498,9 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
 
     harness_type(h, "hello");
     harness_enter(h);
-    harness_step_once(h);
+    /* One step: this round never sends a payload, so the payload-wait
+     * pump would just spin out its budget. */
+    harness_single_step(h);
     nm_chat_app_tick(h->app); /* advance the spinner (the run loop's tick) */
     tui_runtime_flush(h->rt);
 
@@ -1958,6 +1981,11 @@ static void test_markdown_table_reaches_scrollback_aligned(void)
     close(rr.fd);
 }
 
+/* The offline-catalog tripwire: the model tests below assert against
+ * the STATIC ollama catalog, so a live fetch would replace it (see
+ * test_net_helpers.h). */
+TEST_OFFLINE_CATALOG_PIN_CHECK()
+
 int main(void)
 {
 #ifndef _WIN32
@@ -1967,6 +1995,13 @@ int main(void)
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;
     }
+    /* No default-base catalog probes: the model tests assert the
+     * static catalog, and a live fetch would block and answer with
+     * whatever the service serves today. */
+    if (test_pin_offline_catalog() != 0) {
+        fprintf(stderr, "  FAIL: offline catalog pin\n");
+        return 1;
+    }
     /* No context files in the test's cwd: agent construction reads
      * AGENTS.md from the working directory. */
     if (test_chdir_to_scratch() != 0) {
@@ -1974,6 +2009,7 @@ int main(void)
         return 1;
     }
     printf("test_chat_app:\n");
+    RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_separator_blank_line_after_answer);
     RUN_TEST(test_separator_collapses_trailing_blank_lines);

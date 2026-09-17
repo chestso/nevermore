@@ -1,7 +1,7 @@
 /* test_source.c - listing-plane source tests (the catalog picker's
- * data seam). Runs offline: static + registry sources only; the
- * phase-5 wire source rides fetch_begin/step against canned servers
- * in its own test. */
+ * data seam). Runs offline: static + registry sources only, with the
+ * catalog pin held (a wire source rides fetch_begin/step against
+ * canned servers in its own test). */
 
 #include <stdio.h>
 #include <string.h>
@@ -9,6 +9,7 @@
 #include "provider.h"
 #include "source.h"
 #include "test_helpers.h"
+#include "test_net_helpers.h"
 
 /* ---- registry source ---- */
 
@@ -159,11 +160,21 @@ static void test_null_safety(void)
     nm_source_free(s);
 }
 
+/* The offline-catalog tripwire: these sources read a provider catalog
+ * with NO endpoint override, so a live default-base probe would block
+ * and swap the static list (see test_net_helpers.h). */
+TEST_OFFLINE_CATALOG_PIN_CHECK()
+
 int main(int argc, char *argv[])
 {
     (void)argc;
     (void)argv;
+    if (test_pin_offline_catalog() != 0) {
+        fprintf(stderr, "test_source: offline catalog pin failed\n");
+        return 1;
+    }
     printf("test_source:\n");
+    RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_registry_source_lists_all_providers);
     RUN_TEST(test_registry_source_names_round_trip);
     RUN_TEST(test_static_source_wraps_provider_catalog);
