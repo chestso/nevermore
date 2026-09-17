@@ -888,6 +888,149 @@ static void test_run_command_output_is_clamped(void)
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
+/* Cancelling a running command (user interrupt, agent teardown) must
+ * stop it promptly: `end` used to waitpid() a child that had not
+ * exited, so Ctrl+C during `sleep 300` froze the UI for five minutes.
+ * It now SIGKILLs the child's process group and reaps what it killed. */
+static void test_run_command_cancel_is_prompt(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd",
+                nm_json_new_string("sleep 30; printf 'never\\n'"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    ASSERT_TRUE(t->exec_fd(e) >= 0);
+
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING); /* the child is asleep */
+
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    t->end(e);
+    gettimeofday(&t1, NULL);
+    long long us = (long long)(t1.tv_sec - t0.tv_sec) * 1000000LL +
+                   (t1.tv_usec - t0.tv_usec);
+    /* Killing a `sleep 30` and reaping it takes milliseconds; the
+     * blocking wait this guards would take the full 30 s. */
+    ASSERT_TRUE(us < 2 * 1000 * 1000);
+
+    nm_toolset_free(ts);
+}
+
+/* ...and the cancel must really KILL the child, not just stop waiting
+ * for it: a survivor is a leaked process (and, with the async seam, a
+ * child nobody will ever reap). */
+static void test_run_command_cancel_kills_the_child(void)
+{
+    char *leak = scratch_path("leaked.txt");
+    remove(leak); /* scratch_dir is per-pid, but be explicit */
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+
+    NmJson *jargs = nm_json_new_object();
+    /* The shell writes the marker file only if it survives the cancel;
+     * nm_json_set + nm_json_dump keep the path escaped whatever it
+     * holds. */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "sleep 0.5; printf 'leaked\\n' > %s", leak);
+    nm_json_set(jargs, "cmd", nm_json_new_string(cmd));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+    t->end(e); /* cancel before the child wakes up */
+
+    /* Past the child's write point: a survivor would have created the
+     * file by now. */
+    usleep(900 * 1000);
+    FILE *g = fopen(leak, "rb");
+    if (g)
+        fclose(g);
+    ASSERT_NULL(g);
+
+    remove(leak);
+    free(leak);
+    nm_toolset_free(ts);
+}
+
+/* The kill covers the child's whole process group, not just the shell:
+ * a `sh -c '... &'` grandchild survives a shell-only kill and would
+ * leak (nobody would ever reap it either). The grandchild writes the
+ * marker, so a shell-only cancel is detected. */
+static void test_run_command_cancel_kills_the_process_group(void)
+{
+    char *up = scratch_path("grand-up.txt");
+    char *leak = scratch_path("leaked-grand.txt");
+    remove(up);
+    remove(leak);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+
+    /* The background grandchild (in the shell's group) announces
+     * itself, then sleeps and writes the leak marker. The announce is
+     * what makes this deterministic: cancelling before the shell forks
+     * would leave no grandchild to detect. */
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd),
+             "sh -c \"printf 'up\\n' > %s; sleep 0.4; printf 'grand\\n' > "
+             "%s\" & wait",
+             up, leak);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "cmd", nm_json_new_string(cmd));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+
+    /* Bounded wait for the grandchild to exist. */
+    int alive = 0;
+    for (int i = 0; i < 200 && !alive; i++) {
+        FILE *f = fopen(up, "rb");
+        if (f) {
+            fclose(f);
+            alive = 1;
+            break;
+        }
+        usleep(10 * 1000);
+    }
+    ASSERT_TRUE(alive);
+
+    t->end(e); /* cancel kills the group: shell + grandchild */
+
+    /* Past the grandchild's write point. */
+    usleep(900 * 1000);
+    FILE *g = fopen(leak, "rb");
+    if (g)
+        fclose(g);
+    ASSERT_NULL(g);
+
+    remove(up);
+    remove(leak);
+    free(up);
+    free(leak);
+    nm_toolset_free(ts);
+}
+
 #endif /* !_WIN32 */
 
 int main(void)
@@ -924,6 +1067,9 @@ int main(void)
     RUN_TEST(test_run_command_async);
     RUN_TEST(test_run_command_async_bad_args);
     RUN_TEST(test_run_command_output_is_clamped);
+    RUN_TEST(test_run_command_cancel_is_prompt);
+    RUN_TEST(test_run_command_cancel_kills_the_child);
+    RUN_TEST(test_run_command_cancel_kills_the_process_group);
 #endif
     TEST_SUMMARY();
 }

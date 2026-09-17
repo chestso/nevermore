@@ -1438,7 +1438,8 @@ static void test_tool_runs_async_and_spinner_ticks(void)
 /* Cancel while an async tool is mid-run: the announced plan never gets
  * its END, so the block never emitted its own blank line. The marker
  * must still start on a fresh row rather than gluing itself to the
- * plan (the open block is closed on the way out). */
+ * plan (the open block is closed on the way out). The command sleeps
+ * long enough that a blocking reap would be felt here. */
 static void test_cancel_during_tool_closes_the_block(void)
 {
     struct ServerScript sc;
@@ -1448,7 +1449,7 @@ static void test_cancel_during_tool_closes_the_block(void)
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
         "{\"name\":\"run_command\",\"arguments\":"
-        "\"{\\\"cmd\\\":\\\"sleep 0.5; echo never\\\"}\"}}]}}]}\n\n"
+        "\"{\\\"cmd\\\":\\\"sleep 5; echo never\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -1494,7 +1495,7 @@ static void test_cancel_during_tool_closes_the_block(void)
     const char *out = harness_read(h);
     char *clean = strip_frames(out);
     ASSERT_NOT_NULL(clean);
-    const char *plan = strstr(clean, "cmd: sleep 0.5");
+    const char *plan = strstr(clean, "cmd: sleep 5");
     const char *mark = strstr(clean, "🛑 interrupted");
     ASSERT_NOT_NULL(plan);
     ASSERT_NOT_NULL(mark);

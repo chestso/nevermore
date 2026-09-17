@@ -10,6 +10,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <spawn.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -282,10 +283,24 @@ static NmToolExec *spawn_begin(const char *const *argv)
         return NULL;
     }
 
+    posix_spawnattr_t attr;
+    int attr_ok = posix_spawnattr_init(&attr) == 0;
+#ifdef POSIX_SPAWN_SETPGROUP
+    /* Own process group (pgid = the child's pid): a cancel can then
+     * stop the child AND its descendants with one kill(-pid) — a
+     * `sh -c 'cmd1; cmd2'` pipeline leaves grandchildren behind — and
+     * a terminal SIGINT aimed at nevermore's foreground group cannot
+     * kill a running tool behind its back. */
+    if (attr_ok && posix_spawnattr_setpgroup(&attr, 0) == 0)
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETPGROUP);
+#endif
+
     extern char **environ;
     pid_t pid;
-    int rc =
-        posix_spawn(&pid, prog, &fa, NULL, (char *const *)argv, environ);
+    int rc = posix_spawn(&pid, prog, &fa, attr_ok ? &attr : NULL,
+                         (char *const *)argv, environ);
+    if (attr_ok)
+        posix_spawnattr_destroy(&attr);
     posix_spawn_file_actions_destroy(&fa);
     if (rc != 0) {
         close(fds[0]);
@@ -317,6 +332,44 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     NmToolExec *e = spawn_begin(argv);
     free(cmd); /* posix_spawn copied argv before returning */
     return e;  /* NULL falls back to the synchronous execute */
+}
+
+/* Stop the child — and, when it leads its own group (the spawn sets
+ * POSIX_SPAWN_SETPGROUP), its descendants with it. SIGKILL, not
+ * SIGTERM: the callers are the cancel and teardown paths (and the
+ * EOF-with-nothing-left-to-read path), the pipe is already closed, and
+ * a prompt must not sit waiting on a child that ignores SIGTERM or
+ * EPIPE. Killing an already-exited child is a no-op. */
+static void kill_child(NmToolExec *e)
+{
+    if (e->pid <= 0)
+        return;
+    if (kill(-(pid_t)e->pid, SIGKILL) != 0 && errno == ESRCH) {
+        /* No group of its own (platform without SETPGROUP, or the
+         * group is already gone): stop the shell itself. */
+        kill((pid_t)e->pid, SIGKILL);
+    }
+}
+
+/* waitpid the child (EINTR-safe) and record its exit status. Blocking
+ * is fine here: either the child has already exited (a zombie) or
+ * kill_child just SIGKILLed it. */
+static void reap_child(NmToolExec *e)
+{
+    if (e->reaped)
+        return;
+    int st = 0;
+    pid_t r;
+    do {
+        r = waitpid((pid_t)e->pid, &st, 0);
+    } while (r < 0 && errno == EINTR);
+    if (r >= 0) {
+        if (WIFEXITED(st))
+            e->code = WEXITSTATUS(st);
+        else if (WIFSIGNALED(st))
+            e->code = 128 + WTERMSIG(st);
+    }
+    e->reaped = 1;
 }
 
 static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
@@ -362,14 +415,14 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         return NM_TOOL_RUNNING;
 
     if (!e->reaped) {
-        int st = 0;
-        if (waitpid(e->pid, &st, 0) >= 0) {
-            if (WIFEXITED(st))
-                e->code = WEXITSTATUS(st);
-            else if (WIFSIGNALED(st))
-                e->code = 128 + WTERMSIG(st);
-        }
-        e->reaped = 1;
+        /* Output is finished (EOF, the capture cap, or OOM stopped the
+         * read), but the child need not be gone: it can close stdout
+         * and keep working (`exec 1>&-; sleep 300`) or ignore EPIPE
+         * after the cap. There is no fd left to wait on and no timer to
+         * poll from, so a blocking wait here would wedge the event
+         * loop. Stop it, then reap what we stopped. */
+        kill_child(e);
+        reap_child(e);
     }
     *out = run_command_result(e->buf ? e->buf : "", e->len, e->code);
     return NM_TOOL_DONE;
@@ -383,8 +436,14 @@ static void run_command_end(NmToolExec *e)
         return;
     if (e->fd >= 0)
         close(e->fd);
-    if (!e->reaped)
-        waitpid(e->pid, NULL, 0); /* cancelled mid-run: reap it */
+    if (!e->reaped) {
+        /* Cancelled mid-run (user interrupt, agent teardown): stop the
+         * child instead of blocking on waitpid until it finishes on its
+         * own — `sleep 300` would otherwise freeze the UI for five
+         * minutes with no way out. */
+        kill_child(e);
+        reap_child(e);
+    }
     free(e->buf);
     free(e);
 }
