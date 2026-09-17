@@ -1338,6 +1338,17 @@ static char *strip_frames(const char *in)
     return out;
 }
 
+/* True when the byte range contains a blank row (two consecutive
+ * newlines) — the separator a tool block ends with. */
+static int has_blank_row(const char *from, const char *to)
+{
+    for (const char *p = from; p + 1 < to; p++) {
+        if (p[0] == '\n' && p[1] == '\n')
+            return 1;
+    }
+    return 0;
+}
+
 #ifndef _WIN32
 /* A run_command tool round runs asynchronously: while the child runs the
  * agent sits in RUNNING_TOOL with the child's output pipe as its fd, so
@@ -1415,6 +1426,80 @@ static void test_tool_runs_async_and_spinner_ticks(void)
      * that much. */
     ASSERT_TRUE(strstr(clean, "  ╰─ Output:") != NULL);
     ASSERT_TRUE(strstr(clean, "     hi-cmd") != NULL);
+    free(clean);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+#endif /* !_WIN32 */
+
+#ifndef _WIN32
+/* Cancel while an async tool is mid-run: the announced plan never gets
+ * its END, so the block never emitted its own blank line. The marker
+ * must still start on a fresh row rather than gluing itself to the
+ * plan (the open block is closed on the way out). */
+static void test_cancel_during_tool_closes_the_block(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 0.5; echo never\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "run it");
+    harness_enter(h);
+
+    /* Step until the command is running (RUNNING_TOOL with a live fd). */
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            nm_chat_app_fd(h->app) >= 0)
+            break;
+        int fd = nm_chat_app_fd(h->app);
+        unsigned in = nm_chat_app_interest(h->app).flags;
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+
+    tui_runtime_send(h->rt, tui_msg_interrupt());
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    const char *out = harness_read(h);
+    char *clean = strip_frames(out);
+    ASSERT_NOT_NULL(clean);
+    const char *plan = strstr(clean, "cmd: sleep 0.5");
+    const char *mark = strstr(clean, "🛑 interrupted");
+    ASSERT_NOT_NULL(plan);
+    ASSERT_NOT_NULL(mark);
+    ASSERT_TRUE(plan < mark);
+    ASSERT_TRUE(has_blank_row(plan, mark)); /* the open block was closed */
     free(clean);
 
     harness_free(h);
@@ -1502,6 +1587,105 @@ static void test_tool_round_prints_panels(void)
     ASSERT_STR_EQ(content, "the slow red fox\n");
     remove(FIXTURE_PATH);
 
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Parallel tool calls arrive in ONE assistant message (several entries
+ * in the wire tool_calls array) but nevermore runs them sequentially.
+ * The transcript must say so: each call's plan is committed right
+ * before that call's own result — plan1, result1, plan2, result2 —
+ * instead of every plan in the round piling up first, which read as
+ * "two tools started at once, results interleaved". */
+static void test_parallel_tool_calls_pair_plan_with_result(void)
+{
+    FILE *f = fopen("nm-p1.txt", "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("alpha body\n", f);
+    fclose(f);
+    f = fopen("nm-p2.txt", "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("beta body\n", f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_a\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":"
+        "\"{\\\"path\\\":\\\"nm-p1.txt\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,"
+        "\"id\":\"call_b\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":"
+        "\"{\\\"path\\\":\\\"nm-p2.txt\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read both\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "read both files");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    char *clean = strip_frames(out);
+    ASSERT_NOT_NULL(clean);
+
+    /* Distinct path + body per call, so each occurrence's position
+     * identifies which call it belongs to. */
+    const char *plan1 = strstr(clean, "path: nm-p1.txt");
+    const char *res1 = strstr(clean, "alpha body");
+    const char *plan2 = strstr(clean, "path: nm-p2.txt");
+    const char *res2 = strstr(clean, "beta body");
+    const char *plan2hdr = strstr(clean, "📖 read_file\n  path: nm-p2.txt");
+    const char *ans = strstr(clean, "read both\n");
+    ASSERT_NOT_NULL(plan1);
+    ASSERT_NOT_NULL(res1);
+    ASSERT_NOT_NULL(plan2);
+    ASSERT_NOT_NULL(res2);
+    ASSERT_NOT_NULL(plan2hdr);
+    ASSERT_NOT_NULL(ans);
+    ASSERT_TRUE(plan1 < res1); /* the plan precedes its own run */
+    ASSERT_TRUE(res1 < plan2); /* and the next plan is not preloaded */
+    ASSERT_TRUE(plan2 < res2);
+    ASSERT_TRUE(plan2hdr < ans);
+
+    /* One blank line closes EACH tool block (principle 4): block 1's
+     * blank sits immediately before block 2's plan header, block 2's
+     * immediately before the answer — and no blank splits a plan from
+     * its own result (a plan + its result are one block). */
+    ASSERT_TRUE(plan2hdr[-1] == '\n' && plan2hdr[-2] == '\n');
+    ASSERT_TRUE(ans[-1] == '\n' && ans[-2] == '\n');
+    ASSERT_TRUE(!has_blank_row(plan1, res1));
+    ASSERT_TRUE(!has_blank_row(plan2, res2));
+    free(clean);
+
+    /* Both results reach the wire in the ONE follow-up request, each as
+     * its own tool message, in call order (g_request holds the last
+     * round's request body). */
+    const char *tc_a = strstr(g_request, "\"tool_call_id\":\"call_a\"");
+    const char *tc_b = strstr(g_request, "\"tool_call_id\":\"call_b\"");
+    ASSERT_NOT_NULL(tc_a);
+    ASSERT_NOT_NULL(tc_b);
+    ASSERT_TRUE(tc_a < tc_b);
+    ASSERT_TRUE(strstr(g_request, "alpha body") != NULL);
+    ASSERT_TRUE(strstr(g_request, "beta body") != NULL);
+
+    remove("nm-p1.txt");
+    remove("nm-p2.txt");
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -2055,7 +2239,9 @@ int main(void)
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
+    RUN_TEST(test_parallel_tool_calls_pair_plan_with_result);
 #ifndef _WIN32
+    RUN_TEST(test_cancel_during_tool_closes_the_block);
     RUN_TEST(test_tool_runs_async_and_spinner_ticks);
 #endif
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);

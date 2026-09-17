@@ -82,12 +82,17 @@ struct NmAgent
     size_t reasoning_cap;
     NmToolCall *calls; /* delivered tool calls (owned between rounds) */
     size_t n_calls;
-    /* Tool phase (state RUNNING_TOOL): the round's calls are announced
-     * (START emitted) in finish_round, then executed one per step so
-     * the caller can flush the plan before each runs. An async tool
+    /* Tool phase (state RUNNING_TOOL): the round's calls are executed one
+     * per step, and each call is announced (START) the moment it is
+     * about to run — never the whole round up front. The model may ask
+     * for several calls in one message (parallel tool calls), but they
+     * run sequentially, so the transcript reads plan -> its own result,
+     * call after call. tool_announced guards the once-per-call announce
+     * (an async tool re-enters the step while it drains). An async tool
      * (begin/step/exec_fd/end) runs across steps: exec is the live
      * handle, exec_tool its vtable. */
     size_t tool_exec_idx;
+    int tool_announced; /* this call's plan already emitted */
     NmToolExec *exec;
     const NmTool *exec_tool;
 };
@@ -304,6 +309,10 @@ static void round_reset(NmAgent *a)
     nm_tool_calls_free(a->calls, a->n_calls);
     a->calls = NULL;
     a->n_calls = 0;
+    /* Tool phase bookkeeping: a cancelled mid-round turn must not leave
+     * the next round believing its first call was already announced. */
+    a->tool_exec_idx = 0;
+    a->tool_announced = 0;
 }
 
 /* Compose the user-facing error from a failed chat round. The
@@ -420,21 +429,17 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     }
 
     /* Tool-call round: assistant tool_calls message (carrying the
-     * reasoning trace), then ANNOUNCE every call (START) so the caller
-     * can render the plan before anything runs; tool_step executes
-     * them, one per step. */
+     * reasoning trace). The calls are NOT announced here: tool_step
+     * announces each one right before it runs, so the plan is on
+     * screen for the call it belongs to (and its result follows it)
+     * instead of the whole round's plans piling up first. The tool
+     * bookkeeping (tool_exec_idx / tool_announced) is round_reset's
+     * job, already run when this round opened. */
     char *calls_json = calls_to_json(a->calls, a->n_calls);
     nm_session_append_tool_call(a->session, calls_json, a->reasoning);
     free(calls_json);
 
     set_state(a, NM_AGENT_RUNNING_TOOL);
-    for (size_t i = 0; i < a->n_calls; i++) {
-        if (a->on_tool)
-            a->on_tool(nm_toolset_find(a->tools, a->calls[i].name),
-                       a->calls[i].args_json, NM_TOOL_EVENT_START, NULL,
-                       a->userdata);
-    }
-    a->tool_exec_idx = 0;
     return 0;
 }
 
@@ -450,7 +455,22 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
     nm_tool_result_free(res);
 }
 
-/* Tool phase: execute the next announced call and append its result.
+/* Advance to the round's next pending call: the next one re-announces
+ * (its own plan), so plan/result stay paired in the transcript. */
+static void next_tool(NmAgent *a)
+{
+    a->tool_exec_idx++;
+    a->tool_announced = 0;
+}
+
+/* Tool phase: announce the next pending call (its plan), execute it,
+ * and append its result. The announce happens HERE, immediately before
+ * the call runs — the model may pack several calls into one message
+ * (parallel tool calls) but they execute sequentially, so the caller
+ * flushes a plan and its own result back to back instead of the whole
+ * round's plans up front. Once per call (tool_announced): an async
+ * tool re-enters this step on every drain.
+ *
  * A tool with an async executor (begin) runs across steps — start it,
  * then drain until NM_TOOL_DONE, so the event loop (and the spinner)
  * stays live; everything else runs synchronously. When every call is
@@ -462,6 +482,16 @@ static int tool_step(NmAgent *a)
         const NmToolCall *tc = &a->calls[a->tool_exec_idx];
         const NmTool *t = nm_toolset_find(a->tools, tc->name);
 
+        /* Plan first (principle 1): START for THIS call, the moment it
+         * is about to run — not the round's other calls, which have not
+         * been reached yet. */
+        if (!a->tool_announced) {
+            a->tool_announced = 1;
+            if (a->on_tool)
+                a->on_tool(t, tc->args_json, NM_TOOL_EVENT_START, NULL,
+                           a->userdata);
+        }
+
         /* Drain a running async exec. */
         if (a->exec) {
             NmToolResult res = { 0, NULL };
@@ -472,7 +502,7 @@ static int tool_step(NmAgent *a)
             a->exec_tool->end(a->exec);
             a->exec = NULL;
             a->exec_tool = NULL;
-            a->tool_exec_idx++;
+            next_tool(a);
             return 0;
         }
 
@@ -493,7 +523,7 @@ static int tool_step(NmAgent *a)
                                tc->args_json ? tc->args_json : "{}",
                                a->userdata /* tools workdir */);
         finish_tool_call(a, tc, &tres);
-        a->tool_exec_idx++;
+        next_tool(a);
         return 0;
     }
 
@@ -503,6 +533,7 @@ static int tool_step(NmAgent *a)
     a->calls = NULL;
     a->n_calls = 0;
     a->tool_exec_idx = 0;
+    a->tool_announced = 0;
     return begin_round(a) == 0 ? 0 : -1;
 }
 
@@ -532,9 +563,9 @@ int nm_agent_step(NmAgent *a)
     if (!a)
         return -1;
 
-    /* Tool phase: the round's calls were announced; run the next one
-     * (the caller flushes between steps, so the plan is on screen
-     * before the tool executes). */
+    /* Tool phase: announce the next call (its plan) and run it — the
+     * caller flushes between steps, so that call's plan is on screen
+     * before it executes, and its result commits right after. */
     if (a->state == NM_AGENT_RUNNING_TOOL)
         return tool_step(a);
 

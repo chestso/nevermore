@@ -196,6 +196,8 @@ static char g_tool_args[512];
 static char g_tool_output[512]; /* last END result body */
 static char g_tool_seq[64];     /* 'S'/'E' in callback order */
 static size_t g_tool_seq_len;
+static char g_start_names[128]; /* names announced, in START order */
+static size_t g_start_names_len;
 static int g_final_state;
 
 static void reset_capture(void)
@@ -210,6 +212,8 @@ static void reset_capture(void)
     g_tool_output[0] = '\0';
     g_tool_seq[0] = '\0';
     g_tool_seq_len = 0;
+    g_start_names[0] = '\0';
+    g_start_names_len = 0;
     g_final_state = -1;
     g_n_requests = 0;
     for (int i = 0; i < MAX_ROUNDS; i++)
@@ -254,6 +258,16 @@ static void cap_tool(const NmTool *tool, const char *args_json,
         g_tool_starts++;
         if (args_json && tool)
             snprintf(g_tool_args, sizeof(g_tool_args), "%s", args_json);
+        if (tool && tool->name &&
+            g_start_names_len + strlen(tool->name) + 2 <
+                sizeof(g_start_names)) {
+            if (g_start_names_len)
+                g_start_names[g_start_names_len++] = ',';
+            g_start_names_len +=
+                (size_t)snprintf(g_start_names + g_start_names_len,
+                                 sizeof(g_start_names) - g_start_names_len,
+                                 "%s", tool->name);
+        }
     } else {
         g_tool_ends++;
         if (result && result->output)
@@ -699,10 +713,10 @@ static void test_agent_step_driven_full_loop(void)
     remove(FIXTURE);
 }
 
-/* A round with parallel tool calls announces EVERY call (START) before
- * executing any (END): the plan is visible before anything runs, and
- * one execute step per call lets the caller flush between them. */
-static void test_agent_announces_all_tools_before_executing(void)
+/* A round with parallel tool calls runs them sequentially: each call is
+ * announced (START) only when it is about to run, so the event sequence
+ * pairs plan/result instead of stacking the round's plans up front. */
+static void test_agent_announces_each_tool_as_it_runs(void)
 {
     reset_capture();
     write_fixture();
@@ -747,7 +761,12 @@ static void test_agent_announces_all_tools_before_executing(void)
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_tool_starts, 2);
     ASSERT_EQ(g_tool_ends, 2);
-    ASSERT_STR_EQ(g_tool_seq, "SSEE"); /* both plans, then both runs */
+    /* Paired, not preloaded: announce call 1, run it, announce call 2,
+     * run it. The old shape was "SSEE" (the whole round's plans first),
+     * which is exactly what a transcript must not show — it read as two
+     * tools running at once with their results interleaved. */
+    ASSERT_STR_EQ(g_tool_seq, "SESE");
+    ASSERT_STR_EQ(g_start_names, "read_file,list_dir");
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -1230,7 +1249,7 @@ int main(void)
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
-    RUN_TEST(test_agent_announces_all_tools_before_executing);
+    RUN_TEST(test_agent_announces_each_tool_as_it_runs);
 #ifndef _WIN32
     RUN_TEST(test_agent_run_command_is_async);
     RUN_TEST(test_agent_turn_runs_async_command);

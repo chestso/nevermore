@@ -108,8 +108,6 @@ struct NmChatApp
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
     char *current_tool;        /* RUNNING_TOOL label hint */
-    NmAgentState last_state;   /* detect the RUNNING_TOOL -> next transition
-                                * (the tool-block separator) */
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
@@ -482,6 +480,12 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         sys_tool_result(app, result ? result->output : "", result && result->ok);
         free(app->current_tool);
         app->current_tool = NULL;
+        /* One blank line closes THIS tool block (principle 4), so a
+         * round's consecutive calls are visually separated and the
+         * answer is never glued to the last result. Emitted per call,
+         * not per round: the calls are sequential, so each one is its
+         * own block. */
+        sys_blank(app);
     }
     tui_runtime_wakeup(app->rt);
 }
@@ -493,18 +497,17 @@ void nm_chat_app_on_state(int state, void *userdata)
     if (!app)
         return;
     NmAgentState st = (NmAgentState)state;
-    NmAgentState prev = app->last_state;
-    app->last_state = st;
     nm_spinner_set_state(app->spinner, st);
 
-    /* The tool block ends the moment the agent leaves RUNNING_TOOL for
-     * the next round (STREAMING), a terminal state, or an error. Emit
-     * the one blank line there — before the switch, so it precedes any
-     * error/interrupt line. One blank per block, never per call. */
-    if (prev == NM_AGENT_RUNNING_TOOL &&
-        (st == NM_AGENT_STREAMING || st == NM_AGENT_DONE ||
-         st == NM_AGENT_ERROR))
-        sys_blank(app);
+    /* A completed tool block already emitted its own blank line (the
+     * END event in on_tool). A block whose END never arrives — a fatal
+     * error or a cancel while the announced call was running — still
+     * needs one, or the error/interrupt line glues itself to the plan.
+     * current_tool is the signal: set at START, cleared at END. */
+    if (st == NM_AGENT_ERROR || st == NM_AGENT_IDLE) {
+        if (app->current_tool)
+            sys_blank(app);
+    }
 
     switch (st) {
     case NM_AGENT_DONE:
@@ -554,7 +557,6 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
     app->provider = p;
-    app->last_state = nm_agent_state(a);
     return 0;
 }
 
@@ -777,8 +779,8 @@ void nm_chat_app_step(NmChatApp *app)
     /* Drive the agent's steps, flushing between them. A step that
      * leaves the agent waiting on I/O (its stream fd is live) ends the
      * loop; the tool phase has no fd, so its announce/execute steps
-     * run here back-to-back — each flush renders the plan before the
-     * next call executes and the result before the round ends. */
+     * run here back-to-back — each flush renders one call's plan
+     * before that call executes, and its result right after it. */
     for (;;) {
         NmAgentState st = nm_agent_state(app->agent);
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)

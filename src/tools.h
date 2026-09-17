@@ -27,10 +27,16 @@ typedef struct NmToolResult
 
 typedef enum
 {
-    NM_TOOL_EVENT_START, /* name + args visible */
-    NM_TOOL_EVENT_END    /* result ready */
+    NM_TOOL_EVENT_START, /* name + args visible: THIS call is about to run */
+    NM_TOOL_EVENT_END    /* result ready for the call just announced */
 } NmToolEvent;
 
+/* Start/end events arrive PAIRED, one pair per call: a call is
+ * announced (START) immediately before it executes, never batched with
+ * the rest of the round. The model may ask for several calls in one
+ * message (parallel tool calls), but they run sequentially, so a UI
+ * that renders on START and END shows plan -> its own result, call
+ * after call. */
 typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
                                NmToolEvent event, const NmToolResult *result,
                                void *userdata);
