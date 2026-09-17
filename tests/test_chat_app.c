@@ -1311,8 +1311,10 @@ static size_t count_transcript_line(const char *hay, const char *line)
  * multiple wrapped rows. The transcript seam must print each
  * completed line exactly once — no stale partial prefixes stranded
  * in the scrollback. Two hard requirements from the review:
- *   - the width is FORCED (a wrapped tail is the trigger; the app's
- *     default 80 would not wrap this fixture)
+ *   - the width is FORCED (a multi-row live tail is the trigger; the
+ *     app's default 80 would not wrap this fixture). Committed lines
+ *     are no longer width-wrapped — the terminal owns wrapping — but
+ *     the live region still lays out in explicit rows.
  *   - the assertion counts occurrences of the framed byte sequence
  *     (frame bytes legitimately contain the partial tail; only a
  *     count on the transcript's "\r\n"-framed form can see strays)
@@ -1324,7 +1326,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
-    /* Long completed line (wraps at the forced width), then a
+    /* Long completed line (committed as one run), then a
      * newline-bearing delta whose REMAINDER must stay in the live
      * tail, then more partial growth on the same line. */
     sc.sse[0] =
@@ -1385,16 +1387,24 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         }
     }
     /* Each completed transcript line appears EXACTLY once in the
-     * transcript sense (line-\r\n-terminated, not a frame row). At the
-     * forced width the long line wraps explicitly (boba's row math),
-     * so count the wrap fragments. */
+     * transcript sense (line-\r\n-terminated, not a frame row). The
+     * long line is committed as ONE byte run: boba no longer bakes a
+     * width break into committed bytes (the terminal owns wrapping and
+     * reflow), so there are no wrap fragments to count. */
     ASSERT_EQ(count_transcript_line(out, "## The others, for contrast"), 1u);
     /* The list item now carries inline spans (`history.c` is a code
      * span), so match its unstyled suffix. */
     ASSERT_EQ(count_transcript_line(out, " is next"), 1u);
-    /* The wrapped completed line's first and last rows each once. */
-    ASSERT_EQ(count_transcript_line(out, "First completed line long enou"), 1u);
-    ASSERT_EQ(count_transcript_line(out, "or sure here"), 1u);
+    /* The whole logical line, once, intact across the forced width. */
+    ASSERT_EQ(count_transcript_line(
+                  out,
+                  "First completed line long enough to wrap at the forced "
+                  "terminal width several times over for sure here"),
+              1u);
+    /* No wrap fragment: the line's head is never its own row (with the
+     * old width wrap it was, and "First completed line long enou" ended
+     * a committed fragment). */
+    ASSERT_EQ(count_transcript_line(out, "First completed line long enou"), 0u);
     /* No stale partial prefixes stranded as transcript lines: only
      * the completed full line exists, never an intermediate prefix
      * as its own \r\n-terminated line. */

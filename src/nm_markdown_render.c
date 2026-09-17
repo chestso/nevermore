@@ -5,9 +5,10 @@
  * to the sink.
  *
  * Row-sink contract notes (boba/stream.h):
- *   - tui_row_text wraps explicitly at the sink width, so prose and
- *     fence lines are emitted with one text call and one
- *     tui_row_end; boba owns the wrapping and every framing byte.
+ *   - Prose and fence lines are emitted with one tui_row_text call and
+ *     one tui_row_end per logical line; boba owns every framing byte.
+ *     Committed rows carry no width break (the terminal soft-wraps and
+ *     portty reflows them); only the live frame wraps at the width.
  *   - A block-mode table is emitted by the same geometry code from
  *     both render_block (final) and render_live (provisional,
  *     clipped to the tail rows_cap). Both call sites share one
