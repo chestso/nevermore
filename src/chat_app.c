@@ -408,12 +408,15 @@ static void sys_tool_plan(NmChatApp *app, const char *name,
     free(plan);
 }
 
-/* Render a tool result body under the `⎿` row: every line of the
- * output, indented and in the result role (Smoke), each row reset
- * before its end. The first row carries the marker and an "error: "
- * prefix when the call failed; later rows are indented four spaces.
- * Built into the app's reused buffer and sent as ONE system message
- * (boba normalizes LF->CRLF). Per-tool-call reuse, never per token. */
+/* Render a tool result body under the `╰─` elbow: every line of the
+ * output, indented, each row reset before its end. The first row
+ * carries the elbow in its own role (Zinc, never the panel's Oyster
+ * or the body's Smoke - see colors.h) then the body in the result
+ * role, plus an "error: " prefix when the call failed; later rows
+ * indent by the elbow's display width (5 columns) so every row's text
+ * starts in the same column. Built into the app's reused buffer and
+ * sent as ONE system message (boba normalizes LF->CRLF). Per-tool-call
+ * reuse, never per token. */
 static void sys_tool_result(NmChatApp *app, const char *output, int ok)
 {
     if (!app || !app->tool_body)
@@ -428,8 +431,11 @@ static void sys_tool_result(NmChatApp *app, const char *output, int ok)
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (len && p[len - 1] == '\r')
             len--; /* drop a CR before the LF */
-        dynamic_buffer_append_str(b, NM_SGR_RESULT);
-        dynamic_buffer_append_str(b, first ? "  ⎿ " : "    ");
+        /* "  ╰─ " and "     " are both 5 display columns. */
+        if (first)
+            dynamic_buffer_append_str(b, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT);
+        else
+            dynamic_buffer_append_str(b, NM_SGR_RESULT "     ");
         if (first && !ok)
             dynamic_buffer_append_str(b, "error: ");
         dynamic_buffer_append(b, p, len);

@@ -41,6 +41,7 @@
 
 #include "chat_app.h"
 #include "agent.h"
+#include "colors.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
 
@@ -1375,6 +1376,11 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     char *clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
     ASSERT_TRUE(strstr(clean, "hi-cmd") != NULL);
+    /* Every row's text starts in the same column: the label row opens
+     * with `  ╰─ ` (5 display columns), later rows indent by exactly
+     * that much. */
+    ASSERT_TRUE(strstr(clean, "  ╰─ Output:") != NULL);
+    ASSERT_TRUE(strstr(clean, "     hi-cmd") != NULL);
     free(clean);
 
     harness_free(h);
@@ -1434,10 +1440,13 @@ static void test_tool_round_prints_panels(void)
     char *clean = strip_frames(out);
     ASSERT_NOT_NULL(clean);
     const char *plan_at = strstr(clean, "new_string: slow red");
-    const char *res_at = strstr(clean, "⎿");
+    const char *res_at = strstr(clean, "╰─");
     ASSERT_NOT_NULL(plan_at);
     ASSERT_NOT_NULL(res_at);
     ASSERT_TRUE(plan_at < res_at);
+    /* The elbow sits in its own role (Zinc), not the panel's Oyster
+     * and not the body's Smoke; the raw bytes are the proof. */
+    ASSERT_TRUE(strstr(out, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT) != NULL);
     /* The result body is the full tool output, not a one-line slug. */
     ASSERT_TRUE(strstr(res_at, "Edited") != NULL ||
                 strstr(res_at, "Output") != NULL);

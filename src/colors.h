@@ -29,12 +29,18 @@
 /* SGR strings (raw byte writers)                                      */
 /* ------------------------------------------------------------------ */
 
-/* CharmTone Oyster #605F6B - tool panel `▌`, tool result `⎿`, the
- * interrupted marker, the provider separator. */
+/* CharmTone Oyster #605F6B - tool panel `▌`, the interrupted marker,
+ * the provider separator. */
 #define NM_SGR_TOOL "\033[38;2;96;95;107m"
 
-/* CharmTone Smoke #BFBCC8 - the `⎿` tool result line. */
+/* CharmTone Smoke #BFBCC8 - the tool result body, inline spans,
+ * secondary text. */
 #define NM_SGR_RESULT "\033[38;2;191;188;200m"
+
+/* CharmTone Zinc #10B1AE - the `╰─` tool-result elbow: the structural
+ * accent that ties a result body to its panel. Its own role on
+ * purpose: Oyster would read as panel, Smoke as body text. */
+#define NM_SGR_TOOL_ELBOW "\033[38;2;16;177;174m"
 
 /* CharmTone Coral #FF577D - errors (`nevermore: …`). */
 #define NM_SGR_ERROR "\033[38;2;255;87;125m"
@@ -67,6 +73,9 @@
 #define NM_CT_GUAC_R    18
 #define NM_CT_GUAC_G    199
 #define NM_CT_GUAC_B    143
+#define NM_CT_ZINC_R    16
+#define NM_CT_ZINC_G    177
+#define NM_CT_ZINC_B    174
 
 static inline TuiAttr nm_attr_plain(void)
 {
@@ -125,6 +134,13 @@ static inline TuiAttr nm_attr_quote_gutter(void)
 static inline TuiAttr nm_attr_quote_text(void)
 {
     return nm_attr_foreground(NM_CT_SMOKE_R, NM_CT_SMOKE_G, NM_CT_SMOKE_B);
+}
+
+/* Tool-result elbow (`╰─`): the connector that ties a result body to
+ * its panel - its own role, neither panel (Oyster) nor body (Smoke). */
+static inline TuiAttr nm_attr_tool_elbow(void)
+{
+    return nm_attr_foreground(NM_CT_ZINC_R, NM_CT_ZINC_G, NM_CT_ZINC_B);
 }
 
 /* Table borders and header cells (borders Oyster, header bold). */
