@@ -108,6 +108,8 @@ struct NmChatApp
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
     char *current_tool;        /* RUNNING_TOOL label hint */
+    NmAgentState last_state;   /* detect the RUNNING_TOOL -> next transition
+                                * (the tool-block separator) */
 
     TuiRuntime *rt; /* weak; set via nm_chat_app_set_runtime */
 
@@ -443,7 +445,18 @@ void nm_chat_app_on_state(int state, void *userdata)
     if (!app)
         return;
     NmAgentState st = (NmAgentState)state;
+    NmAgentState prev = app->last_state;
+    app->last_state = st;
     nm_spinner_set_state(app->spinner, st);
+
+    /* The tool block ends the moment the agent leaves RUNNING_TOOL for
+     * the next round (STREAMING), a terminal state, or an error. Emit
+     * the one blank line there — before the switch, so it precedes any
+     * error/interrupt line. One blank per block, never per call. */
+    if (prev == NM_AGENT_RUNNING_TOOL &&
+        (st == NM_AGENT_STREAMING || st == NM_AGENT_DONE ||
+         st == NM_AGENT_ERROR))
+        sys_blank(app);
 
     switch (st) {
     case NM_AGENT_DONE:
@@ -493,6 +506,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
     app->provider = p;
+    app->last_state = nm_agent_state(a);
     return 0;
 }
 
@@ -710,14 +724,23 @@ void nm_chat_app_step(NmChatApp *app)
 {
     if (!app || !app->agent)
         return;
-    NmAgentState st = nm_agent_state(app->agent);
-    if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
-        return;
-    nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
-    /* Flush so the batch staged by this step commits now (the runtime's
-     * commit pass runs at the top of flush); the run loop and the test
-     * harness both rely on a step being self-contained. */
-    tui_runtime_flush(app->rt);
+    /* Drive the agent's steps, flushing between them. A step that
+     * leaves the agent waiting on I/O (its stream fd is live) ends the
+     * loop; the tool phase has no fd, so its announce/execute steps
+     * run here back-to-back — each flush renders the plan before the
+     * next call executes and the result before the round ends. */
+    for (;;) {
+        NmAgentState st = nm_agent_state(app->agent);
+        if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+            return;
+        nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
+        tui_runtime_flush(app->rt);
+        if (nm_agent_fd(app->agent) >= 0)
+            return; /* waiting on the stream; the loop will call us back */
+        st = nm_agent_state(app->agent);
+        if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+            return;
+    }
 }
 
 void nm_chat_app_tick(NmChatApp *app)
@@ -1384,14 +1407,6 @@ static int nm_chat_app_input_rows(const NmChatApp *app)
     return rows;
 }
 
-static const char *spinner_label(const NmChatApp *app)
-{
-    NmAgentState st = nm_agent_state(app->agent);
-    if (st == NM_AGENT_RUNNING_TOOL)
-        return app->current_tool ? app->current_tool : "running tools";
-    return "thinking";
-}
-
 static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
 {
     const NmChatApp *app = (const NmChatApp *)model;
@@ -1433,7 +1448,12 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
              * frame's last (the input returns next flush). */
             dynamic_buffer_append_str(out, NM_SGR_TOOL);
             dynamic_buffer_append_str(out, frame);
-            dynamic_buffer_append_printf(out, " %s…", spinner_label(app));
+            if (st == NM_AGENT_RUNNING_TOOL)
+                dynamic_buffer_append_printf(
+                    out, " executing %s…",
+                    app->current_tool ? app->current_tool : "tool");
+            else
+                dynamic_buffer_append_str(out, " thinking…");
             dynamic_buffer_append_str(out, NM_SGR_RESET);
         }
     } else {

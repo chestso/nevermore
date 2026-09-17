@@ -82,6 +82,10 @@ struct NmAgent
     size_t reasoning_cap;
     NmToolCall *calls; /* delivered tool calls (owned between rounds) */
     size_t n_calls;
+    /* Tool phase (state RUNNING_TOOL): the round's calls are announced
+     * (START emitted) in finish_round, then executed one per step so
+     * the caller can flush the plan before each runs. */
+    size_t tool_exec_idx;
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -410,30 +414,44 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     }
 
     /* Tool-call round: assistant tool_calls message (carrying the
-     * reasoning trace), then one tool message per call, then the next
-     * stream. */
+     * reasoning trace), then ANNOUNCE every call (START) so the caller
+     * can render the plan before anything runs; tool_step executes
+     * them, one per step. */
     char *calls_json = calls_to_json(a->calls, a->n_calls);
     nm_session_append_tool_call(a->session, calls_json, a->reasoning);
     free(calls_json);
 
     set_state(a, NM_AGENT_RUNNING_TOOL);
     for (size_t i = 0; i < a->n_calls; i++) {
-        const NmToolCall *tc = &a->calls[i];
         if (a->on_tool)
-            a->on_tool(nm_toolset_find(a->tools, tc->name),
-                       tc->args_json, NM_TOOL_EVENT_START, NULL,
+            a->on_tool(nm_toolset_find(a->tools, a->calls[i].name),
+                       a->calls[i].args_json, NM_TOOL_EVENT_START, NULL,
                        a->userdata);
+    }
+    a->tool_exec_idx = 0;
+    return 0;
+}
+
+/* Tool phase: execute the next announced call and append its result
+ * (synchronous today; one call per step so the caller flushes the plan
+ * and the result in order). When every call is done, free the round's
+ * copies and open the next round. Returns 0 to continue, -1 fatal. */
+static int tool_step(NmAgent *a)
+{
+    if (a->tool_exec_idx < a->n_calls) {
+        const NmToolCall *tc = &a->calls[a->tool_exec_idx];
         NmToolResult tres =
             nm_toolset_execute(a->tools, tc->name,
                                tc->args_json ? tc->args_json : "{}",
                                a->userdata /* tools workdir */);
         if (a->on_tool)
-            a->on_tool(nm_toolset_find(a->tools, tc->name),
-                       tc->args_json, NM_TOOL_EVENT_END, &tres,
-                       a->userdata);
+            a->on_tool(nm_toolset_find(a->tools, tc->name), tc->args_json,
+                       NM_TOOL_EVENT_END, &tres, a->userdata);
         nm_session_append_tool_result(a->session, tc->id, tc->name,
                                       tres.output);
         nm_tool_result_free(&tres);
+        a->tool_exec_idx++;
+        return 0;
     }
 
     /* Tool strings are copied by the session now; free the round's
@@ -441,6 +459,7 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     nm_tool_calls_free(a->calls, a->n_calls);
     a->calls = NULL;
     a->n_calls = 0;
+    a->tool_exec_idx = 0;
     return begin_round(a) == 0 ? 0 : -1;
 }
 
@@ -467,7 +486,16 @@ int nm_agent_start(NmAgent *a, const char *user_input)
 
 int nm_agent_step(NmAgent *a)
 {
-    if (!a || !a->stream)
+    if (!a)
+        return -1;
+
+    /* Tool phase: the round's calls were announced; run the next one
+     * (the caller flushes between steps, so the plan is on screen
+     * before the tool executes). */
+    if (a->state == NM_AGENT_RUNNING_TOOL)
+        return tool_step(a);
+
+    if (!a->stream)
         return -1;
 
     NmChatResult r = { 0 };
@@ -523,13 +551,15 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
     if (nm_agent_start(a, user_input) != 0)
         return -1;
 
-    /* Pump: step until the turn leaves the streaming cycle. PENDING
-     * steps wait on the stream's CURRENT interest bits (connect/send
-     * phases wait writability, the response phase waits readability
-     * — the same bits boba's fill callback declares); tool execution
-     * happens synchronously inside steps, exactly as the event loop
-     * will see it. */
-    while (a->stream) {
+    /* Pump: step until the turn leaves the busy states. PENDING steps
+     * wait on the stream's CURRENT interest bits (connect/send phases
+     * wait writability, the response phase waits readability — the
+     * same bits boba's fill callback declares); the tool phase needs
+     * no I/O, so its steps run back-to-back. */
+    for (;;) {
+        NmAgentState st = a->state;
+        if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+            break;
         int fd = nm_agent_fd(a);
         unsigned interest = nm_agent_interest(a);
         if (fd >= 0 && interest) {
@@ -547,8 +577,8 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
 #else
             select(fd + 1, &r, &w, NULL, &tv);
 #endif
-        } else {
-            nm_usleep(10 * 1000); /* between rounds: brief yield */
+        } else if (fd >= 0) {
+            nm_usleep(10 * 1000); /* stream with no wait interest: brief */
         }
         if (nm_agent_step(a) != 0)
             return -1;

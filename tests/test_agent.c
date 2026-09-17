@@ -193,6 +193,8 @@ static size_t g_reasoning_len;
 static int g_tool_starts;
 static int g_tool_ends;
 static char g_tool_args[512];
+static char g_tool_seq[64]; /* 'S'/'E' in callback order */
+static size_t g_tool_seq_len;
 static int g_final_state;
 
 static void reset_capture(void)
@@ -204,6 +206,8 @@ static void reset_capture(void)
     g_tool_starts = 0;
     g_tool_ends = 0;
     g_tool_args[0] = '\0';
+    g_tool_seq[0] = '\0';
+    g_tool_seq_len = 0;
     g_final_state = -1;
     g_n_requests = 0;
     for (int i = 0; i < MAX_ROUNDS; i++)
@@ -240,6 +244,11 @@ static void cap_tool(const NmTool *tool, const char *args_json,
 {
     (void)result;
     (void)userdata;
+    if (g_tool_seq_len + 1 < sizeof(g_tool_seq)) {
+        g_tool_seq[g_tool_seq_len++] =
+            (event == NM_TOOL_EVENT_START) ? 'S' : 'E';
+        g_tool_seq[g_tool_seq_len] = '\0';
+    }
     if (event == NM_TOOL_EVENT_START) {
         g_tool_starts++;
         if (args_json && tool)
@@ -686,6 +695,63 @@ static void test_agent_step_driven_full_loop(void)
     remove(FIXTURE);
 }
 
+/* A round with parallel tool calls announces EVERY call (START) before
+ * executing any (END): the plan is visible before anything runs, and
+ * one execute step per call lets the caller flush between them. */
+static void test_agent_announces_all_tools_before_executing(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,"
+        "\"id\":\"call_2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"list_dir\",\"arguments\":\"{\\\"path\\\":\\\".\\\"}\""
+        "}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"both done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "look around"), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_tool_starts, 2);
+    ASSERT_EQ(g_tool_ends, 2);
+    ASSERT_STR_EQ(g_tool_seq, "SSEE"); /* both plans, then both runs */
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
 /* Reasoning: collected on the reasoning channel, echoed back as
  * reasoning_content on the next request carrying the turn, and never
  * mixed into the answer text. The canned server scripts reasoning in
@@ -1029,6 +1095,7 @@ int main(void)
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
+    RUN_TEST(test_agent_announces_all_tools_before_executing);
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);

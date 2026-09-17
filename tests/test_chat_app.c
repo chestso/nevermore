@@ -318,6 +318,10 @@ static int harness_drive(AppHarness *h, int max_spins)
             select(fd + 1, &r, &w, NULL, &tv);
 #endif
             nm_chat_app_step(h->app);
+        } else if (fd < 0) {
+            /* Tool phase (announce/execute): no fd, step makes
+             * progress immediately. */
+            nm_chat_app_step(h->app);
         } else {
             usleep(10 * 1000);
         }
@@ -1270,6 +1274,39 @@ static void test_separator_blank_line_after_answer(void)
     close(rr.fd);
 }
 
+/* Strip CSI/OSC escape sequences and carriage returns, leaving the
+ * logical text rows a user would see (used to assert commit ORDER
+ * without live-region framing bytes in the way). Heap-owned. */
+static char *strip_frames(const char *in)
+{
+    size_t n = strlen(in), o = 0;
+    char *out = malloc(n + 1);
+    if (!out)
+        return NULL;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)in[i];
+        if (c == 0x1b) {
+            if (in[i + 1] == '[') {
+                i += 2;
+                while (in[i] && !(in[i] >= '@' && in[i] <= '~'))
+                    i++;
+            } else if (in[i + 1] == ']') {
+                i += 2;
+                while (in[i] && in[i] != 0x07)
+                    i++;
+            } else if (in[i + 1]) {
+                i++;
+            }
+            continue;
+        }
+        if (c == '\r')
+            continue;
+        out[o++] = (char)c;
+    }
+    out[o] = '\0';
+    return out;
+}
+
 static void test_tool_round_prints_panels(void)
 {
     FILE *f = fopen(FIXTURE_PATH, "wb");
@@ -1314,6 +1351,22 @@ static void test_tool_round_prints_panels(void)
     ASSERT_TRUE(strstr(out, "old_string: quick brown") != NULL);
     ASSERT_TRUE(strstr(out, "new_string: slow red") != NULL);
     ASSERT_TRUE(strstr(out, "edited the file") != NULL);
+
+    /* Principle: the plan is committed BEFORE the tool runs (so it
+     * precedes the result line), and the tool block is followed by one
+     * blank line before whatever comes next. */
+    char *clean = strip_frames(out);
+    ASSERT_NOT_NULL(clean);
+    const char *plan_at = strstr(clean, "new_string: slow red");
+    const char *res_at = strstr(clean, "⎿");
+    ASSERT_NOT_NULL(plan_at);
+    ASSERT_NOT_NULL(res_at);
+    ASSERT_TRUE(plan_at < res_at);
+    const char *res_nl = strchr(res_at, '\n');
+    ASSERT_NOT_NULL(res_nl);
+    ASSERT_TRUE(res_nl[1] == '\n'); /* the row after the result is blank */
+    ASSERT_TRUE(strstr(res_at, "edited the file") != NULL);
+    free(clean);
 
     /* The file edit actually happened. */
     char content[128];
