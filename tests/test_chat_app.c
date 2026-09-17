@@ -964,7 +964,10 @@ static void test_cancel_midstream_returns_to_idle(void)
     tui_runtime_send(h->rt, tui_msg_interrupt());
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
     ASSERT_EQ(nm_chat_app_fd(h->app), -1);
-    ASSERT_TRUE(strstr(harness_read(h), "stall please") != NULL);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "stall please") != NULL);
+    /* The interrupt marker: a full-width emoji in the tool role. */
+    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "🛑 interrupted") != NULL);
 
     /* Interrupt on empty IDLE input quits. */
     tui_runtime_send(h->rt, tui_msg_interrupt());

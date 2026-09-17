@@ -521,7 +521,7 @@ void nm_chat_app_on_state(int state, void *userdata)
     case NM_AGENT_IDLE:
         /* Cancel path: a partial answer still commits (it was spoken). */
         stream_end_all(app);
-        sys_line(app, NM_SGR_TOOL "⏹ interrupted" NM_SGR_RESET);
+        sys_line(app, NM_SGR_TOOL "🛑 interrupted" NM_SGR_RESET);
         break;
     default: /* STREAMING / RUNNING_TOOL: no transcript output */
         break;
