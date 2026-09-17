@@ -10,8 +10,8 @@
  * Configuration discovery: $NEVERMORE_CONFIG (file) or
  * ~/.config/nevermore/config, plus provider env vars:
  *   NEVERMORE_PROVIDER, NEVERMORE_MODEL, NEVERMORE_MAX_ROUNDS,
- *   HYPER_API_KEY, OLLAMA_API_KEY, OPENAI_API_KEY,
- *   OPENROUTER_API_KEY, OPENCODE_API_KEY.
+ *   NEVERMORE_ECHO_REASONING, HYPER_API_KEY, OLLAMA_API_KEY,
+ *   OPENAI_API_KEY, OPENROUTER_API_KEY, OPENCODE_API_KEY.
  * A key with no env var set resolves from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
  * nm_provider_api_key; env always wins.
@@ -67,6 +67,9 @@ static void usage(FILE *out)
             "  NEVERMORE_BASE_URL      override the provider's endpoint\n"
             "                          (e.g. a wire-replay server)\n"
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
+            "  NEVERMORE_ECHO_REASONING=1\n"
+            "                          re-send reasoning traces to the\n"
+            "                          provider (off by default)\n"
             "  NEVERMORE_DEBUG_WIRE=1  record the wire to\n"
             "                          ~/.local/state/nevermore/wire/\n");
 }
@@ -126,6 +129,32 @@ static void ask_on_state(NmAgentState state, void *userdata)
 {
     (void)userdata;
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
+}
+
+/* $NEVERMORE_ECHO_REASONING: re-send assistant reasoning traces to
+ * the provider as reasoning_content on later requests carrying the
+ * turn. OFF by default — the trace is received and displayed either
+ * way, it is just not fed back into the conversation. (The reason to
+ * have the knob at all is docs/HYPER-API.md's unverified claim that
+ * hyper needs the field back; see nm_agent_set_echo_reasoning.)
+ * Truthy values:
+ * 1 / true / on / yes (case-insensitive); anything else (unset,
+ * empty, "0", garbage) leaves it off, so a typo can never silently
+ * enable — or disable — provider-facing behavior. */
+static int env_flag(const char *name)
+{
+    const char *s = getenv(name);
+    if (!s || !*s)
+        return 0;
+    char v[8]; /* lowercase copy; longer values cannot match a name */
+    size_t n = 0;
+    for (; s[n] && n < sizeof(v) - 1; n++) {
+        char c = s[n];
+        v[n] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    v[n] = '\0';
+    return strcmp(v, "1") == 0 || strcmp(v, "true") == 0 ||
+           strcmp(v, "on") == 0 || strcmp(v, "yes") == 0;
 }
 
 /* $NEVERMORE_MAX_ROUNDS: cap on tool-call rounds per turn (the
@@ -214,6 +243,8 @@ static int run_interactive(const char *provider_name, const char *model,
     int max_rounds = env_max_rounds();
     if (max_rounds > 0)
         nm_chat_app_set_max_rounds(app, max_rounds);
+    if (env_flag("NEVERMORE_ECHO_REASONING"))
+        nm_chat_app_set_echo_reasoning(app, 1);
     const NmProvider *p = nm_provider_by_name(provider_name);
     nm_chat_app_set_endpoint(app, base_url, nm_provider_api_key(p));
 
@@ -363,6 +394,8 @@ int main(int argc, char *argv[])
         int max_rounds = env_max_rounds();
         if (max_rounds > 0)
             nm_agent_set_max_rounds(agent, max_rounds);
+        if (env_flag("NEVERMORE_ECHO_REASONING"))
+            nm_agent_set_echo_reasoning(agent, 1);
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);

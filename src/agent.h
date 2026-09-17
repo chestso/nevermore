@@ -57,6 +57,28 @@ void nm_agent_set_model(NmAgent *a, const char *model);
 void nm_agent_set_max_rounds(NmAgent *a, int max_rounds);
 int nm_agent_max_rounds(const NmAgent *a);
 
+/* Reasoning echo-back. OFF by default: every round's trace stays in
+ * the session (it is displayed, and turning the echo on later still
+ * sends the history's traces), but it is NOT re-sent to the provider
+ * unless this is enabled. Enabled, each assistant message riding a
+ * later request carries its trace as "reasoning_content".
+ *
+ * NOTE: the reason to offer this at all is docs/HYPER-API.md's claim
+ * that a trace "must be echoed back" on any request carrying the turn
+ * (including tool-call rounds). That is an inherited, hand-written doc
+ * claim — NOT something nevermore has observed: the taxonomy above it
+ * only counts which models STREAM a trace, Crush's hyper provider
+ * handles no reasoning_content round trip, and no fixture in either
+ * repo shows a hyper request failing with the field omitted. Treat it
+ * as an open question, not a requirement; a live hyper probe is the
+ * only thing that settles it. The other providers either ignore the
+ * field or never stream a trace to begin with.
+ *
+ * Takes effect when the next round is composed (a turn already in
+ * flight honours it from its next round). */
+void nm_agent_set_echo_reasoning(NmAgent *a, int on);
+int nm_agent_echo_reasoning(const NmAgent *a);
+
 /* Register UI callbacks. */
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */

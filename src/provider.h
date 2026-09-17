@@ -81,9 +81,14 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
-    /* Assistant reasoning trace echoed back as reasoning_content on
-     * requests carrying the turn (HYPER-API.md requires it on
-     * assistant tool-call messages). NULL/"" when none. */
+    /* Assistant reasoning trace. When present, the client serializes
+     * it as "reasoning_content" on the message (the OpenAI-compatible
+     * wire shape). Whether a trace is ever attached is the caller's
+     * decision — nevermore's agent attaches one only when its
+     * echo-back is enabled, which is OFF by default
+     * (nm_agent_set_echo_reasoning); the echo itself rests on
+     * docs/HYPER-API.md's (unverified) claim that hyper needs the
+     * field back — see that setter. NULL/"" = the field is omitted. */
     const char *reasoning;
 } NmMessage;
 

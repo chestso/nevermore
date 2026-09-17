@@ -38,10 +38,11 @@ typedef struct NmSessionMessage
     char *tool_calls_json; /* NM_ROLE_ASSISTANT: wire tool_calls array, or NULL */
     char *tool_call_id;    /* NM_ROLE_TOOL: answered call id, or NULL */
     char *tool_name;       /* NM_ROLE_TOOL: tool that produced this result */
-    /* NM_ROLE_ASSISTANT: this round's reasoning trace, echoed back as
-     * reasoning_content on later requests carrying the turn. Some
-     * providers require it present (or empty) on assistant
-     * tool-call messages (HYPER-API.md). NULL/"" when none. */
+    /* NM_ROLE_ASSISTANT: the round's reasoning trace. Kept for
+     * display; re-sent as reasoning_content only when the agent's
+     * echo-back is enabled (nm_agent_set_echo_reasoning — and that
+     * echo rests on docs/HYPER-API.md's unverified claim, not an
+     * observed hyper failure). NULL/"" when none. */
     char *reasoning;
 } NmSessionMessage;
 

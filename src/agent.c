@@ -72,11 +72,16 @@ struct NmAgent
     NmChatStream *stream;
     int round;      /* rounds started this turn */
     int max_rounds; /* cap; <=0 means the default */
-    char *text;     /* this round's accumulated answer text */
+    /* Opt-in (nm_agent_set_echo_reasoning): re-send the transcript's
+     * reasoning traces as reasoning_content on later requests.
+     * OFF by default — a trace is kept for display either way. */
+    int echo_reasoning;
+    char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
-    /* This round's accumulated reasoning text (echoed back on the
-     * assistant message). Reused across rounds; same growth rule. */
+    /* This round's accumulated reasoning text. Kept in the session with
+     * the round's assistant message (display, and the echo-back source
+     * when enabled). Reused across rounds; same growth rule. */
     char *reasoning;
     size_t reasoning_len;
     size_t reasoning_cap;
@@ -186,6 +191,18 @@ int nm_agent_max_rounds(const NmAgent *a)
     return a->max_rounds;
 }
 
+void nm_agent_set_echo_reasoning(NmAgent *a, int on)
+{
+    if (!a)
+        return;
+    a->echo_reasoning = on ? 1 : 0;
+}
+
+int nm_agent_echo_reasoning(const NmAgent *a)
+{
+    return a ? a->echo_reasoning : 0;
+}
+
 NmAgentState nm_agent_state(const NmAgent *a)
 {
     return a ? a->state : NM_AGENT_IDLE;
@@ -202,9 +219,9 @@ const char *nm_agent_last_error(const NmAgent *a)
 
 /* Streaming collector: content text accumulates into the agent's
  * reused round buffer; reasoning text accumulates into a second
- * reused buffer (echoed back as reasoning_content on the assistant
- * message, which some providers require on later requests carrying
- * the turn). The final NULL-content call delivers the assembled tool
+ * reused buffer (recorded with the round's assistant message —
+ * displayed, and re-sent as reasoning_content only when the echo-back
+ * is enabled). The final NULL-content call delivers the assembled tool
  * calls (ownership moves in here, moves out at the end of the
  * round). Agent-internal, installed as the request's on_delta for
  * every round. */
@@ -215,7 +232,8 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
     NmAgent *a = userdata;
     if (delta_text && *delta_text) {
         if (channel == NM_STREAM_REASONING) {
-            /* Accumulate for echo-back; forward for display. */
+            /* Keep it with the round's assistant message (display now,
+             * echo-back later if enabled); forward for display. */
             size_t dlen = strlen(delta_text);
             if (a->reasoning_len + dlen + 1 > a->reasoning_cap) {
                 size_t ncap = a->reasoning_cap ? a->reasoning_cap : 256;
@@ -371,7 +389,10 @@ static int begin_round(NmAgent *a)
         msgs[i].content = sm->content;
         msgs[i].tool_calls_json = sm->tool_calls_json;
         msgs[i].tool_call_id = sm->tool_call_id;
-        msgs[i].reasoning = sm->reasoning;
+        /* Reasoning echo-back is opt-in (nm_agent_set_echo_reasoning):
+         * the session keeps every trace for display either way, but
+         * only an enabled agent hands it to the wire. */
+        msgs[i].reasoning = a->echo_reasoning ? sm->reasoning : NULL;
     }
 
     NmChatRequest req = {
@@ -415,9 +436,10 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         return -1;
     }
 
-    /* Record what the model said, echoing the reasoning trace so
-     * later requests carrying this turn can re-send it as
-     * reasoning_content (required by some providers). */
+    /* Record what the model said, with the round's reasoning trace
+     * kept alongside it. The trace is display/history material: the
+     * wire sees it again only when the agent's echo-back is enabled
+     * (nm_agent_set_echo_reasoning). */
     if (a->n_calls == 0) {
         if (a->text && *a->text)
             nm_session_append_reasoning(a->session, a->reasoning, a->text);

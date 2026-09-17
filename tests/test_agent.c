@@ -906,11 +906,11 @@ static void test_agent_turn_runs_async_command(void)
 }
 #endif /* !_WIN32 */
 
-/* Reasoning: collected on the reasoning channel, echoed back as
- * reasoning_content on the next request carrying the turn, and never
- * mixed into the answer text. The canned server scripts reasoning in
- * round 1 (a tool round — the case HYPER-API.md calls out) and
- * records round 2's request. */
+/* Reasoning (opt-in echo-back): collected on the reasoning channel,
+ * re-sent as reasoning_content on the next request carrying the turn
+ * when the agent's echo is enabled, and never mixed into the answer
+ * text. The canned server scripts reasoning in round 1 (a tool round
+ * — the case HYPER-API.md calls out) and records round 2's request. */
 static void test_agent_reasoning_collected_and_echoed(void)
 {
     reset_capture();
@@ -950,6 +950,11 @@ static void test_agent_reasoning_collected_and_echoed(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
+    /* Opt in: the echo is OFF unless asked for (see
+     * test_agent_reasoning_not_echoed_by_default). */
+    nm_agent_set_echo_reasoning(agent, 1);
+    ASSERT_EQ(nm_agent_echo_reasoning(agent), 1);
+
     int rc = nm_agent_turn(agent, "read the fixture");
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -970,6 +975,77 @@ static void test_agent_reasoning_collected_and_echoed(void)
     close(sc.fd);
     remove(FIXTURE);
 }
+
+/* The echo is OFF by default: the trace is still received and
+ * displayed (the reasoning channel + the session's copy), it just
+ * never rides back to the provider. Same scripted turn as the test
+ * above, minus the opt-in. */
+static void test_agent_reasoning_not_echoed_by_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"let me think \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"about the edit\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+    ASSERT_EQ(nm_agent_echo_reasoning(agent), 0); /* the default */
+
+    int rc = nm_agent_turn(agent, "read the fixture");
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    /* Receiving and showing are unaffected: the trace arrived on the
+     * reasoning channel, stayed out of the answer, and the tool round
+     * ran as usual. */
+    ASSERT_STR_EQ(g_text, "all done");
+    ASSERT_STR_EQ(g_reasoning, "let me think about the edit");
+    ASSERT_STR_EQ(g_tool_seq, "SE");
+
+    /* The wire, though, carries no trace: the assistant tool_calls
+     * message goes back with its calls and nothing else. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "let me think") == NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "about the edit") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
 static void test_agent_cancel_then_next_turn_works(void)
 {
     reset_capture();
@@ -1260,6 +1336,7 @@ int main(void)
     RUN_TEST(test_agent_set_model_changes_wire_model);
     RUN_TEST(test_agent_max_rounds_caps_tool_rounds);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
+    RUN_TEST(test_agent_reasoning_not_echoed_by_default);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);
     TEST_SUMMARY();

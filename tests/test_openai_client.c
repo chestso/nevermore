@@ -1465,6 +1465,78 @@ static void test_wiretap_stream_records_events(void)
     free(log);
 }
 
+/* The client is a dumb serializer for the echo: a message that
+ * carries a reasoning trace goes on the wire with reasoning_content
+ * (the assistant tool-call message shape hyper requires); the
+ * decision to attach one belongs to the composer, so the client
+ * simply reflects what it was handed. */
+static void test_reasoning_content_serialized_when_attached(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = {
+        "assistant", NULL,
+        "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{}\"}}]",
+        NULL, "thinking hard"
+    };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    ASSERT_TRUE(strstr(last_request, "\"role\":\"assistant\"") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "\"reasoning_content\":\"thinking hard\"") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* And with no trace attached, the field is simply absent — never an
+ * empty string (the composer's default). */
+static void test_reasoning_content_omitted_when_absent(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = { "assistant", "answered plainly", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    ASSERT_TRUE(strstr(last_request, "answered plainly") != NULL);
+    ASSERT_TRUE(strstr(last_request, "reasoning_content") == NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1497,5 +1569,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_fetch_json_carries_extra_headers);
     RUN_TEST(test_extra_headers_redaction_marker);
     RUN_TEST(test_affinity_headers_logged_verbatim);
+    RUN_TEST(test_reasoning_content_serialized_when_attached);
+    RUN_TEST(test_reasoning_content_omitted_when_absent);
     TEST_SUMMARY();
 }

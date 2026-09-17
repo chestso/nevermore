@@ -1593,6 +1593,113 @@ static void test_tool_round_prints_panels(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Reasoning echo-back: opt-in, OFF by default                       */
+/* ---------------------------------------------------------------- */
+
+/* Scripts one turn whose round 1 streams a reasoning trace and then a
+ * tool call, so that a second request exists to inspect; round 2
+ * answers. The canned server captures only the LAST request
+ * (g_request) — round 2's, the one carrying round 1's assistant
+ * message back. */
+static void script_reasoning_tool_turn(struct ServerScript *sc)
+{
+    memset(sc, 0, sizeof(*sc));
+    sc->n_rounds = 2;
+    sc->sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"let me think about the edit\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE_PATH
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc->sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+}
+
+/* Write the read_file fixture and start the scripted server; the
+ * caller owns the returned harness (and must join/close). */
+static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc,
+                                           pthread_t *th)
+{
+    FILE *f = fopen(FIXTURE_PATH, "wb");
+    if (!f)
+        return NULL;
+    fputs("the quick brown fox\n", f);
+    fclose(f);
+
+    script_reasoning_tool_turn(sc);
+    sc->fd = server_bind(&sc->port);
+    if (sc->fd < 0)
+        return NULL;
+    pthread_create(th, NULL, chat_server_thread, sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
+    return harness_new("openai", "test-model", base);
+}
+
+/* The provider hears no reasoning by default: the trace is received,
+ * printed (dimmed, ahead of the answer) and kept in the session, but
+ * round 2's request carries the assistant tool-call message WITHOUT
+ * reasoning_content. */
+static void test_reasoning_not_echoed_by_default(void)
+{
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "read it");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    /* Receiving and showing are untouched. */
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "let me think about the edit") != NULL);
+    ASSERT_TRUE(strstr(clean, "all done") != NULL);
+    free(clean);
+
+    /* Not fed back. */
+    ASSERT_TRUE(strstr(g_request, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_request, "reasoning_content") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE_PATH);
+}
+
+/* Opted in, the same turn re-sends the trace as reasoning_content on
+ * the request carrying the turn (the shape hyper requires). */
+static void test_reasoning_echo_opt_in(void)
+{
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_set_echo_reasoning(h->app, 1);
+
+    harness_type(h, "read it");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    ASSERT_TRUE(strstr(g_request, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_request,
+                       "\"reasoning_content\":\"let me think about the edit\"") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE_PATH);
+}
+
 /* Parallel tool calls arrive in ONE assistant message (several entries
  * in the wire tool_calls array) but nevermore runs them sequentially.
  * The transcript must say so: each call's plan is committed right
@@ -2240,6 +2347,8 @@ int main(void)
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);
+    RUN_TEST(test_reasoning_not_echoed_by_default);
+    RUN_TEST(test_reasoning_echo_opt_in);
     RUN_TEST(test_parallel_tool_calls_pair_plan_with_result);
 #ifndef _WIN32
     RUN_TEST(test_cancel_during_tool_closes_the_block);

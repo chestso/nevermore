@@ -99,9 +99,10 @@ struct NmChatApp
 
     const NmProvider *provider; /* registry-owned */
     char *model;
-    char *base_url; /* our copy; (re)applied to built agents */
-    char *api_key;  /* our copy */
-    int max_rounds; /* tool-round cap; <=0 = agent default */
+    char *base_url;     /* our copy; (re)applied to built agents */
+    char *api_key;      /* our copy */
+    int max_rounds;     /* tool-round cap; <=0 = agent default */
+    int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
 
     NmToolset *tools;
     NmAgent *agent;
@@ -553,6 +554,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_state(a, (NmAgentStateFn)nm_chat_app_on_state);
     nm_agent_set_endpoint(a, app->base_url, app->api_key);
     nm_agent_set_max_rounds(a, app->max_rounds);
+    nm_agent_set_echo_reasoning(a, app->echo_reasoning);
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
@@ -755,6 +757,15 @@ void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
     app->max_rounds = max_rounds > 0 ? max_rounds : 0;
     if (app->agent)
         nm_agent_set_max_rounds(app->agent, app->max_rounds);
+}
+
+void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
+{
+    if (!app)
+        return;
+    app->echo_reasoning = on ? 1 : 0;
+    if (app->agent)
+        nm_agent_set_echo_reasoning(app->agent, app->echo_reasoning);
 }
 
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }

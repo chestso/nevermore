@@ -74,6 +74,15 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
  * wires $NEVERMORE_MAX_ROUNDS here. */
 void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
 
+/* Reasoning echo-back for the agent this app builds and the live
+ * agent: re-send the transcript's reasoning traces to the provider
+ * as reasoning_content (OFF by default — the traces are received and
+ * displayed either way). main.c wires $NEVERMORE_ECHO_REASONING
+ * here. See nm_agent_set_echo_reasoning for why the echo is a
+ * question at all (docs/HYPER-API.md's unverified claim, not an
+ * observed hyper requirement). */
+void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on);
+
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):
  *   fill_external_fds   -> nm_chat_app_interest (translated in main.c)

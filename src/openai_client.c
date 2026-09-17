@@ -163,9 +163,14 @@ static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
             nm_json_set(m, "tool_call_id",
                         nm_json_new_string(req->messages[i].tool_call_id));
         /* Reasoning echo-back: an assistant message may carry its
-         * round's trace as reasoning_content. Providers that require
-         * it (hyper) need it present on later requests carrying the
-         * turn, including tool-call rounds; for the rest it is inert
+         * round's trace as reasoning_content. The composer decides
+         * whether it does — nevermore's agent attaches a trace only
+         * when its echo-back is on (off by default; see
+         * nm_agent_set_echo_reasoning). The client serializes what it
+         * was handed, nothing more: hyper is the provider that
+         * prompts the echo, and only on docs/HYPER-API.md's
+         * inherited, unverified claim that the field is required on
+         * requests carrying the turn; for the rest it is inert
          * documentation of the thinking (and empty is tolerated). */
         if (req->messages[i].reasoning && *req->messages[i].reasoning)
             nm_json_set(m, "reasoning_content",
