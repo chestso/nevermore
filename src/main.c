@@ -91,24 +91,30 @@ static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
         fputs(delta_text, stdout);
 }
 
-static const char *tool_event_name(int event)
-{
-    return event == NM_TOOL_EVENT_START ? "start" : "end";
-}
-
 static void ask_on_tool(const NmTool *tool, const char *args_json,
                         NmToolEvent event, const NmToolResult *result,
                         void *userdata)
 {
     (void)userdata;
     const char *name = tool ? tool->name : "?";
+
     if (event == NM_TOOL_EVENT_START) {
-        fprintf(stderr, "[tool %s %s]\n", name, tool_event_name(event));
-        (void)args_json;
-    } else {
-        fprintf(stderr, "[tool %s %s ok=%d]\n", name, tool_event_name(event),
-                result ? result->ok : -1);
+        /* Show the plan before the tool runs: name + every argument. */
+        char *plan = nm_tool_plan(name, args_json);
+        fprintf(stderr, "[tool] %s\n", plan ? plan : name);
+        free(plan);
+        return;
     }
+
+    /* The result body, verbatim (the tools already budget it). */
+    const char *output = result && result->output ? result->output : "";
+    fprintf(stderr, "[tool done ok=%d]\n", result ? result->ok : -1);
+    if (*output) {
+        fputs(output, stderr);
+        if (output[strlen(output) - 1] != '\n')
+            fputc('\n', stderr);
+    }
+    fputc('\n', stderr); /* blank line after the tool block */
 }
 
 static void ask_on_state(NmAgentState state, void *userdata)

@@ -1305,12 +1305,14 @@ static void test_tool_round_prints_panels(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    /* The tool start panel and the result line are in the scrollback.
-     * The panel shows the tool name + its path summary (the args'
-     * identifying value), not the edit text. */
+    /* The tool plan and the result line are in the scrollback. The
+     * plan shows the tool name + EVERY argument (not a one-line slug),
+     * so the edit's old/new strings are visible before the result. */
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "edit_file") != NULL);
     ASSERT_TRUE(strstr(out, "nm-test-chat.txt") != NULL);
+    ASSERT_TRUE(strstr(out, "old_string: quick brown") != NULL);
+    ASSERT_TRUE(strstr(out, "new_string: slow red") != NULL);
     ASSERT_TRUE(strstr(out, "edited the file") != NULL);
 
     /* The file edit actually happened. */

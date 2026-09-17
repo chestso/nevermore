@@ -54,7 +54,6 @@
 
 #include "chat_app.h"
 #include "colors.h"
-#include "json.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 #include "spinner.h"
@@ -376,41 +375,32 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
     tui_runtime_wakeup(app->rt);
 }
 
-/* Compact tool-call summary for the panel line: the argument that
- * best identifies the action. Character-level, no regex. Per-tool-call
- * alloc (one per tool event, never per token). */
-static char *tool_summary(const char *args_json)
+/* Render a tool call's plan (the tool name + every argument) into the
+ * system stream, one styled row per plan line: the header row carries
+ * the `▌` marker (Oyster, the tool role) and argument rows are
+ * indented (Smoke). Character-level, no regex. Per-tool-call alloc
+ * (one per tool event, never per token). */
+static void sys_tool_plan(NmChatApp *app, const char *name,
+                          const char *args_json)
 {
-    if (!args_json || !*args_json)
-        return NULL;
-    const char *err = NULL;
-    NmJson *args = nm_json_parse(args_json, strlen(args_json), &err);
-    if (!args)
-        return NULL;
-    static const char *const keys[] = {
-        "path", "cmd", "command", "needle", "old_string", NULL
-    };
-    char *out = NULL;
-    for (int i = 0; keys[i] && !out; i++) {
-        const NmJson *v = nm_json_get(args, keys[i]);
-        if (v && nm_json_type(v) == NM_JSON_STRING)
-            out = strdup(nm_json_str(v));
-    }
-    nm_json_free(args);
-    return out;
-}
-
-/* Truncate in place for display (byte-wise; a clipped multibyte tail
- * is dropped by shrinking to the last ASCII boundary). */
-static void truncate_text(char *s, size_t max)
-{
-    size_t n = strlen(s);
-    if (n <= max)
+    char *plan = nm_tool_plan(name, args_json);
+    if (!plan)
         return;
-    size_t cut = max;
-    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80)
-        cut--; /* back to a lead byte */
-    s[cut] = '\0';
+    const char *p = plan;
+    int first = 1;
+    while (*p) {
+        const char *nl = strchr(p, '\n');
+        size_t len = nl ? (size_t)(nl - p) : strlen(p);
+        if (first)
+            sys_line(app, NM_SGR_TOOL "▌ %.*s" NM_SGR_RESET, (int)len, p);
+        else
+            sys_line(app, NM_SGR_RESULT "%.*s" NM_SGR_RESET, (int)len, p);
+        first = 0;
+        if (!nl)
+            break;
+        p = nl + 1;
+    }
+    free(plan);
 }
 
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
@@ -428,12 +418,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
          * the panel prints between the tool-call round and the answer
          * round, in commit order. */
         stream_end_all(app);
-        char *sum = tool_summary(args_json);
-        if (sum)
-            truncate_text(sum, 64);
-        sys_line(app, NM_SGR_TOOL "▌ %s%s%s" NM_SGR_RESET, name,
-                 sum ? " · " : "", sum ? sum : "");
-        free(sum);
+        sys_tool_plan(app, name, args_json);
         free(app->current_tool);
         app->current_tool = strdup(name);
     } else {
