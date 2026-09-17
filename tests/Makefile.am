@@ -288,6 +288,15 @@ check-programs: $(check_PROGRAMS)
 # connect stalled Windows CI past the 10s watchdog). NM_NO_LIVE_CATALOG
 # makes default-base probes no-ops (static fallback); explicit-base
 # fetches are unaffected.
+#
+# Config paths: every test that builds an app pins both config paths
+# into its own scratch dir (nm_config_set_paths), and test_chat_app
+# pins them to a nonexistent path in main() — a dev box's real
+# ~/.config/nevermore/config would otherwise change captured wire
+# requests, and a runtime write would land in the user's state dir.
+# Nothing is exported here on purpose: the pin is per-test state, not
+# an environment variable, so a test cannot forget to export it and a
+# suite cannot silently inherit one.
 TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1
 
 EXTRA_DIST = test_helpers.h test_net_helpers.h tls/test-cert.pem tls/test-key.pem \
