@@ -1492,18 +1492,20 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     if (busy) {
         const char *frame = app->spinner_frame;
         if (frame) {
-            /* Comment label (the D5 role) — app-owned frame chrome, so an
-             * SGR prefix + reset around the whole row is legitimate; the
-             * reset is before the row's end (D8), and this row is the
-             * frame's last (the input returns next flush). */
-            dynamic_buffer_append_str(out, NM_SGR_TOOL);
+            /* The animated glyph rides its own role (Yellow, the live
+             * "activity" pixel) while the trailing label stays muted
+             * Comment (the D5 chrome role). App-owned frame chrome, so
+             * an SGR prefix + reset around the whole row is legitimate;
+             * the reset is before the row's end (D8), and this row is
+             * the frame's last (the input returns next flush). */
+            dynamic_buffer_append_str(out, NM_SGR_SPINNER);
             dynamic_buffer_append_str(out, frame);
             if (st == NM_AGENT_RUNNING_TOOL)
                 dynamic_buffer_append_printf(
-                    out, " executing %s…",
+                    out, NM_SGR_TOOL " executing %s…",
                     app->current_tool ? app->current_tool : "tool");
             else
-                dynamic_buffer_append_str(out, " thinking…");
+                dynamic_buffer_append_str(out, NM_SGR_TOOL " thinking…");
             dynamic_buffer_append_str(out, NM_SGR_RESET);
         }
     } else {

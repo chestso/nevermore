@@ -511,8 +511,11 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* The frame's first row is the spinner itself: no leading
      * line separator (the phantom row). */
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
-    /* A braille spinner glyph is on the frame. */
-    ASSERT_TRUE(strstr(frame, "\xe2\xa0\x8b") != NULL); /* "⠋" */
+    /* A braille spinner glyph is on the frame, in its own Yellow role
+     * (the live "activity" pixel) - the muted Comment label follows. */
+    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
+    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b" NM_SGR_TOOL
+                                             " thinking…") != NULL);
     /* And once the tail grows, the tail row is frame row 0 too —
      * the first tail row renders where the spinner was, and the
      * spinner moves below it (no blank row in between). */
@@ -561,8 +564,9 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
     ASSERT_TRUE(strstr(frame, "go") == NULL); /* input hidden */
-    /* A braille spinner glyph is on the frame. */
-    ASSERT_TRUE(strstr(frame, "\xe2\xa0\x8b") != NULL); /* "⠋" */
+    /* A braille spinner glyph is on the frame, painted in its own
+     * (Yellow) role. */
+    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
 
     /* The tail is live-region content: nothing has committed to the
      * scrollback mid-stream. This is a real state assertion (the
@@ -1390,11 +1394,15 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
 
-    /* The spinner tier paints "executing" while the child runs. */
+    /* The spinner tier paints "executing" while the child runs: the
+     * charset-tier glyph in the Yellow activity role, the label muted
+     * Comment. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") != NULL);
+    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xc2\xb7" NM_SGR_TOOL
+                                             " executing run_command…") != NULL);
 
     /* And the turn completes, with the command output committed. */
     ASSERT_EQ(harness_drive(h, 2000), 0);

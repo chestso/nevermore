@@ -96,6 +96,14 @@
 /* Dracula Foreground - the tool result body, secondary text. */
 #define NM_SGR_RESULT "\033[38;2;248;248;242m"
 
+/* Dracula Yellow - the spinner animation glyph (the braille / charset
+ * frame). Its own role on purpose: the animated glyph is the one live
+ * "activity" pixel in the frame, so it takes the palette's brightest
+ * accent while the trailing label stays muted Comment. The braille
+ * "dots" preset is canonically yellow (cli-spinners), which the
+ * portty spinner research records. */
+#define NM_SGR_SPINNER "\033[38;2;241;250;140m"
+
 /* Dracula Cyan - the `╰─` tool-result elbow: the structural accent that
  * ties a result body to its panel. Its own role on purpose: Comment
  * would read as panel, Foreground as body text. */
