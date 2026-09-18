@@ -30,7 +30,11 @@ typedef struct NmJson NmJson;
 
 NmJsonType nm_json_type(const NmJson *v);
 
-/* Reader */
+/* Reader. Parses one JSON value from the front of text[0..len);
+ * returns NULL and sets *err (a static string) on malformed input.
+ * Strict per RFC 8259: raw bytes in strings must be well-formed UTF-8,
+ * control characters must be escaped, numbers follow the number
+ * grammar, and only whitespace may follow the value. */
 NmJson *nm_json_parse(const char *text, size_t len, const char **err);
 void nm_json_free(NmJson *v);
 
@@ -45,7 +49,10 @@ const char *nm_json_str(const NmJson *v); /* NULL unless NM_JSON_STRING */
 int nm_json_bool(const NmJson *v);        /* 0 unless NM_JSON_BOOL */
 double nm_json_num(const NmJson *v);      /* 0 unless NM_JSON_NUMBER */
 
-/* Writer: build values, serialize. The returned string is heap-owned. */
+/* Writer: build values, serialize. The returned string is heap-owned.
+ * nm_json_dump always emits a well-formed JSON text: raw bytes in a
+ * string that are not valid UTF-8 become U+FFFD, and a non-finite
+ * number becomes null. The only NULL return is out of memory. */
 NmJson *nm_json_new_object(void);
 NmJson *nm_json_new_array(void);
 NmJson *nm_json_new_string(const char *s);

@@ -6,6 +6,20 @@
  * completion requests, SSE deltas, tool-call arguments, and model
  * catalogs — nothing more, on purpose.
  *
+ * The reader is strict about string content: raw (unescaped) bytes
+ * must be well-formed UTF-8 and control characters must be escaped,
+ * as RFC 8259 requires. Malformed UTF-8 is named and rejected rather
+ * than copied through into files or the transcript. The number grammar
+ * is enforced literally, an out-of-range literal is refused, and only
+ * whitespace may follow the value.
+ *
+ * The writer holds the other half of that contract: it never emits a
+ * JSON text a strict reader (this one included) would reject. Raw
+ * bytes that are not well-formed UTF-8 become U+FFFD (one replacement
+ * per ill-formed maximal subpart), control characters are escaped, and
+ * a non-finite double dumps as null — the writer has no error channel,
+ * so it repairs rather than refuses.
+ *
  * Reader memory model (memory-reuse principle): all strings, keys,
  * and numbers for one parsed document live in a single append-only
  * arena owned by the root node — one malloc at parse time, one free
@@ -17,6 +31,7 @@
  * geometrically); nm_json_dump serializes into one growable buffer.
  */
 
+#include <float.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -203,10 +218,74 @@ static int hex4(const char *s)
     return v;
 }
 
+/* Decode the UTF-8 sequence at s[0..len). Returns the length of a
+ * well-formed sequence, or 0 when the bytes are ill-formed (a stray
+ * continuation byte, a truncated sequence, an overlong form, an
+ * encoded surrogate, or a codepoint above U+10FFFF). *subpart, when
+ * non-NULL, receives the number of bytes to skip: the sequence length
+ * on success, or — per Unicode 15 §3.9 — the length of the ill-formed
+ * maximal subpart on failure, the longest prefix that is still a
+ * prefix of some well-formed sequence. Every byte of bad input falls
+ * inside exactly one such subpart, so the writer can replace one
+ * subpart with one U+FFFD and resume without losing sync.
+ *
+ * One scanner serves both ends of RFC 8259's "JSON text ... MUST be
+ * encoded using UTF-8": the reader rejects on a 0 return, the writer
+ * repairs. */
+static size_t utf8_scan(const char *s, size_t len, size_t *subpart)
+{
+    const unsigned char *u = (const unsigned char *)s;
+    unsigned char c = u[0];
+    size_t expected;
+    unsigned char lo = 0x80, hi = 0xBF; /* bounds on the 2nd byte */
+
+    if (c < 0x80) {
+        if (subpart)
+            *subpart = 1;
+        return 1;
+    }
+    if (c >= 0xC2 && c <= 0xDF) {
+        expected = 2; /* 0xC0/0xC1 would be overlong */
+    } else if (c >= 0xE0 && c <= 0xEF) {
+        expected = 3;
+        if (c == 0xE0)
+            lo = 0xA0; /* overlong */
+        else if (c == 0xED)
+            hi = 0x9F; /* surrogate */
+    } else if (c >= 0xF0 && c <= 0xF4) {
+        expected = 4;
+        if (c == 0xF0)
+            lo = 0x90; /* overlong */
+        else if (c == 0xF4)
+            hi = 0x8F; /* > U+10FFFF */
+    } else {
+        if (subpart)
+            *subpart = 1; /* 0x80-0xC1: stray or overlong lead */
+        return 0;
+    }
+    size_t k = 1;
+    for (; k < expected; k++) {
+        unsigned l = (k == 1) ? lo : 0x80;
+        unsigned h = (k == 1) ? hi : 0xBF;
+        if (k >= len || u[k] < l || u[k] > h)
+            break;
+    }
+    if (k == expected) {
+        if (subpart)
+            *subpart = expected;
+        return expected;
+    }
+    if (subpart)
+        *subpart = k; /* the bytes that were a valid prefix */
+    return 0;
+}
+
 static char *parse_string_raw(Parser *p)
 {
     /* Parses a JSON string literal (with quotes) into a heap/arena
-     * string. Character-level unescaping, no regex. */
+     * string. Character-level unescaping, no regex. Raw bytes are
+     * validated as UTF-8 here (see utf8_scan); escaped ones are
+     * already spec-checked by the escape switch. */
     if (p->pos >= p->len || p->s[p->pos] != '"') {
         if (p->err)
             *p->err = "expected string";
@@ -359,8 +438,27 @@ static char *parse_string_raw(Parser *p)
             }
             i++;
         } else {
-            out[o++] = c;
-            i++;
+            /* Raw (unescaped) byte. RFC 8259 allows only %x20-21 /
+             * %x23-5B / %x5D-10FFFF inside a string, so a bare
+             * control character (U+0000-U+001F) must be escaped and
+             * every other byte must be well-formed UTF-8. Validate
+             * the whole sequence at once — never copy bytes on
+             * faith, or invalid UTF-8 rides out into files and the
+             * transcript. */
+            if ((unsigned char)c < 0x20) {
+                if (p->err)
+                    *p->err = "unescaped control character in string";
+                return NULL;
+            }
+            size_t n = utf8_scan(p->s + i, qend - i, NULL);
+            if (n == 0) {
+                if (p->err)
+                    *p->err = "invalid UTF-8 in string";
+                return NULL;
+            }
+            memcpy(out + o, p->s + i, n);
+            o += n;
+            i += n;
         }
     }
     out[o] = '\0';
@@ -475,34 +573,85 @@ static NmJson *parse_array(Parser *p)
     }
 }
 
+/* Strict RFC 8259 number grammar (character-level scan, no regex):
+ *   number = [ '-' ] int [ frac ] [ exp ]
+ *   int    = '0' / ( [1-9] *DIGIT )
+ *   frac   = '.' 1*DIGIT
+ *   exp    = ('e'/'E') [ '+'/'-' ] 1*DIGIT
+ * Anything else (leading zero, bare '.', trailing '.', empty/exponent
+ * sign, a second sign) is malformed and named. The scan fixes the
+ * token's end before strtod runs, so "1.2.3" or "0x1" cannot parse
+ * as a prefix of a number. */
 static NmJson *parse_number(Parser *p)
 {
+    const char *s = p->s;
+    size_t len = p->len;
     size_t start = p->pos;
-    if (p->pos < p->len && (p->s[p->pos] == '-' || p->s[p->pos] == '+'))
-        p->pos++;
-    while (p->pos < p->len && ((p->s[p->pos] >= '0' && p->s[p->pos] <= '9') || p->s[p->pos] == '.' || p->s[p->pos] == 'e' || p->s[p->pos] == 'E' || p->s[p->pos] == '-' || p->s[p->pos] == '+'))
-        p->pos++;
-    char tmp[64];
-    size_t n = p->pos - start;
-    if (n == 0 || n >= sizeof(tmp)) {
-        if (p->err)
-            *p->err = "bad number";
-        return NULL;
+    size_t i = start;
+
+    if (i < len && s[i] == '-')
+        i++;
+    if (i >= len)
+        goto bad;
+    if (s[i] == '0') {
+        i++; /* a leading zero may not be followed by more digits */
+    } else if (s[i] >= '1' && s[i] <= '9') {
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    } else {
+        goto bad;
     }
-    memcpy(tmp, p->s + start, n);
+    if (i < len && s[i] == '.') {
+        i++;
+        if (i >= len || s[i] < '0' || s[i] > '9')
+            goto bad;
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    }
+    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        if (i < len && (s[i] == '+' || s[i] == '-'))
+            i++;
+        if (i >= len || s[i] < '0' || s[i] > '9')
+            goto bad;
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    }
+
+    char tmp[64];
+    size_t n = i - start;
+    if (n >= sizeof(tmp))
+        goto bad;
+    memcpy(tmp, s + start, n);
     tmp[n] = '\0';
     char *end;
     double d = strtod(tmp, &end);
-    if (end == tmp) {
+    if (end != tmp + n) /* backstop: the grammar above already holds */
+        goto bad;
+    /* A literal too large for a double comes back as ±infinity, which
+     * no JSON value can carry and which a later cast to an integer
+     * type would make undefined. Name it rather than smuggle it in. */
+    if (!(d >= -DBL_MAX && d <= DBL_MAX)) {
         if (p->err)
-            *p->err = "bad number";
+            *p->err = "number out of range";
         return NULL;
     }
-    NmJson *v = new_node(p, NM_JSON_NUMBER);
-    if (!v)
-        return NULL;
-    v->u.number = d;
-    return v;
+    p->pos = i;
+    {
+        NmJson *v = new_node(p, NM_JSON_NUMBER);
+        if (!v)
+            return NULL;
+        v->u.number = d;
+        return v;
+    }
+
+bad:
+    if (p->err)
+        *p->err = "bad number";
+    return NULL;
 }
 
 static NmJson *parse_value(Parser *p)
@@ -583,6 +732,17 @@ NmJson *nm_json_parse(const char *text, size_t len, const char **err)
         return NULL;
     Parser p = { text, 0, len, err, arena };
     NmJson *root = parse_value(&p);
+    if (root) {
+        /* RFC 8259: a JSON text is a single value; only whitespace may
+         * follow it. Without this, trailing garbage is silently
+         * ignored ("0x1" parses as the number 0). */
+        skip_ws(&p);
+        if (p.pos != p.len) {
+            if (err)
+                *err = "trailing characters after JSON value";
+            root = NULL;
+        }
+    }
     if (!root) {
         arena_free(arena);
         free(arena);
@@ -840,21 +1000,39 @@ typedef struct DumpBuf
     int oom;
 } DumpBuf;
 
-static void db_putc(DumpBuf *b, char c)
+/* Ensure room for `extra` more bytes; grows geometrically. */
+static int db_reserve(DumpBuf *b, size_t extra)
 {
     if (b->oom)
-        return;
-    if (b->len + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 256;
-        char *ns = realloc(b->s, nc);
-        if (!ns) {
-            b->oom = 1;
-            return;
-        }
-        b->s = ns;
-        b->cap = nc;
+        return 0;
+    if (b->len + extra <= b->cap)
+        return 1;
+    size_t nc = b->cap ? b->cap : 256;
+    while (nc < b->len + extra)
+        nc *= 2;
+    char *ns = realloc(b->s, nc);
+    if (!ns) {
+        b->oom = 1;
+        return 0;
     }
+    b->s = ns;
+    b->cap = nc;
+    return 1;
+}
+
+static void db_putc(DumpBuf *b, char c)
+{
+    if (!db_reserve(b, 1))
+        return;
     b->s[b->len++] = c;
+}
+
+static void db_write(DumpBuf *b, const char *s, size_t n)
+{
+    if (!db_reserve(b, n))
+        return;
+    memcpy(b->s + b->len, s, n);
+    b->len += n;
 }
 
 static void db_puts(DumpBuf *b, const char *s)
@@ -863,42 +1041,69 @@ static void db_puts(DumpBuf *b, const char *s)
         db_putc(b, *s++);
 }
 
-/* Dump one JSON string value: quotes + escaping (control chars,
- * quote, backslash; everything else rides through as UTF-8). */
+/* Dump one JSON string value (or object key): quotes + escaping. The
+ * output is always well-formed UTF-8 — control characters (U+0000-
+ * U+001F) are escaped, and any raw byte that is not part of a
+ * well-formed UTF-8 sequence becomes U+FFFD instead of riding out as
+ * mojibake. Bytes that are valid UTF-8 (2-, 3-, 4-byte forms) pass
+ * through untouched. */
 static void dump_string(DumpBuf *b, const char *s)
 {
+    static const char kReplacement[] = "\xEF\xBF\xBD"; /* U+FFFD */
+    const char *p = s ? s : "";
+    size_t len = strlen(p);
     db_putc(b, '"');
-    for (const char *p = s ? s : ""; *p; p++) {
-        unsigned char c = (unsigned char)*p;
+    for (size_t i = 0; i < len;) {
+        unsigned char c = (unsigned char)p[i];
         switch (c) {
         case '"':
             db_puts(b, "\\\"");
-            break;
+            i++;
+            continue;
         case '\\':
             db_puts(b, "\\\\");
-            break;
+            i++;
+            continue;
         case '\b':
             db_puts(b, "\\b");
-            break;
+            i++;
+            continue;
         case '\f':
             db_puts(b, "\\f");
-            break;
+            i++;
+            continue;
         case '\n':
             db_puts(b, "\\n");
-            break;
+            i++;
+            continue;
         case '\r':
             db_puts(b, "\\r");
-            break;
+            i++;
+            continue;
         case '\t':
             db_puts(b, "\\t");
-            break;
+            i++;
+            continue;
         default:
-            if (c < 0x20) {
-                char tmp[8];
-                snprintf(tmp, sizeof(tmp), "\\u%04x", c);
-                db_puts(b, tmp);
+            break;
+        }
+        if (c < 0x20) {
+            char tmp[8];
+            snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+            db_puts(b, tmp);
+            i++;
+        } else if (c < 0x80) {
+            db_putc(b, (char)c);
+            i++;
+        } else {
+            size_t sub = 0;
+            size_t n = utf8_scan(p + i, len - i, &sub);
+            if (n) {
+                db_write(b, p + i, n); /* valid: bytes are the value */
+                i += n;
             } else {
-                db_putc(b, (char)c);
+                db_puts(b, kReplacement); /* one U+FFFD per subpart */
+                i += sub;
             }
         }
     }
@@ -921,12 +1126,23 @@ static void dump_value(DumpBuf *b, const NmJson *v)
     case NM_JSON_NUMBER:
     {
         char tmp[64];
-        /* Integral numbers serialize without a trailing .0 — the
-         * wire format for counts and indices. */
-        if (v->u.number == (long long)v->u.number) {
-            snprintf(tmp, sizeof(tmp), "%lld", (long long)v->u.number);
+        double d = v->u.number;
+        /* NaN and ±infinity have no JSON spelling (the grammar has no
+         * Inf/NaN token), so they dump as null — what cJSON and
+         * JSON.stringify substitute. The comparison is the standard
+         * isfinite idiom: NaN fails both halves, ±inf fails the
+         * matching half. */
+        if (!(d >= -DBL_MAX && d <= DBL_MAX)) {
+            snprintf(tmp, sizeof(tmp), "null");
+        } else if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+                   d == (double)(long long)d) {
+            /* Integral numbers serialize without a trailing .0 — the
+             * wire format for counts and indices. The range guard
+             * must come first: casting an out-of-range double to
+             * long long is undefined (UBSan traps it). */
+            snprintf(tmp, sizeof(tmp), "%lld", (long long)d);
         } else {
-            snprintf(tmp, sizeof(tmp), "%g", v->u.number);
+            snprintf(tmp, sizeof(tmp), "%g", d);
         }
         db_puts(b, tmp);
         break;
