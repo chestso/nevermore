@@ -104,6 +104,7 @@ struct NmChatApp
     char *api_key;      /* explicit key override; NULL = resolve per provider */
     int max_rounds;     /* tool-round cap; <=0 = agent default */
     int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
+    int timeout_ms;     /* stream-inactivity ms; 0 = agent default */
 
     /* The resolved config (nm_config.h), borrowed; NULL = no
      * persistence. The app WRITES runtime changes to its shadow file
@@ -574,6 +575,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     nm_agent_set_max_rounds(a, app->max_rounds);
     nm_agent_set_echo_reasoning(a, app->echo_reasoning);
+    nm_agent_set_timeout_ms(a, app->timeout_ms);
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
@@ -780,6 +782,15 @@ void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
         nm_agent_set_max_rounds(app->agent, app->max_rounds);
 }
 
+void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms)
+{
+    if (!app)
+        return;
+    app->timeout_ms = ms; /* 0 = agent default, <0 = disabled */
+    if (app->agent)
+        nm_agent_set_timeout_ms(app->agent, app->timeout_ms);
+}
+
 void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg)
 {
     if (!app)
@@ -838,6 +849,15 @@ void nm_chat_app_tick(NmChatApp *app)
 {
     if (!app)
         return;
+    /* Deadline first: the tick is the event loop's ONLY wakeup for a
+     * silent peer (an accepted connection that never answers, a tool
+     * whose deadline has passed). nm_agent_next_timeout_ms says when;
+     * when it is due now (0), drive a step exactly as an fd-ready
+     * event would, so the yield/request deadline fires. Then tick the
+     * spinner so its frame reflects the post-step state. */
+    if (app->agent && nm_agent_next_timeout_ms(app->agent) == 0)
+        nm_chat_app_step(app);
+
     const char *frame = nm_spinner_tick(app->spinner);
     if (frame && frame != app->spinner_frame) {
         app->spinner_frame = frame;
@@ -850,7 +870,17 @@ int nm_chat_app_tick_ms(NmChatApp *app)
     if (!app)
         return -1;
     NmAgentState st = nm_agent_state(app->agent);
-    return (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL) ? 100 : -1;
+    if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+        return -1;
+    /* Spinner cadence while busy (100 ms), shortened to the nearest
+     * agent deadline so a stalled stream / a due tool fires promptly.
+     * The step that results clears the deadline (tool done, new round,
+     * or the turn errors), so this cannot spin. */
+    int ms = 100;
+    int to = nm_agent_next_timeout_ms(app->agent);
+    if (to >= 0 && to < ms)
+        ms = to;
+    return ms;
 }
 
 NmAgentState nm_chat_app_state(const NmChatApp *app)

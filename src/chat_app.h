@@ -79,6 +79,11 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
  * wires the resolved config here. */
 void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
 
+/* Stream-inactivity timeout for the agent this app builds and the live
+ * agent (0 = agent default NM_AGENT_DEFAULT_TIMEOUT_MS, <0 = disable).
+ * main.c wires $NEVERMORE_TIMEOUT_MS here. See nm_agent_set_timeout_ms. */
+void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms);
+
 /* The resolved config (nm_config.h), BORROWED: the app writes runtime
  * changes (/model, /provider, /rounds, /reasoning) to its shadow file
  * and never reads a value from it — main.c has already applied the

@@ -72,6 +72,8 @@ static void usage(FILE *out)
             "                          tool queries (default\n"
             "                          http://127.0.0.1:8888)\n"
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
+            "  NEVERMORE_TIMEOUT_MS    stream-inactivity timeout in ms\n"
+            "                          (default 300000; negative disables)\n"
             "  NEVERMORE_ECHO_REASONING=1\n"
             "                          re-send reasoning traces to the\n"
             "                          provider (off by default)\n"
@@ -79,9 +81,28 @@ static void usage(FILE *out)
             "                          ~/.local/state/nevermore/wire/\n");
 }
 
+/* Stream-inactivity timeout from $NEVERMORE_TIMEOUT_MS: 0 = the agent
+ * default (NM_AGENT_DEFAULT_TIMEOUT_MS), a positive value = that many
+ * ms, a negative value disables the inactivity deadline. A missing or
+ * non-numeric value leaves the agent default. (A `timeout` config key,
+ * so /config and the shadow file can carry it too, is a follow-up —
+ * see docs/PROCESS-PLAN.md §3.4.) */
+static int resolved_timeout_ms(void)
+{
+    const char *v = getenv("NEVERMORE_TIMEOUT_MS");
+    if (!v || !*v)
+        return 0;
+    char *end = NULL;
+    long ms = strtol(v, &end, 10);
+    if (end == v || (end && *end != '\0'))
+        return 0; /* not a plain integer: keep the agent default */
+    if (ms > 2147483647L || ms < -2147483647L)
+        return 0; /* out of int range: keep the agent default */
+    return (int)ms;
+}
+
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
  * renders as a compact status line (the -P pipeline shape). */
-
 static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
                          const NmToolCall *calls, size_t n_calls,
                          void *userdata)
@@ -216,6 +237,7 @@ static int run_interactive(const char *provider_name, const char *model,
      * to the agent it builds). */
     nm_chat_app_set_config(app, cfg);
     nm_chat_app_set_max_rounds(app, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+    nm_chat_app_set_timeout_ms(app, resolved_timeout_ms());
     nm_chat_app_set_echo_reasoning(
         app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
     /* Base URL override only: the API key is left NULL so the app
@@ -400,6 +422,7 @@ int main(int argc, char *argv[])
         nm_agent_set_endpoint(agent, base_url, api_key);
         nm_agent_set_max_rounds(
             agent, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+        nm_agent_set_timeout_ms(agent, resolved_timeout_ms());
         nm_agent_set_echo_reasoning(
             agent, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
 

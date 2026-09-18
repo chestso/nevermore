@@ -35,6 +35,14 @@ typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
  * nm_agent_set_max_rounds). */
 #define NM_AGENT_DEFAULT_MAX_ROUNDS 25
 
+/* Default stream-inactivity timeout (ms): while a round is streaming,
+ * if no answer/reasoning delta arrives for this long the turn fails
+ * with "timed out" instead of hanging. Matches Codex's 300 s stream
+ * idle timeout; <= 0 disables it (pure readiness-driven). This is an
+ * *inactivity* deadline — a stream that keeps producing deltas is never
+ * cut, however long the answer runs. */
+#define NM_AGENT_DEFAULT_TIMEOUT_MS 300000
+
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata);
 void nm_agent_free(NmAgent *a);
@@ -56,6 +64,33 @@ void nm_agent_set_model(NmAgent *a, const char *model);
  * the new cap from its next begin_round). */
 void nm_agent_set_max_rounds(NmAgent *a, int max_rounds);
 int nm_agent_max_rounds(const NmAgent *a);
+
+/* Stream-inactivity timeout (ms). While a round streams, if no delta
+ * arrives for this long the step errors the turn ("timed out") instead
+ * of waiting forever — a model that connects but never answers, or
+ * stalls mid-body. It is an INACTIVITY deadline: every delta resets it,
+ * so a long-but-live answer is never cut.
+ *
+ *   ms > 0   use it
+ *   ms == 0  restore the default (NM_AGENT_DEFAULT_TIMEOUT_MS)
+ *   ms < 0   disable the inactivity deadline entirely
+ */
+void nm_agent_set_timeout_ms(NmAgent *a, int ms);
+
+/* The effective inactivity timeout in ms (the set value or the default);
+ * <= 0 means disabled. */
+int nm_agent_timeout_ms(const NmAgent *a);
+
+/* Milliseconds until the agent wants a step even though no fd is ready,
+ * or -1 when it is purely readiness-driven (idle, or a live stream/tool
+ * with no pending deadline). The runtime's tick folds this into its wait
+ * timeout so a silent stream or a tool-side deadline still gets stepped:
+ *   - a live async tool's deadline_ms (its own clock), and
+ *   - the remaining stream-inactivity budget.
+ * nm_agent_step enforces both when it is called; this only tells the
+ * event loop WHEN to call it. Never a poll loop: the value is the
+ * single nearest deadline, not a fixed tick. */
+int nm_agent_next_timeout_ms(const NmAgent *a);
 
 /* Reasoning echo-back. OFF by default: every round's trace stays in
  * the session (it is displayed, and turning the echo on later still

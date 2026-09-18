@@ -86,6 +86,15 @@ typedef struct NmTool
      * HTTP tool must first wait for connect/send writability — the
      * agent forwards these bits to the event loop's wait set. */
     unsigned (*interest)(const NmToolExec *e);
+    /* Milliseconds until this live exec wants a step even though no fd
+     * is ready (a tool-side deadline, e.g. an HTTP request timeout or a
+     * session yield window), or -1 for "purely readiness-driven".
+     * NM_INTEREST-driven waits only wake the loop on fd activity, so a
+     * silent peer (an accepted connection that never answers; a spawned
+     * session that never prints) would otherwise never be re-stepped.
+     * The agent folds this into nm_agent_next_timeout_ms so the
+     * runtime's tick can drive the step; NULL means -1. */
+    int (*deadline_ms)(const NmToolExec *e);
     void (*end)(NmToolExec *e);
 } NmTool;
 

@@ -788,6 +788,25 @@ static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
 /* Vtable                                                            */
 /* ---------------------------------------------------------------- */
 
+/* The per-request deadline as "ms until the agent should step again".
+ * The event-driven (TUI) path never polls: the fd is only readable when
+ * the peer speaks, so an instance that accepts the connection and never
+ * answers would otherwise never be re-stepped. The agent folds this into
+ * nm_agent_next_timeout_ms and the runtime's tick fires the step. */
+static int ws_deadline_ms(const NmToolExec *e)
+{
+    if (!e)
+        return -1;
+    if (e->done)
+        return 0; /* wanted now, to hand out the terminal result */
+    double left = (e->deadline - nm_monotonic_seconds()) * 1000.0;
+    if (left <= 0.0)
+        return 0;
+    if (left >= 2147483000.0)
+        return 2147483000;
+    return (int)left; /* truncated: never exceeds the budget */
+}
+
 static const char web_search_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"query\":{\"type\":\"string\",\"description\":\"Search query.\"},"
@@ -811,5 +830,6 @@ const NmTool nm_tool_web_search = {
     .step = ws_step,
     .exec_fd = ws_exec_fd,
     .interest = ws_interest,
+    .deadline_ms = ws_deadline_ms,
     .end = ws_end,
 };

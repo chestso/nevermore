@@ -71,7 +71,12 @@ static void scratch_init(void)
     mkdir(g_root, 0755);
 }
 
-/* Pin both paths for one test; `sub` keeps tests from sharing files. */
+/* Pin both paths for one test; `sub` keeps tests from sharing files.
+ * The two files are removed first: the scratch root is PID-keyed, and
+ * under Wine the PID repeats between runs, so a leftover shadow from a
+ * previous run would leak into this one (a shadow written by the
+ * searxng test beat the user file on the second run on the dev box).
+ * Fresh files make the test assert the shape, not the OS's leftovers. */
 static void pin_paths(const char *sub)
 {
     char dir[1024];
@@ -79,6 +84,8 @@ static void pin_paths(const char *sub)
     mkdir(dir, 0755);
     snprintf(g_user, sizeof(g_user), "%s/config", dir);
     snprintf(g_shadow, sizeof(g_shadow), "%s/shadow", dir);
+    remove(g_user);
+    remove(g_shadow);
     nm_config_set_paths(g_user, g_shadow);
 }
 

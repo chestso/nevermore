@@ -177,7 +177,51 @@ static void test_web_search_is_async(void)
     ASSERT_NOT_NULL(t->step);
     ASSERT_NOT_NULL(t->exec_fd);
     ASSERT_NOT_NULL(t->interest);
+    ASSERT_NOT_NULL(t->deadline_ms);
     ASSERT_NOT_NULL(t->end);
+    nm_toolset_free(ts);
+}
+
+/* The deadline seam (P0): the fd is only readable when the peer speaks,
+ * so an accepted-but-silent instance would never be re-stepped by an
+ * event-driven loop. deadline_ms reports the remaining per-request
+ * budget, and 0 once it has elapsed. */
+static void test_web_search_deadline_ms_seam(void)
+{
+    Srv s;
+    memset(&s, 0, sizeof(s));
+    nm_tool_web_search_reset_health();
+    s.fd = server_bind(&s.port);
+    s.send_nothing = 1;
+    char base[64];
+    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+
+    pthread_t th = srv_launch(&s);
+
+    nm_tool_web_search_set_timeout_ms(200);
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "web_search");
+    NmToolExec *e = t->begin(t, "{\"query\":\"x\"}", NULL);
+    ASSERT_NOT_NULL(e);
+
+    int ms = t->deadline_ms(e);
+    ASSERT_TRUE(ms > 0 && ms <= 200); /* the budget is reported */
+
+    /* Past the deadline it asks to be stepped now (0), and the step
+     * then fails with the timeout instead of hanging. */
+    tsleep(250);
+    ASSERT_EQ(t->deadline_ms(e), 0);
+    NmToolResult out = { 0, NULL };
+    ASSERT_EQ((int)t->step(e, &out), (int)NM_TOOL_DONE);
+    ASSERT_TRUE(!out.ok);
+    ASSERT_NOT_NULL(out.output);
+    ASSERT_NOT_NULL(strstr(out.output, "timed out"));
+    nm_tool_result_free(&out);
+    t->end(e);
+
+    nm_tool_web_search_set_timeout_ms(0); /* restore the default */
+    close(s.fd);
+    pthread_join(th, NULL);
     nm_toolset_free(ts);
 }
 
@@ -499,5 +543,6 @@ int main(void)
     RUN_TEST(test_web_search_timeout);
     RUN_TEST(test_web_search_args_validation);
     RUN_TEST(test_web_search_async_step_seam);
+    RUN_TEST(test_web_search_deadline_ms_seam);
     TEST_SUMMARY();
 }

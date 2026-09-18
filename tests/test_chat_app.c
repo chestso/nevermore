@@ -1102,6 +1102,61 @@ static void test_cancel_midstream_returns_to_idle(void)
     close(sc.fd);
 }
 
+/* P0 deadline seam in the TUI: a silent server never makes the stream
+ * fd readable, so only the runtime's tick can fire the stream-
+ * inactivity deadline. The tick interval is bounded by
+ * nm_agent_next_timeout_ms and the tick drives the step when due. */
+static void test_tick_fires_stream_inactivity_timeout(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = ""; /* stalls: no bytes at all */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A short budget for a fast test (applied to the live agent too). */
+    nm_chat_app_set_timeout_ms(h->app, 200);
+    ASSERT_EQ(nm_agent_timeout_ms(nm_chat_app_agent(h->app)), 200);
+
+    harness_type(h, "stall please");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* The tick interval is the spinner cadence, bounded by the
+     * remaining deadline (never longer than 100 ms while busy). */
+    int ms = nm_chat_app_tick_ms(h->app);
+    ASSERT_TRUE(ms > 0 && ms <= 100);
+
+    /* The fd is silent; only ticks advance the clock. Pump until the
+     * tick drives the step that fires the timeout. Bounded. */
+    for (int i = 0;
+         i < 200 && nm_chat_app_state(h->app) == NM_AGENT_STREAMING; i++) {
+        usleep(10 * 1000);
+        nm_chat_app_tick(h->app);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "stall please") != NULL);
+    ASSERT_NOT_NULL(strstr(out, "timed out"));
+
+    /* Idle again: nothing to tick for. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), -1);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_connect_error_prints_and_returns_to_idle(void)
 {
     /* Bind then close: a port nothing listens on (connect refused). */
@@ -2738,6 +2793,7 @@ int main(void)
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);
     RUN_TEST(test_cancel_midstream_returns_to_idle);
+    RUN_TEST(test_tick_fires_stream_inactivity_timeout);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);

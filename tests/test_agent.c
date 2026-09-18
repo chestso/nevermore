@@ -125,6 +125,42 @@ static void *agent_server_thread(void *arg)
     return NULL;
 }
 
+/* One-shot stall responder (the P0 deadline test): accept once, drain
+ * the request, then sit silent — no bytes, no terminal chunk — until
+ * the peer tears down. A closed peer is READABLE (EOF), so the loop
+ * drains and exits on recv <= 0 (never a select-only hot spin). */
+static void *agent_stall_server_thread(void *arg)
+{
+    struct ServerScript *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    while (1) {
+        struct timeval tv = { 0, 200 * 1000 };
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(cfd, &rfds);
+        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+            continue; /* keep stalling until the peer closes */
+        char sink[256];
+        long n = recv(cfd, sink, sizeof(sink), 0);
+        if (n <= 0)
+            break; /* the client tore the stream down */
+    }
+    close(cfd);
+    return NULL;
+}
+
 /* One-shot 401 responder (error-message tests): accept once, drain
  * the request, answer 401 with a JSON error body, close. */
 static void *auth_401_server_thread(void *arg)
@@ -1127,6 +1163,141 @@ static void test_agent_cancel_then_next_turn_works(void)
     remove(FIXTURE);
 }
 
+/* A stub async tool whose exec NEVER finishes (returns RUNNING
+ * forever): the tool phase stays live so the test can cancel in the
+ * middle of it — after the round's assistant tool_calls message has
+ * been appended but before its tool results. */
+static const char hang_tool_schema[] = "{\"type\":\"object\",\"properties\":{}}";
+static int g_hang_token;
+
+static NmToolExec *hang_begin(const NmTool *tool, const char *args_json,
+                              void *userdata)
+{
+    (void)tool;
+    (void)args_json;
+    (void)userdata;
+    return (NmToolExec *)&g_hang_token; /* a non-NULL, never-null token */
+}
+
+static NmToolStatus hang_step(NmToolExec *e, NmToolResult *out)
+{
+    (void)e;
+    (void)out;
+    return NM_TOOL_RUNNING; /* never completes */
+}
+
+static int hang_exec_fd(NmToolExec *e)
+{
+    (void)e;
+    return -1;
+}
+
+static void hang_end(NmToolExec *e) { (void)e; }
+
+static const NmTool hang_tool = {
+    .name = "stub_hang",
+    .description = "test stub: an async exec that never finishes",
+    .emoji = "🧪",
+    .params_schema = hang_tool_schema,
+    .execute = NULL,
+    .begin = hang_begin,
+    .step = hang_step,
+    .exec_fd = hang_exec_fd,
+    .interest = NULL,
+    .end = hang_end,
+};
+
+/* Cancel in the MIDDLE of the tool phase — the round's assistant
+ * tool_calls message is already in the session, but the call it names
+ * never produced a tool reply. Left dangling, every later request is
+ * malformed and 400s ("an assistant message with 'tool_calls' must be
+ * followed by tool messages responding to each 'tool_call_id'" — the
+ * session-poisoning bug observed live 2026-09-18). Cancel must close
+ * the group with a synthetic tool result so the NEXT turn is valid. */
+static void test_agent_cancel_mid_tool_phase_closes_group(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_hang\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"stub_hang\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    nm_toolset_add(tools, &hang_tool);
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Turn 1: stream round 1 to the tool phase (the assistant
+     * tool_calls message is now in the session). */
+    ASSERT_EQ(nm_agent_start(agent, "hang for a while"), 0);
+    for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
+         i++) {
+        int fd = nm_agent_fd(agent);
+        if (fd >= 0) {
+            fd_set r;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_SET(fd, &r);
+            select(fd + 1, &r, NULL, NULL, &tv);
+        }
+        ASSERT_EQ(nm_agent_step(agent), 0);
+    }
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+
+    /* One step: the plan is announced and the stub exec begins; it
+     * never finishes, so the tool phase stays live. */
+    ASSERT_EQ(nm_agent_step(agent), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+    ASSERT_EQ(g_tool_starts, 1);
+    ASSERT_EQ(g_tool_ends, 0); /* still running when we cancel */
+
+    /* Cancel mid-tool-phase: the group must be closed. */
+    nm_agent_cancel(agent);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
+
+    /* Turn 2 on the same session: the request must be well-formed —
+     * the cancelled call has a tool reply. */
+    ASSERT_EQ(nm_agent_start(agent, "carry on"), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "after cancel");
+
+    ASSERT_EQ(g_n_requests, 2);
+    /* The turn-2 request carries the synthetic reply for the cancelled
+     * call; without it this is the live 400. */
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"tool_call_id\":\"call_hang\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\"role\":\"tool\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "cancelled") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The user-facing failure string (what the TUI prints): the agent
  * must surface the result's always-set message — "transport/parse
  * error" guess strings are gone. A 401 also hints the env var. */
@@ -1304,6 +1475,199 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Deadline seam (P0) — the tick-fireable timeout                   */
+/* ---------------------------------------------------------------- */
+
+/* A silent peer: nothing ever becomes readable, so a readiness-driven
+ * loop never re-steps the agent. The stream-inactivity deadline
+ * (nm_agent_next_timeout_ms + nm_agent_step) is what must fire. */
+static void test_agent_stream_stall_times_out(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_stall_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Idle: no deadline. Unset: the default budget. */
+    ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1);
+    ASSERT_EQ(nm_agent_timeout_ms(agent), NM_AGENT_DEFAULT_TIMEOUT_MS);
+
+    nm_agent_set_timeout_ms(agent, 200); /* a short budget for the test */
+    ASSERT_EQ(nm_agent_timeout_ms(agent), 200);
+
+    ASSERT_EQ(nm_agent_start(agent, "hello?"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_STREAMING);
+
+    /* Armed: a positive budget, never over the 200 ms setting. */
+    int t0 = nm_agent_next_timeout_ms(agent);
+    ASSERT_TRUE(t0 > 0 && t0 <= 200);
+
+    /* Drive by DEADLINE, not by fd readiness (there is none). Bounded. */
+    for (int i = 0; i < 200 && nm_agent_next_timeout_ms(agent) != 0; i++)
+        usleep(10 * 1000);
+    ASSERT_EQ(nm_agent_next_timeout_ms(agent), 0); /* due now */
+
+    ASSERT_EQ(nm_agent_step(agent), -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    ASSERT_NOT_NULL(nm_agent_last_error(agent));
+    ASSERT_TRUE(strstr(nm_agent_last_error(agent), "timed out") != NULL);
+    ASSERT_EQ(g_final_state, (int)NM_AGENT_ERROR);
+    ASSERT_EQ(nm_agent_fd(agent), -1); /* the stream was torn down */
+
+    /* Not busy any more: no deadline to report. */
+    ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1);
+
+    /* A negative setter disables it (documented semantics). */
+    nm_agent_set_timeout_ms(agent, -1);
+    ASSERT_TRUE(nm_agent_timeout_ms(agent) < 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A stub async tool that stays live and declares its own deadline.
+ * Proves the agent folds tool->deadline_ms into nm_agent_next_timeout_ms
+ * (the same seam a process session's yield window will ride). */
+static const char stub_tool_schema[] =
+    "{\"type\":\"object\",\"properties\":{}}";
+static int g_stub_deadline_queries;
+
+static NmToolExec *stub_begin(const NmTool *tool, const char *args_json,
+                              void *userdata)
+{
+    (void)tool;
+    (void)args_json;
+    (void)userdata;
+    g_stub_deadline_queries = 0;
+    return (NmToolExec *)&g_stub_deadline_queries; /* a non-NULL token */
+}
+
+static NmToolStatus stub_step(NmToolExec *e, NmToolResult *out)
+{
+    (void)e;
+    *out = nm_tool_result_text("stub done");
+    return NM_TOOL_DONE;
+}
+
+static int stub_exec_fd(NmToolExec *e)
+{
+    (void)e;
+    return -1;
+}
+
+static int stub_deadline_ms(const NmToolExec *e)
+{
+    (void)e;
+    g_stub_deadline_queries++;
+    return 1234;
+}
+
+static void stub_end(NmToolExec *e) { (void)e; }
+
+static const NmTool stub_deadline_tool = {
+    .name = "stub_deadline",
+    .description = "test stub: a live exec with its own deadline",
+    .emoji = "🧪",
+    .params_schema = stub_tool_schema,
+    .execute = NULL,
+    .begin = stub_begin,
+    .step = stub_step,
+    .exec_fd = stub_exec_fd,
+    .interest = NULL,
+    .deadline_ms = stub_deadline_ms,
+    .end = stub_end,
+};
+
+static void test_agent_next_timeout_ms_reports_tool_deadline(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"stub_deadline\",\"arguments\":\"{}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"stub ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    nm_toolset_add(tools, &stub_deadline_tool);
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "use the stub"), 0);
+
+    /* Stream round 1 to the tool phase (real bytes are coming, so this
+     * is readiness-driven). */
+    for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
+         i++) {
+        int fd = nm_agent_fd(agent);
+        if (fd >= 0) {
+            fd_set r;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_SET(fd, &r);
+            select(fd + 1, &r, NULL, NULL, &tv);
+        }
+        ASSERT_EQ(nm_agent_step(agent), 0);
+    }
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+
+    /* One step: the plan is announced and the stub exec begins. */
+    ASSERT_EQ(nm_agent_step(agent), 0);
+    /* The live tool's own deadline is what the agent reports (not the
+     * stream budget — there is no stream in the tool phase). */
+    ASSERT_EQ(nm_agent_next_timeout_ms(agent), 1234);
+    ASSERT_TRUE(g_stub_deadline_queries > 0);
+
+    /* Let the stub finish and the answer round complete. */
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "stub ok");
+    ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1); /* idle */
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -1331,10 +1695,13 @@ int main(void)
     RUN_TEST(test_agent_turn_runs_async_command);
 #endif
     RUN_TEST(test_agent_cancel_then_next_turn_works);
+    RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_set_model_changes_wire_model);
     RUN_TEST(test_agent_max_rounds_caps_tool_rounds);
+    RUN_TEST(test_agent_stream_stall_times_out);
+    RUN_TEST(test_agent_next_timeout_ms_reports_tool_deadline);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_reasoning_not_echoed_by_default);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);

@@ -38,6 +38,11 @@
 #define nm_usleep(us) usleep(us)
 #endif
 
+/* The one monotonic clock, for the deadline seam. Included AFTER
+ * winsock2.h on Windows: nm_clock.h pulls in <windows.h>, and
+ * winsock2.h must come first (house rule). */
+#include "nm_clock.h"
+
 #include "provider_internal.h"
 
 struct NmAgent
@@ -72,6 +77,13 @@ struct NmAgent
     NmChatStream *stream;
     int round;      /* rounds started this turn */
     int max_rounds; /* cap; <=0 means the default */
+    /* Stream-inactivity timeout (nm_agent_set_timeout_ms): 0 = follow
+     * NM_AGENT_DEFAULT_TIMEOUT_MS, >0 = this value, <0 = disabled.
+     * last_activity is the monotonic timestamp of the last streaming
+     * delta (or the round's start); the deadline seam compares it
+     * against the effective timeout. */
+    int timeout_ms;
+    double last_activity;
     /* Opt-in (nm_agent_set_echo_reasoning): re-send the transcript's
      * reasoning traces as reasoning_content on later requests.
      * OFF by default — a trace is kept for display either way. */
@@ -191,6 +203,70 @@ int nm_agent_max_rounds(const NmAgent *a)
     return a->max_rounds;
 }
 
+void nm_agent_set_timeout_ms(NmAgent *a, int ms)
+{
+    if (!a)
+        return;
+    a->timeout_ms = ms;
+}
+
+int nm_agent_timeout_ms(const NmAgent *a)
+{
+    if (!a)
+        return NM_AGENT_DEFAULT_TIMEOUT_MS;
+    return a->timeout_ms == 0 ? NM_AGENT_DEFAULT_TIMEOUT_MS : a->timeout_ms;
+}
+
+/* Millis left on a monotonic deadline, clamped to int range; a deadline
+ * already in the past is 0 (which reads as "step now"). Truncated, so
+ * the value never exceeds the budget that was set. */
+static int ms_until(double deadline)
+{
+    double left = (deadline - nm_monotonic_seconds()) * 1000.0;
+    if (left <= 0.0)
+        return 0;
+    /* > ~24 days would overflow int; clamp (the wire deadlines are all
+     * far below this, but the arithmetic must be total). */
+    if (left >= 2147483000.0)
+        return 2147483000;
+    return (int)left;
+}
+
+int nm_agent_next_timeout_ms(const NmAgent *a)
+{
+    if (!a)
+        return -1;
+
+    /* Only the busy states wait: streaming (the inactivity deadline)
+     * and a live async tool (its own deadline). */
+    int busy = a->state == NM_AGENT_STREAMING ||
+               a->state == NM_AGENT_RUNNING_TOOL;
+    if (!busy)
+        return -1;
+
+    int best = -1;
+
+    /* A live async tool that declares a deadline (web_search's request
+     * timeout, a future session yield window). */
+    if (a->exec && a->exec_tool && a->exec_tool->deadline_ms) {
+        int t = a->exec_tool->deadline_ms(a->exec);
+        if (t >= 0)
+            best = t;
+    }
+
+    /* The stream-inactivity budget (only while a stream is open — the
+     * tool phase has no stream and uses the tool's own deadline). */
+    int to = nm_agent_timeout_ms(a);
+    if (a->stream && to > 0) {
+        double deadline = a->last_activity + (double)to / 1000.0;
+        int t = ms_until(deadline);
+        if (best < 0 || t < best)
+            best = t;
+    }
+
+    return best;
+}
+
 void nm_agent_set_echo_reasoning(NmAgent *a, int on)
 {
     if (!a)
@@ -230,6 +306,9 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
                            void *userdata)
 {
     NmAgent *a = userdata;
+    /* Any delta is progress: the inactivity deadline resets on the wire
+     * activity that produced it (a live answer is never cut). */
+    a->last_activity = nm_monotonic_seconds();
     if (delta_text && *delta_text) {
         if (channel == NM_STREAM_REASONING) {
             /* Keep it with the round's assistant message (display now,
@@ -420,6 +499,10 @@ static int begin_round(NmAgent *a)
         return -1;
     }
     a->round++;
+    /* Arm the inactivity deadline at the moment the stream opens: an
+     * accepted connection that never sends a delta must still time out
+     * even though nothing is readable. */
+    a->last_activity = nm_monotonic_seconds();
     set_state(a, NM_AGENT_STREAMING);
     return 0;
 }
@@ -594,6 +677,25 @@ int nm_agent_step(NmAgent *a)
     if (!a->stream)
         return -1;
 
+    /* Inactivity deadline: the event loop drove us here (or a plain
+     * poll) but no delta has arrived for too long — the peer accepted
+     * the connection and went silent, or stalled mid-body. Error the
+     * turn instead of waiting forever. nm_agent_next_timeout_ms is what
+     * tells the loop when to make this call. */
+    int to = nm_agent_timeout_ms(a);
+    if (to > 0 &&
+        (nm_monotonic_seconds() - a->last_activity) * 1000.0 >= (double)to) {
+        a->provider->chat_end(a->stream);
+        a->stream = NULL;
+        char msg[160];
+        snprintf(msg, sizeof(msg),
+                 "timed out: no response for %d ms (raise "
+                 "NEVERMORE_TIMEOUT_MS for a slower model)",
+                 to);
+        set_error(a, msg);
+        return -1;
+    }
+
     NmChatResult r = { 0 };
     NmChatStatus s = a->provider->chat_step(a->stream, &r);
     if (s == NM_CHAT_PENDING)
@@ -662,6 +764,21 @@ void nm_agent_cancel(NmAgent *a)
         a->stream = NULL;
     }
     clear_exec(a);
+    /* Close the round's tool-call group before the reset drops its
+     * bookkeeping: the assistant tool_calls message is already in the
+     * session, and a call that never produced a reply leaves the
+     * transcript malformed — every later request then 400s ("an
+     * assistant message with 'tool_calls' must be followed by tool
+     * messages responding to each 'tool_call_id'"). Results exist for
+     * the calls before tool_exec_idx; the rest (including the one that
+     * was running) get a synthetic cancellation reply. */
+    if (a->state == NM_AGENT_RUNNING_TOOL && a->session) {
+        for (size_t i = a->tool_exec_idx; i < a->n_calls; i++)
+            nm_session_append_tool_result(
+                a->session, a->calls[i].id, a->calls[i].name,
+                "cancelled: the turn was interrupted before this tool "
+                "produced a result");
+    }
     round_reset(a);
     a->round = 0;
     set_state(a, NM_AGENT_IDLE);
