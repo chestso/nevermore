@@ -77,7 +77,7 @@ extern const NmTool nm_tool_search_dir;
 extern const NmTool nm_tool_run_command;
 
 /* tools_exec.c: process-session tools (exec_command, write_stdin,
- * kill_session) over src/process.c's PTY session registry. */
+ * kill_session) over src/nm_process.c's PTY session registry. */
 extern const NmTool nm_tool_exec_command;
 extern const NmTool nm_tool_write_stdin;
 extern const NmTool nm_tool_kill_session;

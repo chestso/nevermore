@@ -1,7 +1,7 @@
 /* tools_exec.c - process-session tools: exec_command, write_stdin,
  * kill_session
  *
- * The model-facing surface over src/process.c's PTY session registry
+ * The model-facing surface over src/nm_process.c's PTY session registry
  * (a port of quoth's quoth-process.el / quoth-tools.el exec_command +
  * write_stdin pair). exec_command starts a long-lived command — a dev
  * server, a REPL, `ssh`, a test watcher — and reports either its exit
@@ -42,7 +42,7 @@
 #include <string.h>
 
 #include "json.h"
-#include "process.h"
+#include "nm_process.h"
 #include "tools.h"
 #include "tools_internal.h"
 #include "transport.h" /* NM_INTEREST_* (the write_stdin wait set) */
@@ -148,7 +148,7 @@ static int has_interior_eof_marker(const char *input, size_t n)
 /* ---------------------------------------------------------------- */
 
 /* One in-flight call. The session itself lives in the process registry
- * (process.h), addressed by id — never by pointer (see the file head).
+ * (nm_process.h), addressed by id — never by pointer (see the file head).
  * outbox is write_stdin's pending stdin bytes, built once at begin and
  * drained across steps so a write that would block never stalls the
  * loop. */

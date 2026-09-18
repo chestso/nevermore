@@ -24,6 +24,7 @@
 
 #include "nevermore.h"
 #include "agent.h"
+#include "nm_process.h"
 #include "provider.h"
 #include "session.h"
 #include "tools.h"
@@ -171,31 +172,33 @@ static int provider_name_is_known(const char *name)
 
 /* TuiRuntimeConfig event callbacks (event_data = the app). The fill
  * callback declares the app's live external fds each wait (Elm
- * subscriptions in C idiom); the sink routes per fd. Today: the
- * agent's stream (fd + interest). Phase-5 wire catalog fetches will
- * append their entries here — the seam was designed for it. */
+ * subscriptions in C idiom): the agent's stream/exec fd plus one READ
+ * entry per live process session, so a session the model started keeps
+ * draining after its tool call returned. The sink routes per fd — the
+ * agent's own fd steps the agent, any other is drained by chat_app. */
 static size_t chat_fill_external_fds(TuiExternalFd *out, size_t cap,
                                      void *userdata)
 {
     if (!out || cap == 0)
         return 0;
-    NmConnectionInterest i = nm_chat_app_interest(userdata);
-    if (i.fd < 0 || i.flags == 0)
-        return 0;
-    out[0].fd = i.fd;
-    out[0].flags = 0;
-    if (i.flags & NM_INTEREST_READ)
-        out[0].flags |= TUI_FD_READ;
-    if (i.flags & NM_INTEREST_WRITE)
-        out[0].flags |= TUI_FD_WRITE;
-    return 1;
+    if (cap > TUI_EXTERNAL_FD_MAX)
+        cap = TUI_EXTERNAL_FD_MAX;
+    NmConnectionInterest entries[TUI_EXTERNAL_FD_MAX];
+    size_t n = nm_chat_app_interest(userdata, entries, cap);
+    for (size_t i = 0; i < n; i++) {
+        out[i].fd = entries[i].fd;
+        out[i].flags = 0;
+        if (entries[i].flags & NM_INTEREST_READ)
+            out[i].flags |= TUI_FD_READ;
+        if (entries[i].flags & NM_INTEREST_WRITE)
+            out[i].flags |= TUI_FD_WRITE;
+    }
+    return n;
 }
 
 static void chat_external_ready(int fd, unsigned ready, void *userdata)
 {
-    (void)fd;
-    (void)ready;
-    nm_chat_app_step(userdata);
+    nm_chat_app_external_ready(userdata, fd, ready);
 }
 
 static void chat_tick(void *userdata)
@@ -435,6 +438,10 @@ int main(int argc, char *argv[])
             fputc('\n', stdout);
         }
         nm_agent_free(agent); /* session owned by the agent */
+        /* A one-shot turn can still have started process sessions
+         * (exec_command); they are process-global, so nothing else
+         * closes them. Group-kill them before the CLI exits. */
+        nm_proc_close_all();
         nm_toolset_free(tools);
         nm_config_free(cfg);
         return rc == 0 ? 0 : 1;

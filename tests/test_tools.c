@@ -20,7 +20,7 @@
 #endif
 
 #include "json.h"
-#include "process.h"
+#include "nm_process.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
 
@@ -1887,6 +1887,33 @@ static void test_exec_session_lifecycle(void)
 
 #endif /* !_WIN32 */
 
+#ifdef _WIN32
+/* The session tools are registered on every platform; on Windows the
+ * spawn is the documented unsupported stub (nm_process_win.c) until
+ * boba grows an I/O-source seam for pipes — so the model gets a clean
+ * error instead of a half-working session. */
+static void test_exec_command_unsupported_on_windows(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "exec_command",
+                                        "{\"cmd\":\"echo hi\"}", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "not supported") != NULL);
+    nm_tool_result_free(&r);
+
+    /* No session can exist, so the other two report not-found. */
+    r = nm_toolset_execute(ts, "write_stdin", "{\"session_id\":1}", NULL);
+    ASSERT_FALSE(r.ok);
+    nm_tool_result_free(&r);
+
+    r = nm_toolset_execute(ts, "kill_session", "{\"session_id\":1}", NULL);
+    ASSERT_FALSE(r.ok);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+#endif /* _WIN32 */
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -1949,33 +1976,6 @@ int main(void)
 #endif
 #ifdef _WIN32
     RUN_TEST(test_exec_command_unsupported_on_windows);
-#endif
-
-#ifdef _WIN32
-    /* The session tools are registered on every platform; on Windows the
-     * spawn is the documented unsupported stub (process_win.c) until boba
-     * grows an I/O-source seam for pipes — so the model gets a clean error
-     * instead of a half-working session. */
-    static void test_exec_command_unsupported_on_windows(void)
-    {
-        NmToolset *ts = nm_toolset_new_defaults();
-        NmToolResult r = nm_toolset_execute(ts, "exec_command",
-                                            "{\"cmd\":\"echo hi\"}", NULL);
-        ASSERT_FALSE(r.ok);
-        ASSERT_NOT_NULL(r.output);
-        ASSERT_TRUE(strstr(r.output, "not supported") != NULL);
-        nm_tool_result_free(&r);
-
-        /* No session can exist, so the other two report not-found. */
-        r = nm_toolset_execute(ts, "write_stdin", "{\"session_id\":1}", NULL);
-        ASSERT_FALSE(r.ok);
-        nm_tool_result_free(&r);
-
-        r = nm_toolset_execute(ts, "kill_session", "{\"session_id\":1}", NULL);
-        ASSERT_FALSE(r.ok);
-        nm_tool_result_free(&r);
-        nm_toolset_free(ts);
-    }
 #endif
     TEST_SUMMARY();
 }

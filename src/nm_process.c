@@ -1,6 +1,6 @@
-/* process.c - process-session registry, buffer, and dumb-terminal render
+/* nm_process.c - process-session registry, buffer, and dumb-terminal render
  *
- * Platform-neutral half of the process layer (process.h): the registry,
+ * Platform-neutral half of the process layer (nm_process.h): the registry,
  * the bounded per-session output buffer with its omission counter, the
  * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
  * half (spawn/read/write/kill/reap) is process_posix.c / process_win.c.
@@ -13,8 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "process.h"
-#include "process_internal.h"
+#include "nm_process.h"
+#include "nm_process_internal.h"
 
 #define PROC_BUF_MAX_DEFAULT (256 * 1024) /* == SPAWN_CAPTURE_MAX */
 #define PROC_REPORT_SEED     256

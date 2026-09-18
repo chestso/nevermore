@@ -1,4 +1,4 @@
-/* process.h - process sessions (Codex-style unified exec)
+/* nm_process.h - process sessions (Codex-style unified exec)
  *
  * A session is a long-lived command (a dev server, a REPL, `ssh`, a
  * test watch) the model can poll and feed stdin to, instead of the
@@ -28,11 +28,18 @@ extern "C" {
 typedef struct NmProc NmProc;
 
 /* Concurrent-session cap (default; nm_proc_set_max_sessions overrides
- * for tests).  quoth's default, kept because sessions do not ride the
- * event loop yet; P3 must clamp the effective cap to boba's
- * TUI_EXTERNAL_FD_MAX (32) — the fd budget bounds concurrent sessions,
- * and one past it must error rather than leave a child unsubscribed. */
-#define NM_PROC_MAX_SESSIONS 128
+ * for tests).
+ *
+ * This IS the event loop's subscription budget, not a tidiness knob: a
+ * session is drained only while its PTY master is in the external-fd
+ * set, so a session that cannot be subscribed would block its child on
+ * a full PTY and stall it silently.  boba's TUI_EXTERNAL_FD_MAX (32)
+ * slots must therefore hold every session PLUS one for the agent's own
+ * stream/exec fd — so the cap is 32 - 1, and a spawn one past it fails
+ * loudly ("session cap of N reached") instead of leaving a child
+ * unsubscribed.  chat_app.c static-asserts the relationship against
+ * boba's macro. */
+#define NM_PROC_MAX_SESSIONS 31
 
 /* Spawn `cmd` under /bin/sh -c on a PTY in `cwd` (NULL = inherit the
  * process working directory), with a sanitized environment.  On success

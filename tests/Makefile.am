@@ -191,17 +191,17 @@ test_context_CFLAGS = $(TEST_CFLAGS)
 # Same spawn split as src/Makefile.am — one file per OS.
 if HOST_WINDOWS
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_win.c ../src/os_compat_win.c
-PROCESS_SOURCE = ../src/process_win.c
+PROCESS_SOURCE = ../src/nm_process_win.c
 else
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_posix.c
-PROCESS_SOURCE = ../src/process_posix.c
+PROCESS_SOURCE = ../src/nm_process_posix.c
 endif
 # web_search rides transport (the async HTTP step machine), so the
 # tools binary links the wire stack and the TLS backend source; the
 # spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
-    ../src/process.c $(PROCESS_SOURCE) \
+    ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
@@ -214,7 +214,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # reachability cache and its timeout.
 test_web_search_SOURCES = test_web_search.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
+    ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
@@ -225,7 +225,7 @@ test_web_search_LDADD = -lpthread $(TEST_TLS_LIBS)
 # Process sessions: the PTY registry, bounded buffer, dumb-terminal
 # renderer, stdin writes, and group-kill (loopback-free; the OS seam is
 # exercised for real on POSIX, and reports unsupported on Windows).
-test_process_SOURCES = test_process.c ../src/process.c $(PROCESS_SOURCE)
+test_process_SOURCES = test_process.c ../src/nm_process.c $(PROCESS_SOURCE)
 test_process_CFLAGS = $(TEST_CFLAGS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
@@ -233,7 +233,7 @@ test_process_CFLAGS = $(TEST_CFLAGS)
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/context.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
+    ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
@@ -285,7 +285,7 @@ test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
+    ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \

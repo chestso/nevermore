@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "agent.h"
-#include "process.h"
+#include "nm_process.h"
 #include "transport.h"
 #include "provider.h"
 #include "provider_internal.h"

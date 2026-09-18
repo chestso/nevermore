@@ -44,6 +44,7 @@
 #include "nm_config.h"
 #include "authinfo.h"
 #include "colors.h"
+#include "nm_process.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
 
@@ -408,6 +409,22 @@ static void harness_enter(AppHarness *h)
     tui_runtime_flush(h->rt);
 }
 
+/* The agent's own entry in the app's wait set. The set is an array now
+ * (agent stream/exec fd first, then one READ entry per process
+ * session), so a test that wants "the agent's interest" looks up its
+ * fd rather than assuming slot 0 is a single connection. */
+static unsigned app_interest(NmChatApp *app)
+{
+    NmConnectionInterest e[TUI_EXTERNAL_FD_MAX];
+    size_t n = nm_chat_app_interest(app, e, TUI_EXTERNAL_FD_MAX);
+    int afd = nm_chat_app_fd(app);
+    for (size_t i = 0; i < n; i++) {
+        if (e[i].fd == afd)
+            return e[i].flags;
+    }
+    return 0;
+}
+
 /* Drive the agent to completion the way the runtime's external-fd
  * loop would: poll fd -> step. Bounded. */
 static int harness_drive(AppHarness *h, int max_spins)
@@ -418,7 +435,7 @@ static int harness_drive(AppHarness *h, int max_spins)
             st == NM_AGENT_IDLE)
             return 0;
         int fd = nm_chat_app_fd(h->app);
-        unsigned interest = nm_chat_app_interest(h->app).flags;
+        unsigned interest = app_interest(h->app);
         if (fd >= 0 && interest) {
             fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
@@ -1562,7 +1579,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
             nm_chat_app_fd(h->app) >= 0)
             break;
         int fd = nm_chat_app_fd(h->app);
-        unsigned in = nm_chat_app_interest(h->app).flags;
+        unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
@@ -1646,7 +1663,7 @@ static void test_cancel_during_tool_closes_the_block(void)
             nm_chat_app_fd(h->app) >= 0)
             break;
         int fd = nm_chat_app_fd(h->app);
-        unsigned in = nm_chat_app_interest(h->app).flags;
+        unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
@@ -2727,6 +2744,243 @@ static void test_config_absent_is_no_persistence(void)
  * test_net_helpers.h). */
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 
+/* ---------------------------------------------------------------- */
+/* P3: the multi-fd wait set + session teardown                      */
+/*                                                                    */
+/* Sessions cannot be started on Windows yet (nm_process_win.c stub,   */
+/* P5), so the tests that need a live session are POSIX-only; the     */
+/* fd-budget arithmetic below is checked on every platform.           */
+/* ---------------------------------------------------------------- */
+
+/* The fd budget: boba's pool must hold every session plus the agent's
+ * own fd, or a session goes unsubscribed (and then undrained). The
+ * compile-time typedef in chat_app.c pins it; this pins the arithmetic
+ * at runtime too. */
+static void test_session_cap_fits_the_fd_budget(void)
+{
+    ASSERT_TRUE((size_t)NM_PROC_MAX_SESSIONS + 1 <= TUI_EXTERNAL_FD_MAX);
+#ifndef _WIN32
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    nm_proc_reset(); /* a clean cap + registry, whatever ran before */
+
+    nm_proc_set_max_sessions(4);
+    char err[128];
+    for (int i = 0; i < 4; i++) {
+        int id = -1;
+        ASSERT_NOT_NULL(
+            nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    }
+    /* One past the cap fails loudly instead of spawning a child nobody
+     * will ever drain. */
+    int id = -1;
+    ASSERT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    ASSERT_TRUE(strstr(err, "cap") != NULL);
+
+    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 4);
+    for (size_t i = 0; i < 4; i++) {
+        ASSERT_TRUE(set[i].fd >= 0);
+        for (size_t j = i + 1; j < 4; j++)
+            ASSERT_TRUE(set[i].fd != set[j].fd);
+    }
+
+    harness_free(h);
+    nm_proc_reset(); /* later tests get the default cap back */
+    ASSERT_EQ(nm_proc_count(), 0);
+#endif
+}
+
+#ifndef _WIN32
+/* Every registered session rides the wait set (one READ entry each),
+ * because a session left out of the set is never drained and its child
+ * stalls on a full PTY. Order is agent-first, then registry order; a
+ * closed session's fd drops out. */
+static void test_interest_lists_every_session(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
+    /* Idle app, no sessions: nothing to wait on. */
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 0);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, 0), 0);
+
+    char err[128];
+    int id1 = -1, id2 = -1;
+    NmProc *p1 = nm_proc_start("sleep 30", NULL, &id1, err, sizeof(err));
+    ASSERT_NOT_NULL(p1);
+    NmProc *p2 = nm_proc_start("sleep 30", NULL, &id2, err, sizeof(err));
+    ASSERT_NOT_NULL(p2);
+
+    size_t n = nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX);
+    ASSERT_EQ(n, 2);
+    ASSERT_EQ(set[0].fd, nm_proc_fd(p1));
+    ASSERT_EQ(set[1].fd, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
+    ASSERT_EQ(set[1].flags, NM_INTEREST_READ);
+    ASSERT_TRUE(set[0].fd != set[1].fd);
+    /* nm_proc_by_fd resolves what the loop is handed. */
+    ASSERT_TRUE(nm_proc_by_fd(set[1].fd) == p2);
+
+    /* A closed session stops being declared. */
+    nm_proc_close(p1);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
+    ASSERT_EQ(set[0].fd, nm_proc_fd(p2));
+
+    /* A cap smaller than the set truncates (the caller's pool bound),
+     * and the API never writes past it. */
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, 1), 1);
+    ASSERT_EQ(set[0].fd, nm_proc_fd(p2));
+
+    harness_free(h);
+    ASSERT_EQ(nm_proc_count(), 0); /* teardown killed the survivor */
+}
+
+/* App teardown is where sessions die: they are process-global (a tool's
+ * userdata is a workdir path string, so it cannot carry a manager) and
+ * they outlive the turn that started them. Without the close-all a dev
+ * server the model started keeps running after the user quits. */
+static void test_app_teardown_kills_sessions(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char err[128];
+    int id = -1;
+    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    ASSERT_EQ(nm_proc_count(), 1);
+
+    harness_free(h); /* runtime -> component free -> nm_chat_app_free */
+    ASSERT_EQ(nm_proc_count(), 0);
+}
+
+/* A background session's output is drained by the loop (via
+ * nm_chat_app_external_ready) into its bounded buffer, and NOT echoed
+ * to the transcript: the model reads it later with write_stdin, and
+ * /ps is the human's window. */
+static void test_external_ready_drains_background_session(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("printf 'background output\\n'; sleep 30",
+                              NULL, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    int fd = nm_proc_fd(p);
+    ASSERT_TRUE(fd >= 0);
+
+    /* An unknown fd (and the -1 "nothing" case) is a safe no-op. */
+    nm_chat_app_external_ready(h->app, -1, TUI_FD_READ);
+    nm_chat_app_external_ready(h->app, fd + 1000, TUI_FD_READ);
+    ASSERT_EQ(nm_proc_buffered(p), 0u);
+
+    int drained = 0;
+    for (int i = 0; i < 100 && !drained; i++) {
+        fd_set fds;
+        struct timeval tv = { 0, 20 * 1000 };
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        select(fd + 1, &fds, NULL, NULL, &tv);
+        nm_chat_app_external_ready(h->app, fd, TUI_FD_READ);
+        drained = nm_proc_buffered(p) > 0;
+    }
+    ASSERT_TRUE(drained);
+    ASSERT_NOT_NULL(strstr(nm_proc_take_output(p), "background output"));
+
+    /* Nothing reached the transcript (no echo of background output). */
+    ASSERT_EQ(nm_chat_app_tail_len(h->app), 0u);
+
+    harness_free(h);
+    ASSERT_EQ(nm_proc_count(), 0);
+}
+
+/* An active exec_command's fd IS its session's master, so the wait set
+ * carries it ONCE (boba treats a duplicated fd as undefined). After the
+ * yield window closes and the call ends, the session is still live and
+ * the set holds it on its own — which is the whole P3 point: the
+ * session keeps draining after its tool call returned. */
+static void test_interest_dedupes_active_exec_session(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_x\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"exec_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"echo starting; sleep 30\\\","
+        "\\\"yield_time_ms\\\":250}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"session up\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "start it");
+    harness_enter(h);
+
+    /* Step until the session is up (RUNNING_TOOL with a live fd). */
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            nm_chat_app_fd(h->app) >= 0)
+            break;
+        int fd = nm_chat_app_fd(h->app);
+        unsigned in = app_interest(h->app);
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    int exec_fd = nm_chat_app_fd(h->app);
+    ASSERT_TRUE(exec_fd >= 0);
+    ASSERT_EQ(nm_proc_count(), 1);
+    ASSERT_EQ(exec_fd, nm_proc_fd(nm_proc_at(0)));
+
+    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
+    ASSERT_EQ(set[0].fd, exec_fd);
+    ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
+
+    /* The yield window closes, the call ends, the round finishes — and
+     * the session survives on its own in the wait set. */
+    ASSERT_EQ(harness_drive(h, 2000), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    ASSERT_EQ(nm_chat_app_fd(h->app), -1);
+    ASSERT_EQ(nm_proc_count(), 1);
+    ASSERT_TRUE(harness_read(h) != NULL);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
+    ASSERT_EQ(set[0].fd, exec_fd);
+    ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
+
+    harness_free(h);
+    ASSERT_EQ(nm_proc_count(), 0);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+#endif /* !_WIN32 */
+
 int main(void)
 {
 #ifndef _WIN32
@@ -2814,5 +3068,12 @@ int main(void)
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
+    RUN_TEST(test_session_cap_fits_the_fd_budget);
+#ifndef _WIN32
+    RUN_TEST(test_interest_lists_every_session);
+    RUN_TEST(test_app_teardown_kills_sessions);
+    RUN_TEST(test_external_ready_drains_background_session);
+    RUN_TEST(test_interest_dedupes_active_exec_session);
+#endif
     TEST_SUMMARY();
 }

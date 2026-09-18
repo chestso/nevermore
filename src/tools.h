@@ -172,7 +172,7 @@ void nm_tool_web_search_reset_health(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report
  * exit status. Used by tests too. (Long-lived process sessions live in
- * process.h.) */
+ * nm_process.h.) */
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code);
 
 #ifdef __cplusplus

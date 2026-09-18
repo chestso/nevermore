@@ -1,4 +1,4 @@
-/* process_posix.c - PTY-backed process sessions (POSIX)
+/* nm_process_posix.c - PTY-backed process sessions (POSIX)
  *
  * The OS half of the process layer: spawn a command on a PTY with a
  * sanitized environment, non-blocking read/write on the master, and
@@ -22,8 +22,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "process.h"
-#include "process_internal.h"
+#include "nm_process.h"
+#include "nm_process_internal.h"
 
 extern char **environ;
 

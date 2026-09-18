@@ -28,7 +28,7 @@ static long now_ms(void)
 }
 #endif
 
-#include "process.h"
+#include "nm_process.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */

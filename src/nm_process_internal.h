@@ -1,4 +1,4 @@
-/* process_internal.h - OS seam between process.c and per-OS spawn */
+/* nm_process_internal.h - OS seam between nm_process.c and per-OS spawn */
 
 #ifndef NM_PROCESS_INTERNAL_H
 #define NM_PROCESS_INTERNAL_H
@@ -6,7 +6,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "process.h"
+#include "nm_process.h"
 
 /* Fill err (when non-NULL) with `msg`, truncated; harmless when err is
  * NULL or errsz is 0. */

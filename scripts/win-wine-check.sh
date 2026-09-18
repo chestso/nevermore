@@ -41,6 +41,10 @@ TLS_SRC=src/tls_openssl.c # cross-compiled MinGW + OpenSSL; wine
 run_build() {
 	name=$1
 	shift
+	# Remove the target FIRST: a failed compile must not leave the
+	# previous run's exe behind to "pass" under wine (that is how a
+	# src/process.h shadowing <process.h> hid a broken Windows build).
+	rm -f "$OUT/$name.exe"
 	# shellcheck disable=SC2086
 	$CC -o "$OUT/$name.exe" "$@" $COMMON 2>&1 | head -5
 	[ -f "$OUT/$name.exe" ] || {
@@ -57,17 +61,17 @@ run_build test_config tests/test_config.c src/nm_config.c
 run_build test_session tests/test_session.c src/session.c
 run_build test_context tests/test_context.c src/context.c
 
-run_build test_process tests/test_process.c src/process.c src/process_win.c
+run_build test_process tests/test_process.c src/nm_process.c src/nm_process_win.c
 
 run_build test_tools tests/test_tools.c src/tools.c src/tools_file.c \
-	src/tools_websearch.c src/tools_exec.c src/process.c src/process_win.c \
+	src/tools_websearch.c src/tools_exec.c src/nm_process.c src/nm_process_win.c \
 	src/tools_spawn_win.c src/os_compat_win.c \
 	src/json.c src/transport.c src/transport_socket.c \
 	src/wire_recorder.c $TLS_SRC -lws2_32 -lpthread
 
 run_build test_web_search tests/test_web_search.c src/tools.c \
-	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/process.c \
-	src/process_win.c src/tools_spawn_win.c \
+	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/nm_process.c \
+	src/nm_process_win.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC \
 	-lws2_32 -lpthread
@@ -116,7 +120,7 @@ run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 
 run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/context.c src/tools.c src/tools_file.c src/tools_websearch.c \
-	src/tools_exec.c src/process.c src/process_win.c src/tools_spawn_win.c \
+	src/tools_exec.c src/nm_process.c src/nm_process_win.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \

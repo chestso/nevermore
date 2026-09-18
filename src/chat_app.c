@@ -56,6 +56,7 @@
 #include "colors.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
+#include "nm_process.h"
 #include "spinner.h"
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
@@ -698,6 +699,12 @@ void nm_chat_app_free(NmChatApp *app)
     tui_list_popup_free(app->popup);
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
+    /* Sessions are process-global (a tool's userdata is a workdir path
+     * string, so it cannot carry a manager), and they outlive the turn
+     * that started them — so app teardown is where they die. Without
+     * this, a dev server the model started keeps running (and writing
+     * into a PTY nobody drains) after the user quits. */
+    nm_proc_close_all();
     nm_toolset_free(app->tools);
     nm_spinner_free(app->spinner);
     dynamic_buffer_destroy(app->tool_body);
@@ -809,17 +816,68 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
 
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
 
-/* The app's aggregate wait interest (N4 v1: the live agent stream;
- * phase-5 wire catalog fetches append entries here via the same
- * NmSource fd seam). fd < 0 or flags == 0 = nothing to wait on. */
-NmConnectionInterest nm_chat_app_interest(NmChatApp *app)
+/* boba's external-fd pool must hold every session PLUS the agent's own
+ * stream fd: a session left out of the set is never drained, so its
+ * child stalls on a full PTY (see NM_PROC_MAX_SESSIONS in nm_process.h). */
+typedef char nm_proc_fd_budget_fits
+    [(TUI_EXTERNAL_FD_MAX >= NM_PROC_MAX_SESSIONS + 1) ? 1 : -1];
+
+/* The app's aggregate wait interest: the live agent stream (fd +
+ * flags) first, then one READ entry per registered process session.
+ *
+ * A session outlives the tool call that started it, so its master fd
+ * must stay subscribed or the child blocks writing; the agent's own
+ * stream/exec fd takes priority so a small cap degrades to "background
+ * sessions drain a cycle later", never to "the turn stalls".  An active
+ * exec_command's fd is its session's master — emitted once (boba's
+ * contract: a duplicated fd across slots is undefined). */
+size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
+                            size_t cap)
 {
-    if (!app)
-        return (NmConnectionInterest){ -1, 0 };
+    if (!app || !out || cap == 0)
+        return 0;
+
+    size_t n = 0;
+    int agent_fd = nm_agent_fd(app->agent);
     unsigned flags = nm_agent_interest(app->agent);
-    if (!flags)
-        return (NmConnectionInterest){ -1, 0 };
-    return (NmConnectionInterest){ nm_agent_fd(app->agent), flags };
+    if (agent_fd >= 0 && flags) {
+        out[n].fd = agent_fd;
+        out[n].flags = flags;
+        n++;
+    }
+
+    int sessions = nm_proc_count();
+    for (int i = 0; i < sessions && n < cap; i++) {
+        NmProc *p = nm_proc_at(i);
+        if (!p)
+            continue;
+        int fd = nm_proc_fd(p);
+        if (fd < 0 || fd == agent_fd)
+            continue; /* dedupe: the active exec's fd is already here */
+        out[n].fd = fd;
+        out[n].flags = NM_INTEREST_READ;
+        n++;
+    }
+    return n;
+}
+
+/* One external fd became ready.  The agent's fd drives a step (whose
+ * tool step drains and reaps); any other fd is a background session,
+ * drained into its bounded buffer so the child never blocks on a full
+ * PTY.  The model reads that output later through write_stdin; nothing
+ * here is echoed to the transcript — /ps is the human's window. */
+void nm_chat_app_external_ready(NmChatApp *app, int fd, unsigned ready)
+{
+    (void)ready;
+    if (!app)
+        return;
+    if (app->agent && fd == nm_agent_fd(app->agent)) {
+        nm_chat_app_step(app);
+        return;
+    }
+    NmProc *p = nm_proc_by_fd(fd);
+    if (p)
+        nm_proc_drain(p);
 }
 
 void nm_chat_app_step(NmChatApp *app)

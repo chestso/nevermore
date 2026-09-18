@@ -1,4 +1,4 @@
-/* process_win.c - process sessions on Windows: not supported yet
+/* nm_process_win.c - process sessions on Windows: not supported yet
  *
  * A session's master pipe cannot ride boba's socket subscription set
  * (WSAEventSelect works on sockets, not anonymous pipes); the honest
@@ -10,8 +10,8 @@
 
 #include <stdio.h>
 
-#include "process.h"
-#include "process_internal.h"
+#include "nm_process.h"
+#include "nm_process_internal.h"
 
 int nm_proc_os_spawn(const char *cmd, const char *cwd, long *pid, int *fd,
                      char *err, size_t errsz)
