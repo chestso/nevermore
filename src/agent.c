@@ -629,8 +629,14 @@ unsigned nm_agent_interest(NmAgent *a)
 {
     if (!a)
         return 0;
-    if (a->exec)
-        return NM_INTEREST_READ; /* wait for the child's output */
+    if (a->exec) {
+        /* The async tool declares its own interest (an HTTP tool waits
+         * for connect/send writability, then reads); a tool without the
+         * callback only ever reads (run_command's output pipe). */
+        if (a->exec_tool && a->exec_tool->interest)
+            return a->exec_tool->interest(a->exec);
+        return NM_INTEREST_READ;
+    }
     if (!a->stream || !a->provider->chat_stream_interest)
         return 0;
     return a->provider->chat_stream_interest(a->stream);

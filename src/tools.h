@@ -80,6 +80,12 @@ typedef struct NmTool
                          void *userdata);
     NmToolStatus (*step)(NmToolExec *e, NmToolResult *out);
     int (*exec_fd)(NmToolExec *e);
+    /* Wait interest while a step is draining (transport's
+     * NM_INTEREST_READ / NM_INTEREST_WRITE bits), or NULL to mean
+     * "readable". run_command only ever reads its output pipe, but an
+     * HTTP tool must first wait for connect/send writability — the
+     * agent forwards these bits to the event loop's wait set. */
+    unsigned (*interest)(const NmToolExec *e);
     void (*end)(NmToolExec *e);
 } NmTool;
 
@@ -131,8 +137,29 @@ char *nm_tool_plan(const char *name, const char *args_json);
 /* read_file(path), edit_file(path, old_string, new_string),
  * list_dir(path), search_dir(path, needle) — character-level scan,
  * no regex; run_command(cmd) — portable spawn
- * (posix_spawn / CreateProcessW) */
+ * (posix_spawn / CreateProcessW); web_search(query) — a local SearXNG
+ * instance over HTTP (one async step machine, see tools_websearch.c) */
 NmToolset *nm_toolset_new_defaults(void);
+
+/* ---------------------------------------------------------------- */
+/* web_search runtime knobs (process-global, like the TLS backend /  */
+/* wire tap: configured once at startup, no per-session state)       */
+/* ---------------------------------------------------------------- */
+
+/* Local SearXNG endpoint the web_search tool queries. NULL/"" = the
+ * built-in default (http://127.0.0.1:8888). main.c sets it from
+ * nm_config's `searxng` key; chat_app re-resolves it on /config reset.
+ * Pointing it at a different URL clears the cached reachability
+ * state, so the new endpoint gets a fresh probe. */
+void nm_tool_web_search_set_base_url(const char *url);
+
+/* Per-request timeout in ms (0 = default 10000). Test seam and the
+ * anchor for a future `searxng_timeout` knob. */
+void nm_tool_web_search_set_timeout_ms(int ms);
+
+/* Forget the cached reachability state (unknown again). Test seam;
+ * set_base_url calls it when the URL changes. */
+void nm_tool_web_search_reset_health(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report
  * exit status. This is also the OS portability seam for the future
