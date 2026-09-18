@@ -1919,6 +1919,91 @@ static void test_parallel_tool_calls_pair_plan_with_result(void)
     close(sc.fd);
 }
 
+/* The real wire pattern behind the 2026-09-18 "eaten description"
+ * report (dumps 094157/094235/094301): round 1 streams content whose
+ * tail is an UNCLOSED ```json fence quoting the tool description, then
+ * the tool call. The unclosed fence's body lives in the live region
+ * until the tool round begins; the report read its transient frame
+ * rows as "committed then deleted". The flash itself was a spinner OOB
+ * read (test_spinner), not the transcript.
+ *
+ * This test pins the transcript half of that story so the two cannot be
+ * confused again: the pending fence body DOES reach the scrollback,
+ * committed in order before the tool plan, and the transient live frame
+ * carries it meanwhile. */
+static void test_open_json_fence_before_tool_call_commits(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Let me check.\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"```json\\n\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"{\\n  \\\"description\\\": "
+        "\\\"Run a shell command and capture its combined output and exit "
+        "status\\\"\\n}\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_d\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 0.2; echo done-check\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Done. The tool said "
+        "hello.\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.delay_us = 60 * 1000; /* separate readable events per delta */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base2[64];
+    snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base2);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "check it");
+    harness_enter(h);
+
+    /* Mid-stream: step until the fence body is on the live frame.
+     * (The FLASH itself was the spinner's tier-switch OOB read, pinned
+     * deterministically in test_spinner.c; here we pin the other half
+     * of the story — those bytes are real transcript data, not a stray
+     * rodata leak.) */
+    for (int i = 0; i < 300; i++) {
+        if (nm_chat_app_state(h->app) != NM_AGENT_STREAMING)
+            break;
+        harness_step_once(h);
+        const char *out = harness_read(h);
+        if (strstr(out, "Run a shell command"))
+            break;
+    }
+    printf("  mid-stream: description visible=%s\n",
+           strstr(harness_read(h), "Run a shell command") ? "yes" : "no");
+
+    /* Drive to completion the way the loop would. */
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    char *clean = strip_frames(out);
+    ASSERT_NOT_NULL(clean);
+    /* ...and it must STAY: the unclosed fence's body commits at the
+     * round boundary (stream_end finalizes it), before the tool plan. */
+    const char *desc = strstr(clean, "Run a shell command");
+    const char *plan = strstr(clean, "run_command");
+    ASSERT_NOT_NULL(desc);
+    ASSERT_NOT_NULL(plan);
+    ASSERT_TRUE(desc < plan);
+    free(clean);
+    /* The turn's answer is also present. */
+    ASSERT_TRUE(strstr(out, "Done. The tool said hello.") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_tab_on_slash_prefix_opens_commands_popup(void)
 {
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
@@ -2660,6 +2745,7 @@ int main(void)
     RUN_TEST(test_reasoning_not_echoed_by_default);
     RUN_TEST(test_reasoning_echo_opt_in);
     RUN_TEST(test_parallel_tool_calls_pair_plan_with_result);
+    RUN_TEST(test_open_json_fence_before_tool_call_commits);
 #ifndef _WIN32
     RUN_TEST(test_cancel_during_tool_closes_the_block);
     RUN_TEST(test_tool_runs_async_and_spinner_ticks);
