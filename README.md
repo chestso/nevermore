@@ -128,16 +128,16 @@ In the chat: `/config` shows where each setting comes from,
 
 `exec_command` starts a command that outlives the tool call: a dev
 server, a REPL, `ssh`, a test watcher. It reports either the exit
-status (the command finished inside its yield window) or a session id.
+status (the command finished inside its yield window) or a job id.
 
-The session keeps running between turns, and the model drives it on its
+The job keeps running between turns, and the model drives it on its
 own: `write_stdin` feeds it input and reports what it has printed since,
-`kill_session` stops it. Output produced between calls is buffered for
+`kill_job` stops it. Output produced between calls is buffered for
 the model to poll. Its output is deliberately **not** streamed
 into the transcript — it is the model's to poll, so a build log does
 not scroll by unasked.
 
-You watch the same sessions from the chat:
+You watch the same jobs from the chat:
 
 ```
 /ps            # id, state (running / exited N), command, output buffered
@@ -147,10 +147,10 @@ You watch the same sessions from the chat:
 The spinner keeps ticking while a command runs, so a silent child never
 looks like a hang.
 
-Sessions are POSIX-only for now: on Windows the session tools answer
+Jobs are POSIX-only for now: on Windows the job tools answer
 "not supported" until boba grows an I/O-source seam for pipes. They are
 process-global and each occupies a slot in boba's external-fd pool, so
-at most `NM_PROC_MAX_SESSIONS` (31: the pool less the agent's own fd)
+at most `NM_PROC_MAX_JOBS` (31: the pool less the agent's own fd)
 run at once — one past that fails loudly rather than starting a child
 nothing would read. They die with nevermore.
 

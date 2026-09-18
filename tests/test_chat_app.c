@@ -2095,7 +2095,7 @@ static void test_tab_on_slash_prefix_opens_commands_popup(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "/model") != NULL);
     ASSERT_TRUE(strstr(frame, "/provider") != NULL);
-    /* The process-session commands are in the completion set too. */
+    /* The process-job commands are in the completion set too. */
     ASSERT_TRUE(strstr(frame, "/ps") != NULL);
     ASSERT_TRUE(strstr(frame, "/kill") != NULL);
     /* The retired plurals are gone from the completion set. */
@@ -2750,26 +2750,26 @@ static void test_config_absent_is_no_persistence(void)
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 
 /* ---------------------------------------------------------------- */
-/* P3: the multi-fd wait set + session teardown                      */
+/* P3: the multi-fd wait set + job teardown                      */
 /*                                                                    */
-/* Sessions cannot be started on Windows yet (nm_process_win.c stub,   */
-/* P5), so the tests that need a live session are POSIX-only; the     */
+/* Jobs cannot be started on Windows yet (nm_process_win.c stub,   */
+/* P5), so the tests that need a live job are POSIX-only; the     */
 /* fd-budget arithmetic below is checked on every platform.           */
 /* ---------------------------------------------------------------- */
 
-/* The fd budget: boba's pool must hold every session plus the agent's
- * own fd, or a session goes unsubscribed (and then undrained). The
+/* The fd budget: boba's pool must hold every job plus the agent's
+ * own fd, or a job goes unsubscribed (and then undrained). The
  * compile-time typedef in chat_app.c pins it; this pins the arithmetic
  * at runtime too. */
-static void test_session_cap_fits_the_fd_budget(void)
+static void test_job_cap_fits_the_fd_budget(void)
 {
-    ASSERT_TRUE((size_t)NM_PROC_MAX_SESSIONS + 1 <= TUI_EXTERNAL_FD_MAX);
+    ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 1 <= TUI_EXTERNAL_FD_MAX);
 #ifndef _WIN32
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     nm_proc_reset(); /* a clean cap + registry, whatever ran before */
 
-    nm_proc_set_max_sessions(4);
+    nm_proc_set_max_jobs(4);
     char err[128];
     for (int i = 0; i < 4; i++) {
         int id = -1;
@@ -2797,17 +2797,17 @@ static void test_session_cap_fits_the_fd_budget(void)
 }
 
 #ifndef _WIN32
-/* Every registered session rides the wait set (one READ entry each),
- * because a session left out of the set is never drained and its child
+/* Every registered job rides the wait set (one READ entry each),
+ * because a job left out of the set is never drained and its child
  * stalls on a full PTY. Order is agent-first, then registry order; a
- * closed session's fd drops out. */
-static void test_interest_lists_every_session(void)
+ * closed job's fd drops out. */
+static void test_interest_lists_every_job(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
-    /* Idle app, no sessions: nothing to wait on. */
+    /* Idle app, no jobs: nothing to wait on. */
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 0);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, 0), 0);
 
@@ -2828,7 +2828,7 @@ static void test_interest_lists_every_session(void)
     /* nm_proc_by_fd resolves what the loop is handed. */
     ASSERT_TRUE(nm_proc_by_fd(set[1].fd) == p2);
 
-    /* A closed session stops being declared. */
+    /* A closed job stops being declared. */
     nm_proc_close(p1);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
     ASSERT_EQ(set[0].fd, nm_proc_fd(p2));
@@ -2842,11 +2842,11 @@ static void test_interest_lists_every_session(void)
     ASSERT_EQ(nm_proc_count(), 0); /* teardown killed the survivor */
 }
 
-/* App teardown is where sessions die: they are process-global (a tool's
+/* App teardown is where jobs die: they are process-global (a tool's
  * userdata is a workdir path string, so it cannot carry a manager) and
  * they outlive the turn that started them. Without the close-all a dev
  * server the model started keeps running after the user quits. */
-static void test_app_teardown_kills_sessions(void)
+static void test_app_teardown_kills_jobs(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -2860,11 +2860,11 @@ static void test_app_teardown_kills_sessions(void)
     ASSERT_EQ(nm_proc_count(), 0);
 }
 
-/* A background session's output is drained by the loop (via
+/* A background job's output is drained by the loop (via
  * nm_chat_app_external_ready) into its bounded buffer, and NOT echoed
  * to the transcript: the model reads it later with write_stdin, and
  * /ps is the human's window. */
-static void test_external_ready_drains_background_session(void)
+static void test_external_ready_drains_background_job(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -2902,12 +2902,12 @@ static void test_external_ready_drains_background_session(void)
     ASSERT_EQ(nm_proc_count(), 0);
 }
 
-/* An active exec_command's fd IS its session's master, so the wait set
+/* An active exec_command's fd IS its job's master, so the wait set
  * carries it ONCE (boba treats a duplicated fd as undefined). After the
- * yield window closes and the call ends, the session is still live and
+ * yield window closes and the call ends, the job is still live and
  * the set holds it on its own — which is the whole P3 point: the
- * session keeps draining after its tool call returned. */
-static void test_interest_dedupes_active_exec_session(void)
+ * job keeps draining after its tool call returned. */
+static void test_interest_dedupes_active_exec_job(void)
 {
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
@@ -2920,7 +2920,7 @@ static void test_interest_dedupes_active_exec_session(void)
         "\\\"yield_time_ms\\\":250}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"session up\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"job up\"}}]}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -2935,7 +2935,7 @@ static void test_interest_dedupes_active_exec_session(void)
     harness_type(h, "start it");
     harness_enter(h);
 
-    /* Step until the session is up (RUNNING_TOOL with a live fd). */
+    /* Step until the job is up (RUNNING_TOOL with a live fd). */
     int spins = 0;
     while (spins++ < 2000) {
         if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
@@ -2969,7 +2969,7 @@ static void test_interest_dedupes_active_exec_session(void)
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
     /* The yield window closes, the call ends, the round finishes — and
-     * the session survives on its own in the wait set. */
+     * the job survives on its own in the wait set. */
     ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     ASSERT_EQ(nm_chat_app_fd(h->app), -1);
@@ -3014,10 +3014,10 @@ static int utf8_well_formed(const char *s)
     return 1;
 }
 
-/* /ps with no sessions: a note, not an empty table (and no crash on an
- * empty registry). Runs on every platform — sessions cannot start on
+/* /ps with no jobs: a note, not an empty table (and no crash on an
+ * empty registry). Runs on every platform — jobs cannot start on
  * Windows, so this is its whole /ps story there. */
-static void test_ps_without_sessions(void)
+static void test_ps_without_jobs(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -3026,14 +3026,14 @@ static void test_ps_without_sessions(void)
     harness_enter(h);
     char *clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
-    ASSERT_TRUE(strstr(clean, "no process sessions") != NULL);
+    ASSERT_TRUE(strstr(clean, "no process jobs") != NULL);
     free(clean);
 
     harness_free(h);
 }
 
 #ifndef _WIN32
-/* /ps lists every registered session with its id, state, command and
+/* /ps lists every registered job with its id, state, command and
  * how much output is waiting; /kill <id> then removes exactly one. */
 static void test_ps_lists_and_kill_removes(void)
 {
@@ -3065,7 +3065,7 @@ static void test_ps_lists_and_kill_removes(void)
     harness_enter(h);
     char *clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
-    ASSERT_TRUE(strstr(clean, "2 process sessions:") != NULL);
+    ASSERT_TRUE(strstr(clean, "2 process jobs:") != NULL);
     char idbuf[16];
     snprintf(idbuf, sizeof(idbuf), "%2d", id_run);
     ASSERT_NOT_NULL(strstr(clean, idbuf));
@@ -3084,7 +3084,7 @@ static void test_ps_lists_and_kill_removes(void)
     harness_enter(h);
     clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
-    ASSERT_TRUE(strstr(clean, "killed session") != NULL);
+    ASSERT_TRUE(strstr(clean, "killed job") != NULL);
     ASSERT_TRUE(strstr(clean, "echo hello; sleep 30") != NULL);
     free(clean);
     ASSERT_NULL(nm_proc_find(id_run));
@@ -3105,7 +3105,7 @@ static void test_ps_lists_and_kill_removes(void)
     harness_enter(h);
     clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
-    ASSERT_TRUE(strstr(clean, "no process sessions") != NULL);
+    ASSERT_TRUE(strstr(clean, "no process jobs") != NULL);
     free(clean);
 
     harness_free(h);
@@ -3139,12 +3139,12 @@ static void test_kill_rejects_bad_ids(void)
 
     char *clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
-    ASSERT_NOT_NULL(strstr(clean, "expected a session id"));
-    ASSERT_NOT_NULL(strstr(clean, "expected a positive session id"));
-    ASSERT_NOT_NULL(strstr(clean, "no session 999"));
+    ASSERT_NOT_NULL(strstr(clean, "expected a job id"));
+    ASSERT_NOT_NULL(strstr(clean, "expected a positive job id"));
+    ASSERT_NOT_NULL(strstr(clean, "no job 999"));
     free(clean);
 
-    /* None of it touched the real session. */
+    /* None of it touched the real job. */
     ASSERT_EQ(nm_proc_count(), 1);
     ASSERT_NOT_NULL(nm_proc_find(id));
 
@@ -3278,8 +3278,8 @@ static void test_exec_command_spinner_tier(void)
     ASSERT_TRUE(strstr(frame, "executing exec_command") != NULL);
 
     /* The window stays open on a silent child; interrupting the turn
-     * returns the UI to idle and LEAVES THE SESSION ALIVE (P3's whole
-     * point: a call's end frees its state, not the session). */
+     * returns the UI to idle and LEAVES THE JOB ALIVE (P3's whole
+     * point: a call's end frees its state, not the job). */
     tui_runtime_send(h->rt, tui_msg_interrupt());
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
     ASSERT_EQ(nm_proc_count(), 1);
@@ -3378,13 +3378,13 @@ int main(void)
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
-    RUN_TEST(test_session_cap_fits_the_fd_budget);
-    RUN_TEST(test_ps_without_sessions);
+    RUN_TEST(test_job_cap_fits_the_fd_budget);
+    RUN_TEST(test_ps_without_jobs);
 #ifndef _WIN32
-    RUN_TEST(test_interest_lists_every_session);
-    RUN_TEST(test_app_teardown_kills_sessions);
-    RUN_TEST(test_external_ready_drains_background_session);
-    RUN_TEST(test_interest_dedupes_active_exec_session);
+    RUN_TEST(test_interest_lists_every_job);
+    RUN_TEST(test_app_teardown_kills_jobs);
+    RUN_TEST(test_external_ready_drains_background_job);
+    RUN_TEST(test_interest_dedupes_active_exec_job);
     RUN_TEST(test_ps_lists_and_kill_removes);
     RUN_TEST(test_kill_rejects_bad_ids);
     RUN_TEST(test_ps_command_column_elides_safely);

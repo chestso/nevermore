@@ -1,6 +1,6 @@
-/* nm_process_win.c - process sessions on Windows: not supported yet
+/* nm_process_win.c - process jobs on Windows: not supported yet
  *
- * A session's master pipe cannot ride boba's socket subscription set
+ * A job's master pipe cannot ride boba's socket subscription set
  * (WSAEventSelect works on sockets, not anonymous pipes); the honest
  * fix is a boba I/O-source abstraction, not a workaround here.  Until
  * that lands the OS seam reports a clean spawn failure, so
@@ -21,7 +21,7 @@ int nm_proc_os_spawn(const char *cmd, const char *cwd, long *pid, int *fd,
     *pid = -1;
     *fd = -1;
     nm_proc_set_err(err, errsz,
-                    "process sessions are not supported on Windows yet");
+                    "process jobs are not supported on Windows yet");
     return -1;
 }
 

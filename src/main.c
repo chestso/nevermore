@@ -173,7 +173,7 @@ static int provider_name_is_known(const char *name)
 /* TuiRuntimeConfig event callbacks (event_data = the app). The fill
  * callback declares the app's live external fds each wait (Elm
  * subscriptions in C idiom): the agent's stream/exec fd plus one READ
- * entry per live process session, so a session the model started keeps
+ * entry per live process job, so a job the model started keeps
  * draining after its tool call returned. The sink routes per fd — the
  * agent's own fd steps the agent, any other is drained by chat_app. */
 static size_t chat_fill_external_fds(TuiExternalFd *out, size_t cap,
@@ -438,7 +438,7 @@ int main(int argc, char *argv[])
             fputc('\n', stdout);
         }
         nm_agent_free(agent); /* session owned by the agent */
-        /* A one-shot turn can still have started process sessions
+        /* A one-shot turn can still have started process jobs
          * (exec_command); they are process-global, so nothing else
          * closes them. Group-kill them before the CLI exits. */
         nm_proc_close_all();

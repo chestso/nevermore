@@ -222,7 +222,7 @@ test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_web_search_LDADD = -lpthread $(TEST_TLS_LIBS)
 
-# Process sessions: the PTY registry, bounded buffer, dumb-terminal
+# Process jobs: the PTY registry, bounded buffer, dumb-terminal
 # renderer, stdin writes, and group-kill (loopback-free; the OS seam is
 # exercised for real on POSIX, and reports unsupported on Windows).
 test_process_SOURCES = test_process.c ../src/nm_process.c $(PROCESS_SOURCE)

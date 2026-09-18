@@ -173,13 +173,13 @@ char *nm_clamp_output(const char *text)
     return nm_truncate_tail(text, NM_TOOL_MAX_OUTPUT, marker);
 }
 
-/* Session-output clamp (tools_internal.h): trim trailing whitespace,
+/* Job-output clamp (tools_internal.h): trim trailing whitespace,
  * then keep a 70/30 head/tail split of the budget with an omission
  * marker between the halves. A finished build's failures, a test
  * summary and a crash dump all live in the last lines, so the head-only
  * cut the other tools use would drop exactly the part being asked for.
  * quoth spends the same 70/30 on exec output. */
-char *nm_clamp_session_output(const char *text)
+char *nm_clamp_job_output(const char *text)
 {
     if (!text)
         return NULL;
@@ -256,7 +256,7 @@ NmToolset *nm_toolset_new_defaults(void)
     nm_toolset_add(ts, &nm_tool_run_command);
     nm_toolset_add(ts, &nm_tool_exec_command);
     nm_toolset_add(ts, &nm_tool_write_stdin);
-    nm_toolset_add(ts, &nm_tool_kill_session);
+    nm_toolset_add(ts, &nm_tool_kill_job);
     nm_toolset_add(ts, &nm_tool_web_search);
     return ts;
 }

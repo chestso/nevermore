@@ -112,19 +112,19 @@ int nm_chat_app_fd(NmChatApp *app);
 
 /* The app's whole wait set, filled in priority order: the agent's live
  * stream/exec fd first (when it has one), then one READ entry per
- * registered process session.  An active exec_command's fd IS its
- * session's master, so it is emitted once — boba treats a duplicated fd
+ * registered process job.  An active exec_command's fd IS its
+ * job's master, so it is emitted once — boba treats a duplicated fd
  * as undefined.  Returns the number of entries written (<= cap), which
  * is what main.c's TuiFillExternalFds hands back.  A cap too small for
- * the set drops trailing sessions (they cannot be drained while
- * unsubscribed), which is why NM_PROC_MAX_SESSIONS leaves a slot for
+ * the set drops trailing jobs (they cannot be drained while
+ * unsubscribed), which is why NM_PROC_MAX_JOBS leaves a slot for
  * the agent. */
 size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
                             size_t cap);
 
 /* Dispatch one external fd's readiness.  The agent's own fd steps the
  * agent (whose step drains via the live tool); any other fd is a
- * background session, drained into its buffer for a later write_stdin
+ * background job, drained into its buffer for a later write_stdin
  * take — so a chatty server keeps running instead of blocking on a full
  * PTY. */
 void nm_chat_app_external_ready(NmChatApp *app, int fd, unsigned ready);

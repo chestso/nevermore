@@ -1,24 +1,24 @@
-/* tools_exec.c - process-session tools: exec_command, write_stdin,
- * kill_session
+/* tools_exec.c - process-job tools: exec_command, write_stdin,
+ * kill_job
  *
- * The model-facing surface over src/nm_process.c's PTY session registry
+ * The model-facing surface over src/nm_process.c's PTY job registry
  * (a port of quoth's quoth-process.el / quoth-tools.el exec_command +
  * write_stdin pair). exec_command starts a long-lived command — a dev
  * server, a REPL, `ssh`, a test watcher — and reports either its exit
- * or, once the yield window closes, a session id; write_stdin feeds it
- * stdin and reports what it has printed since; kill_session stops it.
+ * or, once the yield window closes, a job id; write_stdin feeds it
+ * stdin and reports what it has printed since; kill_job stops it.
  *
  * Async by construction (the event-driven principle): all three ride
- * the NmTool begin/step/exec_fd/interest/deadline_ms seam. The session's
+ * the NmTool begin/step/exec_fd/interest/deadline_ms seam. The job's
  * PTY master is the wait fd, and the yield window is the deadline the
  * agent folds into the runtime's tick — so the spinner keeps ticking, a
  * silent child is still re-stepped when the window closes, and no read
  * or write ever blocks the event loop (a stdin write that would block
  * leaves a remainder and declares WRITE interest).
  *
- * A session OUTLIVES the call that started it: `end` frees only this
- * call's state. That is why the exec holds the session ID and never a
- * NmProc pointer — kill_session / teardown may free a session while a
+ * A job OUTLIVES the call that started it: `end` frees only this
+ * call's state. That is why the exec holds the job ID and never a
+ * NmProc pointer — kill_job / teardown may free a job while a
  * call's handle is still alive, and a stale pointer would be a UAF.
  *
  * Result text follows Codex's prose convention (the same shape quoth
@@ -28,11 +28,11 @@
  *   Output:
  *   ...
  *
- *   Process running with session ID 3
+ *   Process running with job ID 3
  *   Output:
  *   ...
  *
- * Output rides the session clamp (70/30 head/tail, tools.c): the tail
+ * Output rides the job clamp (70/30 head/tail, tools.c): the tail
  * of a build log is where the errors are.
  */
 
@@ -84,7 +84,7 @@ static NmJson *parse_args(const char *args_json)
 }
 
 /* An integer arg, taken from a JSON number or a decimal string — models
- * emit both for "session_id" and the string form is unambiguous. 0 on
+ * emit both for "job_id" and the string form is unambiguous. 0 on
  * success. */
 static int arg_int(NmJson *args, const char *key, long *out)
 {
@@ -147,14 +147,14 @@ static int has_interior_eof_marker(const char *input, size_t n)
 /* Shared exec state                                                 */
 /* ---------------------------------------------------------------- */
 
-/* One in-flight call. The session itself lives in the process registry
+/* One in-flight call. The job itself lives in the process registry
  * (nm_process.h), addressed by id — never by pointer (see the file head).
  * outbox is write_stdin's pending stdin bytes, built once at begin and
  * drained across steps so a write that would block never stalls the
  * loop. */
 struct NmToolExec
 {
-    int session_id;
+    int job_id;
     double deadline; /* yield-window end (monotonic seconds) */
     char *outbox;
     size_t outbox_len, outbox_off;
@@ -197,11 +197,11 @@ static NmToolExec *fail_exec(NmToolResult r)
     return e;
 }
 
-/* "STATUS" + the Output: section, with the body on the session clamp
+/* "STATUS" + the Output: section, with the body on the job clamp
  * (70/30 head/tail — the tail of a log is where the failures are). */
-static NmToolResult session_result(const char *status, const char *body)
+static NmToolResult job_result(const char *status, const char *body)
 {
-    char *clamped = body ? nm_clamp_session_output(body) : NULL;
+    char *clamped = body ? nm_clamp_job_output(body) : NULL;
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
     NmToolResult r = { out != NULL, out };
@@ -213,20 +213,20 @@ static NmToolResult exited_result(int code, const char *body)
 {
     char status[64];
     snprintf(status, sizeof(status), "Process exited with code %d", code);
-    NmToolResult r = session_result(status, body);
+    NmToolResult r = job_result(status, body);
     if (r.output)
         r.ok = (code == 0);
     return r;
 }
 
-/* A still-running session's report: the id is the handle the model
+/* A still-running job's report: the id is the handle the model
  * echoes into write_stdin. */
-static NmToolResult running_result(int session_id, const char *body)
+static NmToolResult running_result(int job_id, const char *body)
 {
     char status[64];
-    snprintf(status, sizeof(status), "Process running with session ID %d",
-             session_id);
-    return session_result(status, body);
+    snprintf(status, sizeof(status), "Process running with job ID %d",
+             job_id);
+    return job_result(status, body);
 }
 
 /* The shared yield deadline as "ms until the agent should step again".
@@ -248,12 +248,12 @@ static int exec_fd_generic(NmToolExec *e)
 {
     if (!e || e->done)
         return -1;
-    NmProc *p = nm_proc_find(e->session_id);
+    NmProc *p = nm_proc_find(e->job_id);
     return p ? nm_proc_fd(p) : -1;
 }
 
-/* The session is NOT closed here: it outlives the call that started it
- * (the model polls it with write_stdin later). A session whose exit was
+/* The job is NOT closed here: it outlives the call that started it
+ * (the model polls it with write_stdin later). A job whose exit was
  * already reported was closed inside step. */
 static void exec_end(NmToolExec *e)
 {
@@ -309,7 +309,7 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
         nm_proc_close(p); /* never leak a child on OOM */
         return NULL;
     }
-    e->session_id = id;
+    e->job_id = id;
     e->deadline = nm_monotonic_seconds() + (double)yield_ms / 1000.0;
     return e;
 }
@@ -323,17 +323,17 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
     if (e->done)
         return take(e, out);
 
-    NmProc *p = nm_proc_find(e->session_id);
+    NmProc *p = nm_proc_find(e->job_id);
     if (!p) {
         e->result = nm_tool_result_error(
-            "exec_command: the session is no longer registered");
+            "exec_command: the job is no longer registered");
         e->done = 1;
         return take(e, out);
     }
 
     nm_proc_drain(p);
 
-    /* Exited inside the window: report the exit and retire the session
+    /* Exited inside the window: report the exit and retire the job
      * (its output has been delivered — nothing left to poll). */
     if (!nm_proc_live(p)) {
         int code = nm_proc_exit(p);
@@ -344,10 +344,10 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
         return take(e, out);
     }
 
-    /* Still running at the deadline: hand the model the session id. */
+    /* Still running at the deadline: hand the model the job id. */
     if (ms_until(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
-        e->result = running_result(e->session_id, body);
+        e->result = running_result(e->job_id, body);
         e->done = 1;
         return take(e, out);
     }
@@ -370,10 +370,10 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
     }
 
     long id = 0;
-    if (arg_int(args, "session_id", &id) != 0) {
+    if (arg_int(args, "job_id", &id) != 0) {
         nm_json_free(args);
         return fail_exec(
-            nm_tool_result_error("write_stdin: missing session_id"));
+            nm_tool_result_error("write_stdin: missing job_id"));
     }
     const char *input = nm_json_str(nm_json_get(args, "input"));
     size_t ilen = input ? strlen(input) : 0;
@@ -390,7 +390,7 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
 
     if (!nm_proc_find((int)id)) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "write_stdin: unknown session id %ld", id);
+        snprintf(msg, sizeof(msg), "write_stdin: unknown job id %ld", id);
         nm_json_free(args);
         return fail_exec(nm_tool_result_error(msg));
     }
@@ -424,7 +424,7 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
         free(outbox);
         return NULL;
     }
-    e->session_id = (int)id;
+    e->job_id = (int)id;
     e->outbox = outbox;
     e->outbox_len = n;
     e->deadline = nm_monotonic_seconds() + (double)yield_ms / 1000.0;
@@ -440,11 +440,11 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
     if (e->done)
         return take(e, out);
 
-    NmProc *p = nm_proc_find(e->session_id);
+    NmProc *p = nm_proc_find(e->job_id);
     if (!p) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "write_stdin: session %d is gone",
-                 e->session_id);
+        snprintf(msg, sizeof(msg), "write_stdin: job %d is gone",
+                 e->job_id);
         e->result = nm_tool_result_error(msg);
         e->done = 1;
         return take(e, out);
@@ -480,7 +480,7 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
     }
     if (ms_until(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
-        e->result = running_result(e->session_id, body);
+        e->result = running_result(e->job_id, body);
         e->done = 1;
         return take(e, out);
     }
@@ -603,40 +603,40 @@ static NmToolResult write_stdin_exec(const NmTool *tool, const char *args_json,
 }
 
 /* ---------------------------------------------------------------- */
-/* kill_session                                                      */
+/* kill_job                                                      */
 /* ---------------------------------------------------------------- */
 
-static NmToolResult kill_session_exec(const NmTool *tool,
-                                      const char *args_json, void *userdata)
+static NmToolResult kill_job_exec(const NmTool *tool,
+                                  const char *args_json, void *userdata)
 {
     (void)tool;
     (void)userdata;
     NmJson *args = parse_args(args_json);
     if (!args) {
         return nm_tool_result_error(
-            "kill_session: arguments are not a JSON object");
+            "kill_job: arguments are not a JSON object");
     }
     long id = 0;
-    if (arg_int(args, "session_id", &id) != 0) {
+    if (arg_int(args, "job_id", &id) != 0) {
         nm_json_free(args);
-        return nm_tool_result_error("kill_session: missing session_id");
+        return nm_tool_result_error("kill_job: missing job_id");
     }
     NmProc *p = nm_proc_find((int)id);
     if (!p) {
         char msg[96];
-        snprintf(msg, sizeof(msg), "kill_session: unknown session id %ld", id);
+        snprintf(msg, sizeof(msg), "kill_job: unknown job id %ld", id);
         nm_json_free(args);
         return nm_tool_result_error(msg);
     }
 
-    /* Take the output printed since the last report before the session
+    /* Take the output printed since the last report before the job
      * goes: a kill is exactly when whatever it managed to print matters
      * (the tail of a wedged server, a crash it was about to report). The
      * take is a delta, so nothing already handed to the model repeats. */
     const char *body = nm_proc_take_output(p);
     char status[64];
-    snprintf(status, sizeof(status), "Session %ld killed", id);
-    NmToolResult r = session_result(status, body);
+    snprintf(status, sizeof(status), "Job %ld killed", id);
+    NmToolResult r = job_result(status, body);
     nm_json_free(args);
     nm_proc_close(p);
     return r;
@@ -649,20 +649,20 @@ static NmToolResult kill_session_exec(const NmTool *tool,
 static const char exec_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"cmd\":{\"type\":\"string\",\"description\":\"Shell command to start "
-    "(runs under /bin/sh -c in its own terminal session).\"},"
+    "(runs under /bin/sh -c in its own terminal).\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Working directory "
     "(defaults to the agent's working directory).\"},"
     "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"How long to "
-    "wait for the command to finish before reporting a session id "
+    "wait for the command to finish before reporting a job id "
     "(250-30000, default 10000).\"}},"
     "\"required\":[\"cmd\"]}";
 
 const NmTool nm_tool_exec_command = {
     .name = "exec_command",
-    .description = "Start a long-running shell command in a new terminal "
-                   "session (a dev server, REPL, ssh, test watcher) and "
+    .description = "Start a long-running shell command in its own terminal "
+                   "(a dev server, REPL, ssh, test watcher) and "
                    "return its output; if it is still running when the yield "
-                   "window closes, return a session ID to poll with "
+                   "window closes, return a job ID to poll with "
                    "write_stdin",
     .emoji = "▶️",
     .params_schema = exec_command_schema,
@@ -677,18 +677,18 @@ const NmTool nm_tool_exec_command = {
 
 static const char write_stdin_schema[] =
     "{\"type\":\"object\",\"properties\":{"
-    "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID "
+    "\"job_id\":{\"type\":\"integer\",\"description\":\"Job ID "
     "returned by exec_command.\"},"
-    "\"input\":{\"type\":\"string\",\"description\":\"Text for the session's "
+    "\"input\":{\"type\":\"string\",\"description\":\"Text for the job's "
     "stdin. A trailing \\\\x04 closes stdin; an interior \\\\x04 is an "
     "error. Omit to just read output.\"},"
     "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"How long to "
     "wait for output (250-30000, default 1000).\"}},"
-    "\"required\":[\"session_id\"]}";
+    "\"required\":[\"job_id\"]}";
 
 const NmTool nm_tool_write_stdin = {
     .name = "write_stdin",
-    .description = "Write to a live session's stdin and return the output it "
+    .description = "Write to a live job's stdin and return the output it "
                    "has produced since the last read; a trailing \\x04 in "
                    "input closes stdin",
     .emoji = "⌨️",
@@ -702,18 +702,18 @@ const NmTool nm_tool_write_stdin = {
     .end = exec_end,
 };
 
-static const char kill_session_schema[] =
+static const char kill_job_schema[] =
     "{\"type\":\"object\",\"properties\":{"
-    "\"session_id\":{\"type\":\"integer\",\"description\":\"Session ID to "
+    "\"job_id\":{\"type\":\"integer\",\"description\":\"Job ID to "
     "kill (its whole process group is stopped).\"}},"
-    "\"required\":[\"session_id\"]}";
+    "\"required\":[\"job_id\"]}";
 
-const NmTool nm_tool_kill_session = {
-    .name = "kill_session",
-    .description = "Stop a session started by exec_command (and every "
+const NmTool nm_tool_kill_job = {
+    .name = "kill_job",
+    .description = "Stop a job started by exec_command (and every "
                    "process it spawned), returning whatever it printed since "
                    "the last report",
     .emoji = "🛑",
-    .params_schema = kill_session_schema,
-    .execute = kill_session_exec,
+    .params_schema = kill_job_schema,
+    .execute = kill_job_exec,
 };

@@ -1,8 +1,8 @@
-/* nm_process_posix.c - PTY-backed process sessions (POSIX)
+/* nm_process_posix.c - PTY-backed process jobs (POSIX)
  *
  * The OS half of the process layer: spawn a command on a PTY with a
  * sanitized environment, non-blocking read/write on the master, and
- * group-kill/reap.  fork/exec (not posix_spawn) because a PTY session
+ * group-kill/reap.  fork/exec (not posix_spawn) because a PTY job
  * needs child-side setsid + TIOCSCTTY to acquire the tty as its
  * controlling terminal — work posix_spawn's file actions cannot
  * express.  The child calls only async-signal-safe functions before
@@ -194,7 +194,7 @@ void nm_proc_os_kill(long pid)
 {
     if (pid <= 0)
         return;
-    /* The session is its own process group (setsid), so the negative
+    /* The job is its own process group (setsid), so the negative
      * pid takes the shell AND its descendants; a plain pid is the
      * fallback when the group is already gone. */
     if (kill(-(pid_t)pid, SIGKILL) != 0)

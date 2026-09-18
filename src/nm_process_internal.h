@@ -36,7 +36,7 @@ long nm_proc_os_write(int fd, const char *buf, size_t n);
 /* Close the master fd (no-op when fd < 0). */
 void nm_proc_os_close(int fd);
 
-/* Kill the session's process group (SIGKILL) led by `pid`; a no-op when
+/* Kill the job's process group (SIGKILL) led by `pid`; a no-op when
  * the group/process is already gone. */
 void nm_proc_os_kill(long pid);
 

@@ -88,10 +88,10 @@ typedef struct NmTool
     unsigned (*interest)(const NmToolExec *e);
     /* Milliseconds until this live exec wants a step even though no fd
      * is ready (a tool-side deadline, e.g. an HTTP request timeout or a
-     * session yield window), or -1 for "purely readiness-driven".
+     * job yield window), or -1 for "purely readiness-driven".
      * NM_INTEREST-driven waits only wake the loop on fd activity, so a
      * silent peer (an accepted connection that never answers; a spawned
-     * session that never prints) would otherwise never be re-stepped.
+     * job that never prints) would otherwise never be re-stepped.
      * The agent folds this into nm_agent_next_timeout_ms so the
      * runtime's tick can drive the step; NULL means -1. */
     int (*deadline_ms)(const NmToolExec *e);
@@ -171,7 +171,7 @@ void nm_tool_web_search_set_timeout_ms(int ms);
 void nm_tool_web_search_reset_health(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report
- * exit status. Used by tests too. (Long-lived process sessions live in
+ * exit status. Used by tests too. (Long-lived process jobs live in
  * nm_process.h.) */
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code);
 

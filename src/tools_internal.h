@@ -34,21 +34,21 @@ char *nm_clamp_output(const char *text);
  * Heap text (caller frees), NULL on OOM. */
 char *nm_truncate_tail(const char *body, size_t max, const char *marker);
 
-/* Session-output clamp (exec_command / write_stdin / kill_session):
+/* Job-output clamp (exec_command / write_stdin / kill_job):
  * trailing whitespace is trimmed, then the body is capped at
  * NM_TOOL_MAX_OUTPUT with a 70/30 head/tail split and an
- * "... N bytes omitted ..." marker between the halves. A session's
+ * "... N bytes omitted ..." marker between the halves. A job's
  * interesting end is its LAST lines (a build's failures, a test
  * summary, a crash), so the head-only clamp every other tool uses
  * would throw away the half worth reading. NULL when the body is
  * empty after the trim (the caller then renders it structurally),
  * heap text otherwise. */
-char *nm_clamp_session_output(const char *text);
+char *nm_clamp_job_output(const char *text);
 
 /* Assemble the canonical result text: the STATUS line, then the
  * "Output:" section. `clamped` is the caller's already-truncated body
  * (each tool family owns its budget shape: nm_clamp_output head-only,
- * nm_clamp_session_output 70/30) or NULL for the structural
+ * nm_clamp_job_output 70/30) or NULL for the structural
  * "(empty)" marker — never fake body text. Heap text (caller frees),
  * NULL on OOM. */
 char *nm_tool_result_body(const char *status, const char *clamped);
@@ -76,11 +76,11 @@ extern const NmTool nm_tool_search_dir;
 /* tools_spawn_posix.c / tools_spawn_win.c: run_command tool. */
 extern const NmTool nm_tool_run_command;
 
-/* tools_exec.c: process-session tools (exec_command, write_stdin,
- * kill_session) over src/nm_process.c's PTY session registry. */
+/* tools_exec.c: process-job tools (exec_command, write_stdin,
+ * kill_job) over src/nm_process.c's PTY job registry. */
 extern const NmTool nm_tool_exec_command;
 extern const NmTool nm_tool_write_stdin;
-extern const NmTool nm_tool_kill_session;
+extern const NmTool nm_tool_kill_job;
 
 /* tools_websearch.c: local SearXNG web_search tool. */
 extern const NmTool nm_tool_web_search;

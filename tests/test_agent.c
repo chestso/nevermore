@@ -942,12 +942,12 @@ static void test_agent_turn_runs_async_command(void)
     close(sc.fd);
 }
 
-/* The process-session tools through the agent: exec_command's yield
+/* The process-job tools through the agent: exec_command's yield
  * window is a tool deadline, so the loop re-steps a SILENT child (no fd
- * activity) until the window closes and the session id is reported into
+ * activity) until the window closes and the job id is reported into
  * the transcript. Before the deadline seam, `sleep 30` would have held
  * the round open until the command finished. */
-static void test_agent_exec_command_yields_session(void)
+static void test_agent_exec_command_yields_job(void)
 {
     reset_capture();
 
@@ -962,7 +962,7 @@ static void test_agent_exec_command_yields_session(void)
         "\\\"yield_time_ms\\\":400}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"session up\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"job up\"}}]}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -1005,27 +1005,27 @@ static void test_agent_exec_command_yields_session(void)
             break;
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
-    ASSERT_EQ(nm_agent_step(agent), 0); /* begins the session */
+    ASSERT_EQ(nm_agent_step(agent), 0); /* begins the job */
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(nm_agent_fd(agent) >= 0); /* the PTY master */
     int wait = nm_agent_next_timeout_ms(agent);
     ASSERT_TRUE(wait >= 0 && wait <= 400);
 
-    /* Finish the round: the window closes, the session id is reported. */
+    /* Finish the round: the window closes, the job id is reported. */
     ASSERT_EQ(agent_drive(agent, 20000), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_STR_EQ(g_text, "session up");
+    ASSERT_STR_EQ(g_text, "job up");
     ASSERT_STR_EQ(g_tool_seq, "SE");
-    ASSERT_TRUE(strstr(g_tool_output, "Process running with session ID") !=
+    ASSERT_TRUE(strstr(g_tool_output, "Process running with job ID") !=
                 NULL);
     ASSERT_TRUE(strstr(g_tool_output, "booting") != NULL);
     /* The model sees the report in round 2's request (it can then poll
      * with write_stdin). */
     ASSERT_EQ(g_n_requests, 2);
-    ASSERT_TRUE(strstr(g_requests[1], "Process running with session ID") !=
+    ASSERT_TRUE(strstr(g_requests[1], "Process running with job ID") !=
                 NULL);
 
-    /* The session outlives the turn: only teardown kills it. */
+    /* The job outlives the turn: only teardown kills it. */
     ASSERT_EQ(nm_proc_count(), 1);
     nm_proc_close_all();
     ASSERT_EQ(nm_proc_count(), 0);
@@ -1641,7 +1641,7 @@ static void test_agent_stream_stall_times_out(void)
 
 /* A stub async tool that stays live and declares its own deadline.
  * Proves the agent folds tool->deadline_ms into nm_agent_next_timeout_ms
- * (the same seam a process session's yield window will ride). */
+ * (the same seam a process job's yield window will ride). */
 static const char stub_tool_schema[] =
     "{\"type\":\"object\",\"properties\":{}}";
 static int g_stub_deadline_queries;
@@ -1788,7 +1788,7 @@ int main(void)
 #ifndef _WIN32
     RUN_TEST(test_agent_run_command_is_async);
     RUN_TEST(test_agent_turn_runs_async_command);
-    RUN_TEST(test_agent_exec_command_yields_session);
+    RUN_TEST(test_agent_exec_command_yields_job);
 #endif
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);

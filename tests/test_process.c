@@ -1,6 +1,6 @@
-/* test_process.c - process sessions (PTY registry + renderer)
+/* test_process.c - process jobs (PTY registry + renderer)
  *
- * The pure renderer is exercised on every platform; the session
+ * The pure renderer is exercised on every platform; the job
  * lifecycle runs for real on POSIX (spawn, drain, stdin write,
  * group-kill, bounded buffer).  On Windows the OS seam reports
  * "unsupported" (docs/PROCESS-PLAN.md P5) and only that is asserted.
@@ -95,7 +95,7 @@ static void test_render_drops_sgr_and_osc(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Session lifecycle (POSIX)                                        */
+/* Job lifecycle (POSIX)                                        */
 /* ---------------------------------------------------------------- */
 
 #ifndef _WIN32
@@ -237,10 +237,10 @@ static void test_bounded_buffer_reports_omission(void)
     nm_proc_reset();
 }
 
-static void test_session_cap(void)
+static void test_job_cap(void)
 {
     nm_proc_reset();
-    nm_proc_set_max_sessions(2);
+    nm_proc_set_max_jobs(2);
     char err[128];
     int id = -1;
     NmProc *a = nm_proc_start("sleep 30", NULL, &id, err, sizeof(err));
@@ -356,7 +356,7 @@ int main(void)
     RUN_TEST(test_live_and_fd);
     RUN_TEST(test_close_is_prompt);
     RUN_TEST(test_bounded_buffer_reports_omission);
-    RUN_TEST(test_session_cap);
+    RUN_TEST(test_job_cap);
     RUN_TEST(test_registry_iteration);
     RUN_TEST(test_empty_command_is_rejected);
     RUN_TEST(test_workdir_is_honored);

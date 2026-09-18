@@ -699,7 +699,7 @@ void nm_chat_app_free(NmChatApp *app)
     tui_list_popup_free(app->popup);
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
-    /* Sessions are process-global (a tool's userdata is a workdir path
+    /* Jobs are process-global (a tool's userdata is a workdir path
      * string, so it cannot carry a manager), and they outlive the turn
      * that started them — so app teardown is where they die. Without
      * this, a dev server the model started keeps running (and writing
@@ -816,20 +816,20 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
 
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
 
-/* boba's external-fd pool must hold every session PLUS the agent's own
- * stream fd: a session left out of the set is never drained, so its
- * child stalls on a full PTY (see NM_PROC_MAX_SESSIONS in nm_process.h). */
+/* boba's external-fd pool must hold every job PLUS the agent's own
+ * stream fd: a job left out of the set is never drained, so its
+ * child stalls on a full PTY (see NM_PROC_MAX_JOBS in nm_process.h). */
 typedef char nm_proc_fd_budget_fits
-    [(TUI_EXTERNAL_FD_MAX >= NM_PROC_MAX_SESSIONS + 1) ? 1 : -1];
+    [(TUI_EXTERNAL_FD_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
 
 /* The app's aggregate wait interest: the live agent stream (fd +
- * flags) first, then one READ entry per registered process session.
+ * flags) first, then one READ entry per registered process job.
  *
- * A session outlives the tool call that started it, so its master fd
+ * A job outlives the tool call that started it, so its master fd
  * must stay subscribed or the child blocks writing; the agent's own
  * stream/exec fd takes priority so a small cap degrades to "background
- * sessions drain a cycle later", never to "the turn stalls".  An active
- * exec_command's fd is its session's master — emitted once (boba's
+ * jobs drain a cycle later", never to "the turn stalls".  An active
+ * exec_command's fd is its job's master — emitted once (boba's
  * contract: a duplicated fd across slots is undefined). */
 size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
                             size_t cap)
@@ -846,8 +846,8 @@ size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
         n++;
     }
 
-    int sessions = nm_proc_count();
-    for (int i = 0; i < sessions && n < cap; i++) {
+    int jobs = nm_proc_count();
+    for (int i = 0; i < jobs && n < cap; i++) {
         NmProc *p = nm_proc_at(i);
         if (!p)
             continue;
@@ -862,7 +862,7 @@ size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
 }
 
 /* One external fd became ready.  The agent's fd drives a step (whose
- * tool step drains and reaps); any other fd is a background session,
+ * tool step drains and reaps); any other fd is a background job,
  * drained into its bounded buffer so the child never blocks on a full
  * PTY.  The model reads that output later through write_stdin; nothing
  * here is echoed to the transcript — /ps is the human's window. */
@@ -997,7 +997,7 @@ static void print_help(NmChatApp *app)
                   "  /rounds [n|reset]  show or set the tool-round cap\n"
                   "  /reasoning [on|off|reset]  echo reasoning traces back\n"
                   "  /config [reset [k|all]]    where each setting comes from\n"
-                  "  /ps                process sessions run by exec_command\n"
+                  "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
 }
@@ -1231,7 +1231,7 @@ static void config_reset(NmChatApp *app, const char *key)
 }
 
 /* ---------------------------------------------------------------- */
-/* Process sessions: /ps and /kill (the human's window)             */
+/* Process jobs: /ps and /kill (the human's window)             */
 /* ---------------------------------------------------------------- */
 
 /* Display budget for a /ps command column; the id/state columns and the
@@ -1318,18 +1318,18 @@ static void ps_join_command(char *dst, size_t cap, const char *cmd)
         snprintf(dst, cap, "(unknown)");
 }
 
-/* /ps: the human's window on process sessions. Background output is the
+/* /ps: the human's window on process jobs. Background output is the
  * MODEL's to poll (write_stdin) and is deliberately never streamed into
  * the transcript, so this is how a person sees what is running, what it
  * exited with, and how much output is waiting. */
-static void print_sessions(NmChatApp *app)
+static void print_jobs(NmChatApp *app)
 {
     int n = nm_proc_count();
     if (n <= 0) {
-        sys_line(app, "no process sessions (exec_command starts one)");
+        sys_line(app, "no process jobs (exec_command starts one)");
         return;
     }
-    sys_line(app, "%d process session%s:", n, n == 1 ? "" : "s");
+    sys_line(app, "%d process job%s:", n, n == 1 ? "" : "s");
     for (int i = 0; i < n; i++) {
         NmProc *p = nm_proc_at(i);
         if (!p)
@@ -1352,18 +1352,18 @@ static void print_sessions(NmChatApp *app)
     }
 }
 
-/* /kill <id>: close a session by id — the number /ps prints and
- * exec_command hands back. A live session is group-killed (its shell and
+/* /kill <id>: close a job by id — the number /ps prints and
+ * exec_command hands back. A live job is group-killed (its shell and
  * every descendant); an already-exited one is just unregistered. The
  * MODEL's own cancel path is nm_agent_cancel; this is the user's. */
-static void kill_session_command(NmChatApp *app, const char *arg)
+static void kill_job_command(NmChatApp *app, const char *arg)
 {
     const char *p = arg;
     while (*p == ' ' || *p == '\t')
         p++;
     if (*p < '0' || *p > '9') {
         sys_line(app, NM_SGR_ERROR
-                 "kill: expected a session id (see /ps)" NM_SGR_RESET);
+                 "kill: expected a job id (see /ps)" NM_SGR_RESET);
         return;
     }
     int id = 0;
@@ -1379,13 +1379,13 @@ static void kill_session_command(NmChatApp *app, const char *arg)
         p++;
     if (id <= 0 || *p) {
         sys_line(app, NM_SGR_ERROR
-                 "kill: expected a positive session id (see /ps)" NM_SGR_RESET);
+                 "kill: expected a positive job id (see /ps)" NM_SGR_RESET);
         return;
     }
 
     NmProc *s = nm_proc_find(id);
     if (!s) {
-        sys_line(app, NM_SGR_ERROR "kill: no session %d — /ps lists them" NM_SGR_RESET, id);
+        sys_line(app, NM_SGR_ERROR "kill: no job %d — /ps lists them" NM_SGR_RESET, id);
         return;
     }
     char cmd[NM_PS_CMD_CAP];
@@ -1393,9 +1393,9 @@ static void kill_session_command(NmChatApp *app, const char *arg)
     int live = nm_proc_live(s);
     nm_proc_close(s);
     if (live)
-        sys_line(app, "killed session %d (%s)", id, cmd);
+        sys_line(app, "killed job %d (%s)", id, cmd);
     else
-        sys_line(app, "closed session %d (%s, already exited)", id, cmd);
+        sys_line(app, "closed job %d (%s, already exited)", id, cmd);
 }
 
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
@@ -1593,11 +1593,11 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         return;
     }
     if (NAME_IS("ps")) {
-        print_sessions(app);
+        print_jobs(app);
         return;
     }
     if (NAME_IS("kill")) {
-        kill_session_command(app, arg);
+        kill_job_command(app, arg);
         return;
     }
     sys_line(app, NM_SGR_ERROR "unknown command '%.*s' — /help lists "

@@ -1,11 +1,11 @@
-/* nm_process.c - process-session registry, buffer, and dumb-terminal render
+/* nm_process.c - process-job registry, buffer, and dumb-terminal render
  *
  * Platform-neutral half of the process layer (nm_process.h): the registry,
- * the bounded per-session output buffer with its omission counter, the
+ * the bounded per-job output buffer with its omission counter, the
  * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
  * half (spawn/read/write/kill/reap) is process_posix.c / process_win.c.
  *
- * Memory-reuse: one raw buffer and one report buffer per session, both
+ * Memory-reuse: one raw buffer and one report buffer per job, both
  * grown geometrically and reused across drains and takes (the report is
  * handed out borrowed and rewritten in place on the next take).
  */
@@ -39,8 +39,8 @@ struct NmProc
     size_t report_cap;
 };
 
-static NmProc *g_sessions[NM_PROC_MAX_SESSIONS];
-static int g_max_sessions = NM_PROC_MAX_SESSIONS;
+static NmProc *g_jobs[NM_PROC_MAX_JOBS];
+static int g_max_jobs = NM_PROC_MAX_JOBS;
 static int g_next_id = 1;
 static size_t g_buf_max = PROC_BUF_MAX_DEFAULT;
 
@@ -51,17 +51,17 @@ static size_t g_buf_max = PROC_BUF_MAX_DEFAULT;
 static int registry_count(void)
 {
     int n = 0;
-    for (int i = 0; i < g_max_sessions; i++)
-        if (g_sessions[i])
+    for (int i = 0; i < g_max_jobs; i++)
+        if (g_jobs[i])
             n++;
     return n;
 }
 
 static int registry_add(NmProc *p)
 {
-    for (int i = 0; i < g_max_sessions; i++) {
-        if (!g_sessions[i]) {
-            g_sessions[i] = p;
+    for (int i = 0; i < g_max_jobs; i++) {
+        if (!g_jobs[i]) {
+            g_jobs[i] = p;
             return 0;
         }
     }
@@ -70,16 +70,16 @@ static int registry_add(NmProc *p)
 
 static void registry_remove(NmProc *p)
 {
-    for (int i = 0; i < g_max_sessions; i++) {
-        if (g_sessions[i] == p) {
-            g_sessions[i] = NULL;
+    for (int i = 0; i < g_max_jobs; i++) {
+        if (g_jobs[i] == p) {
+            g_jobs[i] = NULL;
             return;
         }
     }
 }
 
 /* ---------------------------------------------------------------- */
-/* Session lifecycle                                                */
+/* Job lifecycle                                                */
 /* ---------------------------------------------------------------- */
 
 static void proc_free(NmProc *p)
@@ -92,21 +92,21 @@ static void proc_free(NmProc *p)
     free(p);
 }
 
-NmProc *nm_proc_start(const char *cmd, const char *cwd, int *session_id,
+NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
                       char *err, size_t errsz)
 {
-    if (session_id)
-        *session_id = -1;
+    if (job_id)
+        *job_id = -1;
     if (err && errsz)
         err[0] = '\0';
     if (!cmd || !*cmd) {
         nm_proc_set_err(err, errsz, "missing or empty cmd");
         return NULL;
     }
-    if (registry_count() >= g_max_sessions) {
+    if (registry_count() >= g_max_jobs) {
         char msg[64];
-        snprintf(msg, sizeof(msg), "session cap of %d reached",
-                 g_max_sessions);
+        snprintf(msg, sizeof(msg), "job cap of %d reached",
+                 g_max_jobs);
         nm_proc_set_err(err, errsz, msg);
         return NULL;
     }
@@ -135,16 +135,16 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *session_id,
         nm_proc_os_kill(pid);
         nm_proc_os_reap(pid, &p->exit_code, 1);
         proc_free(p);
-        nm_proc_set_err(err, errsz, "session cap reached");
+        nm_proc_set_err(err, errsz, "job cap reached");
         return NULL;
     }
-    if (session_id)
-        *session_id = p->id;
+    if (job_id)
+        *job_id = p->id;
     return p;
 }
 
 /* Reap the child if it has exited (non-blocking).  Once reaped the
- * session is no longer live; the master fd is closed and the buffered
+ * job is no longer live; the master fd is closed and the buffered
  * output stays available for a later take. */
 static void try_reap(NmProc *p)
 {
@@ -183,9 +183,9 @@ void nm_proc_close(NmProc *p)
 
 void nm_proc_close_all(void)
 {
-    for (int i = 0; i < g_max_sessions; i++) {
-        if (g_sessions[i])
-            nm_proc_close(g_sessions[i]);
+    for (int i = 0; i < g_max_jobs; i++) {
+        if (g_jobs[i])
+            nm_proc_close(g_jobs[i]);
     }
 }
 
@@ -210,11 +210,11 @@ int nm_proc_exit(NmProc *p)
     return p->live ? -1 : p->exit_code;
 }
 
-NmProc *nm_proc_find(int session_id)
+NmProc *nm_proc_find(int job_id)
 {
-    for (int i = 0; i < g_max_sessions; i++) {
-        if (g_sessions[i] && g_sessions[i]->id == session_id)
-            return g_sessions[i];
+    for (int i = 0; i < g_max_jobs; i++) {
+        if (g_jobs[i] && g_jobs[i]->id == job_id)
+            return g_jobs[i];
     }
     return NULL;
 }
@@ -223,9 +223,9 @@ NmProc *nm_proc_by_fd(int fd)
 {
     if (fd < 0)
         return NULL;
-    for (int i = 0; i < g_max_sessions; i++) {
-        if (g_sessions[i] && g_sessions[i]->fd == fd)
-            return g_sessions[i];
+    for (int i = 0; i < g_max_jobs; i++) {
+        if (g_jobs[i] && g_jobs[i]->fd == fd)
+            return g_jobs[i];
     }
     return NULL;
 }
@@ -236,11 +236,11 @@ NmProc *nm_proc_at(int i)
 {
     if (i < 0)
         return NULL;
-    for (int k = 0; k < g_max_sessions; k++) {
-        if (!g_sessions[k])
+    for (int k = 0; k < g_max_jobs; k++) {
+        if (!g_jobs[k])
             continue;
         if (i-- == 0)
-            return g_sessions[k];
+            return g_jobs[k];
     }
     return NULL;
 }
@@ -280,7 +280,7 @@ static void buf_append(NmProc *p, const char *data, size_t n)
         if (ncap > g_buf_max)
             ncap = g_buf_max;
         char *nb = realloc(p->buf, ncap);
-        if (!nb) { /* OOM: drop the chunk rather than lose the session */
+        if (!nb) { /* OOM: drop the chunk rather than lose the job */
             p->dropped += n;
             return;
         }
@@ -663,13 +663,13 @@ const char *nm_proc_take_output(NmProc *p)
 /* Test seams                                                       */
 /* ---------------------------------------------------------------- */
 
-void nm_proc_set_max_sessions(int n)
+void nm_proc_set_max_jobs(int n)
 {
     if (n < 1)
         n = 1;
-    if (n > NM_PROC_MAX_SESSIONS)
-        n = NM_PROC_MAX_SESSIONS;
-    g_max_sessions = n;
+    if (n > NM_PROC_MAX_JOBS)
+        n = NM_PROC_MAX_JOBS;
+    g_max_jobs = n;
 }
 
 void nm_proc_set_buffer_max(size_t bytes) { g_buf_max = bytes; }
@@ -677,7 +677,7 @@ void nm_proc_set_buffer_max(size_t bytes) { g_buf_max = bytes; }
 void nm_proc_reset(void)
 {
     nm_proc_close_all();
-    g_max_sessions = NM_PROC_MAX_SESSIONS;
+    g_max_jobs = NM_PROC_MAX_JOBS;
     g_buf_max = PROC_BUF_MAX_DEFAULT;
     g_next_id = 1;
 }

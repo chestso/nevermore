@@ -247,7 +247,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     int best = -1;
 
     /* A live async tool that declares a deadline (web_search's request
-     * timeout, exec_command/write_stdin's session yield window). */
+     * timeout, exec_command/write_stdin's job yield window). */
     if (a->exec && a->exec_tool && a->exec_tool->deadline_ms) {
         int t = a->exec_tool->deadline_ms(a->exec);
         if (t >= 0)
@@ -800,7 +800,7 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
      * no I/O, so its steps run back-to-back.
      *
      * The wait is the deadline seam (nm_agent_next_timeout_ms), not a
-     * fixed poll: a tool with a session yield window (exec_command's
+     * fixed poll: a tool with a job yield window (exec_command's
      * silent child) or a stream-inactivity budget must be re-stepped
      * when it comes due even though nothing is readable, and a
      * readiness-only wait (an async tool's pipe) keeps a short poll so
