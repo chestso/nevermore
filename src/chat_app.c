@@ -997,6 +997,8 @@ static void print_help(NmChatApp *app)
                   "  /rounds [n|reset]  show or set the tool-round cap\n"
                   "  /reasoning [on|off|reset]  echo reasoning traces back\n"
                   "  /config [reset [k|all]]    where each setting comes from\n"
+                  "  /ps                process sessions run by exec_command\n"
+                  "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
 }
 
@@ -1228,6 +1230,174 @@ static void config_reset(NmChatApp *app, const char *key)
     }
 }
 
+/* ---------------------------------------------------------------- */
+/* Process sessions: /ps and /kill (the human's window)             */
+/* ---------------------------------------------------------------- */
+
+/* Display budget for a /ps command column; the id/state columns and the
+ * byte count fit beside it in a normal terminal. */
+#define NM_PS_CMD_COLS 46
+#define NM_PS_CMD_CAP  256
+
+/* Human byte count for /ps. */
+static void ps_size(char *dst, size_t cap, size_t bytes)
+{
+    if (bytes < 1024)
+        snprintf(dst, cap, "%zu B", bytes);
+    else if (bytes < 1024u * 1024u)
+        snprintf(dst, cap, "%.1f KiB", (double)bytes / 1024.0);
+    else
+        snprintf(dst, cap, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
+}
+
+/* One /ps command cell: whitespace runs collapse to a single space and
+ * the text is elided at NM_PS_CMD_COLS columns with a trailing "…".
+ *
+ * Cluster-safe, measured the way the renderer measures: a wide or
+ * combining character is never cut in half (byte-count clamping is what
+ * produces mojibake in a terminal). `cmd` may be NULL (an ordering edge
+ * in the registry); the result is then empty. */
+static void ps_command_summary(char *dst, size_t cap, const char *cmd)
+{
+    if (!dst || cap == 0)
+        return;
+    dst[0] = '\0';
+    if (!cmd || !*cmd)
+        return;
+
+    size_t len = strlen(cmd);
+    size_t i = 0, o = 0;
+    int cols = 0, truncated = 0, prev_space = 0;
+    while (i < len) {
+        size_t nb = 0;
+        int w = tui_next_cluster(cmd + i, len - i, &nb);
+        if (nb == 0)
+            break; /* invalid/truncated tail: stop, never spin */
+        if (w < 0)
+            w = 0;
+        int space = (nb == 1 && (cmd[i] == ' ' || cmd[i] == '\t' ||
+                                 cmd[i] == '\n' || cmd[i] == '\r'));
+        if (space) {
+            if (o > 0 && !prev_space) {
+                if (cols + 1 > NM_PS_CMD_COLS) {
+                    truncated = 1;
+                    break;
+                }
+                dst[o++] = ' ';
+                cols++;
+                prev_space = 1;
+            }
+            i += nb;
+            continue;
+        }
+        if (cols + w > NM_PS_CMD_COLS || o + nb + 1 > cap) {
+            truncated = 1;
+            break;
+        }
+        memcpy(dst + o, cmd + i, nb);
+        o += nb;
+        cols += w;
+        prev_space = 0;
+        i += nb;
+    }
+    while (o > 0 && dst[o - 1] == ' ')
+        o--; /* never end on the collapsed blank */
+    if (truncated && o + 4 <= cap) {
+        dst[o++] = (char)0xE2; /* "…" U+2026 */
+        dst[o++] = (char)0x80;
+        dst[o++] = (char)0xA6;
+    }
+    dst[o] = '\0';
+}
+
+/* The command column, shared by /ps and /kill's report. */
+static void ps_join_command(char *dst, size_t cap, const char *cmd)
+{
+    ps_command_summary(dst, cap, cmd);
+    if (!dst[0])
+        snprintf(dst, cap, "(unknown)");
+}
+
+/* /ps: the human's window on process sessions. Background output is the
+ * MODEL's to poll (write_stdin) and is deliberately never streamed into
+ * the transcript, so this is how a person sees what is running, what it
+ * exited with, and how much output is waiting. */
+static void print_sessions(NmChatApp *app)
+{
+    int n = nm_proc_count();
+    if (n <= 0) {
+        sys_line(app, "no process sessions (exec_command starts one)");
+        return;
+    }
+    sys_line(app, "%d process session%s:", n, n == 1 ? "" : "s");
+    for (int i = 0; i < n; i++) {
+        NmProc *p = nm_proc_at(i);
+        if (!p)
+            continue;
+        char cmd[NM_PS_CMD_CAP];
+        char size[24];
+        char state[24];
+        int code = nm_proc_exit(p); /* -1 while running (reaps if it just did) */
+        ps_join_command(cmd, sizeof(cmd), nm_proc_command(p));
+        ps_size(size, sizeof(size), nm_proc_buffered(p));
+        if (code >= 0)
+            snprintf(state, sizeof(state), "exited %d", code);
+        else
+            snprintf(state, sizeof(state), "running");
+        /* The state carries the color (activity yellow while running,
+         * muted Comment once exited); the id and command stay plain. */
+        sys_line(app, "%2d  %s%-9s" NM_SGR_RESET " %s  (%s buffered)",
+                 nm_proc_id(p), code >= 0 ? NM_SGR_TOOL : NM_SGR_SPINNER,
+                 state, cmd, size);
+    }
+}
+
+/* /kill <id>: close a session by id — the number /ps prints and
+ * exec_command hands back. A live session is group-killed (its shell and
+ * every descendant); an already-exited one is just unregistered. The
+ * MODEL's own cancel path is nm_agent_cancel; this is the user's. */
+static void kill_session_command(NmChatApp *app, const char *arg)
+{
+    const char *p = arg;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p < '0' || *p > '9') {
+        sys_line(app, NM_SGR_ERROR
+                 "kill: expected a session id (see /ps)" NM_SGR_RESET);
+        return;
+    }
+    int id = 0;
+    while (*p >= '0' && *p <= '9') {
+        id = id * 10 + (*p - '0');
+        if (id > 100000000) {
+            id = -1;
+            break;
+        }
+        p++;
+    }
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (id <= 0 || *p) {
+        sys_line(app, NM_SGR_ERROR
+                 "kill: expected a positive session id (see /ps)" NM_SGR_RESET);
+        return;
+    }
+
+    NmProc *s = nm_proc_find(id);
+    if (!s) {
+        sys_line(app, NM_SGR_ERROR "kill: no session %d — /ps lists them" NM_SGR_RESET, id);
+        return;
+    }
+    char cmd[NM_PS_CMD_CAP];
+    ps_join_command(cmd, sizeof(cmd), nm_proc_command(s));
+    int live = nm_proc_live(s);
+    nm_proc_close(s);
+    if (live)
+        sys_line(app, "killed session %d (%s)", id, cmd);
+    else
+        sys_line(app, "closed session %d (%s, already exited)", id, cmd);
+}
+
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
 {
     const char *rest = text + 1; /* past '/' */
@@ -1422,6 +1592,14 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         sys_line(app, NM_SGR_ERROR "config: expected 'reset [key|all]'" NM_SGR_RESET);
         return;
     }
+    if (NAME_IS("ps")) {
+        print_sessions(app);
+        return;
+    }
+    if (NAME_IS("kill")) {
+        kill_session_command(app, arg);
+        return;
+    }
     sys_line(app, NM_SGR_ERROR "unknown command '%.*s' — /help lists "
                                "commands" NM_SGR_RESET,
              (int)name_len, rest);
@@ -1478,7 +1656,7 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
     (void)word_start;
     static const char *const commands[] = {
         "/help", "/model", "/provider", "/rounds", "/reasoning", "/config",
-        "/quit", NULL
+        "/ps", "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

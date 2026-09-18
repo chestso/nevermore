@@ -1032,6 +1032,8 @@ static void test_help_command_lists_commands(void)
     ASSERT_TRUE(strstr(out, "/model") != NULL);
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
     ASSERT_TRUE(strstr(out, "/rounds") != NULL);
+    ASSERT_TRUE(strstr(out, "/ps") != NULL);
+    ASSERT_TRUE(strstr(out, "/kill") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
     /* The retired plurals are no longer advertised. */
     ASSERT_TRUE(strstr(out, "/models") == NULL);
@@ -2093,6 +2095,9 @@ static void test_tab_on_slash_prefix_opens_commands_popup(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "/model") != NULL);
     ASSERT_TRUE(strstr(frame, "/provider") != NULL);
+    /* The process-session commands are in the completion set too. */
+    ASSERT_TRUE(strstr(frame, "/ps") != NULL);
+    ASSERT_TRUE(strstr(frame, "/kill") != NULL);
     /* The retired plurals are gone from the completion set. */
     ASSERT_TRUE(strstr(frame, "/models") == NULL);
     ASSERT_TRUE(strstr(frame, "/providers") == NULL);
@@ -2981,6 +2986,311 @@ static void test_interest_dedupes_active_exec_session(void)
 }
 #endif /* !_WIN32 */
 
+/* ---------------------------------------------------------------- */
+/* P4: /ps, /kill, and the exec spinner tier                         */
+/* ---------------------------------------------------------------- */
+
+/* 1 when every non-ASCII sequence in `s` is well-formed. A byte-count
+ * cut through a multi-byte character leaves a lone continuation byte;
+ * this is how the /ps command column's cluster-safe elision is checked
+ * (a cut codepoint would be invalid UTF-8 on the terminal). */
+static int utf8_well_formed(const char *s)
+{
+    for (size_t i = 0; s[i];) {
+        unsigned char c = (unsigned char)s[i];
+        int len = c < 0x80             ? 1
+                  : (c & 0xE0) == 0xC0 ? 2
+                  : (c & 0xF0) == 0xE0 ? 3
+                  : (c & 0xF8) == 0xF0 ? 4
+                                       : 0;
+        if (len == 0)
+            return 0; /* a stray continuation byte or invalid lead */
+        for (int k = 1; k < len; k++) {
+            if (((unsigned char)s[i + k] & 0xC0) != 0x80)
+                return 0;
+        }
+        i += (size_t)len;
+    }
+    return 1;
+}
+
+/* /ps with no sessions: a note, not an empty table (and no crash on an
+ * empty registry). Runs on every platform — sessions cannot start on
+ * Windows, so this is its whole /ps story there. */
+static void test_ps_without_sessions(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/ps");
+    harness_enter(h);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "no process sessions") != NULL);
+    free(clean);
+
+    harness_free(h);
+}
+
+#ifndef _WIN32
+/* /ps lists every registered session with its id, state, command and
+ * how much output is waiting; /kill <id> then removes exactly one. */
+static void test_ps_lists_and_kill_removes(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    nm_proc_reset();
+
+    char err[128];
+    int id_run = -1, id_done = -1;
+    NmProc *pr = nm_proc_start("echo hello; sleep 30", NULL, &id_run, err,
+                               sizeof(err));
+    ASSERT_NOT_NULL(pr);
+    /* This one exits on its own: /ps must show BOTH states. */
+    ASSERT_NOT_NULL(
+        nm_proc_start("exit 3", NULL, &id_done, err, sizeof(err)));
+    for (int i = 0; i < 300 && nm_proc_count() < 2; i++)
+        usleep(5 * 1000);
+    /* Let the second one actually leave. */
+    int reaped = 0;
+    for (int i = 0; i < 300 && !reaped; i++) {
+        NmProc *d = nm_proc_find(id_done);
+        reaped = d && nm_proc_exit(d) >= 0;
+        if (!reaped)
+            usleep(5 * 1000);
+    }
+    ASSERT_TRUE(reaped);
+
+    harness_type(h, "/ps");
+    harness_enter(h);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "2 process sessions:") != NULL);
+    char idbuf[16];
+    snprintf(idbuf, sizeof(idbuf), "%2d", id_run);
+    ASSERT_NOT_NULL(strstr(clean, idbuf));
+    snprintf(idbuf, sizeof(idbuf), "%2d", id_done);
+    ASSERT_NOT_NULL(strstr(clean, idbuf));
+    ASSERT_TRUE(strstr(clean, "running") != NULL);
+    ASSERT_TRUE(strstr(clean, "exited 3") != NULL);
+    ASSERT_TRUE(strstr(clean, "echo hello; sleep 30") != NULL);
+    ASSERT_TRUE(strstr(clean, "buffered)") != NULL);
+    free(clean);
+
+    /* /kill <running id>: group-kill + report. */
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "/kill %d", id_run);
+    harness_type(h, cmd);
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "killed session") != NULL);
+    ASSERT_TRUE(strstr(clean, "echo hello; sleep 30") != NULL);
+    free(clean);
+    ASSERT_NULL(nm_proc_find(id_run));
+    ASSERT_EQ(nm_proc_count(), 1);
+
+    /* /kill on the already-exited one: unregistered, reported as such. */
+    snprintf(cmd, sizeof(cmd), "/kill %d", id_done);
+    harness_type(h, cmd);
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "already exited") != NULL);
+    free(clean);
+    ASSERT_EQ(nm_proc_count(), 0);
+
+    /* Back to the empty note. */
+    harness_type(h, "/ps");
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "no process sessions") != NULL);
+    free(clean);
+
+    harness_free(h);
+    nm_proc_reset();
+}
+
+/* /kill argument handling: no id, a non-numeric id, an over-long id and
+ * an unknown id all refuse without touching the registry. */
+static void test_kill_rejects_bad_ids(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    nm_proc_reset();
+
+    char err[128];
+    int id = -1;
+    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+
+    harness_type(h, "/kill");
+    harness_enter(h);
+    harness_type(h, "/kill abc");
+    harness_enter(h);
+    harness_type(h, "/kill 0");
+    harness_enter(h);
+    harness_type(h, "/kill 12abc");
+    harness_enter(h);
+    harness_type(h, "/kill 999999999999");
+    harness_enter(h);
+    harness_type(h, "/kill 999");
+    harness_enter(h);
+
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_NOT_NULL(strstr(clean, "expected a session id"));
+    ASSERT_NOT_NULL(strstr(clean, "expected a positive session id"));
+    ASSERT_NOT_NULL(strstr(clean, "no session 999"));
+    free(clean);
+
+    /* None of it touched the real session. */
+    ASSERT_EQ(nm_proc_count(), 1);
+    ASSERT_NOT_NULL(nm_proc_find(id));
+
+    harness_free(h);
+    nm_proc_reset();
+    ASSERT_EQ(nm_proc_count(), 0);
+}
+
+/* The /ps command column: whitespace runs collapse, an over-long command
+ * elides with "…", and the cut never splits a multi-byte character. */
+static void test_ps_command_column_elides_safely(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    nm_proc_reset();
+
+    /* Runs of spaces/tabs and a newline collapse to single spaces. */
+    char err[128];
+    int id_a = -1, id_b = -1;
+    ASSERT_NOT_NULL(nm_proc_start("sleep\t\t 30; echo   a\nb", NULL, &id_a,
+                                  err, sizeof(err)));
+    ASSERT_NOT_NULL(
+        nm_proc_start("sleep 30", NULL, &id_b, err, sizeof(err)));
+
+    harness_type(h, "/ps");
+    harness_enter(h);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_NOT_NULL(strstr(clean, "sleep 30; echo a b"));
+    /* No collapsed run survives as a double space. */
+    ASSERT_TRUE(strstr(clean, "sleep\t") == NULL);
+    ASSERT_TRUE(strstr(clean, "echo  a") == NULL);
+    free(clean);
+
+    /* An over-long ASCII command elides at the column budget. */
+    char long_cmd[256];
+    size_t o = 0;
+    o += (size_t)snprintf(long_cmd + o, sizeof(long_cmd) - o, "echo");
+    for (int i = 0; i < 40 && o + 5 < sizeof(long_cmd); i++)
+        o += (size_t)snprintf(long_cmd + o, sizeof(long_cmd) - o, " word%d",
+                              i);
+    int id_c = -1;
+    ASSERT_NOT_NULL(nm_proc_start(long_cmd, NULL, &id_c, err, sizeof(err)));
+    harness_type(h, "/ps");
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_NOT_NULL(strstr(clean, "\xE2\x80\xA6")); /* elided with "…" */
+    ASSERT_TRUE(utf8_well_formed(clean));
+    free(clean);
+
+    /* A wide character straddling the cut must not be halved: the
+     * summary stays valid UTF-8 (each CJK glyph is 3 columns, so the
+     * 46-column budget lands mid-run). */
+    char wide[512];
+    o = (size_t)snprintf(wide, sizeof(wide), "echo");
+    for (int i = 0; i < 60; i++)
+        o += (size_t)snprintf(wide + o, sizeof(wide) - o, " \xE6\xBC\xA2");
+    int id_d = -1;
+    ASSERT_NOT_NULL(nm_proc_start(wide, NULL, &id_d, err, sizeof(err)));
+    harness_type(h, "/ps");
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(utf8_well_formed(clean));
+    ASSERT_NOT_NULL(strstr(clean, "\xE2\x80\xA6"));
+    free(clean);
+
+    harness_free(h);
+    nm_proc_reset();
+}
+
+/* The exec spinner tier: while exec_command's yield window is open the
+ * status row reads "executing exec_command…" in the activity role — the
+ * same tier run_command gets (P4's spinner item). */
+static void test_exec_command_spinner_tier(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"exec_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 30\\\",\\\"yield_time_ms\\\":5000}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    nm_proc_reset(); /* this test owns the registry */
+
+    harness_type(h, "start the server");
+    harness_enter(h);
+
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            nm_chat_app_fd(h->app) >= 0)
+            break;
+        int fd = nm_chat_app_fd(h->app);
+        unsigned in = app_interest(h->app);
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+
+    /* The yield window is open (a silent child): the spinner still
+     * animates, tier "executing exec_command". */
+    nm_chat_app_tick(h->app);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER) != NULL);
+    ASSERT_TRUE(strstr(frame, "executing exec_command") != NULL);
+
+    /* The window stays open on a silent child; interrupting the turn
+     * returns the UI to idle and LEAVES THE SESSION ALIVE (P3's whole
+     * point: a call's end frees its state, not the session). */
+    tui_runtime_send(h->rt, tui_msg_interrupt());
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_EQ(nm_proc_count(), 1);
+
+    harness_free(h);
+    ASSERT_EQ(nm_proc_count(), 0); /* teardown reaps the survivor */
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+#endif /* !_WIN32 */
+
 int main(void)
 {
 #ifndef _WIN32
@@ -3069,11 +3379,16 @@ int main(void)
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     RUN_TEST(test_session_cap_fits_the_fd_budget);
+    RUN_TEST(test_ps_without_sessions);
 #ifndef _WIN32
     RUN_TEST(test_interest_lists_every_session);
     RUN_TEST(test_app_teardown_kills_sessions);
     RUN_TEST(test_external_ready_drains_background_session);
     RUN_TEST(test_interest_dedupes_active_exec_session);
+    RUN_TEST(test_ps_lists_and_kill_removes);
+    RUN_TEST(test_kill_rejects_bad_ids);
+    RUN_TEST(test_ps_command_column_elides_safely);
+    RUN_TEST(test_exec_command_spinner_tier);
 #endif
     TEST_SUMMARY();
 }
