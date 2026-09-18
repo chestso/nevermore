@@ -16,6 +16,7 @@ check_PROGRAMS = \
     test_session \
     test_context \
     test_tools \
+    test_web_search \
     test_agent \
     test_spinner \
     test_history \
@@ -192,16 +193,35 @@ TOOLS_SPAWN_SOURCE = ../src/tools_spawn_win.c ../src/os_compat_win.c
 else
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_posix.c
 endif
+# web_search rides transport (the async HTTP step machine), so the
+# tools binary links the wire stack and the TLS backend source; the
+# spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
-    $(TOOLS_SPAWN_SOURCE) ../src/json.c
-test_tools_CFLAGS = $(TEST_CFLAGS)
-test_tools_LDADD = -lpthread
+    ../src/tools_websearch.c \
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c \
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
+    $(TEST_TLS_SOURCE)
+test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
+
+# web_search: the SearXNG HTTP tool against a canned loopback server —
+# request shaping, result normalization (sort/dedup/cap), errors, the
+# reachability cache and its timeout.
+test_web_search_SOURCES = test_web_search.c \
+    ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c \
+    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
+    $(TEST_TLS_SOURCE)
+test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_web_search_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/context.c \
-    ../src/tools.c ../src/tools_file.c $(TOOLS_SPAWN_SOURCE) \
+    ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
@@ -251,7 +271,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
-    ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c \
+    ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \

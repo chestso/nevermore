@@ -118,12 +118,13 @@ static void test_registry_defaults(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     ASSERT_NOT_NULL(ts);
-    ASSERT_EQ(nm_toolset_len(ts), 5);
+    ASSERT_EQ(nm_toolset_len(ts), 6);
     ASSERT_NOT_NULL(nm_toolset_find(ts, "read_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "edit_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "list_dir"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "search_dir"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "run_command"));
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "web_search"));
     ASSERT_NULL(nm_toolset_find(ts, "nope"));
     nm_toolset_free(ts);
 }
@@ -149,7 +150,7 @@ static void test_schema_json(void)
     NmJson *arr = nm_json_parse(json, strlen(json), &err);
     ASSERT_NOT_NULL(arr);
     ASSERT_EQ(nm_json_type(arr), NM_JSON_ARRAY);
-    ASSERT_EQ(nm_json_len(arr), 5);
+    ASSERT_EQ(nm_json_len(arr), 6);
     NmJson *first = nm_json_at(arr, 0);
     ASSERT_STR_EQ(nm_json_str(nm_json_get(first, "type")), "function");
     NmJson *fn = nm_json_get(first, "function");

@@ -57,4 +57,7 @@ extern const NmTool nm_tool_search_dir;
 /* tools_spawn_posix.c / tools_spawn_win.c: run_command tool. */
 extern const NmTool nm_tool_run_command;
 
+/* tools_websearch.c: local SearXNG web_search tool. */
+extern const NmTool nm_tool_web_search;
+
 #endif // NM_TOOLS_INTERNAL_H

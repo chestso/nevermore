@@ -119,6 +119,7 @@ nevermore_SOURCES = \
     tools_internal.h \
     tools.c \
     tools_file.c \
+    tools_websearch.c \
     session.c \
     nm_markdown.h \
     nm_markdown.c \

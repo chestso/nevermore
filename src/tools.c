@@ -183,6 +183,7 @@ NmToolset *nm_toolset_new_defaults(void)
     nm_toolset_add(ts, &nm_tool_list_dir);
     nm_toolset_add(ts, &nm_tool_search_dir);
     nm_toolset_add(ts, &nm_tool_run_command);
+    nm_toolset_add(ts, &nm_tool_web_search);
     return ts;
 }
 

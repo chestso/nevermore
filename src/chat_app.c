@@ -1131,6 +1131,13 @@ static void config_reset(NmChatApp *app, const char *key)
         nm_chat_app_set_max_rounds(app, resolved_rounds(app));
     if (!key || strcmp(key, NM_CFG_KEY_REASONING) == 0)
         nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
+    /* The web_search endpoint is process-global tool state; reset it so
+     * the layer below applies and the new endpoint is probed fresh. */
+    if (!key || strcmp(key, NM_CFG_KEY_SEARXNG) == 0) {
+        nm_tool_web_search_set_base_url(
+            nm_config_get(app->cfg, NM_CFG_KEY_SEARXNG));
+        nm_tool_web_search_reset_health();
+    }
 }
 
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)

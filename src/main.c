@@ -68,6 +68,9 @@ static void usage(FILE *out)
             "  NEVERMORE_MODEL         default model (as -m)\n"
             "  NEVERMORE_BASE_URL      override the provider's endpoint\n"
             "                          (e.g. a wire-replay server)\n"
+            "  NEVERMORE_SEARXNG_URL   SearXNG endpoint the web_search\n"
+            "                          tool queries (default\n"
+            "                          http://127.0.0.1:8888)\n"
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
             "  NEVERMORE_ECHO_REASONING=1\n"
             "                          re-send reasoning traces to the\n"
@@ -336,6 +339,12 @@ int main(int argc, char *argv[])
     nm_config_set_env(cfg);
     nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, cli_provider);
     nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, cli_model);
+
+    /* The web_search endpoint is process-global tool state (no
+     * per-session plumbing): resolve it once from the `searxng` key
+     * (env NEVERMORE_SEARXNG_URL, else the built-in localhost default)
+     * before either the ask or the TUI path builds its toolset. */
+    nm_tool_web_search_set_base_url(nm_config_get(cfg, NM_CFG_KEY_SEARXNG));
 
     const char *provider_name =
         nm_config_get(cfg, NM_CFG_KEY_PROVIDER);

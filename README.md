@@ -6,8 +6,9 @@ _"Quoth the raven: nevermore."_
 
 nevermore chats with AI models (Charm Hyper, Ollama local daemon and
 Ollama Cloud, OpenAI, OpenRouter, OpenCode Go and Zen) from a
-terminal, with an agent loop that can read, edit, and search files and
-run commands. It is a first-class citizen of the [portty](../portty)
+terminal, with an agent loop that can read, edit, and search files,
+run commands, and search the web through a local SearXNG instance. It
+is a first-class citizen of the [portty](../portty)
 terminal: kitty keyboard protocol, OSC 52 clipboard, Lottie spinner
 via OSC 5555, sixel image attach — graceful degradation elsewhere.
 
@@ -79,7 +80,8 @@ Settings resolve once, lowest to highest:
 3. **runtime shadow** — `~/.local/state/nevermore/config`, written by
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
-   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`
+   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`,
+   `NEVERMORE_SEARXNG_URL`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -99,13 +101,20 @@ provider  = openai
 model     = glm-5.3
 rounds    = 40
 reasoning = on
+searxng   = http://127.0.0.1:8888
 ```
 
-Four keys, one spelling each. The value is the rest of the line,
+Five keys, one spelling each. The value is the rest of the line,
 trimmed and taken verbatim — no quoting, no inline comments. Unknown
 keys and invalid values warn and are skipped, so a stale file can never
 break startup. No secrets: API keys stay in the environment or
 `~/.authinfo`.
+
+`searxng` is the local [SearXNG](https://searxng.org) endpoint behind
+the `web_search` tool (default `http://127.0.0.1:8888`); the model
+queries it when it needs live web results. If the instance is
+unreachable, `web_search` says so once and short-circuits for the rest
+of the session rather than hammering a dead server.
 
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
