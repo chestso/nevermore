@@ -97,11 +97,56 @@ static void test_spinner_stops_on_terminal_states(void)
     nm_spinner_free(s);
 }
 
+/* A tier switch must not index past the new (shorter) set. The frame
+ * index is shared across tiers; braille has 10 frames and charset 6,
+ * so an index in [6,9) carried over from streaming used to read
+ * charset_frames[6..9] — neighbouring rodata, one slot of which is
+ * literally the run_command description (the 2026-09-18 bug: the
+ * description text flashed in the spinner's yellow while a tool ran).
+ * The index must be wrapped into the active set before the read. */
+static void test_spinner_tier_switch_wraps_index(void)
+{
+    NmSpinner *s = nm_spinner_new();
+    ASSERT_NOT_NULL(s);
+
+    /* Stream long enough that the index leaves the charset range:
+     * after 9 braille ticks the index is 9. */
+    nm_spinner_set_state(s, NM_AGENT_STREAMING);
+    for (int i = 0; i < 9; i++)
+        ASSERT_NOT_NULL(nm_spinner_tick(s));
+
+    /* Tool tier: 9 wraps into the 6-frame set -> frame 3, "✶". The
+     * returned pointer must be INSIDE the charset set, never a rodata
+     * neighbour (the description string lives right after it). */
+    nm_spinner_set_state(s, NM_AGENT_RUNNING_TOOL);
+    const char *f = nm_spinner_tick(s);
+    ASSERT_NOT_NULL(f);
+    ASSERT_STR_EQ(f, "✶");
+
+    /* Every index reachable from streaming wraps the same way: the
+     * frame returned is always one of the six charset glyphs, never a
+     * neighbour like the run_command description. */
+    for (int i = 0; i < 10; i++) {
+        nm_spinner_set_state(s, NM_AGENT_STREAMING);
+        for (int k = 0; k < i; k++)
+            nm_spinner_tick(s);
+        nm_spinner_set_state(s, NM_AGENT_RUNNING_TOOL);
+        const char *t = nm_spinner_tick(s);
+        ASSERT_NOT_NULL(t);
+        ASSERT_TRUE(strcmp(t, "·") == 0 || strcmp(t, "✢") == 0 ||
+                    strcmp(t, "*") == 0 || strcmp(t, "✶") == 0 ||
+                    strcmp(t, "✻") == 0 || strcmp(t, "✽") == 0);
+    }
+
+    nm_spinner_free(s);
+}
+
 int main(void)
 {
     printf("test_spinner:\n");
     RUN_TEST(test_spinner_streaming_braille_cycle);
     RUN_TEST(test_spinner_tool_charset_frames);
     RUN_TEST(test_spinner_stops_on_terminal_states);
+    RUN_TEST(test_spinner_tier_switch_wraps_index);
     TEST_SUMMARY();
 }

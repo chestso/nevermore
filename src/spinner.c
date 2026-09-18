@@ -73,10 +73,18 @@ const char *nm_spinner_tick(NmSpinner *s)
         n = BRAILLE_N;
     }
 
-    /* Return the current frame, then advance — the first tick of an
-     * animation shows frame 0. The index carries across tier
-     * switches via modulo of the new set (never out of range); a
-     * stop leaves the index where it was. */
+    /* The frame index is shared across tiers, which have DIFFERENT
+     * lengths (braille 10, charset 6), so it must be wrapped into the
+     * ACTIVE set's range BEFORE the read — the read is the first use.
+     * Wrapping only on advance (the old form) let the first tick after
+     * a streaming->tool switch index past the shorter charset array
+     * (braille left it at up to 9): charset_frames[9] is neighbouring
+     * rodata, the run_command description, so one tick printed that
+     * string in the spinner's yellow before the next tick replaced it
+     * — the 2026-09-18 "eaten description" report (an OOB read, not a
+     * transcript bug). A stop leaves the index where it was, and a
+     * wrapped index is still that (the cycle just resumes in range). */
+    s->frame %= (int)n;
     const char *frame = frames[s->frame];
     s->frame = (s->frame + 1) % (int)n;
     return frame;

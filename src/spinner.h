@@ -35,7 +35,13 @@ void nm_spinner_set_state(NmSpinner *s, NmAgentState state);
  * any state was set). The FIRST tick of an animation returns frame
  * 0; a NULL return advances nothing — the cycle resumes where it
  * left off when the animation restarts. The returned string is
- * static; valid until the next call. */
+ * static; valid until the next call.
+ *
+ * The frame index is shared across tiers and the tiers have
+ * different lengths (braille 10, charset 6), so it is wrapped into
+ * the ACTIVE set before every read — never read out of range. A
+ * tier switch therefore resumes at the wrapped position rather than
+ * frame 0 (the cycle does not restart, per set_state). */
 const char *nm_spinner_tick(NmSpinner *s);
 
 #endif // NM_SPINNER_H
