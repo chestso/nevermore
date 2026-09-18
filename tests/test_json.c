@@ -1,5 +1,6 @@
 /* test_json.c - JSON reader/writer tests. Runs offline. */
 
+#include <float.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -458,6 +459,107 @@ static void test_json_dump_large_number_is_valid_json(void)
     nm_json_free(w);
 }
 
+/* Maximum value fidelity: whatever a double is handed, the text must
+ * parse back to the bit-identical double (strtod round trip). The
+ * shortest %g precision is kept, so 0.1 stays "0.1" and only a value
+ * that needs it grows to 17 digits. */
+static void test_json_dump_number_roundtrip_fidelity(void)
+{
+    static const double nums[] = {
+        0.1,
+        1.0 / 3.0,
+        2.0 / 3.0,
+        1.0 / 7.0,
+        0.30000000000000004,
+        3.141592653589793,
+        2.718281828459045,
+        123456789.123456789,
+        1e20,
+        -1e20,
+        1e19,
+        -1e19,
+        1e-300,
+        -1e-300,
+        9007199254740992.0,
+        9007199254740993.0,
+        DBL_MAX,
+        -DBL_MAX,
+        DBL_MIN,
+        2.2250738585072014e-308,
+        4.9406564584124654e-324, /* the smallest denormal */
+    };
+    for (size_t i = 0; i < sizeof(nums) / sizeof(nums[0]); i++) {
+        NmJson *v = nm_json_new_number(nums[i]);
+        char *d = nm_json_dump(v);
+        ASSERT_NOT_NULL(d);
+        const char *err = NULL;
+        NmJson *rt = nm_json_parse(d, strlen(d), &err);
+        ASSERT_NOT_NULL(rt);
+        double back = nm_json_num(rt);
+        ASSERT_TRUE(memcmp(&back, &nums[i], sizeof(double)) == 0);
+        nm_json_free(rt);
+        free(d);
+        nm_json_free(v);
+    }
+}
+
+/* The readable spellings are chosen deliberately, not by accident of
+ * %g: no trailing ".0" on a whole number, "-0" keeps its sign (a
+ * valid RFC 8259 number), and %.15g..%.17g keep the shortest form. */
+static void test_json_dump_number_text(void)
+{
+    static const struct
+    {
+        double in;
+        const char *want;
+    } cases[] = {
+        { 0.0, "0" },
+        { -0.0, "-0" },
+        { 1.0, "1" },
+        { 1.5, "1.5" },
+        { 0.1, "0.1" },
+        { 1.0 / 3.0, "0.3333333333333333" },
+        { 1e20, "1e+20" },
+        { 1e-300, "1e-300" },
+        { 9007199254740992.0, "9007199254740992" },
+        { DBL_MAX, "1.7976931348623157e+308" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        NmJson *v = nm_json_new_number(cases[i].in);
+        char *d = nm_json_dump(v);
+        ASSERT_NOT_NULL(d);
+        ASSERT_STR_EQ(d, cases[i].want);
+        free(d);
+        nm_json_free(v);
+    }
+}
+
+/* Doubles arrive from the wire (temperature, timestamps) and leave
+ * through a request body; the two directions must agree, so a dump
+ * must survive the strict reader and come back bit-exact. */
+static void test_json_dump_number_wire_roundtrip(void)
+{
+    NmJson *o = nm_json_new_object();
+    nm_json_set(o, "temperature", nm_json_new_number(0.7));
+    nm_json_set(o, "top_p", nm_json_new_number(0.95));
+    nm_json_set(o, "t", nm_json_new_number(1726092000.123456));
+    char *d = nm_json_dump(o);
+    ASSERT_NOT_NULL(d);
+    const char *err = NULL;
+    NmJson *rt = nm_json_parse(d, strlen(d), &err);
+    ASSERT_NOT_NULL(rt);
+    double temp = nm_json_num(nm_json_get(rt, "temperature"));
+    double top_p = nm_json_num(nm_json_get(rt, "top_p"));
+    double t = nm_json_num(nm_json_get(rt, "t"));
+    double temp0 = 0.7, top_p0 = 0.95, t0 = 1726092000.123456;
+    ASSERT_TRUE(memcmp(&temp, &temp0, sizeof(double)) == 0);
+    ASSERT_TRUE(memcmp(&top_p, &top_p0, sizeof(double)) == 0);
+    ASSERT_TRUE(memcmp(&t, &t0, sizeof(double)) == 0);
+    nm_json_free(rt);
+    free(d);
+    nm_json_free(o);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -484,5 +586,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_dump_replaces_invalid_key);
     RUN_TEST(test_json_dump_nonfinite_is_null);
     RUN_TEST(test_json_dump_large_number_is_valid_json);
+    RUN_TEST(test_json_dump_number_roundtrip_fidelity);
+    RUN_TEST(test_json_dump_number_text);
+    RUN_TEST(test_json_dump_number_wire_roundtrip);
     TEST_SUMMARY();
 }

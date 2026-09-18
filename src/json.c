@@ -18,7 +18,9 @@
  * bytes that are not well-formed UTF-8 become U+FFFD (one replacement
  * per ill-formed maximal subpart), control characters are escaped, and
  * a non-finite double dumps as null — the writer has no error channel,
- * so it repairs rather than refuses.
+ * so it repairs rather than refuses. Numbers are emitted at maximum
+ * fidelity: the shortest %g precision (15, 16 or 17 significant
+ * digits) that strtod round-trips bit-exactly.
  *
  * Reader memory model (memory-reuse principle): all strings, keys,
  * and numbers for one parsed document live in a single append-only
@@ -32,6 +34,7 @@
  */
 
 #include <float.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1110,6 +1113,55 @@ static void dump_string(DumpBuf *b, const char *s)
     db_putc(b, '"');
 }
 
+/* Serialize one double with maximum fidelity: the text must parse
+ * back (strtod) to the bit-identical value, and it must be a valid
+ * RFC 8259 number — the exponent form %g can emit ("1e+20") is legal.
+ * No libm, no dtoa: try the shortest of %.*g at 15, then 16, then 17
+ * significant digits and keep the first that round-trips. 17 always
+ * suffices for an IEEE-754 double, so the loop is bounded and the
+ * final snprintf (the 17-digit fallback) is a formality.
+ *
+ * Values with human meaning stay readable: a whole number in long
+ * long range prints as an integer (the wire format for counts and
+ * indices), zero keeps its sign ("-0" is a valid RFC 8259 number and
+ * strtod round-trips it), and NaN/±infinity have no JSON spelling, so
+ * they become null (as cJSON and JSON.stringify substitute).
+ *
+ * The C locale is assumed: nevermore never calls setlocale, so %g's
+ * decimal point is '.' — a locale with a comma separator would emit
+ * invalid JSON here. */
+static void db_put_number(DumpBuf *b, double d)
+{
+    char tmp[64];
+    if (!(d >= -DBL_MAX && d <= DBL_MAX)) { /* NaN or ±infinity */
+        db_puts(b, "null");
+        return;
+    }
+    if (d == 0.0) {
+        db_puts(b, signbit(d) ? "-0" : "0");
+        return;
+    }
+    if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+        d == (double)(long long)d) {
+        /* The range guard must come first: casting an out-of-range
+         * double to long long is undefined (UBSan traps it). */
+        snprintf(tmp, sizeof(tmp), "%lld", (long long)d);
+        db_puts(b, tmp);
+        return;
+    }
+    int prec = 15;
+    for (; prec < 17; prec++) {
+        snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
+        char *end = NULL;
+        double back = strtod(tmp, &end);
+        if (end && *end == '\0' && memcmp(&back, &d, sizeof(d)) == 0)
+            break;
+    }
+    if (prec == 17) /* no shorter form round-tripped */
+        snprintf(tmp, sizeof(tmp), "%.17g", d);
+    db_puts(b, tmp);
+}
+
 static void dump_value(DumpBuf *b, const NmJson *v)
 {
     if (!v) {
@@ -1124,29 +1176,8 @@ static void dump_value(DumpBuf *b, const NmJson *v)
         db_puts(b, v->u.boolean ? "true" : "false");
         break;
     case NM_JSON_NUMBER:
-    {
-        char tmp[64];
-        double d = v->u.number;
-        /* NaN and ±infinity have no JSON spelling (the grammar has no
-         * Inf/NaN token), so they dump as null — what cJSON and
-         * JSON.stringify substitute. The comparison is the standard
-         * isfinite idiom: NaN fails both halves, ±inf fails the
-         * matching half. */
-        if (!(d >= -DBL_MAX && d <= DBL_MAX)) {
-            snprintf(tmp, sizeof(tmp), "null");
-        } else if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
-                   d == (double)(long long)d) {
-            /* Integral numbers serialize without a trailing .0 — the
-             * wire format for counts and indices. The range guard
-             * must come first: casting an out-of-range double to
-             * long long is undefined (UBSan traps it). */
-            snprintf(tmp, sizeof(tmp), "%lld", (long long)d);
-        } else {
-            snprintf(tmp, sizeof(tmp), "%g", d);
-        }
-        db_puts(b, tmp);
+        db_put_number(b, v->u.number);
         break;
-    }
     case NM_JSON_STRING:
     {
         const char *s = v->u.string ? v->u.string : "";
