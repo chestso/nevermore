@@ -189,6 +189,20 @@ static int hexval(char c)
     return -1;
 }
 
+/* Four hex digits at s[0..3] → the 16-bit unit they spell, or -1 if
+ * any digit is not hex. */
+static int hex4(const char *s)
+{
+    int v = 0;
+    for (int k = 0; k < 4; k++) {
+        int h = hexval(s[k]);
+        if (h < 0)
+            return -1;
+        v = (v << 4) | h;
+    }
+    return v;
+}
+
 static char *parse_string_raw(Parser *p)
 {
     /* Parses a JSON string literal (with quotes) into a heap/arena
@@ -220,8 +234,10 @@ static char *parse_string_raw(Parser *p)
             *p->err = "unterminated string";
         return NULL;
     }
-    /* Sizing pass counts worst-case UTF-8 bytes: a \u escape can emit
-     * up to 3 bytes, any other escape exactly 1. */
+    /* Sizing pass counts worst-case UTF-8 bytes: each \u escape is
+     * charged 3 bytes for the escape plus 1 for the hex digit the
+     * skip lands on, so an astral pair (two escapes, 4 bytes out)
+     * stays inside the bound; any other escape is 1 byte. */
     {
         size_t i = start;
         size_t out_len = 0;
@@ -286,29 +302,54 @@ static char *parse_string_raw(Parser *p)
                         *p->err = "bad \\u escape";
                     return NULL;
                 }
-                int h[4];
-                for (int k = 0; k < 4; k++) {
-                    h[k] = hexval(p->s[i + 1 + k]);
-                    if (h[k] < 0) {
+                int unit = hex4(p->s + i + 1);
+                if (unit < 0) {
+                    if (p->err)
+                        *p->err = "bad \\u escape";
+                    return NULL;
+                }
+                unsigned cp = (unsigned)unit;
+                i += 4;
+                /* An astral character arrives as a surrogate pair
+                 * (\ud83d\ude00) and must be recombined into the one
+                 * codepoint UTF-8 can encode. Encoding the halves as
+                 * if they were standalone codepoints writes CESU-8
+                 * (0xED 0xA0 0xBD ...) — bytes no UTF-8 reader
+                 * accepts, which is how a model's emoji in
+                 * edit_file's new_string reached a file verbatim and
+                 * read_file then refused the file. A lone surrogate
+                 * has no UTF-8 form at all: it is malformed input, so
+                 * it is named and rejected, never silently mangled. */
+                if (cp >= 0xD800 && cp <= 0xDFFF) {
+                    int low = -1;
+                    if (cp <= 0xDBFF && i + 6 < p->len &&
+                        p->s[i + 1] == '\\' && p->s[i + 2] == 'u')
+                        low = hex4(p->s + i + 3);
+                    if (low < 0xDC00 || low > 0xDFFF) {
                         if (p->err)
-                            *p->err = "bad \\u escape";
+                            *p->err = "unpaired surrogate in \\u escape";
                         return NULL;
                     }
+                    cp = 0x10000u + ((cp - 0xD800u) << 10) +
+                         ((unsigned)low - 0xDC00u);
+                    i += 6; /* the low half's \uXXXX */
                 }
-                unsigned cp = (unsigned)h[0] << 12 | (unsigned)h[1] << 8 | (unsigned)h[2] << 4 | (unsigned)h[3];
-                /* UTF-8 encode (no surrogate pairs — models never emit
-                 * them, and unpaired surrogates are an error anyway). */
+                /* UTF-8 encode. */
                 if (cp < 0x80) {
                     out[o++] = (char)cp;
                 } else if (cp < 0x800) {
                     out[o++] = (char)(0xC0 | (cp >> 6));
                     out[o++] = (char)(0x80 | (cp & 0x3F));
-                } else {
+                } else if (cp < 0x10000) {
                     out[o++] = (char)(0xE0 | (cp >> 12));
                     out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
                     out[o++] = (char)(0x80 | (cp & 0x3F));
+                } else {
+                    out[o++] = (char)(0xF0 | (cp >> 18));
+                    out[o++] = (char)(0x80 | ((cp >> 12) & 0x3F));
+                    out[o++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                    out[o++] = (char)(0x80 | (cp & 0x3F));
                 }
-                i += 4;
                 break;
             }
             default:

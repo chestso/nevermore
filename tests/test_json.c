@@ -52,6 +52,71 @@ static void test_json_parse_escapes_and_unicode(void)
     nm_json_free(v);
 }
 
+/* Non-BMP characters arrive on the wire escaped as a surrogate pair
+ * (\ud83d\ude00): the halves must be recombined into the one codepoint
+ * UTF-8 can encode. Encoding each half on its own wrote CESU-8
+ * (ED A0 BD ED B8 80) — invalid UTF-8, which is how a model's emoji in
+ * edit_file's new_string reached a file and made read_file refuse it
+ * (2026-09-18). */
+static void test_json_parse_surrogate_pairs(void)
+{
+    const char *err = NULL;
+    const char *s = "{\"s\":\"hi \\ud83d\\ude00 there\"}";
+    NmJson *v = nm_json_parse(s, strlen(s), &err);
+    ASSERT_NOT_NULL(v);
+    ASSERT_STR_EQ(nm_json_str(nm_json_get(v, "s")),
+                  "hi \xf0\x9f\x98\x80 there");
+
+    /* A pair immediately followed by another escape: the low half's
+     * digits are consumed, not re-read as content. */
+    const char *s2 = "{\"s\":\"\\ud83d\\ude00\\u00e9\"}";
+    NmJson *v2 = nm_json_parse(s2, strlen(s2), &err);
+    ASSERT_NOT_NULL(v2);
+    ASSERT_STR_EQ(nm_json_str(nm_json_get(v2, "s")),
+                  "\xf0\x9f\x98\x80\xc3\xa9");
+
+    /* BMP escapes keep their 2- and 3-byte forms. */
+    const char *s3 = "{\"s\":\"caf\\u00e9 \\u4e2d\"}";
+    NmJson *v3 = nm_json_parse(s3, strlen(s3), &err);
+    ASSERT_NOT_NULL(v3);
+    ASSERT_STR_EQ(nm_json_str(nm_json_get(v3, "s")),
+                  "caf\xc3\xa9 \xe4\xb8\xad");
+
+    /* Dumping is the inverse: an astral string rides out as raw UTF-8
+     * and re-parses to the same bytes. */
+    char *d = nm_json_dump(v);
+    ASSERT_NOT_NULL(d);
+    NmJson *rt = nm_json_parse(d, strlen(d), &err);
+    ASSERT_NOT_NULL(rt);
+    ASSERT_STR_EQ(nm_json_str(nm_json_get(rt, "s")),
+                  nm_json_str(nm_json_get(v, "s")));
+
+    nm_json_free(rt);
+    free(d);
+    nm_json_free(v3);
+    nm_json_free(v2);
+    nm_json_free(v);
+}
+
+/* A lone surrogate has no UTF-8 encoding at all: report the input as
+ * malformed instead of emitting unpaired bytes or a silent U+FFFD. */
+static void test_json_parse_rejects_lone_surrogates(void)
+{
+    const char *err = NULL;
+    static const char *bad[] = {
+        "{\"s\":\"\\ud83d\"}",        /* high, string ends */
+        "{\"s\":\"\\ud83dx\"}",       /* high, then a plain char */
+        "{\"s\":\"\\ud83d\\u0041\"}", /* high, then a non-low escape */
+        "{\"s\":\"\\ud83d\\ud83d\"}", /* two highs */
+        "{\"s\":\"\\ude00\"}",        /* bare low */
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        err = NULL;
+        ASSERT_NULL(nm_json_parse(bad[i], strlen(bad[i]), &err));
+        ASSERT_NOT_NULL(err);
+    }
+}
+
 static void test_json_parse_rejects_garbage(void)
 {
     const char *err = NULL;
@@ -102,6 +167,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_parse_object);
     RUN_TEST(test_json_parse_sse_delta_shape);
     RUN_TEST(test_json_parse_escapes_and_unicode);
+    RUN_TEST(test_json_parse_surrogate_pairs);
+    RUN_TEST(test_json_parse_rejects_lone_surrogates);
     RUN_TEST(test_json_parse_rejects_garbage);
     RUN_TEST(test_json_roundtrip);
     RUN_TEST(test_json_build_messages_array);
