@@ -57,6 +57,8 @@ run_build test_config tests/test_config.c src/nm_config.c
 run_build test_session tests/test_session.c src/session.c
 run_build test_context tests/test_context.c src/context.c
 
+run_build test_process tests/test_process.c src/process.c src/process_win.c
+
 run_build test_tools tests/test_tools.c src/tools.c src/tools_file.c \
 	src/tools_websearch.c src/tools_spawn_win.c src/os_compat_win.c \
 	src/json.c src/transport.c src/transport_socket.c \

@@ -171,11 +171,9 @@ void nm_tool_web_search_set_timeout_ms(int ms);
 void nm_tool_web_search_reset_health(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report
- * exit status. This is also the OS portability seam for the future
- * shell tool. Used by tests too. */
-typedef struct NmProc NmProc;
+ * exit status. Used by tests too. (Long-lived process sessions live in
+ * process.h.) */
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code);
-void nm_proc_free(NmProc *p);
 
 #ifdef __cplusplus
 }

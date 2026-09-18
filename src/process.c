@@ -1,0 +1,683 @@
+/* process.c - process-session registry, buffer, and dumb-terminal render
+ *
+ * Platform-neutral half of the process layer (process.h): the registry,
+ * the bounded per-session output buffer with its omission counter, the
+ * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
+ * half (spawn/read/write/kill/reap) is process_posix.c / process_win.c.
+ *
+ * Memory-reuse: one raw buffer and one report buffer per session, both
+ * grown geometrically and reused across drains and takes (the report is
+ * handed out borrowed and rewritten in place on the next take).
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "process.h"
+#include "process_internal.h"
+
+#define PROC_BUF_MAX_DEFAULT (256 * 1024) /* == SPAWN_CAPTURE_MAX */
+#define PROC_REPORT_SEED     256
+
+struct NmProc
+{
+    int id;
+    int fd; /* PTY master; -1 once closed */
+    long pid;
+    int live; /* 1 while the child runs */
+    int reaped;
+    int exit_code;
+    char *cmd; /* for /ps */
+    /* Raw accumulation: bytes [report_pos, len) are unreported. */
+    char *buf;
+    size_t len;
+    size_t cap;
+    size_t report_pos;
+    size_t dropped; /* unreported bytes the bounded buffer evicted */
+    /* Last take_output (borrowed out; rewritten in place next take). */
+    char *report;
+    size_t report_cap;
+};
+
+static NmProc *g_sessions[NM_PROC_MAX_SESSIONS];
+static int g_max_sessions = NM_PROC_MAX_SESSIONS;
+static int g_next_id = 1;
+static size_t g_buf_max = PROC_BUF_MAX_DEFAULT;
+
+/* ---------------------------------------------------------------- */
+/* Registry                                                         */
+/* ---------------------------------------------------------------- */
+
+static int registry_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_max_sessions; i++)
+        if (g_sessions[i])
+            n++;
+    return n;
+}
+
+static int registry_add(NmProc *p)
+{
+    for (int i = 0; i < g_max_sessions; i++) {
+        if (!g_sessions[i]) {
+            g_sessions[i] = p;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void registry_remove(NmProc *p)
+{
+    for (int i = 0; i < g_max_sessions; i++) {
+        if (g_sessions[i] == p) {
+            g_sessions[i] = NULL;
+            return;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- */
+/* Session lifecycle                                                */
+/* ---------------------------------------------------------------- */
+
+static void proc_free(NmProc *p)
+{
+    if (p->fd >= 0)
+        nm_proc_os_close(p->fd);
+    free(p->cmd);
+    free(p->buf);
+    free(p->report);
+    free(p);
+}
+
+NmProc *nm_proc_start(const char *cmd, const char *cwd, int *session_id,
+                      char *err, size_t errsz)
+{
+    if (session_id)
+        *session_id = -1;
+    if (err && errsz)
+        err[0] = '\0';
+    if (!cmd || !*cmd) {
+        nm_proc_set_err(err, errsz, "missing or empty cmd");
+        return NULL;
+    }
+    if (registry_count() >= g_max_sessions) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "session cap of %d reached",
+                 g_max_sessions);
+        nm_proc_set_err(err, errsz, msg);
+        return NULL;
+    }
+
+    NmProc *p = calloc(1, sizeof(*p));
+    if (!p) {
+        nm_proc_set_err(err, errsz, "out of memory");
+        return NULL;
+    }
+    p->fd = -1;
+
+    long pid = -1;
+    int fd = -1;
+    if (nm_proc_os_spawn(cmd, cwd, &pid, &fd, err, errsz) != 0) {
+        free(p);
+        return NULL;
+    }
+
+    p->id = g_next_id++;
+    p->pid = pid;
+    p->fd = fd;
+    p->live = 1;
+    p->cmd = strdup(cmd);
+    if (registry_add(p) != 0) {
+        /* Only reachable if the cap changed under us; be safe. */
+        nm_proc_os_kill(pid);
+        nm_proc_os_reap(pid, &p->exit_code, 1);
+        proc_free(p);
+        nm_proc_set_err(err, errsz, "session cap reached");
+        return NULL;
+    }
+    if (session_id)
+        *session_id = p->id;
+    return p;
+}
+
+/* Reap the child if it has exited (non-blocking).  Once reaped the
+ * session is no longer live; the master fd is closed and the buffered
+ * output stays available for a later take. */
+static void try_reap(NmProc *p)
+{
+    if (p->reaped || p->pid <= 0)
+        return;
+    int code = -1;
+    int r = nm_proc_os_reap(p->pid, &code, 0);
+    if (r == 0)
+        return; /* still running */
+    p->reaped = 1;
+    p->live = 0;
+    p->exit_code = (r == 1) ? code : -1;
+    if (p->fd >= 0) {
+        nm_proc_os_close(p->fd);
+        p->fd = -1;
+    }
+}
+
+void nm_proc_close(NmProc *p)
+{
+    if (!p)
+        return;
+    registry_remove(p);
+    if (!p->reaped) {
+        nm_proc_os_kill(p->pid);
+        /* Blocking reap: the child is a zombie or was just SIGKILLed,
+         * so waitpid returns at once (run_command's reap rationale). */
+        int code = -1;
+        if (nm_proc_os_reap(p->pid, &code, 1) == 1)
+            p->exit_code = code;
+        p->reaped = 1;
+        p->live = 0;
+    }
+    proc_free(p);
+}
+
+void nm_proc_close_all(void)
+{
+    for (int i = 0; i < g_max_sessions; i++) {
+        if (g_sessions[i])
+            nm_proc_close(g_sessions[i]);
+    }
+}
+
+int nm_proc_id(const NmProc *p) { return p ? p->id : -1; }
+const char *nm_proc_command(const NmProc *p) { return p ? p->cmd : NULL; }
+size_t nm_proc_buffered(const NmProc *p) { return p ? p->len : 0; }
+int nm_proc_fd(NmProc *p) { return p ? p->fd : -1; }
+
+int nm_proc_live(NmProc *p)
+{
+    if (!p)
+        return 0;
+    try_reap(p);
+    return p->live;
+}
+
+int nm_proc_exit(NmProc *p)
+{
+    if (!p)
+        return -1;
+    try_reap(p);
+    return p->live ? -1 : p->exit_code;
+}
+
+NmProc *nm_proc_find(int session_id)
+{
+    for (int i = 0; i < g_max_sessions; i++) {
+        if (g_sessions[i] && g_sessions[i]->id == session_id)
+            return g_sessions[i];
+    }
+    return NULL;
+}
+
+NmProc *nm_proc_by_fd(int fd)
+{
+    if (fd < 0)
+        return NULL;
+    for (int i = 0; i < g_max_sessions; i++) {
+        if (g_sessions[i] && g_sessions[i]->fd == fd)
+            return g_sessions[i];
+    }
+    return NULL;
+}
+
+int nm_proc_count(void) { return registry_count(); }
+
+NmProc *nm_proc_at(int i)
+{
+    if (i < 0)
+        return NULL;
+    for (int k = 0; k < g_max_sessions; k++) {
+        if (!g_sessions[k])
+            continue;
+        if (i-- == 0)
+            return g_sessions[k];
+    }
+    return NULL;
+}
+
+/* ---------------------------------------------------------------- */
+/* Output buffer                                                    */
+/* ---------------------------------------------------------------- */
+
+/* Append to the bounded raw buffer, evicting the oldest bytes when it
+ * is full (the newest output is what a reader wants for a spinner or a
+ * tail) and counting any unreported bytes lost as omitted. */
+static void buf_append(NmProc *p, const char *data, size_t n)
+{
+    if (n == 0 || g_buf_max == 0)
+        return;
+    if (n > g_buf_max) { /* a single huge chunk: keep its tail */
+        size_t lose = n - g_buf_max;
+        data += lose;
+        n = g_buf_max;
+        p->dropped += lose; /* the dropped prefix was never reported */
+    }
+    if (p->len + n > g_buf_max) {
+        size_t evict = p->len + n - g_buf_max;
+        if (p->report_pos < evict) {
+            p->dropped += evict - p->report_pos;
+            p->report_pos = 0;
+        } else {
+            p->report_pos -= evict;
+        }
+        memmove(p->buf, p->buf + evict, p->len - evict);
+        p->len -= evict;
+    }
+    if (p->len + n > p->cap) {
+        size_t ncap = p->cap ? p->cap : 4096;
+        while (ncap < p->len + n)
+            ncap *= 2;
+        if (ncap > g_buf_max)
+            ncap = g_buf_max;
+        char *nb = realloc(p->buf, ncap);
+        if (!nb) { /* OOM: drop the chunk rather than lose the session */
+            p->dropped += n;
+            return;
+        }
+        p->buf = nb;
+        p->cap = ncap;
+    }
+    memcpy(p->buf + p->len, data, n);
+    p->len += n;
+}
+
+void nm_proc_drain(NmProc *p)
+{
+    if (!p)
+        return;
+    if (p->fd >= 0) {
+        for (;;) {
+            char tmp[8192];
+            long n = nm_proc_os_read(p->fd, tmp, sizeof(tmp));
+            if (n > 0) {
+                buf_append(p, tmp, (size_t)n);
+                continue;
+            }
+            if (n == 0)
+                break; /* would block: nothing more right now */
+            /* EOF / terminal error: the master is exhausted. */
+            nm_proc_os_close(p->fd);
+            p->fd = -1;
+            break;
+        }
+    }
+    try_reap(p);
+}
+
+int nm_proc_write(NmProc *p, const char *bytes, size_t n)
+{
+    if (!p || p->fd < 0)
+        return -1;
+    if (n == 0)
+        return 0;
+    size_t off = 0;
+    while (off < n) {
+        long w = nm_proc_os_write(p->fd, bytes + off, n - off);
+        if (w > 0) {
+            off += (size_t)w;
+            continue;
+        }
+        if (w == 0)
+            break; /* would block: report the partial write */
+        return off ? (int)off : -1;
+    }
+    return (int)off;
+}
+
+/* ---------------------------------------------------------------- */
+/* Dumb-terminal renderer                                           */
+/* ---------------------------------------------------------------- */
+
+#define RENDER_MAX_COL 65536
+
+typedef struct
+{
+    char *p;
+    size_t len, cap;
+} RBuf;
+
+static int rbuf_reserve(RBuf *b, size_t extra)
+{
+    if (b->len + extra + 1 <= b->cap)
+        return 0;
+    size_t ncap = b->cap ? b->cap : PROC_REPORT_SEED;
+    while (ncap < b->len + extra + 1)
+        ncap *= 2;
+    char *np = realloc(b->p, ncap);
+    if (!np)
+        return -1;
+    b->p = np;
+    b->cap = ncap;
+    return 0;
+}
+
+static void rbuf_puts(RBuf *b, const char *s, size_t n)
+{
+    if (rbuf_reserve(b, n) != 0)
+        return;
+    memcpy(b->p + b->len, s, n);
+    b->len += n;
+    b->p[b->len] = '\0';
+}
+
+static void rbuf_putc(RBuf *b, char c)
+{
+    if (rbuf_reserve(b, 1) != 0)
+        return;
+    b->p[b->len++] = c;
+    b->p[b->len] = '\0';
+}
+
+/* Column scratch: spaces, grown geometrically, so a cursor write at an
+ * arbitrary column lands correctly. */
+static int col_ensure(char **cols, size_t *cap, size_t need)
+{
+    if (need <= *cap)
+        return 0;
+    if (need > RENDER_MAX_COL)
+        return -1;
+    size_t ncap = *cap ? *cap : 256;
+    while (ncap < need)
+        ncap *= 2;
+    if (ncap > RENDER_MAX_COL)
+        ncap = RENDER_MAX_COL;
+    char *nb = realloc(*cols, ncap);
+    if (!nb)
+        return -1;
+    memset(nb + *cap, ' ', ncap - *cap);
+    *cols = nb;
+    *cap = ncap;
+    return 0;
+}
+
+/* Parse a CSI sequence in line[i..n) (i points just past "ESC [").
+ * On success fills *final_idx (the final byte's index) and *params
+ * (*nparams entries, an omitted parameter read as 0) and returns 0;
+ * returns -1 when the sequence is unterminated at end of line or
+ * malformed (the caller then drops the rest of the line). */
+static int csi_parse(const char *line, size_t n, size_t i, size_t *final_idx,
+                     long *params, int max_params, int *nparams)
+{
+    long cur = 0;
+    int have_cur = 0;
+    int np = 0;
+    for (size_t j = i; j < n; j++) {
+        unsigned char c = (unsigned char)line[j];
+        if (c >= '0' && c <= '9') {
+            cur = cur * 10 + (c - '0');
+            have_cur = 1;
+            continue;
+        }
+        if (c == ';' || c == ':' || c == '?') { /* separators/subparams */
+            if (np < max_params)
+                params[np++] = have_cur ? cur : 0;
+            cur = 0;
+            have_cur = 0;
+            continue;
+        }
+        if (c >= 0x40 && c <= 0x7e) { /* the final byte */
+            if (np < max_params)
+                params[np++] = have_cur ? cur : 0;
+            *final_idx = j;
+            *nparams = np;
+            return 0;
+        }
+        return -1; /* malformed: a stray control byte */
+    }
+    return -1; /* unterminated at end of line */
+}
+
+/* Collapse one newline-free line to its final visible text. */
+static void render_line(RBuf *out, const char *line, size_t n)
+{
+    char *cols = NULL;
+    size_t cols_cap = 0;
+    size_t len = 0; /* highest column ever written, +1 */
+    size_t col = 0;
+    size_t i = 0;
+
+    while (i < n) {
+        unsigned char c = (unsigned char)line[i];
+
+        if (c == '\r') {
+            col = 0;
+            i++;
+            continue;
+        }
+        if (c == '\b') {
+            if (col)
+                col--;
+            i++;
+            continue;
+        }
+        if (c == '\t') {
+            size_t next = (col / 8 + 1) * 8;
+            while (col < next) {
+                if (col_ensure(&cols, &cols_cap, col + 1) != 0) {
+                    i = n;
+                    break;
+                }
+                cols[col++] = ' ';
+                if (col > len)
+                    len = col;
+            }
+            if (i == n)
+                break;
+            i++;
+            continue;
+        }
+        if (c == 0x1b) {
+            if (i + 1 >= n) { /* lone ESC: drop */
+                i++;
+                continue;
+            }
+            unsigned char c2 = (unsigned char)line[i + 1];
+            if (c2 == '[') {
+                size_t fidx = 0;
+                long params[8];
+                int np = 0;
+                if (csi_parse(line, n, i + 2, &fidx, params, 8, &np) != 0) {
+                    i = n; /* malformed/unterminated: drop the rest */
+                    break;
+                }
+                long p1 = np > 0 ? params[0] : 1;
+                switch (line[fidx]) {
+                case 'K':
+                case 'J':
+                {
+                    long mode = np > 0 ? params[0] : 0;
+                    if (mode == 0) {
+                        if (len > col)
+                            len = col; /* erase to end of line */
+                    } else if (mode == 1) {
+                        /* erase to start: spaces are real columns */
+                        for (size_t k = 0; k < col && k < cols_cap; k++)
+                            cols[k] = ' ';
+                    } else {
+                        len = 0; /* whole line */
+                    }
+                    break;
+                }
+                case 'C': /* cursor forward */
+                    col += (size_t)(p1 > 0 ? p1 : 1);
+                    if (col > RENDER_MAX_COL)
+                        col = RENDER_MAX_COL;
+                    break;
+                case 'D': /* cursor back */
+                    col = col > (size_t)p1 ? col - (size_t)p1 : 0;
+                    break;
+                case 'G': /* cursor to column P */
+                    col = (size_t)(p1 > 0 ? p1 : 1);
+                    col = col ? col - 1 : 0;
+                    break;
+                case 'H':
+                case 'f':
+                { /* cursor position: row 1 is this line */
+                    long row = np > 0 ? params[0] : 1;
+                    if (row <= 1) {
+                        long cc = np > 1 ? params[1] : 1;
+                        col = (size_t)(cc > 0 ? cc - 1 : 0);
+                    }
+                    break;
+                }
+                default: /* SGR and every other final: drop */
+                    break;
+                }
+                i = fidx + 1;
+                continue;
+            }
+            if (c2 == ']') { /* OSC: ESC ] ... BEL | ESC \ */
+                size_t j = i + 2;
+                int done = 0;
+                while (j < n && !done) {
+                    if (line[j] == '\a') {
+                        done = 1;
+                    } else if (line[j] == 0x1b && j + 1 < n &&
+                               line[j + 1] == '\\') {
+                        done = 1;
+                        j++;
+                    }
+                    j++;
+                }
+                i = done ? j : n;
+                continue;
+            }
+            i += 2; /* other two-byte escape: drop */
+            continue;
+        }
+        if (c < 32 || c == 127) { /* remaining C0 controls / DEL: drop */
+            i++;
+            continue;
+        }
+        if (col >= RENDER_MAX_COL) { /* pathological cursor: stop */
+            i = n;
+            break;
+        }
+        if (col_ensure(&cols, &cols_cap, col + 1) != 0) {
+            i = n;
+            break;
+        }
+        cols[col++] = (char)c;
+        if (col > len)
+            len = col;
+        i++;
+    }
+
+    /* Trailing spaces written by a tab or erase-to-start are part of
+     * the visible line (quoth keeps them). */
+    if (len)
+        rbuf_puts(out, cols, len);
+    free(cols);
+}
+
+/* Does this line carry anything the dumb-terminal pass must apply? */
+static int line_needs_render(const char *s, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (s[i] == '\r' || s[i] == '\b' || s[i] == '\t' || s[i] == 0x1b)
+            return 1;
+    }
+    return 0;
+}
+
+/* Render multi-line PTY text: each line collapses to its final visible
+ * text; a line free of control bytes passes through untouched and a
+ * trailing partial line is preserved as-is. */
+static void render_text(RBuf *out, const char *text, size_t n)
+{
+    size_t start = 0;
+    int first = 1;
+    for (size_t i = 0; i <= n; i++) {
+        if (i != n && text[i] != '\n')
+            continue;
+        const char *seg = text + start;
+        size_t segn = i - start;
+        if (!first)
+            rbuf_putc(out, '\n');
+        first = 0;
+        if (segn) {
+            if (line_needs_render(seg, segn))
+                render_line(out, seg, segn);
+            else
+                rbuf_puts(out, seg, segn);
+        }
+        start = i + 1;
+    }
+}
+
+char *nm_proc_render(const char *text)
+{
+    RBuf out = { NULL, 0, 0 };
+    if (text && *text)
+        render_text(&out, text, strlen(text));
+    if (!out.p)
+        return strdup("");
+    return out.p;
+}
+
+const char *nm_proc_take_output(NmProc *p)
+{
+    if (!p)
+        return "";
+    /* The report buffer is reused in place (memory-reuse); it is handed
+     * out borrowed and rewritten on the next take. */
+    RBuf out = { p->report, 0, p->report_cap };
+
+    if (p->dropped) {
+        char notice[64];
+        int k = snprintf(notice, sizeof(notice), "\n... %zu bytes omitted ...\n",
+                         p->dropped);
+        if (k > 0)
+            rbuf_puts(&out, notice, (size_t)k);
+        p->dropped = 0;
+    }
+    if (p->len > p->report_pos)
+        render_text(&out, p->buf + p->report_pos, p->len - p->report_pos);
+
+    /* Terminate even the empty case: a reused report buffer would
+     * otherwise hand back the previous take's content. */
+    if (out.p && out.cap > 0)
+        out.p[out.len] = '\0';
+
+    p->report = out.p;
+    p->report_cap = out.cap;
+
+    /* Delivered: reclaim the raw buffer (its allocation is kept). */
+    p->len = 0;
+    p->report_pos = 0;
+
+    return out.p ? out.p : "";
+}
+
+/* ---------------------------------------------------------------- */
+/* Test seams                                                       */
+/* ---------------------------------------------------------------- */
+
+void nm_proc_set_max_sessions(int n)
+{
+    if (n < 1)
+        n = 1;
+    if (n > NM_PROC_MAX_SESSIONS)
+        n = NM_PROC_MAX_SESSIONS;
+    g_max_sessions = n;
+}
+
+void nm_proc_set_buffer_max(size_t bytes) { g_buf_max = bytes; }
+
+void nm_proc_reset(void)
+{
+    nm_proc_close_all();
+    g_max_sessions = NM_PROC_MAX_SESSIONS;
+    g_buf_max = PROC_BUF_MAX_DEFAULT;
+    g_next_id = 1;
+}

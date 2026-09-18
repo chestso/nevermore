@@ -356,8 +356,3 @@ int nm_spawn_capture(const char *const *argv, char **output, int *exit_code)
     /* Implemented per-OS: tools_spawn_posix.c / tools_spawn_win.c. */
     return nm_spawn_capture_os(argv, output, exit_code);
 }
-
-void nm_proc_free(NmProc *p)
-{
-    (void)p; /* sessions are a post-1.0 idea; plain capture today */
-}

@@ -17,6 +17,7 @@ check_PROGRAMS = \
     test_context \
     test_tools \
     test_web_search \
+    test_process \
     test_agent \
     test_spinner \
     test_history \
@@ -190,8 +191,10 @@ test_context_CFLAGS = $(TEST_CFLAGS)
 # Same spawn split as src/Makefile.am — one file per OS.
 if HOST_WINDOWS
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_win.c ../src/os_compat_win.c
+PROCESS_SOURCE = ../src/process_win.c
 else
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_posix.c
+PROCESS_SOURCE = ../src/process_posix.c
 endif
 # web_search rides transport (the async HTTP step machine), so the
 # tools binary links the wire stack and the TLS backend source; the
@@ -216,6 +219,12 @@ test_web_search_SOURCES = test_web_search.c \
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_web_search_LDADD = -lpthread $(TEST_TLS_LIBS)
+
+# Process sessions: the PTY registry, bounded buffer, dumb-terminal
+# renderer, stdin writes, and group-kill (loopback-free; the OS seam is
+# exercised for real on POSIX, and reports unsupported on Windows).
+test_process_SOURCES = test_process.c ../src/process.c $(PROCESS_SOURCE)
+test_process_CFLAGS = $(TEST_CFLAGS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
