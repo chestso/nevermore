@@ -171,6 +171,35 @@ static void test_value_is_verbatim(void)
     nm_config_free(c);
 }
 
+/* The searxng endpoint is a durable key (not an exploratory base_url):
+ * file < shadow < env, and a runtime change persists to the shadow. */
+static void test_searxng_endpoint(void)
+{
+    pin_paths("searxng");
+    write_file_at(g_user, "searxng = http://127.0.0.1:9999\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG),
+                  "http://127.0.0.1:9999");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_SEARXNG), NM_CFG_USER);
+
+    test_setenv("NEVERMORE_SEARXNG_URL", "http://127.0.0.1:8080");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG),
+                  "http://127.0.0.1:8080");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_SEARXNG), NM_CFG_ENV);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_SEARXNG_URL");
+
+    NmConfig *c2 = nm_config_load();
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_SEARXNG,
+                                   "http://127.0.0.1:7777"),
+              0);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "searxng = http://127.0.0.1:7777\n");
+    nm_config_free(c2);
+}
+
 /* A stale file must never brick startup: unknown keys, malformed lines
  * and invalid values warn and are skipped. */
 static void test_bad_lines_are_skipped(void)
@@ -459,9 +488,12 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
     ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
     ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING);
-    ASSERT_NULL(nm_config_key_at(4));
+    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_SEARXNG);
+    ASSERT_NULL(nm_config_key_at(5));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG),
+                  "NEVERMORE_SEARXNG_URL");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
@@ -477,6 +509,7 @@ int main(void)
     test_unsetenv("NEVERMORE_ECHO_REASONING");
     test_unsetenv("NEVERMORE_CONFIG");
     test_unsetenv("NEVERMORE_SHADOW_CONFIG");
+    test_unsetenv("NEVERMORE_SEARXNG_URL");
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
@@ -485,6 +518,7 @@ int main(void)
     RUN_TEST(test_defaults_without_files);
     RUN_TEST(test_user_file_parses);
     RUN_TEST(test_value_is_verbatim);
+    RUN_TEST(test_searxng_endpoint);
     RUN_TEST(test_bad_lines_are_skipped);
     RUN_TEST(test_shadow_overrides_user);
     RUN_TEST(test_env_overrides_shadow);

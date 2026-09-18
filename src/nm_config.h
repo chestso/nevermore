@@ -50,12 +50,16 @@
 extern "C" {
 #endif
 
-/* The four knobs. One spelling each — no aliases, no NEVERMORE_ prefix
- * in the file. */
+/* The knobs. One spelling each — no aliases, no NEVERMORE_ prefix in
+ * the file. */
 #define NM_CFG_KEY_PROVIDER  "provider"
 #define NM_CFG_KEY_MODEL     "model"
 #define NM_CFG_KEY_ROUNDS    "rounds"
 #define NM_CFG_KEY_REASONING "reasoning"
+/* Local SearXNG endpoint for the web_search tool; the env spelling is
+ * NEVERMORE_SEARXNG_URL. A durable profile value (not an exploratory
+ * base_url like NEVERMORE_BASE_URL), so it is a first-class key. */
+#define NM_CFG_KEY_SEARXNG "searxng"
 
 typedef enum
 {

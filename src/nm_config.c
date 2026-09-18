@@ -37,7 +37,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 4
+#define NM_CFG_NKEYS 5
 
 typedef struct
 {
@@ -81,6 +81,7 @@ static void init_keys(NmConfig *c)
         { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL" },
         { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS" },
         { NM_CFG_KEY_REASONING, "NEVERMORE_ECHO_REASONING" },
+        { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL" },
     };
     for (int i = 0; i < NM_CFG_NKEYS; i++) {
         CfgKey *k = &c->keys[i];
@@ -165,7 +166,7 @@ const char *nm_config_key_at(size_t i)
 {
     static const char *const names[NM_CFG_NKEYS] = {
         NM_CFG_KEY_PROVIDER, NM_CFG_KEY_MODEL, NM_CFG_KEY_ROUNDS,
-        NM_CFG_KEY_REASONING
+        NM_CFG_KEY_REASONING, NM_CFG_KEY_SEARXNG
     };
     return i < NM_CFG_NKEYS ? names[i] : NULL;
 }
@@ -174,7 +175,7 @@ const char *nm_config_env_name(const char *key)
 {
     static const char *const envs[NM_CFG_NKEYS] = {
         "NEVERMORE_PROVIDER", "NEVERMORE_MODEL", "NEVERMORE_MAX_ROUNDS",
-        "NEVERMORE_ECHO_REASONING"
+        "NEVERMORE_ECHO_REASONING", "NEVERMORE_SEARXNG_URL"
     };
     for (size_t i = 0; i < NM_CFG_NKEYS; i++) {
         if (key && strcmp(key, nm_config_key_at(i)) == 0)
@@ -384,7 +385,7 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
         if (!k) {
             fprintf(stderr,
                     "nevermore: %s: unknown key '%s' (keys: provider, "
-                    "model, rounds, reasoning): ignored\n",
+                    "model, rounds, reasoning, searxng): ignored\n",
                     which, key);
             continue;
         }
@@ -397,7 +398,8 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
             ok = nm_config_valid_reasoning(val);
         else
             ok = 1; /* model: any non-empty id (a local daemon may serve
-                     * private ids the static catalog does not know) */
+                     * private ids the static catalog does not know);
+                     * searxng: any non-empty URL (an endpoint) */
         if (!ok) {
             fprintf(stderr, "nevermore: %s: %s: invalid value '%s': "
                             "ignored\n",
