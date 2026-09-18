@@ -27,32 +27,10 @@
 
 #include "tools_internal.h"
 
-/* ---------------------------------------------------------------- */
-/* Result shaping (quoth's format-result convention)                */
-/* ---------------------------------------------------------------- */
-
-/* Format a finished result: status line + Output: section. The body
- * rides the shared head-only clamp (nm_clamp_output, tools.c); `body`
- * may be NULL (structural "(empty)" marker, never fake text). */
-static NmToolResult format_result(const char *body, int exit_code)
-{
-    char *clamped = body ? nm_clamp_output(body) : NULL;
-    size_t need = 64 + (clamped ? strlen(clamped) : 0);
-    char *out = malloc(need);
-    if (!out) {
-        NmToolResult r = { 0, NULL };
-        return r;
-    }
-    if (!clamped)
-        snprintf(out, need, "Process exited with code %d\nOutput: (empty)\n",
-                 exit_code);
-    else
-        snprintf(out, need, "Process exited with code %d\nOutput:\n%s",
-                 exit_code, clamped);
-    free(clamped);
-    NmToolResult r = { exit_code == 0, out };
-    return r;
-}
+/* Result shaping (quoth's format-result convention) and the args
+ * plumbing: the status line + Output: section is the SHARED
+ * nm_tool_format_result (tools_internal.h) — one shaper for the file
+ * tools and web_search alike. */
 
 /* ---------------------------------------------------------------- */
 /* Args plumbing                                                     */
@@ -411,7 +389,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     char *full = marker_len
                      ? nm_truncate_tail(body, NM_TOOL_MAX_OUTPUT, marker)
                      : strdup(body);
-    NmToolResult r = format_result((full && full[0]) ? full : NULL, 0);
+    NmToolResult r = nm_tool_format_result((full && full[0]) ? full : NULL, 0);
     free(full);
     free(body);
     free(text);
@@ -652,7 +630,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     free(text);
     free(path);
     nm_json_free(args);
-    NmToolResult r = format_result(body, 0);
+    NmToolResult r = nm_tool_format_result(body, 0);
     free(body);
     return r;
 }
@@ -783,7 +761,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
     } else if (bo) {
         shaped = strdup(body);
     }
-    NmToolResult r = format_result(shaped, 0);
+    NmToolResult r = nm_tool_format_result(shaped, 0);
     free(shaped);
     free(body);
     return r;
@@ -961,7 +939,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
     } else if (bo) {
         shaped = strdup(body);
     }
-    NmToolResult r = format_result(shaped, 0);
+    NmToolResult r = nm_tool_format_result(shaped, 0);
     free(shaped);
     free(body);
     return r;

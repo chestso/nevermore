@@ -186,6 +186,30 @@ NmToolset *nm_toolset_new_defaults(void)
     return ts;
 }
 
+/* The shared result shaper (tools_internal.h): status line + Output
+ * section. Lives here, beside the truncation seam it rides, so the
+ * file tools and web_search format identically. */
+NmToolResult nm_tool_format_result(const char *body, int exit_code)
+{
+    char *clamped = body ? nm_clamp_output(body) : NULL;
+    size_t need = 64 + (clamped ? strlen(clamped) : 0);
+    char *out = malloc(need);
+    if (!out) {
+        NmToolResult r = { 0, NULL };
+        free(clamped);
+        return r;
+    }
+    if (!clamped)
+        snprintf(out, need, "Process exited with code %d\nOutput: (empty)\n",
+                 exit_code);
+    else
+        snprintf(out, need, "Process exited with code %d\nOutput:\n%s",
+                 exit_code, clamped);
+    free(clamped);
+    NmToolResult r = { exit_code == 0, out };
+    return r;
+}
+
 const char *nm_toolset_to_json(const NmToolset *ts)
 {
     if (!ts)

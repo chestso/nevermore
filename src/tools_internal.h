@@ -40,6 +40,14 @@ char *nm_truncate_tail(const char *body, size_t max, const char *marker);
  * multi-byte character is never split into invalid UTF-8. */
 size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
 
+/* The one result shaper every textual tool rides (quoth's
+ * format-result convention): the "Process exited with code N" status
+ * line + an "Output:" section carrying the clamped body. `body` NULL
+ * yields the structural "(empty)" marker, never fake text. Heap text
+ * (caller frees); shared by tools_file.c and tools_websearch.c so the
+ * rendered transcript and the session history see identical bytes. */
+NmToolResult nm_tool_format_result(const char *body, int exit_code);
+
 /* tools_file.c: built-in file tools (read/edit/list/search). */
 extern const NmTool nm_tool_read_file;
 extern const NmTool nm_tool_edit_file;
