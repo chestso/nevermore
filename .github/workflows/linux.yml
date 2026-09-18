@@ -26,11 +26,13 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the streaming transcript component,
-          # stream.h + terminal_profile.h, and the cluster-aware width
-          # seam, unicode.h). A floating master would let boba churn
-          # break this repo's CI mid-work.
-          ref: 5aa81a30a17d73059d997d1a3ebe8243db7ecd8d
+          # new boba API (currently the I/O-source subscription seam —
+          # runtime.h's TUI_SRC_*/fill_io_sources/on_io_ready, which
+          # replaced the fd-only fill_external_fds/on_external_ready).
+          # A floating master would let boba churn break this repo's CI
+          # mid-work. NOTE: this SHA must be PUSHED to the boba remote
+          # BEFORE nevermore, or CI cannot fetch it.
+          ref: 9c49c40c157e6e09a62f14ab6a7a38f2acda2c49
           path: boba
           fetch-depth: 0
 

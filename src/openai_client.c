@@ -1025,8 +1025,8 @@ unsigned nm_openai_stream_interest(NmChatStream *h)
 {
     if (!h || !h->conn)
         return 0;
-    NmConnectionInterest i = nm_connection_interest(h->conn);
-    return i.fd >= 0 ? i.flags : 0;
+    NmSource i = nm_connection_interest(h->conn);
+    return i.handle >= 0 ? i.flags : 0;
 }
 
 void nm_openai_chat_end(NmChatStream *h)

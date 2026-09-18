@@ -171,34 +171,42 @@ static int provider_name_is_known(const char *name)
 /* ---------------------------------------------------------------- */
 
 /* TuiRuntimeConfig event callbacks (event_data = the app). The fill
- * callback declares the app's live external fds each wait (Elm
- * subscriptions in C idiom): the agent's stream/exec fd plus one READ
- * entry per live process job, so a job the model started keeps
- * draining after its tool call returned. The sink routes per fd — the
- * agent's own fd steps the agent, any other is drained by chat_app. */
-static size_t chat_fill_external_fds(TuiExternalFd *out, size_t cap,
-                                     void *userdata)
+ * callback declares the app's live I/O sources each wait (Elm
+ * subscriptions in C idiom): the agent's stream/exec source plus one
+ * READ entry per live process job, so a job the model started keeps
+ * draining after its tool call returned. The sink routes per source —
+ * the agent's own source steps the agent, any other is drained by
+ * chat_app. The only translation here is NM_SRC_* -> TUI_SRC_* and
+ * NM_INTEREST_* -> TUI_IO_*: nevermore's source vocabulary and boba's
+ * are kept in lockstep by value (both 0/1/2, both READ=1/WRITE=2),
+ * asserted once at compile time. */
+_Static_assert(NM_SRC_FD == TUI_SRC_FD && NM_SRC_SOCKET == TUI_SRC_SOCKET &&
+                   NM_SRC_HANDLE == TUI_SRC_HANDLE,
+               "NM_SRC_* must mirror TUI_SRC_*");
+_Static_assert(NM_INTEREST_READ == TUI_IO_READ &&
+                   NM_INTEREST_WRITE == TUI_IO_WRITE,
+               "NM_INTEREST_* must mirror TUI_IO_*");
+
+static size_t chat_fill_io_sources(TuiIoSource *out, size_t cap,
+                                   void *userdata)
 {
     if (!out || cap == 0)
         return 0;
-    if (cap > TUI_EXTERNAL_FD_MAX)
-        cap = TUI_EXTERNAL_FD_MAX;
-    NmConnectionInterest entries[TUI_EXTERNAL_FD_MAX];
+    if (cap > TUI_IO_SOURCE_MAX)
+        cap = TUI_IO_SOURCE_MAX;
+    NmSource entries[TUI_IO_SOURCE_MAX];
     size_t n = nm_chat_app_interest(userdata, entries, cap);
     for (size_t i = 0; i < n; i++) {
-        out[i].fd = entries[i].fd;
-        out[i].flags = 0;
-        if (entries[i].flags & NM_INTEREST_READ)
-            out[i].flags |= TUI_FD_READ;
-        if (entries[i].flags & NM_INTEREST_WRITE)
-            out[i].flags |= TUI_FD_WRITE;
+        out[i].handle = entries[i].handle;
+        out[i].flags = entries[i].flags; /* same bit values (above) */
+        out[i].kind = entries[i].kind;
     }
     return n;
 }
 
-static void chat_external_ready(int fd, unsigned ready, void *userdata)
+static void chat_io_ready(intptr_t handle, unsigned ready, void *userdata)
 {
-    nm_chat_app_external_ready(userdata, fd, ready);
+    nm_chat_app_external_ready(userdata, handle, ready);
 }
 
 static void chat_tick(void *userdata)
@@ -252,8 +260,8 @@ static int run_interactive(const char *provider_name, const char *model,
     TuiRuntimeConfig rt_cfg = { 0 };
     rt_cfg.raw_mode = 1;
     rt_cfg.output = stdout;
-    rt_cfg.fill_external_fds = chat_fill_external_fds;
-    rt_cfg.on_external_ready = chat_external_ready;
+    rt_cfg.fill_io_sources = chat_fill_io_sources;
+    rt_cfg.on_io_ready = chat_io_ready;
     rt_cfg.on_tick = chat_tick;
     rt_cfg.get_tick_timeout_ms = chat_tick_timeout;
     rt_cfg.event_data = app;

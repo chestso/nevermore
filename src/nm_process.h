@@ -33,7 +33,7 @@ typedef struct NmProc NmProc;
  * This IS the event loop's subscription budget, not a tidiness knob: a
  * job is drained only while its PTY master is in the external-fd
  * set, so a job that cannot be subscribed would block its child on
- * a full PTY and stall it silently.  boba's TUI_EXTERNAL_FD_MAX (32)
+ * a full PTY and stall it silently.  boba's TUI_IO_SOURCE_MAX (32)
  * slots must therefore hold every job PLUS one for the agent's own
  * stream/exec fd — so the cap is 32 - 1, and a spawn one past it fails
  * loudly ("job cap of N reached") instead of leaving a child

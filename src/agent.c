@@ -725,7 +725,7 @@ int nm_agent_fd(NmAgent *a)
 
 /* The active wait interest: the async tool's output pipe (readable) or
  * the stream's connect/send/response phase (mirrors transport's
- * NmConnectionInterest). 0 = nothing to wait on (idle, synchronous tool
+ * NmSource). 0 = nothing to wait on (idle, synchronous tool
  * phase, or a provider without the step API). */
 unsigned nm_agent_interest(NmAgent *a)
 {

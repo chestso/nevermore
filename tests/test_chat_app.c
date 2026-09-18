@@ -415,11 +415,11 @@ static void harness_enter(AppHarness *h)
  * fd rather than assuming slot 0 is a single connection. */
 static unsigned app_interest(NmChatApp *app)
 {
-    NmConnectionInterest e[TUI_EXTERNAL_FD_MAX];
-    size_t n = nm_chat_app_interest(app, e, TUI_EXTERNAL_FD_MAX);
+    NmSource e[TUI_IO_SOURCE_MAX];
+    size_t n = nm_chat_app_interest(app, e, TUI_IO_SOURCE_MAX);
     int afd = nm_chat_app_fd(app);
     for (size_t i = 0; i < n; i++) {
-        if (e[i].fd == afd)
+        if (e[i].handle == afd)
             return e[i].flags;
     }
     return 0;
@@ -2763,7 +2763,7 @@ TEST_OFFLINE_CATALOG_PIN_CHECK()
  * at runtime too. */
 static void test_job_cap_fits_the_fd_budget(void)
 {
-    ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 1 <= TUI_EXTERNAL_FD_MAX);
+    ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 1 <= TUI_IO_SOURCE_MAX);
 #ifndef _WIN32
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -2782,12 +2782,12 @@ static void test_job_cap_fits_the_fd_budget(void)
     ASSERT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
     ASSERT_TRUE(strstr(err, "cap") != NULL);
 
-    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
-    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 4);
+    NmSource set[TUI_IO_SOURCE_MAX];
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 4);
     for (size_t i = 0; i < 4; i++) {
-        ASSERT_TRUE(set[i].fd >= 0);
+        ASSERT_TRUE(set[i].handle >= 0);
         for (size_t j = i + 1; j < 4; j++)
-            ASSERT_TRUE(set[i].fd != set[j].fd);
+            ASSERT_TRUE(set[i].handle != set[j].handle);
     }
 
     harness_free(h);
@@ -2806,9 +2806,9 @@ static void test_interest_lists_every_job(void)
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
-    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
+    NmSource set[TUI_IO_SOURCE_MAX];
     /* Idle app, no jobs: nothing to wait on. */
-    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 0);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 0);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, 0), 0);
 
     char err[128];
@@ -2818,25 +2818,25 @@ static void test_interest_lists_every_job(void)
     NmProc *p2 = nm_proc_start("sleep 30", NULL, &id2, err, sizeof(err));
     ASSERT_NOT_NULL(p2);
 
-    size_t n = nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX);
+    size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
     ASSERT_EQ(n, 2);
-    ASSERT_EQ(set[0].fd, nm_proc_fd(p1));
-    ASSERT_EQ(set[1].fd, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].handle, nm_proc_fd(p1));
+    ASSERT_EQ(set[1].handle, nm_proc_fd(p2));
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
     ASSERT_EQ(set[1].flags, NM_INTEREST_READ);
-    ASSERT_TRUE(set[0].fd != set[1].fd);
+    ASSERT_TRUE(set[0].handle != set[1].handle);
     /* nm_proc_by_fd resolves what the loop is handed. */
-    ASSERT_TRUE(nm_proc_by_fd(set[1].fd) == p2);
+    ASSERT_TRUE(nm_proc_by_fd(set[1].handle) == p2);
 
     /* A closed job stops being declared. */
     nm_proc_close(p1);
-    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
-    ASSERT_EQ(set[0].fd, nm_proc_fd(p2));
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
+    ASSERT_EQ(set[0].handle, nm_proc_fd(p2));
 
     /* A cap smaller than the set truncates (the caller's pool bound),
      * and the API never writes past it. */
     ASSERT_EQ(nm_chat_app_interest(h->app, set, 1), 1);
-    ASSERT_EQ(set[0].fd, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].handle, nm_proc_fd(p2));
 
     harness_free(h);
     ASSERT_EQ(nm_proc_count(), 0); /* teardown killed the survivor */
@@ -2878,8 +2878,8 @@ static void test_external_ready_drains_background_job(void)
     ASSERT_TRUE(fd >= 0);
 
     /* An unknown fd (and the -1 "nothing" case) is a safe no-op. */
-    nm_chat_app_external_ready(h->app, -1, TUI_FD_READ);
-    nm_chat_app_external_ready(h->app, fd + 1000, TUI_FD_READ);
+    nm_chat_app_external_ready(h->app, -1, TUI_IO_READ);
+    nm_chat_app_external_ready(h->app, fd + 1000, TUI_IO_READ);
     ASSERT_EQ(nm_proc_buffered(p), 0u);
 
     int drained = 0;
@@ -2889,7 +2889,7 @@ static void test_external_ready_drains_background_job(void)
         FD_ZERO(&fds);
         FD_SET(fd, &fds);
         select(fd + 1, &fds, NULL, NULL, &tv);
-        nm_chat_app_external_ready(h->app, fd, TUI_FD_READ);
+        nm_chat_app_external_ready(h->app, fd, TUI_IO_READ);
         drained = nm_proc_buffered(p) > 0;
     }
     ASSERT_TRUE(drained);
@@ -2963,9 +2963,9 @@ static void test_interest_dedupes_active_exec_job(void)
     ASSERT_EQ(nm_proc_count(), 1);
     ASSERT_EQ(exec_fd, nm_proc_fd(nm_proc_at(0)));
 
-    NmConnectionInterest set[TUI_EXTERNAL_FD_MAX];
-    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
-    ASSERT_EQ(set[0].fd, exec_fd);
+    NmSource set[TUI_IO_SOURCE_MAX];
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
+    ASSERT_EQ(set[0].handle, exec_fd);
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
     /* The yield window closes, the call ends, the round finishes — and
@@ -2975,8 +2975,8 @@ static void test_interest_dedupes_active_exec_job(void)
     ASSERT_EQ(nm_chat_app_fd(h->app), -1);
     ASSERT_EQ(nm_proc_count(), 1);
     ASSERT_TRUE(harness_read(h) != NULL);
-    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_EXTERNAL_FD_MAX), 1);
-    ASSERT_EQ(set[0].fd, exec_fd);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
+    ASSERT_EQ(set[0].handle, exec_fd);
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
     harness_free(h);

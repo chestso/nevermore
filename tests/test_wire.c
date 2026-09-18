@@ -377,7 +377,7 @@ static void test_wire_nonblocking_head_resume(void)
     ASSERT_EQ(r->status, 0);
 
     /* Wait for the server's second flush: poll the socket (this is
-     * exactly what boba's on_external_ready will do). Bounded, no
+     * exactly what boba's on_io_ready will do). Bounded, no
      * infinite hang. */
     int cfd = nm_connection_fd(c);
     ASSERT_TRUE(cfd >= 0);
@@ -429,21 +429,21 @@ static void test_wire_nonblocking_head_resume(void)
 
 /* Poll an fd for the given interest bits (test pump — the same
  * thing boba's fill does, spelled inline). */
-static int wait_interest(int fd, unsigned interest, int timeout_ms)
+static int wait_interest(intptr_t fd, unsigned interest, int timeout_ms)
 {
     fd_set r, w;
     FD_ZERO(&r);
     FD_ZERO(&w);
     if (interest & NM_INTEREST_READ)
-        FD_SET(fd, &r);
+        FD_SET((int)fd, &r);
     if (interest & NM_INTEREST_WRITE)
-        FD_SET(fd, &w);
+        FD_SET((int)fd, &w);
     struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
 #ifdef _WIN32
     return select(1, (interest & NM_INTEREST_READ) ? &r : NULL,
                   (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
 #else
-    return select(fd + 1, &r, &w, NULL, &tv);
+    return select((int)fd + 1, &r, &w, NULL, &tv);
 #endif
 }
 
@@ -471,8 +471,8 @@ static void test_async_connect_interest_and_phases(void)
     ASSERT_NOT_NULL(c);
 
     /* Interest while connecting: WRITE on a live fd. */
-    NmConnectionInterest i = nm_connection_interest(c);
-    ASSERT_TRUE(i.fd >= 0);
+    NmSource i = nm_connection_interest(c);
+    ASSERT_TRUE(i.handle >= 0);
     ASSERT_TRUE(i.flags & NM_INTEREST_WRITE);
 
     /* Wait for writability, then step: CONNECTING finishes, the
@@ -483,7 +483,7 @@ static void test_async_connect_interest_and_phases(void)
         i = nm_connection_interest(c);
         if (i.flags == 0)
             break;
-        wait_interest(i.fd, i.flags, 20);
+        wait_interest(i.handle, i.flags, 20);
         NmTransportStatus s = nm_connection_step(c);
         if (s != NM_TRANSPORT_PENDING && s != NM_TRANSPORT_OK) {
             ASSERT_EQ(s, NM_TRANSPORT_OK); /* fail loudly */
@@ -493,7 +493,7 @@ static void test_async_connect_interest_and_phases(void)
     /* Fully on the wire: interest is now READ-only. */
     i = nm_connection_interest(c);
     ASSERT_EQ(i.flags, (unsigned)NM_INTEREST_READ);
-    ASSERT_TRUE(i.fd >= 0);
+    ASSERT_TRUE(i.handle >= 0);
 
     /* Read the response through the resumable body reader. */
     char buf[128];
@@ -501,7 +501,7 @@ static void test_async_connect_interest_and_phases(void)
     for (int spin = 0; spin < 200 && got < 5; spin++) {
         long n = nm_read_body(c, buf + got, sizeof(buf) - got);
         if (n == NM_READ_WOULD_BLOCK) {
-            wait_interest(i.fd, NM_INTEREST_READ, 20);
+            wait_interest(i.handle, NM_INTEREST_READ, 20);
             continue;
         }
         ASSERT_TRUE(n > 0);
@@ -534,8 +534,8 @@ static void test_async_connect_refused_step_errors(void)
         return;
     }
 
-    NmConnectionInterest i = nm_connection_interest(c);
-    ASSERT_TRUE(i.fd >= 0);
+    NmSource i = nm_connection_interest(c);
+    ASSERT_TRUE(i.handle >= 0);
     /* Wait for the failure to land, then step until it surfaces.
      * Spurious wakeups are part of the contract; a bounded
      * step-poll is the correct consumer shape (what boba does).
@@ -548,7 +548,7 @@ static void test_async_connect_refused_step_errors(void)
         i = nm_connection_interest(c);
         if (i.flags == 0)
             break; /* IDLE: never happens for a refused connect */
-        wait_interest(i.fd, i.flags, 100);
+        wait_interest(i.handle, i.flags, 100);
         s = nm_connection_step(c);
         if (s == NM_TRANSPORT_OK || s == NM_TRANSPORT_PENDING)
             continue;
@@ -622,10 +622,10 @@ static void test_async_send_partial_resume(void)
      * request lands (the server drains exactly the full request)
      * and the response arrives intact. */
     for (int spin = 0; spin < 500; spin++) {
-        NmConnectionInterest i = nm_connection_interest(c);
+        NmSource i = nm_connection_interest(c);
         if (i.flags == 0)
             break;
-        wait_interest(i.fd, i.flags, 20);
+        wait_interest(i.handle, i.flags, 20);
         NmTransportStatus s = nm_connection_step(c);
         ASSERT_TRUE(s == NM_TRANSPORT_OK || s == NM_TRANSPORT_PENDING);
         if (s == NM_TRANSPORT_OK && (nm_connection_interest(c).flags ==

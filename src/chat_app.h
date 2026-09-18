@@ -103,31 +103,31 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on);
 
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):
- *   fill_external_fds   -> nm_chat_app_interest (translated in main.c)
- *   on_external_ready   -> nm_chat_app_external_ready
+ *   fill_io_sources     -> nm_chat_app_interest (translated in main.c)
+ *   on_io_ready         -> nm_chat_app_external_ready
  *   on_tick             -> nm_chat_app_tick
  *   get_tick_timeout_ms -> nm_chat_app_tick_ms
  */
 int nm_chat_app_fd(NmChatApp *app);
 
 /* The app's whole wait set, filled in priority order: the agent's live
- * stream/exec fd first (when it has one), then one READ entry per
- * registered process job.  An active exec_command's fd IS its
- * job's master, so it is emitted once — boba treats a duplicated fd
- * as undefined.  Returns the number of entries written (<= cap), which
- * is what main.c's TuiFillExternalFds hands back.  A cap too small for
- * the set drops trailing jobs (they cannot be drained while
- * unsubscribed), which is why NM_PROC_MAX_JOBS leaves a slot for
+ * stream/exec source first (when it has one), then one READ entry per
+ * registered process job.  An active exec_command's handle IS its
+ * job's master, so it is emitted once — boba treats a duplicated
+ * handle as undefined.  Returns the number of entries written
+ * (<= cap), which is what main.c's TuiFillIoSources hands back.  A cap
+ * too small for the set drops trailing jobs (they cannot be drained
+ * while unsubscribed), which is why NM_PROC_MAX_JOBS leaves a slot for
  * the agent. */
-size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
-                            size_t cap);
+size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap);
 
-/* Dispatch one external fd's readiness.  The agent's own fd steps the
- * agent (whose step drains via the live tool); any other fd is a
+/* Dispatch one source's readiness.  The agent's own source steps the
+ * agent (whose step drains via the live tool); any other is a
  * background job, drained into its buffer for a later write_stdin
  * take — so a chatty server keeps running instead of blocking on a full
  * PTY. */
-void nm_chat_app_external_ready(NmChatApp *app, int fd, unsigned ready);
+void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
+                                unsigned ready);
 
 void nm_chat_app_step(NmChatApp *app);
 void nm_chat_app_tick(NmChatApp *app);

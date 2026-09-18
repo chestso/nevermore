@@ -816,23 +816,47 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
 
 int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
 
-/* boba's external-fd pool must hold every job PLUS the agent's own
- * stream fd: a job left out of the set is never drained, so its
+/* boba's I/O-source pool must hold every job PLUS the agent's own
+ * stream source: a job left out of the set is never drained, so its
  * child stalls on a full PTY (see NM_PROC_MAX_JOBS in nm_process.h). */
-typedef char nm_proc_fd_budget_fits
-    [(TUI_EXTERNAL_FD_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
+typedef char nm_proc_source_budget_fits
+    [(TUI_IO_SOURCE_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
 
-/* The app's aggregate wait interest: the live agent stream (fd +
+/* What kind of object a source's handle names.  POSIX has only
+ * descriptors, so every source is NM_SRC_FD there.  On Windows the
+ * agent's live fd is its HTTP stream socket (WSAEventSelect-bound);
+ * a process job's readiness handle is a waitable event — but Windows
+ * jobs are a later step (docs/PROCESS-PLAN.md P5), so nothing reaches
+ * the loop as a job there yet.  Kept as helpers so the day a Windows
+ * exec_command lands, its kind is decided in one place. */
+static int agent_source_kind(void)
+{
+#ifdef _WIN32
+    return NM_SRC_SOCKET;
+#else
+    return NM_SRC_FD;
+#endif
+}
+
+static int job_source_kind(void)
+{
+#ifdef _WIN32
+    return NM_SRC_HANDLE;
+#else
+    return NM_SRC_FD;
+#endif
+}
+
+/* The app's aggregate wait interest: the live agent stream (handle +
  * flags) first, then one READ entry per registered process job.
  *
- * A job outlives the tool call that started it, so its master fd
+ * A job outlives the tool call that started it, so its master handle
  * must stay subscribed or the child blocks writing; the agent's own
- * stream/exec fd takes priority so a small cap degrades to "background
- * jobs drain a cycle later", never to "the turn stalls".  An active
- * exec_command's fd is its job's master — emitted once (boba's
- * contract: a duplicated fd across slots is undefined). */
-size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
-                            size_t cap)
+ * stream/exec source takes priority so a small cap degrades to
+ * "background jobs drain a cycle later", never to "the turn stalls".
+ * An active exec_command's handle is its job's master — emitted once
+ * (boba's contract: a duplicated handle across slots is undefined). */
+size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
 {
     if (!app || !out || cap == 0)
         return 0;
@@ -841,8 +865,9 @@ size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
     int agent_fd = nm_agent_fd(app->agent);
     unsigned flags = nm_agent_interest(app->agent);
     if (agent_fd >= 0 && flags) {
-        out[n].fd = agent_fd;
+        out[n].handle = (intptr_t)agent_fd;
         out[n].flags = flags;
+        out[n].kind = agent_source_kind();
         n++;
     }
 
@@ -854,28 +879,30 @@ size_t nm_chat_app_interest(NmChatApp *app, NmConnectionInterest *out,
         int fd = nm_proc_fd(p);
         if (fd < 0 || fd == agent_fd)
             continue; /* dedupe: the active exec's fd is already here */
-        out[n].fd = fd;
+        out[n].handle = (intptr_t)fd;
         out[n].flags = NM_INTEREST_READ;
+        out[n].kind = job_source_kind();
         n++;
     }
     return n;
 }
 
-/* One external fd became ready.  The agent's fd drives a step (whose
- * tool step drains and reaps); any other fd is a background job,
+/* One source became ready.  The agent's source drives a step (whose
+ * tool step drains and reaps); any other source is a background job,
  * drained into its bounded buffer so the child never blocks on a full
  * PTY.  The model reads that output later through write_stdin; nothing
  * here is echoed to the transcript — /ps is the human's window. */
-void nm_chat_app_external_ready(NmChatApp *app, int fd, unsigned ready)
+void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
+                                unsigned ready)
 {
     (void)ready;
     if (!app)
         return;
-    if (app->agent && fd == nm_agent_fd(app->agent)) {
+    if (app->agent && handle == (intptr_t)nm_agent_fd(app->agent)) {
         nm_chat_app_step(app);
         return;
     }
-    NmProc *p = nm_proc_by_fd(fd);
+    NmProc *p = nm_proc_by_fd((int)handle);
     if (p)
         nm_proc_drain(p);
 }

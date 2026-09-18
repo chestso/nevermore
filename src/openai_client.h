@@ -90,7 +90,7 @@ int nm_openai_stream_fd(NmChatStream *h);
  * while the response streams, READ|WRITE while connect/send are in
  * flight, 0 when nothing is open. Mirrors transport's
  * nm_connection_interest (NM_INTEREST_*); the app forwards it into
- * boba's fill_external_fds array. */
+ * boba's fill_io_sources array. */
 unsigned nm_openai_stream_interest(NmChatStream *h);
 void nm_openai_chat_end(NmChatStream *h);
 

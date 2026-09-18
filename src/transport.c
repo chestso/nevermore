@@ -234,12 +234,18 @@ const char *nm_connection_last_error(const NmConnection *conn)
     return conn ? conn->err_detail : "";
 }
 
-NmConnectionInterest nm_connection_interest(NmConnection *conn)
+NmSource nm_connection_interest(NmConnection *conn)
 {
-    NmConnectionInterest i = { -1, 0 };
+    /* A connection's handle is always a socket: a descriptor on
+     * POSIX, a Windows SOCKET (which WSAEventSelect binds). */
+#ifdef _WIN32
+    NmSource i = { -1, 0, NM_SRC_SOCKET };
+#else
+    NmSource i = { -1, 0, NM_SRC_FD };
+#endif
     if (!conn || conn->fd < 0)
         return i;
-    i.fd = conn->fd;
+    i.handle = (intptr_t)conn->fd;
     switch (conn->phase) {
     case NM_CONN_CONNECTING:
         i.flags = NM_INTEREST_WRITE; /* writability = completion */
@@ -257,7 +263,7 @@ NmConnectionInterest nm_connection_interest(NmConnection *conn)
          * nothing to wait for — READ would busy-loop on EOF. */
         i.flags = conn->phase == NM_CONN_READING ? NM_INTEREST_READ : 0;
         if (i.flags == 0)
-            i.fd = -1;
+            i.handle = -1;
         break;
     }
     return i;

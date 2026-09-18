@@ -16,6 +16,7 @@
 #define NM_TRANSPORT_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -100,10 +101,40 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
 /* Async connect + resumable send (N1; boba subscriptions seam)      */
 /* ---------------------------------------------------------------- */
 
-/* Interest bits, mirroring boba's TUI_FD_* (the app forwards these
- * straight into its fill_external_fds array). */
+/* Interest bits, mirroring boba's TUI_IO_* (the app forwards these
+ * straight into its fill_io_sources array). */
 #define NM_INTEREST_READ  (1u << 0) /* readable / EOF */
 #define NM_INTEREST_WRITE (1u << 1) /* connect completion, send room */
+
+/* What an NmSource's handle names — mirrors boba's TUI_SRC_* kinds.
+ * main.c translates one to the other. POSIX has only descriptors; a
+ * socket and a pipe readiness event are both non-sockets on Windows,
+ * which is the whole reason the kind exists. */
+#define NM_SRC_FD     0 /* a POSIX file descriptor */
+#define NM_SRC_SOCKET 1 /* a Windows SOCKET */
+#define NM_SRC_HANDLE 2 /* a Windows waitable HANDLE (a job's event) */
+
+/* One waitable I/O source: the object, what to wait for, and what the
+ * object IS. The event loop (boba) needs the kind on Windows — a
+ * SOCKET rides WSAEventSelect, a HANDLE rides WaitForMultipleObjects
+ * directly — and every nevermore layer that feeds the loop (a
+ * transport connection, the agent's active stream/tool, a background
+ * job) speaks this one shape. */
+typedef struct NmSource
+{
+    intptr_t handle; /* fd / SOCKET / HANDLE; -1 = nothing to wait on */
+    unsigned flags;  /* NM_INTEREST_READ / NM_INTEREST_WRITE / both */
+    int kind;        /* NM_SRC_FD / NM_SRC_SOCKET / NM_SRC_HANDLE */
+} NmSource;
+
+/* Current wait interest for the event loop: {handle, flags, kind} —
+ * handle is -1 when there is nothing to wait on. Each connection
+ * answers for itself; the app aggregates multiple sources into its
+ * fill array (why the boba seam is fill-array). READ|WRITE while a
+ * send is pending, READ once the request is fully on the wire, WRITE
+ * only while connect/send are in flight (a perpetually-writable
+ * idle socket with WRITE declared busy-loops the runtime). */
+NmSource nm_connection_interest(NmConnection *conn);
 
 /* Open a connection WITHOUT blocking on connect(): the socket is
  * non-blocking and connect() is in flight (EINPROGRESS /
@@ -121,21 +152,6 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
  * phase, so writability dispatch arrives with the failure). */
 NmConnection *nm_connect_async(const char *host, int port,
                                NmTransportMode mode, NmConnectInfo *info);
-
-/* Current wait interest for the event loop: {fd, NM_INTEREST_*} —
- * fd is -1 when there is nothing to wait on. Each connection answers
- * for itself; the app aggregates multiple connections into its fill
- * array (why the boba seam is fill-array). READ|WRITE while a send
- * is pending, READ once the request is fully on the wire, WRITE
- * only while connect/send are in flight (a perpetually-writable
- * idle socket with WRITE declared busy-loops the runtime). */
-typedef struct NmConnectionInterest
-{
-    int fd;
-    unsigned flags; /* NM_INTEREST_READ / NM_INTEREST_WRITE / both */
-} NmConnectionInterest;
-
-NmConnectionInterest nm_connection_interest(NmConnection *conn);
 
 /* One non-blocking pump over the connection's phase machine:
  *
