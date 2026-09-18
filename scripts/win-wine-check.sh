@@ -60,12 +60,14 @@ run_build test_context tests/test_context.c src/context.c
 run_build test_process tests/test_process.c src/process.c src/process_win.c
 
 run_build test_tools tests/test_tools.c src/tools.c src/tools_file.c \
-	src/tools_websearch.c src/tools_spawn_win.c src/os_compat_win.c \
+	src/tools_websearch.c src/tools_exec.c src/process.c src/process_win.c \
+	src/tools_spawn_win.c src/os_compat_win.c \
 	src/json.c src/transport.c src/transport_socket.c \
 	src/wire_recorder.c $TLS_SRC -lws2_32 -lpthread
 
 run_build test_web_search tests/test_web_search.c src/tools.c \
-	src/tools_file.c src/tools_websearch.c src/tools_spawn_win.c \
+	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/process.c \
+	src/process_win.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC \
 	-lws2_32 -lpthread
@@ -114,7 +116,7 @@ run_build test_openai_client tests/test_openai_client.c src/openai_client.c \
 
 run_build test_agent tests/test_agent.c src/agent.c src/session.c \
 	src/context.c src/tools.c src/tools_file.c src/tools_websearch.c \
-	src/tools_spawn_win.c \
+	src/tools_exec.c src/process.c src/process_win.c src/tools_spawn_win.c \
 	src/os_compat_win.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
 	src/transport_socket.c src/wire_recorder.c $TLS_SRC src/nevermore.c \

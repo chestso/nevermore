@@ -34,6 +34,25 @@ char *nm_clamp_output(const char *text);
  * Heap text (caller frees), NULL on OOM. */
 char *nm_truncate_tail(const char *body, size_t max, const char *marker);
 
+/* Session-output clamp (exec_command / write_stdin / kill_session):
+ * trailing whitespace is trimmed, then the body is capped at
+ * NM_TOOL_MAX_OUTPUT with a 70/30 head/tail split and an
+ * "... N bytes omitted ..." marker between the halves. A session's
+ * interesting end is its LAST lines (a build's failures, a test
+ * summary, a crash), so the head-only clamp every other tool uses
+ * would throw away the half worth reading. NULL when the body is
+ * empty after the trim (the caller then renders it structurally),
+ * heap text otherwise. */
+char *nm_clamp_session_output(const char *text);
+
+/* Assemble the canonical result text: the STATUS line, then the
+ * "Output:" section. `clamped` is the caller's already-truncated body
+ * (each tool family owns its budget shape: nm_clamp_output head-only,
+ * nm_clamp_session_output 70/30) or NULL for the structural
+ * "(empty)" marker — never fake body text. Heap text (caller frees),
+ * NULL on OOM. */
+char *nm_tool_result_body(const char *status, const char *clamped);
+
 /* Largest prefix length of s[0..n) that is at most `max` bytes and
  * ends on a UTF-8 boundary. Every mid-string cut in the tools — plan
  * values, search hit lines, truncation — clamps through here, so a
@@ -56,6 +75,12 @@ extern const NmTool nm_tool_search_dir;
 
 /* tools_spawn_posix.c / tools_spawn_win.c: run_command tool. */
 extern const NmTool nm_tool_run_command;
+
+/* tools_exec.c: process-session tools (exec_command, write_stdin,
+ * kill_session) over src/process.c's PTY session registry. */
+extern const NmTool nm_tool_exec_command;
+extern const NmTool nm_tool_write_stdin;
+extern const NmTool nm_tool_kill_session;
 
 /* tools_websearch.c: local SearXNG web_search tool. */
 extern const NmTool nm_tool_web_search;

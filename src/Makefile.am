@@ -124,6 +124,7 @@ nevermore_SOURCES = \
     tools.c \
     tools_file.c \
     tools_websearch.c \
+    tools_exec.c \
     process.h \
     process_internal.h \
     process.c \

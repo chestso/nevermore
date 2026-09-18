@@ -173,6 +173,77 @@ char *nm_clamp_output(const char *text)
     return nm_truncate_tail(text, NM_TOOL_MAX_OUTPUT, marker);
 }
 
+/* Session-output clamp (tools_internal.h): trim trailing whitespace,
+ * then keep a 70/30 head/tail split of the budget with an omission
+ * marker between the halves. A finished build's failures, a test
+ * summary and a crash dump all live in the last lines, so the head-only
+ * cut the other tools use would drop exactly the part being asked for.
+ * quoth spends the same 70/30 on exec output. */
+char *nm_clamp_session_output(const char *text)
+{
+    if (!text)
+        return NULL;
+    size_t len = strlen(text);
+    while (len > 0) {
+        char c = text[len - 1];
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r')
+            break;
+        len--;
+    }
+    if (len == 0)
+        return NULL; /* nothing but whitespace: structural "(empty)" */
+
+    if (len <= NM_TOOL_MAX_OUTPUT) {
+        char *out = malloc(len + 1);
+        if (!out)
+            return NULL;
+        memcpy(out, text, len);
+        out[len] = '\0';
+        return out;
+    }
+
+    size_t head = (size_t)NM_TOOL_MAX_OUTPUT * 7 / 10;
+    size_t tail = NM_TOOL_MAX_OUTPUT - head;
+    size_t omitted = len - NM_TOOL_MAX_OUTPUT;
+    /* Both cuts are byte offsets into text: back off to a character
+     * boundary on each side so neither half ends mid-sequence. */
+    head = nm_utf8_clamp_len(text, len, head);
+    size_t tstart = len - tail;
+    while (tstart < len && ((unsigned char)text[tstart] & 0xC0) == 0x80)
+        tstart++;
+
+    char marker[64];
+    size_t mlen = (size_t)snprintf(marker, sizeof(marker),
+                                   "\n... %zu bytes omitted ...\n", omitted);
+    size_t body_tail = len - tstart;
+    char *out = malloc(head + mlen + body_tail + 1);
+    if (!out)
+        return NULL;
+    memcpy(out, text, head);
+    memcpy(out + head, marker, mlen);
+    memcpy(out + head + mlen, text + tstart, body_tail);
+    out[head + mlen + body_tail] = '\0';
+    return out;
+}
+
+/* The one result shape every textual tool emits: "STATUS\n" followed by
+ * the "Output:" section. A NULL body is the structural "(empty)" marker
+ * (never fake text a reader could mistake for output); a real body
+ * follows the "Output:" line. */
+char *nm_tool_result_body(const char *status, const char *clamped)
+{
+    const char *st = status ? status : "";
+    size_t need = strlen(st) + 64 + (clamped ? strlen(clamped) : 0);
+    char *out = malloc(need);
+    if (!out)
+        return NULL;
+    if (clamped)
+        snprintf(out, need, "%s\nOutput:\n%s", st, clamped);
+    else
+        snprintf(out, need, "%s\nOutput: (empty)\n", st);
+    return out;
+}
+
 NmToolset *nm_toolset_new_defaults(void)
 {
     NmToolset *ts = nm_toolset_new();
@@ -183,6 +254,9 @@ NmToolset *nm_toolset_new_defaults(void)
     nm_toolset_add(ts, &nm_tool_list_dir);
     nm_toolset_add(ts, &nm_tool_search_dir);
     nm_toolset_add(ts, &nm_tool_run_command);
+    nm_toolset_add(ts, &nm_tool_exec_command);
+    nm_toolset_add(ts, &nm_tool_write_stdin);
+    nm_toolset_add(ts, &nm_tool_kill_session);
     nm_toolset_add(ts, &nm_tool_web_search);
     return ts;
 }
@@ -193,21 +267,11 @@ NmToolset *nm_toolset_new_defaults(void)
 NmToolResult nm_tool_format_result(const char *body, int exit_code)
 {
     char *clamped = body ? nm_clamp_output(body) : NULL;
-    size_t need = 64 + (clamped ? strlen(clamped) : 0);
-    char *out = malloc(need);
-    if (!out) {
-        NmToolResult r = { 0, NULL };
-        free(clamped);
-        return r;
-    }
-    if (!clamped)
-        snprintf(out, need, "Process exited with code %d\nOutput: (empty)\n",
-                 exit_code);
-    else
-        snprintf(out, need, "Process exited with code %d\nOutput:\n%s",
-                 exit_code, clamped);
+    char status[64];
+    snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
+    char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { exit_code == 0, out };
+    NmToolResult r = { out != NULL && exit_code == 0, out };
     return r;
 }
 

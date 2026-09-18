@@ -200,7 +200,8 @@ endif
 # tools binary links the wire stack and the TLS backend source; the
 # spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
-    ../src/tools_websearch.c \
+    ../src/tools_websearch.c ../src/tools_exec.c \
+    ../src/process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
@@ -213,6 +214,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # reachability cache and its timeout.
 test_web_search_SOURCES = test_web_search.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
@@ -230,7 +232,9 @@ test_process_CFLAGS = $(TEST_CFLAGS)
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/context.c \
-    ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c $(TOOLS_SPAWN_SOURCE) \
+    ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
+    $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
@@ -281,6 +285,7 @@ test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/tools_exec.c ../src/process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \

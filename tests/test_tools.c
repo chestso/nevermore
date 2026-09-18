@@ -20,7 +20,9 @@
 #endif
 
 #include "json.h"
+#include "process.h"
 #include "tools.h"
+#include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
 
 #include "tools_internal.h"
 #include "test_helpers.h"
@@ -118,12 +120,15 @@ static void test_registry_defaults(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     ASSERT_NOT_NULL(ts);
-    ASSERT_EQ(nm_toolset_len(ts), 6);
+    ASSERT_EQ(nm_toolset_len(ts), 9);
     ASSERT_NOT_NULL(nm_toolset_find(ts, "read_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "edit_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "list_dir"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "search_dir"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "run_command"));
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "exec_command"));
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "write_stdin"));
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "kill_session"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "web_search"));
     ASSERT_NULL(nm_toolset_find(ts, "nope"));
     nm_toolset_free(ts);
@@ -150,7 +155,7 @@ static void test_schema_json(void)
     NmJson *arr = nm_json_parse(json, strlen(json), &err);
     ASSERT_NOT_NULL(arr);
     ASSERT_EQ(nm_json_type(arr), NM_JSON_ARRAY);
-    ASSERT_EQ(nm_json_len(arr), 6);
+    ASSERT_EQ(nm_json_len(arr), 9);
     NmJson *first = nm_json_at(arr, 0);
     ASSERT_STR_EQ(nm_json_str(nm_json_get(first, "type")), "function");
     NmJson *fn = nm_json_get(first, "function");
@@ -1363,6 +1368,523 @@ static void test_run_command_async_stdin_is_dev_null(void)
     nm_tool_result_free(&r);
 }
 
+/* ---------------------------------------------------------------- */
+/* exec_command / write_stdin / kill_session (process sessions)      */
+/* ---------------------------------------------------------------- */
+
+/* Build an args object and dump it (never raw snprintf: a value with a
+ * backslash or a control byte would reach the parser unescaped). */
+static char *args_dump(NmJson *j)
+{
+    char *s = nm_json_dump(j);
+    nm_json_free(j);
+    return s;
+}
+
+static char *exec_args(const char *cmd, int yield_ms)
+{
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string(cmd));
+    if (yield_ms > 0)
+        nm_json_set(j, "yield_time_ms", nm_json_new_number(yield_ms));
+    return args_dump(j);
+}
+
+static char *stdin_args(int session_id, const char *input)
+{
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "session_id", nm_json_new_number(session_id));
+    if (input)
+        nm_json_set(j, "input", nm_json_new_string(input));
+    return args_dump(j);
+}
+
+/* Drive one async call the way the event loop does: step, then wait on
+ * the fd + interest the tool declares (for min(deadline, 5 ms)); repeat
+ * until DONE or the wall-clock budget runs out. This is the contract the
+ * agent and boba's fill/ready callbacks rely on, so the tests exercise it
+ * directly rather than only through the blocking pump. Returns 0 on DONE,
+ * -1 on budget exhaustion. */
+static int drive_async(const NmTool *t, NmToolExec *e, NmToolResult *out,
+                       int budget_ms)
+{
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    for (;;) {
+        if (t->step(e, out) == NM_TOOL_DONE)
+            return 0;
+        int fd = t->exec_fd(e);
+        unsigned fl = t->interest ? t->interest(e) : NM_INTEREST_READ;
+        int dl = t->deadline_ms ? t->deadline_ms(e) : -1;
+        int slice = 5;
+        if (dl >= 0 && dl < slice)
+            slice = dl;
+        if (fd >= 0 && fl) {
+            fd_set r, w;
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            struct timeval tv = { 0, slice * 1000 };
+            if (fl & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (fl & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        } else {
+            usleep((useconds_t)(slice * 1000));
+        }
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > (long long)budget_ms * 1000)
+            return -1;
+    }
+}
+
+/* The session id out of a "Process running with session ID N" report. */
+static int reported_session_id(const char *output)
+{
+    static const char key[] = "session ID ";
+    const char *p = output ? strstr(output, key) : NULL;
+    if (!p)
+        return -1;
+    return atoi(p + sizeof(key) - 1);
+}
+
+/* A command that finishes inside the yield window reports its exit code
+ * and its output, and retires the session (nothing left to poll). */
+static void test_exec_command_exits_within_window(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("printf 'hello exec\\n'; exit 0", 5000);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
+    ASSERT_TRUE(strstr(r.output, "hello exec") != NULL);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A nonzero exit is a failed result — the model must be able to see it
+ * without parsing prose. */
+static void test_exec_command_nonzero_exit(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("printf 'boom\\n'; exit 3", 5000);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 3"));
+    ASSERT_NOT_NULL(strstr(r.output, "boom"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* The child runs on a PTY with merged stdout+stderr — that is what makes
+ * a REPL or a colouring tool work at all (and why the renderer, not the
+ * spawn, deals with the escape bytes). */
+static void test_exec_command_is_a_pty_with_merged_streams(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args(
+        "if [ -t 0 ] && [ -t 1 ]; then echo TTY; fi; echo diagnostics 1>&2",
+        5000);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "TTY"));
+    /* stderr lands in the same stream (the PTY merges them). */
+    ASSERT_NOT_NULL(strstr(r.output, "diagnostics"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A command still running when the window closes reports a session id,
+ * and the async seam declares both a wait fd and a yield deadline so the
+ * event loop re-steps a silent child. */
+static void test_exec_command_yields_session_id(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "exec_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(t->begin);
+    ASSERT_NOT_NULL(t->step);
+    ASSERT_NOT_NULL(t->exec_fd);
+    ASSERT_NOT_NULL(t->deadline_ms);
+
+    char *args = exec_args("printf 'starting\\n'; sleep 30", 400);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    /* The PTY master is the subscribed fd... */
+    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    /* ...and the yield window is the declared step deadline. */
+    int dl = t->deadline_ms(e);
+    ASSERT_TRUE(dl >= 0 && dl <= 400);
+    ASSERT_EQ(t->interest(e), NM_INTEREST_READ);
+
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(drive_async(t, e, &r, 5000), 0);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process running with session ID"));
+    ASSERT_NOT_NULL(strstr(r.output, "starting"));
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    ASSERT_EQ(nm_proc_count(), 1);
+
+    /* The session outlives the call that made it: `end` must not kill it. */
+    t->end(e);
+    ASSERT_NOT_NULL(nm_proc_find(sid));
+
+    nm_proc_close_all();
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* Missing/empty cmd is an error result, not a spawn. */
+static void test_exec_command_missing_cmd(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", "{}", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "missing cmd"));
+    nm_tool_result_free(&r);
+
+    r = nm_toolset_execute(ts, "exec_command", "{not json", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "JSON object"));
+    nm_tool_result_free(&r);
+
+    r = nm_toolset_execute(ts, "exec_command",
+                           "{\"cmd\":\"\",\"yield_time_ms\":250}", NULL);
+    ASSERT_FALSE(r.ok);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+
+/* A workdir arg decides where the command runs (the agent's cwd is the
+ * default, exercised by every other test here). */
+static void test_exec_command_workdir(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("pwd"));
+    nm_json_set(j, "workdir", nm_json_new_string("/"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(5000));
+    char *args = args_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    /* Trailing whitespace is trimmed by the session clamp, so the output
+     * ends at the path itself. */
+    size_t n = strlen(r.output);
+    ASSERT_TRUE(n > 0 && r.output[n - 1] == '/');
+    ASSERT_NOT_NULL(strstr(r.output, "Output:\n/"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* exec output rides the 70/30 head/tail session clamp: the head names
+ * what happened, the tail (where a build's errors live) survives, and
+ * the middle is named as omitted. */
+static void test_exec_command_output_clamped_head_and_tail(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("printf 'HEAD\\n'; seq 1 20000; printf 'TAIL\\n'",
+                           10000);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "HEAD"));
+    ASSERT_NOT_NULL(strstr(r.output, "TAIL")); /* the tail is kept */
+    ASSERT_NOT_NULL(strstr(r.output, "bytes omitted"));
+    /* The 70/30 split bounds the body at the budget; the status line is
+     * the only slack on top of it. */
+    ASSERT_TRUE(strlen(r.output) <= (size_t)NM_TOOL_MAX_OUTPUT + 64);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* The session clamp names trailing whitespace away rather than passing a
+ * blank body through as real output. */
+static void test_clamp_session_output_trims_and_marks_empty(void)
+{
+    char *s = nm_clamp_session_output("line\n\n\n   \n");
+    ASSERT_NOT_NULL(s);
+    ASSERT_STR_EQ(s, "line");
+    free(s);
+
+    s = nm_clamp_session_output("   \n\t\n");
+    ASSERT_NULL(s);
+
+    s = nm_clamp_session_output(NULL);
+    ASSERT_NULL(s);
+
+    /* Leading whitespace (indented output: trees, diffs) is preserved. */
+    s = nm_clamp_session_output("    indented\n");
+    ASSERT_NOT_NULL(s);
+    ASSERT_STR_EQ(s, "    indented");
+    free(s);
+}
+
+/* write_stdin: start `cat`, feed it a line, close stdin with the marker,
+ * and read back the exit. */
+static void test_write_stdin_round_trip(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("cat", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    /* Feed a line: still running. */
+    args = stdin_args(sid, "hello there\n");
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "Process running with session ID"));
+    ASSERT_NOT_NULL(strstr(r.output, "hello there"));
+    nm_tool_result_free(&r);
+    ASSERT_TRUE(nm_proc_find(sid) != NULL);
+
+    /* Close stdin: cat sees EOF, exits 0, and the session retires. */
+    args = stdin_args(sid, "\\x04");
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
+    nm_tool_result_free(&r);
+    ASSERT_NULL(nm_proc_find(sid));
+    ASSERT_EQ(nm_proc_count(), 0);
+
+    nm_toolset_free(ts);
+}
+
+/* A body that does not end in a newline is still delivered byte-exactly:
+ * the line discipline's flush marker must not become an added newline. */
+static void test_write_stdin_partial_line_and_eof(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("cat; printf 'after:\\n'", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    /* "partial" with no trailing newline, then the close marker: the
+     * flush C-d delivers the partial line, the EOF C-d closes it, cat
+     * exits, and the shell moves on to its own printf. */
+    args = stdin_args(sid, "partial\\x04");
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "partial") != NULL);
+    ASSERT_NOT_NULL(strstr(r.output, "after:")); /* the shell survived cat */
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
+    nm_tool_result_free(&r);
+
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+
+/* An interior close marker is rejected instead of delivering a truncated
+ * write (the marker would otherwise be literal text after the EOF). */
+static void test_write_stdin_interior_marker_rejected(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("sleep 30", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    args = stdin_args(sid, "before\\x04after");
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "end of input"));
+    nm_tool_result_free(&r);
+
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
+static void test_write_stdin_unknown_session(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = stdin_args(99999, "hi\n");
+    NmToolResult r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "unknown session id"));
+    nm_tool_result_free(&r);
+
+    /* No session_id at all is its own error. */
+    r = nm_toolset_execute(ts, "write_stdin", "{}", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "missing session_id"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* write_stdin polls a background session that has printed since the last
+ * report — the "read the output" half of the pair. */
+static void test_write_stdin_reads_progress(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("printf 'first\\n'; sleep 0.4; printf 'second\\n'",
+                           300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    ASSERT_NOT_NULL(strstr(r.output, "first"));
+    nm_tool_result_free(&r);
+
+    /* Poll with no input: the second line arrives, and with it the exit. */
+    args = stdin_args(sid, NULL);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
+    ASSERT_NOT_NULL(strstr(r.output, "second"));
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+
+/* write_stdin declares WRITE interest while stdin bytes are still unsent
+ * (a would-block write must never stall the loop). */
+static void test_write_stdin_interest_includes_write(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "write_stdin");
+    ASSERT_NOT_NULL(t);
+    char *args = exec_args("sleep 30", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    /* Input that cannot be sunk at once (a PTY's input queue is small
+     * relative to this) must leave WRITE declared rather than block. */
+    size_t big = 200000;
+    char *payload = malloc(big + 1);
+    ASSERT_NOT_NULL(payload);
+    memset(payload, 'x', big);
+    payload[big] = '\0';
+    args = stdin_args(sid, payload);
+    free(payload);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    ASSERT_TRUE((t->interest(e) & NM_INTEREST_WRITE) != 0);
+    ASSERT_TRUE((t->interest(e) & NM_INTEREST_READ) != 0);
+    ASSERT_TRUE(t->exec_fd(e) >= 0);
+
+    t->end(e);
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
+/* kill_session stops the session (its whole group) and reports what it
+ * printed since the last report — a kill is exactly when the tail of a
+ * wedged process matters, and the delta is never re-echoed. */
+static void test_kill_session_stops_and_reports(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args(
+        "printf 'before\\n'; sleep 0.5; printf 'after\\n'; sleep 30", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    ASSERT_NOT_NULL(strstr(r.output, "before"));
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 1);
+
+    /* Let it print again, and drain the way the event loop will (P3): the
+     * kill report carries the bytes taken since the last report. */
+    usleep(900 * 1000);
+    NmProc *p = nm_proc_find(sid);
+    ASSERT_NOT_NULL(p);
+    nm_proc_drain(p);
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "session_id", nm_json_new_number(sid));
+    args = args_dump(j);
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    r = nm_toolset_execute(ts, "kill_session", args, NULL);
+    gettimeofday(&t1, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "killed"));
+    ASSERT_NOT_NULL(strstr(r.output, "after"));
+    /* A SIGKILLed group is reaped at once, never waited out. */
+    ASSERT_TRUE(elapsed_us(&t0, &t1) < 2 * 1000 * 1000);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+
+static void test_kill_session_unknown(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "kill_session",
+                                        "{\"session_id\":42}", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "unknown session id"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* The three tools cooperate end to end through the async seam exactly as
+ * the agent drives them: start (session id), poll, kill. */
+static void test_exec_session_lifecycle(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("while read line; do echo \"got $line\"; done", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_session_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    args = stdin_args(sid, "one\n");
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(strstr(r.output, "got one"));
+    nm_tool_result_free(&r);
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "session_id", nm_json_new_number(sid));
+    args = args_dump(j);
+    r = nm_toolset_execute(ts, "kill_session", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+
 #endif /* !_WIN32 */
 
 int main(void)
@@ -1407,6 +1929,53 @@ int main(void)
     RUN_TEST(test_run_command_cancel_kills_the_process_group);
     RUN_TEST(test_run_command_stdin_is_dev_null);
     RUN_TEST(test_run_command_async_stdin_is_dev_null);
+    RUN_TEST(test_exec_command_exits_within_window);
+    RUN_TEST(test_exec_command_nonzero_exit);
+    RUN_TEST(test_exec_command_is_a_pty_with_merged_streams);
+    RUN_TEST(test_exec_command_yields_session_id);
+    RUN_TEST(test_exec_command_missing_cmd);
+    RUN_TEST(test_exec_command_workdir);
+    RUN_TEST(test_exec_command_output_clamped_head_and_tail);
+    RUN_TEST(test_clamp_session_output_trims_and_marks_empty);
+    RUN_TEST(test_write_stdin_round_trip);
+    RUN_TEST(test_write_stdin_partial_line_and_eof);
+    RUN_TEST(test_write_stdin_interior_marker_rejected);
+    RUN_TEST(test_write_stdin_unknown_session);
+    RUN_TEST(test_write_stdin_reads_progress);
+    RUN_TEST(test_write_stdin_interest_includes_write);
+    RUN_TEST(test_kill_session_stops_and_reports);
+    RUN_TEST(test_kill_session_unknown);
+    RUN_TEST(test_exec_session_lifecycle);
+#endif
+#ifdef _WIN32
+    RUN_TEST(test_exec_command_unsupported_on_windows);
+#endif
+
+#ifdef _WIN32
+    /* The session tools are registered on every platform; on Windows the
+     * spawn is the documented unsupported stub (process_win.c) until boba
+     * grows an I/O-source seam for pipes — so the model gets a clean error
+     * instead of a half-working session. */
+    static void test_exec_command_unsupported_on_windows(void)
+    {
+        NmToolset *ts = nm_toolset_new_defaults();
+        NmToolResult r = nm_toolset_execute(ts, "exec_command",
+                                            "{\"cmd\":\"echo hi\"}", NULL);
+        ASSERT_FALSE(r.ok);
+        ASSERT_NOT_NULL(r.output);
+        ASSERT_TRUE(strstr(r.output, "not supported") != NULL);
+        nm_tool_result_free(&r);
+
+        /* No session can exist, so the other two report not-found. */
+        r = nm_toolset_execute(ts, "write_stdin", "{\"session_id\":1}", NULL);
+        ASSERT_FALSE(r.ok);
+        nm_tool_result_free(&r);
+
+        r = nm_toolset_execute(ts, "kill_session", "{\"session_id\":1}", NULL);
+        ASSERT_FALSE(r.ok);
+        nm_tool_result_free(&r);
+        nm_toolset_free(ts);
+    }
 #endif
     TEST_SUMMARY();
 }

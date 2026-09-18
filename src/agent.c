@@ -247,7 +247,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     int best = -1;
 
     /* A live async tool that declares a deadline (web_search's request
-     * timeout, a future session yield window). */
+     * timeout, exec_command/write_stdin's session yield window). */
     if (a->exec && a->exec_tool && a->exec_tool->deadline_ms) {
         int t = a->exec_tool->deadline_ms(a->exec);
         if (t >= 0)
@@ -797,7 +797,14 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
      * wait on the stream's CURRENT interest bits (connect/send phases
      * wait writability, the response phase waits readability — the
      * same bits boba's fill callback declares); the tool phase needs
-     * no I/O, so its steps run back-to-back. */
+     * no I/O, so its steps run back-to-back.
+     *
+     * The wait is the deadline seam (nm_agent_next_timeout_ms), not a
+     * fixed poll: a tool with a session yield window (exec_command's
+     * silent child) or a stream-inactivity budget must be re-stepped
+     * when it comes due even though nothing is readable, and a
+     * readiness-only wait (an async tool's pipe) keeps a short poll so
+     * the loop stays live. */
     for (;;) {
         NmAgentState st = a->state;
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
@@ -805,10 +812,15 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
         int fd = nm_agent_fd(a);
         unsigned interest = nm_agent_interest(a);
         if (fd >= 0 && interest) {
+            int wait_ms = nm_agent_next_timeout_ms(a);
+            if (wait_ms < 0)
+                wait_ms = 10; /* purely readiness-driven: short poll */
+            else if (wait_ms > 1000)
+                wait_ms = 1000; /* the deadline is the bound; stay live */
             fd_set r, w;
             FD_ZERO(&r);
             FD_ZERO(&w);
-            struct timeval tv = { 0, 10 * 1000 };
+            struct timeval tv = { wait_ms / 1000, (wait_ms % 1000) * 1000 };
             if (interest & NM_INTEREST_READ)
                 FD_SET(fd, &r);
             if (interest & NM_INTEREST_WRITE)
