@@ -8,6 +8,11 @@
 /* Output budget for every tool result body (bytes). */
 #define NM_TOOL_MAX_OUTPUT 30000
 
+/* Slack past the budget in a tool body's allocation: an append that
+ * crosses the budget still fits the buffer, so it is trimmed by
+ * nm_truncate_tail (with its notice) instead of being dropped. */
+#define NM_TOOL_BODY_SLACK 1024
+
 /* Implemented once per OS: tools_spawn_posix.c (posix_spawn + pipe)
  * and tools_spawn_win.c (CreateProcessW + anonymous pipe). */
 int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code);
@@ -28,6 +33,12 @@ char *nm_clamp_output(const char *text);
  * "... use offset=N to resume ..." line, other tools a plain notice.
  * Heap text (caller frees), NULL on OOM. */
 char *nm_truncate_tail(const char *body, size_t max, const char *marker);
+
+/* Largest prefix length of s[0..n) that is at most `max` bytes and
+ * ends on a UTF-8 boundary. Every mid-string cut in the tools — plan
+ * values, search hit lines, truncation — clamps through here, so a
+ * multi-byte character is never split into invalid UTF-8. */
+size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
 
 /* tools_file.c: built-in file tools (read/edit/list/search). */
 extern const NmTool nm_tool_read_file;

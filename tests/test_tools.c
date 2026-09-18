@@ -55,9 +55,64 @@ static char *scratch_path(const char *name)
     return p;
 }
 
+/* A subdirectory of the scratch dir, created on demand. A test that
+ * searches a directory owns one, so the shared scratch dir's other
+ * fixtures — and a pid that Wine keeps stable across runs — cannot
+ * decide what the walk finds (the bug this guards: a second run's
+ * leftover hits spent the budget before the fixture's line). */
+static char *scratch_sub_dir(const char *sub)
+{
+    char *dir = scratch_path(sub);
+    if (dir)
+        mkdir(dir, 0755);
+    return dir;
+}
+
+/* A file path inside a directory the caller owns. */
+static char *scratch_in(const char *dir, const char *name)
+{
+    char *p = malloc(512);
+    if (p)
+#ifdef _WIN32
+        snprintf(p, 512, "%s\\%s", dir, name);
+#else
+        snprintf(p, 512, "%s/%s", dir, name);
+#endif
+    return p;
+}
+
 /* ---------------------------------------------------------------- */
 /* Registry                                                          */
 /* ---------------------------------------------------------------- */
+
+/* UTF-8 well-formedness scan, the property every tool output must
+ * hold: a cut through a multi-byte character fails here. */
+static int utf8_text_ok(const char *s)
+{
+    const unsigned char *b = (const unsigned char *)s;
+    size_t n = strlen(s);
+    for (size_t i = 0; i < n;) {
+        unsigned char c = b[i];
+        size_t need;
+        if (c < 0x80)
+            need = 1;
+        else if (c >= 0xC2 && c <= 0xDF)
+            need = 2;
+        else if (c >= 0xE0 && c <= 0xEF)
+            need = 3;
+        else if (c >= 0xF0 && c <= 0xF4)
+            need = 4;
+        else
+            return 0;
+        if (i + need > n)
+            return 0;
+        for (size_t k = 1; k < need; k++)
+            if ((b[i + k] & 0xC0) != 0x80)
+                return 0;
+        i += need;
+    }
+    return 1;
+}
 
 static void test_registry_defaults(void)
 {
@@ -365,6 +420,61 @@ static void test_edit_file_unique_replace(void)
     nm_toolset_free(ts);
 }
 
+/* The wire form of a non-BMP character in tool args is a surrogate
+ * pair. It must reach the file as the 4-byte UTF-8 form: encoded
+ * half-by-half the escapes landed as CESU-8 (ED A0 BD ED B8 80),
+ * invalid UTF-8 that read_file then refused — the 2026-09-18 report. */
+static void test_edit_file_writes_astral_escaping(void)
+{
+    char *path = scratch_path("astral.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("hello world\n", f);
+    fclose(f);
+
+    /* Raw wire args: nm_json_parse is part of the path under test, so
+     * building them with nm_json_set would hide the bug. The path
+     * rides through nm_json_dump, keeping Windows backslashes escaped
+     * (the fixture lesson). */
+    NmJson *jp = nm_json_new_string(path);
+    char *path_json = nm_json_dump(jp);
+    nm_json_free(jp);
+    ASSERT_NOT_NULL(path_json);
+    char *args = malloc(strlen(path_json) + 128);
+    ASSERT_NOT_NULL(args);
+    sprintf(args,
+            "{\"path\":%s,\"old_string\":\"hello\","
+            "\"new_string\":\"hi \\ud83d\\ude00\"}",
+            path_json);
+    free(path_json);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    nm_tool_result_free(&r);
+
+    FILE *g = fopen(path, "rb");
+    ASSERT_NOT_NULL(g);
+    char buf[64];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, g);
+    buf[n] = '\0';
+    fclose(g);
+    ASSERT_STR_EQ(buf, "hi \xf0\x9f\x98\x80 world\n");
+
+    /* The file the edit wrote is readable again. */
+    NmJson *ja = nm_json_new_object();
+    nm_json_set(ja, "path", nm_json_new_string(path));
+    char *rargs = nm_json_dump(ja);
+    nm_json_free(ja);
+    r = nm_toolset_execute(ts, "read_file", rargs, NULL);
+    free(rargs);
+    free(path);
+    ASSERT_TRUE(r.ok);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 static void test_edit_file_ambiguous_fails_loudly(void)
 {
     char *path = scratch_path("edit2.txt");
@@ -562,14 +672,16 @@ static void test_list_dir(void)
 
 static void test_search_dir_literal(void)
 {
-    /* Plant a needle; search finds it, path:line:content shape. */
-    char *path = scratch_path("haystack.txt");
+    /* Plant a needle; search finds it, path:line:content shape. The
+     * test owns its directory (see scratch_sub_dir). */
+    char *dir = scratch_sub_dir("literal_dir");
+    char *path = scratch_in(dir, "haystack.txt");
     FILE *f = fopen(path, "wb");
     fputs("nothing here\nthe NEEDLE line\nlast\n", f);
     fclose(f);
 
     NmJson *jargs = nm_json_new_object();
-    nm_json_set(jargs, "path", nm_json_new_string(scratch_dir()));
+    nm_json_set(jargs, "path", nm_json_new_string(dir));
     nm_json_set(jargs, "needle", nm_json_new_string("NEEDLE"));
     char *args = nm_json_dump(jargs);
     nm_json_free(jargs);
@@ -577,9 +689,45 @@ static void test_search_dir_literal(void)
     NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
     free(args);
     free(path);
+    free(dir);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "haystack.txt:2:the NEEDLE line") != NULL);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A hit line longer than the per-hit clamp is cut on a character
+ * boundary: the fixed 200-byte clamp split a 2-byte letter, and the
+ * hit reached the transcript as a lone 0xC3. */
+static void test_search_dir_hit_clamp_is_char_safe(void)
+{
+    char *dir = scratch_sub_dir("wide_hit_dir");
+    char *path = scratch_in(dir, "wide_hit.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("needle ", f);
+    for (int i = 0; i < 300; i++)
+        fputs("\xc3\xa9", f); /* é, two bytes */
+    fputs("\n", f);
+    fclose(f);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(dir));
+    nm_json_set(jargs, "needle", nm_json_new_string("needle"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    free(args);
+    free(path);
+    free(dir);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "wide_hit.txt:1:needle ") != NULL);
+    ASSERT_TRUE(utf8_text_ok(r.output));
+    /* The clamp still bites: the hit is not the whole 600-byte line. */
+    ASSERT_TRUE(strlen(r.output) < 300);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
@@ -589,7 +737,8 @@ static void test_search_dir_literal(void)
  * result stays inside the budget. */
 static void test_search_dir_truncates_with_budget_notice(void)
 {
-    char *path = scratch_path("search_big.txt");
+    char *dir = scratch_sub_dir("search_big_dir");
+    char *path = scratch_in(dir, "search_big.txt");
     FILE *f = fopen(path, "wb");
     ASSERT_NOT_NULL(f);
     for (int i = 1; i <= 5000; i++)
@@ -597,7 +746,7 @@ static void test_search_dir_truncates_with_budget_notice(void)
     fclose(f);
 
     NmJson *jargs = nm_json_new_object();
-    nm_json_set(jargs, "path", nm_json_new_string(scratch_dir()));
+    nm_json_set(jargs, "path", nm_json_new_string(dir));
     nm_json_set(jargs, "needle", nm_json_new_string("needle"));
     char *args = nm_json_dump(jargs);
     nm_json_free(jargs);
@@ -605,6 +754,7 @@ static void test_search_dir_truncates_with_budget_notice(void)
     NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
     free(args);
     free(path);
+    free(dir);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "needle") != NULL);
@@ -637,6 +787,30 @@ static void test_truncate_tail_fits_and_caps(void)
     ASSERT_NOT_NULL(c);
     ASSERT_STR_EQ(c, "....");
     free(c);
+}
+
+/* The cut is a byte offset into text: it must back off to a character
+ * boundary, or the kept head ends in a lone lead byte. */
+static void test_truncate_tail_keeps_utf8_boundary(void)
+{
+    /* 5 bytes ("A" + two 2-byte é); max 4 lands inside the second é. */
+    char *d = nm_truncate_tail("A\xc3\xa9\xc3\xa9", 4, "");
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d, "A\xc3\xa9");
+    free(d);
+
+    /* Same cut with a marker: the kept head backs off, the marker
+     * still lands. */
+    char *e = nm_truncate_tail("A\xc3\xa9\xc3\xa9", 4, ">");
+    ASSERT_NOT_NULL(e);
+    ASSERT_STR_EQ(e, "A\xc3\xa9>");
+    free(e);
+
+    /* A cut that already sits on a boundary is untouched. */
+    char *f2 = nm_truncate_tail("A\xc3\xa9\xc3\xa9", 5, "");
+    ASSERT_NOT_NULL(f2);
+    ASSERT_STR_EQ(f2, "A\xc3\xa9\xc3\xa9");
+    free(f2);
 }
 
 static void test_clamp_output_head_only(void)
@@ -1203,6 +1377,7 @@ int main(void)
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);
     RUN_TEST(test_edit_file_unique_replace);
+    RUN_TEST(test_edit_file_writes_astral_escaping);
     RUN_TEST(test_edit_file_ambiguous_fails_loudly);
     RUN_TEST(test_edit_file_replace_all);
     RUN_TEST(test_edit_file_no_match);
@@ -1210,8 +1385,10 @@ int main(void)
     RUN_TEST(test_edit_file_multiline_diff_fits);
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
+    RUN_TEST(test_search_dir_hit_clamp_is_char_safe);
     RUN_TEST(test_search_dir_truncates_with_budget_notice);
     RUN_TEST(test_truncate_tail_fits_and_caps);
+    RUN_TEST(test_truncate_tail_keeps_utf8_boundary);
     RUN_TEST(test_clamp_output_head_only);
     RUN_TEST(test_run_command_exit_zero);
     RUN_TEST(test_run_command_exit_nonzero);

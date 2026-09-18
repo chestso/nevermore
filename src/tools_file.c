@@ -695,7 +695,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
     if (!path)
         return nm_tool_result_error("missing or empty path");
 
-    char *body = malloc(NM_TOOL_MAX_OUTPUT + 1024);
+    char *body = malloc(NM_TOOL_MAX_OUTPUT + NM_TOOL_BODY_SLACK);
     size_t bo = 0;
     if (!body) {
         free(path);
@@ -736,7 +736,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         const char *mark = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
                                ? "/"
                                : "";
-        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT - bo,
+        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT + NM_TOOL_BODY_SLACK - bo,
                                "%s%s\n", name, mark);
         nentries++;
     } while (FindNextFileW(h, &fd) && bo < NM_TOOL_MAX_OUTPUT);
@@ -759,7 +759,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         const char *mark = (stat(full, &st) == 0 && S_ISDIR(st.st_mode))
                                ? "/"
                                : "";
-        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT + 1024 - bo,
+        bo += (size_t)snprintf(body + bo, NM_TOOL_MAX_OUTPUT + NM_TOOL_BODY_SLACK - bo,
                                "%s%s\n", ent->d_name, mark);
         nentries++;
         if (bo >= NM_TOOL_MAX_OUTPUT)
@@ -797,6 +797,10 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
  * Reports path:line:content for every line containing the needle,
  * under the output budget. */
 
+/* Bytes of a matching line's content shown for one hit (the rest of
+ * the line is dropped — the model greps for the line, then reads it). */
+#define SEARCH_LINE_CLAMP 200
+
 static void search_file(const char *path, const char *needle,
                         char *body, size_t *bo)
 {
@@ -814,12 +818,29 @@ static void search_file(const char *path, const char *needle,
         if (i == len || text[i] == '\n') {
             if (i > line_start && find_literal(text + line_start, i - line_start, needle,
                                                0) >= 0) {
-                size_t clen = i - line_start;
-                if (clen > 200)
-                    clen = 200;
-                *bo += (size_t)snprintf(body + *bo, 512, "%s:%ld:%.*s\n",
-                                        path, lineno, (int)clen,
-                                        text + line_start);
+                /* The line clamp is a byte count but the line is text:
+                 * a fixed 200 split a 2-byte letter and the hit came
+                 * out with a lone 0xC3 in it. */
+                size_t clen =
+                    nm_utf8_clamp_len(text + line_start, i - line_start,
+                                      SEARCH_LINE_CLAMP);
+                /* Room is checked before the append: snprintf's return
+                 * value counts bytes it did NOT write, so adding it to
+                 * *bo would step over the NUL and leave a hole of
+                 * uninitialized bytes before the next hit. */
+                size_t room = NM_TOOL_MAX_OUTPUT + NM_TOOL_BODY_SLACK - 1 - *bo;
+                int w = snprintf(body + *bo, room + 1, "%s:%ld:%.*s\n", path,
+                                 lineno, (int)clen, text + line_start);
+                if (w < 0 || (size_t)w > room) {
+                    /* One entry cannot fit — only possible with a
+                     * pathologically long path this close to the
+                     * budget. Mark the budget spent so the caller adds
+                     * its truncation notice; the body itself stays
+                     * NUL-terminated for strlen. */
+                    *bo = NM_TOOL_MAX_OUTPUT;
+                    break;
+                }
+                *bo += (size_t)w;
                 if (*bo >= NM_TOOL_MAX_OUTPUT)
                     break;
             }
@@ -918,7 +939,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("missing or empty needle");
     }
 
-    char *body = malloc(NM_TOOL_MAX_OUTPUT + 1024);
+    char *body = malloc(NM_TOOL_MAX_OUTPUT + NM_TOOL_BODY_SLACK);
     if (!body) {
         free(path);
         free(needle);

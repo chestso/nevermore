@@ -107,6 +107,23 @@ NmToolResult nm_tool_result_text(const char *text)
     return r;
 }
 
+/* Largest prefix length of s[0..n) that is at most `max` bytes and
+ * ends on a UTF-8 boundary: walk back over the continuation bytes the
+ * cut landed in. The one clamp every mid-string cut goes through —
+ * plan rows, search hit lines, tool-body truncation. A split sequence
+ * is invalid UTF-8, and a tool that emits one hands the transcript
+ * mojibake (a search hit clamped at 200 bytes cut a 2-byte letter
+ * down to a lone 0xC3). */
+size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max)
+{
+    if (n <= max)
+        return n;
+    size_t cut = max;
+    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80)
+        cut--;
+    return cut;
+}
+
 /* Keep the head of `body` and append `marker`, the whole thing capped
  * at `max` bytes. The one truncation primitive: read_file appends a
  * resumable notice, generic tool output a plain one. */
@@ -121,6 +138,9 @@ char *nm_truncate_tail(const char *body, size_t max, const char *marker)
     size_t keep = (max > mlen) ? max - mlen : 0;
     if (keep > len)
         keep = len;
+    /* The cut is a byte offset but the body is text: back off to a
+     * character boundary so the kept head never ends mid-sequence. */
+    keep = nm_utf8_clamp_len(body, len, keep);
     char *out = malloc(keep + mlen + 1);
     if (!out)
         return NULL;
@@ -256,18 +276,6 @@ static void plan_puts(PlanBuf *b, const char *s)
     plan_append(b, s, strlen(s));
 }
 
-/* Byte length of a value to show, clamped to `max' without splitting a
- * UTF-8 sequence (back off to the last lead byte). */
-static size_t plan_clamp_len(const char *s, size_t n, size_t max)
-{
-    if (n <= max)
-        return n;
-    size_t cut = max;
-    while (cut > 0 && ((unsigned char)s[cut] & 0xC0) == 0x80)
-        cut--;
-    return cut;
-}
-
 static void plan_value(PlanBuf *b, const NmJson *v)
 {
     char *dump = v ? nm_json_dump(v) : NULL;
@@ -282,7 +290,7 @@ static void plan_value(PlanBuf *b, const NmJson *v)
         s++;
         n -= 2;
     }
-    size_t cut = plan_clamp_len(s, n, NM_TOOL_PLAN_VALUE_MAX);
+    size_t cut = nm_utf8_clamp_len(s, n, NM_TOOL_PLAN_VALUE_MAX);
     plan_append(b, s, cut);
     if (cut < n)
         plan_puts(b, "…");
