@@ -30,6 +30,14 @@ Introspection: GET /__wire_replay__/status returns JSON action counts
 (total/served/pending, per signature). Every response carries
 X-Wire-Replay-Action / X-Wire-Replay-Status headers.
 
+Rearm: POST /__wire_replay__/rearm reloads the dump file(s) from disk
+and resets every queue — the server is ready for another identical
+run without restarting (the old process' port survives; a new dump
+file at the same path is picked up too). POST
+/__wire_replay__/rearm?dumps=PATH[,PATH...] swaps the scenario to a
+different dump set entirely. GET /__wire_replay__/status reports the
+current dump paths under "dumps".
+
 Limitations (documented, intentional):
   - transport failures (no HTTP head recorded) cannot be reproduced
     over HTTP; the recorded detail is answered as a 502,
@@ -52,6 +60,7 @@ from collections import deque
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Deque, Dict, List, Optional, Sequence, Tuple
+from urllib.parse import parse_qs, urlsplit
 
 import wire_dump
 from wire_dump import Dump, Exchange, Response, StreamEvent
@@ -61,6 +70,10 @@ Signature = Tuple[str, str, str]
 
 # Introspection endpoint (GET, never consumes an action).
 STATUS_PATH = "/__wire_replay__/status"
+
+# Rearm endpoint (POST): reload the dumps from disk, reset every
+# queue. Never consumes an action.
+REARM_PATH = "/__wire_replay__/rearm"
 
 # Whole-body responses are sliced at this size when --pace is active.
 BODY_SLICE = 512
@@ -106,6 +119,7 @@ class Scenario:
         self._queues: Dict[Signature, Deque[Action]] = {}
         self._served_count: Dict[Signature, int] = {}
         self._all: List[Action] = []
+        self._dump_paths: List[str] = []
         # Loose (sequential) mode: serve any pending action without a
         # body match. For rendering repros, where the session content
         # (tool output, AGENTS.md) cannot be reproduced byte-exactly —
@@ -119,15 +133,43 @@ class Scenario:
         actions are ordered by recorded time (file order breaks ties);
         dumps compose in argument order, so cross-file order is
         explicit rather than a comparison of unrelated clocks."""
+        with self._lock:
+            self._reset(dumps)
+
+    def rearm(self, paths: Optional[Sequence[str]] = None) -> List[str]:
+        """Reload the dumps from disk and reset every queue, ready for
+        another run. With `paths`, swap the scenario to a different
+        dump set; without, reload the current paths (picking up an
+        edited/replaced dump file). The scenario lock is held across
+        the load, so a request racing the rearm sees either the old or
+        the new queues atomically. Returns the new path list (the
+        caller logs it); raises OSError (via wire_dump.load) when a
+        path cannot be read — the old queues are untouched then."""
+        with self._lock:
+            to_load = list(paths) if paths else list(self._dump_paths)
+            dumps = [wire_dump.load(p) for p in to_load]
+            self._reset(dumps)
+            return to_load
+
+    def dump_paths(self) -> List[str]:
+        with self._lock:
+            return list(self._dump_paths)
+
+    def _reset(self, dumps: Sequence[Dump]) -> None:
+        """Caller holds the lock. Rebuild every queue from `dumps`."""
+        self._queues = {}
+        self._served_count = {}
+        actions: List[Action] = []
         for dump in dumps:
             for ex in sorted(dump.exchanges, key=lambda e: (e.t0, e.index)):
-                action = Action(
-                    action_id=0, exchange=ex, signature=ex.request.signature()
+                actions.append(
+                    Action(action_id=0, exchange=ex, signature=ex.request.signature())
                 )
-                self._all.append(action)
-        for action_id, action in enumerate(self._all):
+        for action_id, action in enumerate(actions):
             action.action_id = action_id
             self._queues.setdefault(action.signature, deque()).append(action)
+        self._all = actions
+        self._dump_paths = [d.path for d in dumps]
 
     # -- serving ---------------------------------------------------- #
 
@@ -184,6 +226,7 @@ class Scenario:
                 "actions_total": len(self._all),
                 "actions_served": served,
                 "actions_pending": len(self._all) - served,
+                "dumps": list(self._dump_paths),
                 "signatures": sigs,
             }
 
@@ -363,6 +406,10 @@ class ReplayHandler(BaseHTTPRequestHandler):
 
         if method in ("GET", "HEAD") and target == STATUS_PATH:
             self._serve_status(with_body)
+            return
+
+        if method == "POST" and target.split("?", 1)[0] == REARM_PATH:
+            self._serve_rearm()
             return
 
         action = self.server.scenario.take(signature)
@@ -616,6 +663,40 @@ class ReplayHandler(BaseHTTPRequestHandler):
                 self.wfile.flush()
             except OSError:
                 pass
+
+    def _serve_rearm(self) -> None:
+        """Reload the dumps, reset the queues, report the new state.
+        `?dumps=PATH[,PATH...]` swaps the dump set; a bare POST reloads
+        the current paths from disk."""
+        query = parse_qs(urlsplit(self.path).query)
+        paths: Optional[List[str]] = None
+        if "dumps" in query and query["dumps"] and query["dumps"][0].strip():
+            paths = [p.strip() for p in query["dumps"][0].split(",") if p.strip()]
+        try:
+            loaded = self.server.scenario.rearm(paths)
+        except OSError as exc:
+            self._log(f"rearm failed: {exc}")
+            self._respond_json(
+                500,
+                {
+                    "error": {
+                        "message": f"wire-replay: rearm failed: {exc}",
+                        "type": "rearm_failed",
+                    }
+                },
+                replay_status="rearm_failed",
+            )
+            return
+        for path in loaded:
+            self._log(f"rearm: loaded {path}")
+        st = self.server.scenario.status()
+        self._log(
+            f"rearm: {st['actions_total']} action(s), "
+            f"{st['actions_pending']} pending"
+        )
+        self._respond_json(
+            200, {"rearmed": True, "dumps": st["dumps"], "status": st}, "rearmed"
+        )
 
     def _write_chunk(self, payload: bytes) -> None:
         self.wfile.write(b"%x\r\n" % len(payload))

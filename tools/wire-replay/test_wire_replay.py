@@ -535,6 +535,101 @@ class TestServer(unittest.TestCase):
         self.assertNotIn("transfer-encoding", headers)
         self.assertEqual(decode_sse(data)[-1], "[DONE]")
 
+    def test_rearm_resets_queues_for_another_run(self):
+        """The whole point of rearm: after exhaustion, one POST rebuilds
+        the queues from the same dump file — a second identical client
+        run works without restarting the server."""
+        fx = self.fixture(simple_stream_exchange(marker="one"))
+        # Run 1: serve and exhaust.
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(decode_sse(data)[-1], "[DONE]")
+        status, _, _ = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 503)
+
+        # Rearm (no dumps= query: reload the current paths).
+        status, headers, data = fx.request("POST", "/__wire_replay__/rearm")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["x-wire-replay-status"], "rearmed")
+        payload = json.loads(data)
+        self.assertTrue(payload["rearmed"])
+        self.assertEqual(payload["dumps"], st_dumps(fx))
+        self.assertEqual(payload["status"]["actions_pending"], 1)
+
+        # Run 2: identical request, served again.
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(decode_sse(data)[-1], "[DONE]")
+
+    def test_rearm_reloads_the_dump_file_from_disk(self):
+        """A bare rearm re-reads the file: editing the dump between
+        runs changes what is served."""
+        path = os.path.join(self._tmp.name, "dump0.ndjson")
+        fx = self.fixture(simple_stream_exchange(marker="one"))
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(decode_sse(data)[0], '{"m":"one-a"}')
+
+        # Rewrite the same path with different content, rearm, rerun.
+        write_dump(self._tmp.name, "dump0.ndjson", simple_stream_exchange(marker="two"))
+        self.assertEqual(path, fx.scenario.dump_paths()[0])
+        fx.request("POST", "/__wire_replay__/rearm")
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(decode_sse(data)[0], '{"m":"two-a"}')
+
+    def test_rearm_with_dumps_query_swaps_the_scenario(self):
+        """?dumps= swaps to a different dump set on the fly."""
+        self.fixture(simple_stream_exchange(marker="one"))
+        other = write_dump(
+            self._tmp.name, "other.ndjson", simple_stream_exchange(marker="two")
+        )
+        fx = self.fixtures[0]
+        status, _, data = fx.request(
+            "POST",
+            "/__wire_replay__/rearm?dumps=" + other.replace(",", "%2C"),
+        )
+        self.assertEqual(status, 200)
+        payload = json.loads(data)
+        self.assertEqual(payload["dumps"], [other])
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(decode_sse(data)[0], '{"m":"two-a"}')
+
+    def test_rearm_bad_path_is_500_and_keeps_old_actions(self):
+        """A rearm naming an unreadable path fails loudly and leaves
+        the previous queues intact."""
+        fx = self.fixture(simple_stream_exchange(marker="one"))
+        status, _, _ = fx.request(
+            "POST", "/__wire_replay__/rearm?dumps=/nonexistent/nope.ndjson"
+        )
+        self.assertEqual(status, 500)
+        # The old action is still pending and served on the next hit.
+        status, _, data = fx.post("/v1/chat/completions", "{}")
+        self.assertEqual(status, 200)
+        self.assertEqual(decode_sse(data)[0], '{"m":"one-a"}')
+
+    def test_rearm_get_does_not_consume(self):
+        """The rearm path only reacts to POST; a GET is just another
+        unmatched request (it must NOT reset the queues)."""
+        fx = self.fixture(simple_stream_exchange(marker="one"))
+        status, _, _ = fx.request("GET", "/__wire_replay__/rearm")
+        self.assertEqual(status, 503)
+        st = fx.scenario.status()
+        self.assertEqual(st["actions_pending"], 1)
+
+    def test_status_reports_dump_paths(self):
+        fx = self.fixture(simple_stream_exchange(marker="one"))
+        status, _, data = fx.request("GET", "/__wire_replay__/status")
+        self.assertEqual(status, 200)
+        st = json.loads(data)
+        self.assertEqual(st["dumps"], st_dumps(fx))
+
+
+def st_dumps(fx: ServerFixture) -> list:
+    """The status endpoint's dump list must match the scenario's paths;
+    both are the temp fixture's absolute path."""
+    return fx.scenario.dump_paths()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

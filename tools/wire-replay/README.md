@@ -82,9 +82,37 @@ nevermore constructs a correct request.
 
 Introspection: `GET /__wire_replay__/status` returns action counts
 (total / served / pending) plus per-signature counts with body sizes
-and short SHA-1 digests (distinguishing same-path requests). Every
-response carries `X-Wire-Replay-Action` and `X-Wire-Replay-Status`
-headers.
+and short SHA-1 digests (distinguishing same-path requests), and the
+current dump paths under `dumps`. Every response carries
+`X-Wire-Replay-Action` and `X-Wire-Replay-Status` headers.
+
+## Rearm: another run without a restart
+
+A replay scenario is single-shot: every served request consumes one
+action, and once the queues are empty further requests 503. Instead
+of killing the server (and losing the port, the terminal scrollback,
+the `--pace`/`--loose` flags), re-arm it:
+
+```sh
+curl -X POST http://127.0.0.1:11434/__wire_replay__/rearm
+```
+
+That reloads the dump file(s) from disk and resets every queue — the
+next client run replays the same scenario against the same port. A
+bare rearm also re-reads the files, so an edited or replaced dump at
+the same path is picked up (trim a dump to the interesting rounds,
+rearm, rerun).
+
+`?dumps=PATH[,PATH...]` swaps the scenario to a different dump set
+without restarting:
+
+```sh
+curl -X POST 'http://127.0.0.1:11434/__wire_replay__/rearm?dumps=/path/other.ndjson'
+```
+
+A failed rearm (unreadable path) answers 500 and leaves the previous
+queues intact, so a typo never wedges the server. Only POST rearms —
+a GET on the path is just another unmatched request.
 
 ## Typical workflow
 
