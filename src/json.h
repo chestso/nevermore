@@ -54,7 +54,9 @@ double nm_json_num(const NmJson *v);      /* 0 unless NM_JSON_NUMBER */
  * string that are not valid UTF-8 become U+FFFD, a non-finite number
  * becomes null, and a finite number is written at the shortest
  * precision that parses back to the same double (up to %.17g). The
- * only NULL return is out of memory. */
+ * number text is C-locale whatever LC_NUMERIC says, so a later
+ * setlocale for localization cannot move the wire bytes. The only
+ * NULL return is out of memory. */
 NmJson *nm_json_new_object(void);
 NmJson *nm_json_new_array(void);
 NmJson *nm_json_new_string(const char *s);

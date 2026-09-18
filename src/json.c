@@ -19,8 +19,10 @@
  * per ill-formed maximal subpart), control characters are escaped, and
  * a non-finite double dumps as null — the writer has no error channel,
  * so it repairs rather than refuses. Numbers are emitted at maximum
- * fidelity: the shortest %g precision (15, 16 or 17 significant
- * digits) that strtod round-trips bit-exactly.
+ * fidelity (the shortest %g precision — 15, 16 or 17 significant
+ * digits — that strtod round-trips bit-exactly) and in the C locale
+ * whatever LC_NUMERIC says: the wire decimal point is always '.', so
+ * a later setlocale for localization cannot move the bytes.
  *
  * Reader memory model (memory-reuse principle): all strings, keys,
  * and numbers for one parsed document live in a single append-only
@@ -34,6 +36,7 @@
  */
 
 #include <float.h>
+#include <locale.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -576,6 +579,77 @@ static NmJson *parse_array(Parser *p)
     }
 }
 
+/* ---------------------------------------------------------------- */
+/* Locale-independent numbers                                       */
+/* ---------------------------------------------------------------- */
+
+/* RFC 8259's number grammar is C-locale: the decimal point is '.', and
+ * nevermore's wire format is that text. strtod and snprintf are not —
+ * under a setlocale(LC_ALL, "") (what a gettext-based localization does
+ * at startup) LC_NUMERIC is free to say otherwise. In de_DE, say,
+ * strtod("0.1") stops at the '.' and returns 0, and snprintf emits
+ * "0,1", which is not JSON at all. Both directions therefore go through
+ * localeconv(): the active locale's decimal point is swapped for '.' on
+ * the way out and for its own spelling on the way in, so the bytes on
+ * the wire never depend on LC_NUMERIC.
+ *
+ * localeconv() rather than the _l strtod/snprintf variants (or
+ * uselocale): this is standard C99, so one implementation covers
+ * glibc, macOS and Windows (MSVC/MinGW, where the _l spellings differ
+ * and the printf one does not exist in UCRT) with no platform guards.
+ * nevermore is single-threaded, so the shared struct lconv is not a
+ * race; the C locale is the fast path (one byte compare) and the whole
+ * pair is a no-op while nothing calls setlocale. */
+
+/* Copy the C-locale number token src[0..n) into dst (capacity cap),
+ * spelling each '.' as the active locale's decimal point so strtod
+ * reads it, and NUL-terminate. Returns the length written, or 0 if it
+ * does not fit. */
+static size_t localize_number(char *dst, size_t cap, const char *src, size_t n)
+{
+    const char *dp = localeconv()->decimal_point;
+    if (!dp || !*dp || (dp[0] == '.' && dp[1] == '\0')) { /* C locale */
+        if (n + 1 > cap)
+            return 0;
+        memcpy(dst, src, n);
+        dst[n] = '\0';
+        return n;
+    }
+    size_t dplen = strlen(dp);
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (src[i] == '.') {
+            if (o + dplen + 1 > cap)
+                return 0;
+            memcpy(dst + o, dp, dplen);
+            o += dplen;
+        } else {
+            if (o + 2 > cap)
+                return 0;
+            dst[o++] = src[i];
+        }
+    }
+    dst[o] = '\0';
+    return o;
+}
+
+/* The inverse, in place: rewrite the active locale's decimal point in
+ * a formatted number back to '.', so the emitted text is C-locale JSON
+ * whatever LC_NUMERIC says. Localized decimal points can be multibyte
+ * (or empty), so this memmoves; the replacement is always one byte, so
+ * the buffer only ever shrinks. */
+static void normalize_number(char *s)
+{
+    const char *dp = localeconv()->decimal_point;
+    if (!dp || !*dp || (dp[0] == '.' && dp[1] == '\0'))
+        return; /* C locale: already '.' */
+    size_t dplen = strlen(dp);
+    for (char *p = strstr(s, dp); p; p = strstr(p + 1, dp)) {
+        *p = '.';
+        memmove(p + 1, p + dplen, strlen(p + dplen) + 1);
+    }
+}
+
 /* Strict RFC 8259 number grammar (character-level scan, no regex):
  *   number = [ '-' ] int [ frac ] [ exp ]
  *   int    = '0' / ( [1-9] *DIGIT )
@@ -624,15 +698,19 @@ static NmJson *parse_number(Parser *p)
         while (i < len && s[i] >= '0' && s[i] <= '9');
     }
 
-    char tmp[64];
+    /* 63 bytes of token, plus room for a multibyte locale decimal
+     * point (the grammar allows a single '.', so a handful of spare
+     * bytes is ample); the token limit is the pre-existing one. */
+    char tmp[72];
     size_t n = i - start;
-    if (n >= sizeof(tmp))
+    if (n >= 64)
         goto bad;
-    memcpy(tmp, s + start, n);
-    tmp[n] = '\0';
+    size_t tn = localize_number(tmp, sizeof(tmp), s + start, n);
+    if (tn == 0)
+        goto bad;
     char *end;
     double d = strtod(tmp, &end);
-    if (end != tmp + n) /* backstop: the grammar above already holds */
+    if (end != tmp + tn) /* backstop: the grammar above already holds */
         goto bad;
     /* A literal too large for a double comes back as ±infinity, which
      * no JSON value can carry and which a later cast to an integer
@@ -1127,9 +1205,10 @@ static void dump_string(DumpBuf *b, const char *s)
  * strtod round-trips it), and NaN/±infinity have no JSON spelling, so
  * they become null (as cJSON and JSON.stringify substitute).
  *
- * The C locale is assumed: nevermore never calls setlocale, so %g's
- * decimal point is '.' — a locale with a comma separator would emit
- * invalid JSON here. */
+ * The decimal point is normalized to '.' afterward: snprintf writes it
+ * in whatever LC_NUMERIC is in force, and the round-trip strtod reads
+ * that same spelling, so the two checks above are consistent — but the
+ * bytes handed to the wire must be C-locale JSON (normalize_number). */
 static void db_put_number(DumpBuf *b, double d)
 {
     char tmp[64];
@@ -1138,27 +1217,25 @@ static void db_put_number(DumpBuf *b, double d)
         return;
     }
     if (d == 0.0) {
-        db_puts(b, signbit(d) ? "-0" : "0");
-        return;
-    }
-    if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
-        d == (double)(long long)d) {
+        snprintf(tmp, sizeof(tmp), "%s", signbit(d) ? "-0" : "0");
+    } else if (d >= -9223372036854775808.0 && d < 9223372036854775808.0 &&
+               d == (double)(long long)d) {
         /* The range guard must come first: casting an out-of-range
          * double to long long is undefined (UBSan traps it). */
         snprintf(tmp, sizeof(tmp), "%lld", (long long)d);
-        db_puts(b, tmp);
-        return;
+    } else {
+        int prec = 15;
+        for (; prec < 17; prec++) {
+            snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
+            char *end = NULL;
+            double back = strtod(tmp, &end);
+            if (end && *end == '\0' && memcmp(&back, &d, sizeof(d)) == 0)
+                break;
+        }
+        if (prec == 17) /* no shorter form round-tripped */
+            snprintf(tmp, sizeof(tmp), "%.17g", d);
     }
-    int prec = 15;
-    for (; prec < 17; prec++) {
-        snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
-        char *end = NULL;
-        double back = strtod(tmp, &end);
-        if (end && *end == '\0' && memcmp(&back, &d, sizeof(d)) == 0)
-            break;
-    }
-    if (prec == 17) /* no shorter form round-tripped */
-        snprintf(tmp, sizeof(tmp), "%.17g", d);
+    normalize_number(tmp);
     db_puts(b, tmp);
 }
 

@@ -1,6 +1,7 @@
 /* test_json.c - JSON reader/writer tests. Runs offline. */
 
 #include <float.h>
+#include <locale.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -560,6 +561,104 @@ static void test_json_dump_number_wire_roundtrip(void)
     nm_json_free(o);
 }
 
+/* Dump one number and copy the text into a fixed buffer (so the test
+ * owns nothing to leak when an ASSERT returns early). */
+static void dump_number_into(char *buf, size_t cap, double d)
+{
+    NmJson *v = nm_json_new_number(d);
+    char *s = nm_json_dump(v);
+    snprintf(buf, cap, "%s", s ? s : "(null)");
+    free(s);
+    nm_json_free(v);
+}
+
+/* nevermore may be localized later (gettext calls setlocale(LC_ALL,
+ * "") at startup), and any locale but the C one is free to use ','
+ * as the decimal point: strtod("0.1") then stops at the '.' and
+ * returns 0, while snprintf writes "0,1", which is not JSON at all.
+ * The wire must not move because of LC_NUMERIC — the reader keeps
+ * reading C-locale JSON and the writer keeps emitting it.
+ *
+ * Skips when the box has no locale that redefines the decimal point
+ * (Windows CI): the property under test needs one, and a silent pass
+ * would be worse than a named skip. */
+static void test_json_number_locale_independent(void)
+{
+    static const char *cands[] = {
+        /* POSIX names (glibc, macOS) */
+        "de_DE.utf8",
+        "de_DE.UTF-8",
+        "de_DE",
+        "fr_FR.utf8",
+        "fr_FR",
+        /* Windows (UCRT / Wine) */
+        "de-DE",
+        "fr-FR",
+        "German_Germany.1252",
+    };
+    char dp[16] = "";
+    int switched = 0;
+    for (size_t i = 0; i < sizeof(cands) / sizeof(cands[0]); i++) {
+        if (!setlocale(LC_NUMERIC, cands[i]))
+            continue;
+        const char *p = localeconv()->decimal_point;
+        if (p && *p && !(p[0] == '.' && p[1] == '\0')) {
+            snprintf(dp, sizeof(dp), "%s", p);
+            switched = 1;
+            break;
+        }
+        setlocale(LC_NUMERIC, "C"); /* a C-like locale: try the next */
+    }
+    if (!switched) {
+        printf("  SKIP: no locale with a non-'.' decimal point\n");
+        return;
+    }
+
+    /* Capture every result under the foreign locale, then restore
+     * before the ASSERTs (they return early and would otherwise leak
+     * the locale into the other tests). */
+    char loc01[64], loc13[64], locexp[64], locneg0[64];
+    dump_number_into(loc01, sizeof(loc01), 0.1);
+    dump_number_into(loc13, sizeof(loc13), 1.0 / 3.0);
+    dump_number_into(locexp, sizeof(locexp), 1e20);
+    dump_number_into(locneg0, sizeof(locneg0), -0.0);
+
+    const char *str = "{\"a\":0.1,\"b\":1e20,\"c\":-0.0}";
+    const char *err = NULL;
+    NmJson *doc = nm_json_parse(str, strlen(str), &err);
+    int parsed = 0, a_ok = 0, b_ok = 0, c_ok = 0;
+    if (doc) {
+        double want_a = 0.1, want_b = 1e20;
+        double a = nm_json_num(nm_json_get(doc, "a"));
+        double b = nm_json_num(nm_json_get(doc, "b"));
+        double c = nm_json_num(nm_json_get(doc, "c"));
+        a_ok = memcmp(&a, &want_a, sizeof(double)) == 0;
+        b_ok = memcmp(&b, &want_b, sizeof(double)) == 0;
+        c_ok = signbit(c) && c == 0.0; /* -0 keeps its sign */
+        parsed = 1;
+    }
+
+    setlocale(LC_NUMERIC, "C"); /* restore before any ASSERT */
+    char c01[64];
+    dump_number_into(c01, sizeof(c01), 0.1);
+
+    /* The chosen locale really is a different one. */
+    ASSERT_TRUE(dp[0] != '.' || dp[1] != '\0');
+    ASSERT_TRUE(parsed);
+    ASSERT_TRUE(a_ok);
+    ASSERT_TRUE(b_ok);
+    ASSERT_TRUE(c_ok);
+    /* Dumped text: C-locale JSON, not the locale's spelling. */
+    ASSERT_STR_EQ(loc01, "0.1");
+    ASSERT_STR_EQ(loc13, "0.3333333333333333");
+    ASSERT_STR_EQ(locexp, "1e+20");
+    ASSERT_STR_EQ(locneg0, "-0");
+    /* ...and byte-identical to the C locale's output: the wire does not
+     * move with LC_NUMERIC. */
+    ASSERT_STR_EQ(c01, loc01);
+    nm_json_free(doc);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -589,5 +688,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_dump_number_roundtrip_fidelity);
     RUN_TEST(test_json_dump_number_text);
     RUN_TEST(test_json_dump_number_wire_roundtrip);
+    RUN_TEST(test_json_number_locale_independent);
     TEST_SUMMARY();
 }
