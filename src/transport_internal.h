@@ -62,13 +62,35 @@ long nm_conn_read(NmConnection *conn, char *buf, size_t len);
  * in transport_socket.c; shared with transport.c's step paths. */
 const char *nm_sock_errstr(void);
 
-/* Flip an fd back to blocking (the TLS handshake path). 0 on
- * success, -1 on failure. */
+/* Flip an fd back to blocking for the TLS handshake. Best-effort by
+ * design: a Windows socket subscribed by the event loop (WSAEventSelect)
+ * refuses the flip with WSAEINVAL, and the backends wait for readiness
+ * themselves in that case. 0 on success, -1 on failure. */
 int nm_socket_set_blocking(int fd);
 
 /* TLS backend factories (one per file; guarded by NM_TLS_* defines). */
 #if defined(NM_TLS_SCHANNEL)
 const NmTlsBackend *nm_tls_backend_schannel(void);
+
+/* tls_schannel.c: resolve a successful DecryptMessage buffer set into
+ * "where the plaintext is / how much ciphertext was consumed /
+ * what to carry over". The buffer array stays opaquely typed so this
+ * header (and POSIX builds) need no Schannel headers; the Windows
+ * test constructs real SecBuffers. Exposed because no TLS server
+ * exists on Windows, so the record bookkeeping — the bug that shipped
+ * silently — is pinned synthetically instead. */
+typedef struct NmTlsRecordView
+{
+    const unsigned char *plain; /* SECBUFFER_DATA payload */
+    size_t plain_len;
+    int have_plain;
+    size_t consumed;            /* ciphertext used: in_len - extra */
+    const unsigned char *extra; /* SECBUFFER_EXTRA (the next record) */
+    size_t extra_len;
+} NmTlsRecordView;
+
+void nm_schannel_record_view(const void *secbufs, size_t n_bufs, size_t in_len,
+                             NmTlsRecordView *out);
 #elif defined(NM_TLS_SECTRANSPORT)
 const NmTlsBackend *nm_tls_backend_sectransport(void);
 #elif defined(NM_TLS_MBEDTLS)

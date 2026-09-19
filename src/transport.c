@@ -268,23 +268,24 @@ NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
 {
     if (!conn || !conn->tls || conn->tls_ctx)
         return conn ? NM_TRANSPORT_OK : NM_TRANSPORT_ERR_SOCKET;
-    /* The handshake blocks (the documented sub-second deferral), so
-     * it needs a BLOCKING fd: an async connection's socket was
-     * flipped non-blocking for connect(), and a non-blocking fd makes
-     * the blocking backends fail with EAGAIN mid-handshake (they
-     * don't loop on SSL_ERROR_WANT_READ/WRITE). Flip blocking for the
-     * handshake and leave it: TLS reads/writes go through the backend,
-     * never the raw fd, and block today by the same deferral. */
-    if (conn->nonblocking) {
-        if (nm_socket_set_blocking(conn->fd) != 0) {
-            conn_fail(conn, "tls", NM_TRANSPORT_ERR_SOCKET,
-                      "could not set the socket blocking for the "
-                      "TLS handshake: %s",
-                      nm_sock_errstr());
-            return NM_TRANSPORT_ERR_SOCKET;
-        }
+    /* The handshake blocks (the documented sub-second deferral), so a
+     * blocking fd is its natural home: an async connection's socket
+     * was flipped non-blocking for connect(), and a non-blocking fd
+     * makes the blocking backends fail mid-handshake (they don't loop
+     * on WANT_READ/WANT_WRITE).
+     *
+     * But the fd belongs to the event loop, and on Windows a
+     * WSAEventSelect-associated socket REFUSES the flip: for as long
+     * as the association stands, ioctlsocket(FIONBIO, 0) answers
+     * WSAEINVAL (10022, proved with a minimal repro). The association
+     * is boba's subscription — the thing that keeps the TUI fed — so
+     * dropping it is not ours to do. Hence a BEST-EFFORT flip: a
+     * socket that stays non-blocking is served by the backends' own
+     * readiness waits (tls_schannel.c waits for the handshake, and
+     * reports would-block from the record layer so the loop stays in
+     * charge of when a read happens). */
+    if (conn->nonblocking && nm_socket_set_blocking(conn->fd) == 0)
         conn->nonblocking = 0;
-    }
     const char *err = NULL;
     conn->tls_ctx = conn->tls->handshake(conn->fd, host, &err);
     if (conn->tls_ctx)

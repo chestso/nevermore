@@ -282,6 +282,11 @@ static void wire_debug_startup(const char *provider_name, const char *model)
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    /* Before any output: a Win32 console starts on the OEM codepage
+     * and would mojibake the UTF-8 banner (os_compat_win.c). */
+    nm_os_console_init();
+#endif
     const char *base_url = getenv("NEVERMORE_BASE_URL");
     const char *cli_provider = NULL;
     const char *cli_model = NULL;

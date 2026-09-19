@@ -249,9 +249,14 @@ typedef struct NmTlsBackend
     /* Perform the TLS handshake over an already-connected TCP socket.
      * Returns an opaque context, or NULL on failure. */
     void *(*handshake)(int fd, const char *host, const char **err);
-    /* Returns bytes written, or -1 on failure. */
+    /* Returns bytes written, or -1 on failure. A non-blocking fd is
+     * waited for, not reported: writes keep the blocking shape. */
     long (*write)(void *ctx, const char *buf, size_t len, const char **err);
-    /* Returns bytes read, 0 = EOF, -1 = error. */
+    /* Returns bytes read, 0 = EOF, -1 = error, or NM_READ_WOULD_BLOCK
+     * when the socket is non-blocking and nothing is pending. The
+     * record layer holds any partial ciphertext across the call, so
+     * would-block is a normal "re-step when the loop says readable",
+     * never a dropped byte. */
     long (*read)(void *ctx, char *buf, size_t len, const char **err);
     void (*close)(void *ctx);
 } NmTlsBackend;
