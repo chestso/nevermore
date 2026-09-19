@@ -91,6 +91,24 @@ typedef struct NmTlsRecordView
 
 void nm_schannel_record_view(const void *secbufs, size_t n_bufs, size_t in_len,
                              NmTlsRecordView *out);
+
+/* tls_schannel.c: resolve the handshake's input staging — where the
+ * bytes Schannel did NOT consume start, and how many there are. The
+ * PSDK Schannel client sample's convention: the leftover is reported as
+ * SECBUFFER_EXTRA on the second input buffer and sits at the END of the
+ * staging buffer. Exposed for the record view's reason (no TLS server
+ * exists on Windows to pin it live): a dropped leftover made the next
+ * InitializeSecurityContext call parse a buffer starting mid-record,
+ * which Schannel answers with SEC_E_INVALID_TOKEN — the intermittent
+ * handshake failure. */
+typedef struct NmTlsFlightView
+{
+    size_t keep_off; /* start of the unconsumed tail in the input */
+    size_t keep_len; /* bytes to keep (0 = the input was taken whole) */
+} NmTlsFlightView;
+
+void nm_schannel_flight_view(int is_extra, size_t extra_len, size_t in_len,
+                             NmTlsFlightView *out);
 #elif defined(NM_TLS_SECTRANSPORT)
 const NmTlsBackend *nm_tls_backend_sectransport(void);
 #elif defined(NM_TLS_MBEDTLS)

@@ -493,9 +493,25 @@ static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
     return r;
 }
 
-/* One pull: read what's ready, feed SSE, dispatch events.
- * Returns NM_CHAT_PENDING (call again later — would-block or head
- * incomplete), NM_CHAT_OK (stream complete), or an error. */
+/* One step: drain everything the transport can hand over right now,
+ * feeding the SSE parser and dispatching every complete event.
+ *
+ * Draining to quiescence is the contract the callers rely on. A step
+ * is driven by *socket* readiness (the TUI's event loop, the ask
+ * pump's select), so a step that returns with bytes still buffered
+ * strands them: the wakeup that announced them is already spent, and
+ * nothing left to read means nothing left to wake the loop — the
+ * streaming stall. The Windows symptom is sharpest because the last
+ * wakeup is the peer's FD_CLOSE, which WSAEnumNetworkEvents consumes
+ * once: the server's closing burst (finish_reason, `[DONE]`, the
+ * chunked terminator) sat in nevermore's TLS/chunk buffers with the
+ * loop waiting forever (live-probed: 33 extra steps drained the last
+ * 540 bytes and completed the stream).
+ *
+ * So PENDING means exactly "no more input is immediately available",
+ * which is the only state in which waiting on the fd is honest.
+ *
+ * Returns NM_CHAT_PENDING, NM_CHAT_OK (stream complete), or an error. */
 static NmChatStatus stream_one_step(NmChatStream *st)
 {
     /* Body bytes stashed by the head check (their consumer was not
@@ -512,37 +528,32 @@ static NmChatStatus stream_one_step(NmChatStream *st)
             return NM_CHAT_OK;
     }
 
-    NmSseEvent ev;
-    long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
-    if (n == NM_READ_WOULD_BLOCK)
-        return NM_CHAT_PENDING;
-    if (n < 0) {
-        st->status = NM_CHAT_ERR_TRANSPORT;
-        snprintf(st->error_body, sizeof(st->error_body), "%s",
-                 nm_connection_last_error(st->conn));
-        st->error_len = strlen(st->error_body);
-        return NM_CHAT_ERR_TRANSPORT;
-    }
-    if (n == 0)
-        return NM_CHAT_OK; /* EOF: stream complete (or truncated; the
-                              caller's status check flags it) */
+    for (;;) {
+        long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
+        if (n == NM_READ_WOULD_BLOCK)
+            return NM_CHAT_PENDING; /* drained: the fd is the only wait */
+        if (n < 0) {
+            st->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(st->error_body, sizeof(st->error_body), "%s",
+                     nm_connection_last_error(st->conn));
+            st->error_len = strlen(st->error_body);
+            return NM_CHAT_ERR_TRANSPORT;
+        }
+        if (n == 0)
+            return NM_CHAT_OK; /* body complete: framing done or EOF
+                                  (a truncated stream is the caller's
+                                  status check, not a stall) */
 
-    int r = nm_sse_feed(st->sse, st->rbuf, (size_t)n, &ev);
-    while (r == 1) {
-        nm_wire_tap_stream_event(st->conn, ev.event, ev.data,
-                                 strlen(ev.data));
-        handle_event(st, ev.data, strlen(ev.data));
+        int r = feed_and_dispatch(st, st->rbuf, (size_t)n);
+        if (r < 0) {
+            st->status = NM_CHAT_ERR_PARSE;
+            return NM_CHAT_ERR_PARSE;
+        }
         if (st->done)
-            break;
-        r = nm_sse_feed(st->sse, "", 0, &ev);
+            return NM_CHAT_OK;
+        /* Bytes arrived: loop for the next read, which returns
+         * would-block (or 0) the moment the transport is drained. */
     }
-    if (r < 0) {
-        st->status = NM_CHAT_ERR_PARSE;
-        return NM_CHAT_ERR_PARSE;
-    }
-    if (st->done)
-        return NM_CHAT_OK;
-    return NM_CHAT_PENDING;
 }
 
 /* Pull bytes until the response head completes (or stalls), WITHOUT

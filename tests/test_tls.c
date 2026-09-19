@@ -369,10 +369,48 @@ static void test_schannel_record_view_consumed(void)
     nm_schannel_record_view(none, 4, 0, &v);
     ASSERT_TRUE(!v.have_plain);
 }
+
+/* InitializeSecurityContext does not always take an input flight
+ * whole: when the server's messages arrive split across segments it
+ * consumes message by message and reports the unconsumed tail as
+ * SECBUFFER_EXTRA on the second input buffer. The tail sits at the END
+ * of the staging buffer, and it must be moved to the front and
+ * re-fed — the old code reset the buffer instead, so the next call
+ * parsed bytes starting mid-record and Schannel answered
+ * SEC_E_INVALID_TOKEN (0x80090308; 7 of 80 probed handshakes failed
+ * before the fix, 0 of 170 after). Pinned here because no TLS server
+ * exists on Windows. */
+static void test_schannel_flight_view_keeps_leftover(void)
+{
+    NmTlsFlightView v;
+
+    /* A whole ServerHello plus part of a Certificate: Schannel reports
+     * the 3564 unconsumed bytes, which start right after the 96-byte
+     * record. */
+    nm_schannel_flight_view(1, 3564, 3660, &v);
+    ASSERT_EQ(v.keep_off, (size_t)96);
+    ASSERT_EQ(v.keep_len, (size_t)3564);
+
+    /* Taken whole: nothing to keep. */
+    nm_schannel_flight_view(0, 0, 4395, &v);
+    ASSERT_EQ(v.keep_len, (size_t)0);
+    ASSERT_EQ(v.keep_off, (size_t)4395);
+
+    /* A report bigger than the input is nonsense, not an out-of-bounds
+     * read: clamp to the whole buffer. */
+    nm_schannel_flight_view(1, 9999, 100, &v);
+    ASSERT_EQ(v.keep_len, (size_t)100);
+    ASSERT_EQ(v.keep_off, (size_t)0);
+}
 #else
 static void test_schannel_record_view_consumed(void)
 {
     printf("  (Schannel record bookkeeping is Windows-only — n/a)\n");
+}
+
+static void test_schannel_flight_view_keeps_leftover(void)
+{
+    printf("  (Schannel handshake staging is Windows-only — n/a)\n");
 }
 #endif
 
@@ -424,6 +462,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_on_loop_owned_socket);
     RUN_TEST(test_schannel_record_view_consumed);
+    RUN_TEST(test_schannel_flight_view_keeps_leftover);
     live_tls_probe();
     TEST_SUMMARY();
 }

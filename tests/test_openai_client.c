@@ -302,6 +302,145 @@ static void test_chat_step_pending_between_events(void)
     close(lfd);
 }
 
+/* Burst server: the whole streamed answer (head + many chunked SSE
+ * events + [DONE] + the terminator) leaves in one write and the peer
+ * closes. It is sized past READ_BUF_CAP, so no single transport read
+ * can deliver it: the step the event loop takes must drain the rest
+ * itself, or the tail is stranded with nothing left to wake the loop
+ * (on Windows the last wakeup is FD_CLOSE, consumed once — the
+ * streaming stall).
+ *
+ * It sends nothing until the test has confirmed the request is on the
+ * wire (g_burst_go), so the response cannot be read early: the test
+ * then waits for the entire burst to reach the socket's receive
+ * buffer, which makes "one step completes the stream" exact rather
+ * than a sleep race. */
+#define BURST_EVENTS 400
+
+static volatile int g_burst_request_seen;
+static volatile int g_burst_go;
+static unsigned long g_burst_total;
+
+static void *burst_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n";
+    static const char ev[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n\n";
+    static const char fin[] = "data: [DONE]\n\n";
+    static char resp[64 * 1024];
+    size_t n = sizeof(head) - 1;
+    memcpy(resp, head, n);
+    for (int i = 0; i < BURST_EVENTS; i++)
+        n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%x\r\n%s\r\n",
+                              (unsigned)strlen(ev), ev);
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%x\r\n%s\r\n0\r\n\r\n",
+                          (unsigned)strlen(fin), fin);
+    g_burst_total = (unsigned long)n;
+    g_burst_request_seen = 1;
+
+    /* Bounded (5 s): a test server must never hang the suite. */
+    for (int i = 0; i < 500 && !g_burst_go; i++)
+        usleep(10 * 1000);
+
+    size_t off = 0;
+    while (off < n) {
+        long sent = send(cfd, resp + off, (int)(n - off), 0);
+        if (sent <= 0)
+            break;
+        off += (size_t)sent;
+    }
+    close(cfd);
+    return NULL;
+}
+
+/* Bytes already in the socket's receive buffer, without consuming.
+ * MSG_PEEK is the portable query (FIONREAD needs a different call on
+ * each platform); the burst fits the peek buffer, so one peek reports
+ * all of it. */
+static unsigned long sock_avail(int fd)
+{
+    static char peek[64 * 1024];
+    long n = recv(fd, peek, sizeof(peek), MSG_PEEK);
+    return n > 0 ? (unsigned long)n : 0;
+}
+
+static void test_chat_step_drains_everything_available(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    g_burst_request_seen = 0;
+    g_burst_go = 0;
+    g_burst_total = 0;
+    pthread_t th;
+    pthread_create(&th, NULL, burst_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, &cap
+    };
+    NmChatResult err = { 0 };
+    NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
+    ASSERT_NOT_NULL(h);
+    int fd = nm_openai_stream_fd(h);
+    ASSERT_TRUE(fd >= 0);
+
+    /* Drive the connect/send phases only: the server withholds the
+     * response, so nothing can be read into the stream yet. */
+    NmChatResult result = { 0 };
+    for (int i = 0; i < 400 && !g_burst_request_seen; i++) {
+        nm_openai_chat_step(h, &result);
+        usleep(5 * 1000);
+    }
+    ASSERT_TRUE(g_burst_request_seen);
+
+    g_burst_go = 1;
+    int got_all = 0;
+    for (int i = 0; i < 500; i++) {
+        if (sock_avail(fd) >= g_burst_total) {
+            got_all = 1;
+            break;
+        }
+        usleep(5 * 1000);
+    }
+    ASSERT_TRUE(got_all);
+
+    /* ONE step reaches [DONE], the last thing in the burst: it
+     * consumed every byte that was available. */
+    NmChatStatus st = nm_openai_chat_step(h, &result);
+    ASSERT_EQ(st, NM_CHAT_OK);
+    ASSERT_EQ(result.status, NM_CHAT_OK);
+    ASSERT_TRUE(cap.n_deltas > 100);
+
+    nm_openai_chat_end(h);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* Cancel mid-stream: chat_end tears the connection down without
  * waiting for [DONE] or EOF. */
 /* Deterministic regression server for the buffered-response bug:
@@ -1551,6 +1690,7 @@ int main(int argc, char *argv[])
     printf("test_openai_client:\n");
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_step_pending_between_events);
+    RUN_TEST(test_chat_step_drains_everything_available);
     RUN_TEST(test_chat_step_whole_response_in_first_read_delivers_tools);
     RUN_TEST(test_parallel_calls_with_same_index_stay_distinct);
     RUN_TEST(test_fragmented_tool_args_merge_by_index_and_id);

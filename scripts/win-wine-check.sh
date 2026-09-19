@@ -5,12 +5,26 @@
 # Prereqs: x86_64-w64-mingw32-gcc (cross toolchain), wine, and a
 # configured build/ (../configure has run for the host build so
 # nevermore_version.h + config.h exist).
+#
+# Exit: 0 = every binary built and passed under wine; 1 = a build or a
+# run failed; 77 = a prereq is missing (no cross toolchain / no wine) —
+# the suite's skip code, so a box without wine reads as "not run", not
+# as sixteen failures.
 
 set -e
 
 cd "$(dirname "$0")/.."
 
 CC=x86_64-w64-mingw32-gcc
+command -v $CC >/dev/null 2>&1 || {
+	echo "SKIP: $CC not found (mingw-w64 cross toolchain)"
+	exit 77
+}
+command -v wine >/dev/null 2>&1 || {
+	echo "SKIP: wine not found"
+	exit 77
+}
+
 OUT=build/tests-wine
 mkdir -p "$OUT"
 

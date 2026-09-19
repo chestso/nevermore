@@ -192,6 +192,23 @@ static int schannel_read_flight(SchCtx *c, int fd, const char **err)
     }
 }
 
+/* Resolve the handshake's input staging: where the bytes Schannel did
+ * not consume start, and how many there are. SECBUFFER_EXTRA is the
+ * TRAILING remainder of the input (the PSDK Schannel client sample
+ * moves exactly those bytes to the front). A report larger than the
+ * input can only be nonsense, so it is clamped — never trusted into
+ * an out-of-bounds read. See transport_internal.h for why this is a
+ * function. */
+void nm_schannel_flight_view(int is_extra, size_t extra_len, size_t in_len,
+                             NmTlsFlightView *out)
+{
+    size_t keep = is_extra ? extra_len : 0;
+    if (keep > in_len)
+        keep = in_len;
+    out->keep_len = keep;
+    out->keep_off = in_len - keep;
+}
+
 static void *schannel_handshake(int fd, const char *host, const char **err)
 {
     if (err)
@@ -223,17 +240,17 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
         return NULL;
     }
 
-    /* InitializeSecurityContext loop: each call yields a token to
-     * send and consumes the server's flight. A flight can arrive split
-     * across recv boundaries — Schannel answers SEC_E_INCOMPLETE_MESSAGE
-     * for a partial one, and the accumulated bytes must be handed back
-     * (a segmented ServerHello/Certificate flight used to fail with the
-     * generic "InitializeSecurityContext failed"). */
+    /* InitializeSecurityContext loop: each call yields a token to send
+     * and consumes the server's flight. The flight is not one recv and
+     * not necessarily consumed whole — see the leftover handling inside
+     * the loop for both cases (segmented flights, and the tail a
+     * per-message consume leaves behind). */
     DWORD flags_out = 0;
     DWORD ctx_req = ISC_REQ_REPLAY_DETECT | ISC_REQ_SEQUENCE_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM | ISC_REQ_MANUAL_CRED_VALIDATION;
     DWORD in_flags = ctx_req;
     SecBufferDesc in_desc, out_desc;
-    SecBuffer in_buf, out_buf;
+    SecBuffer in_bufs[2]; /* [0] the flight, [1] reports the tail back */
+    SecBuffer out_buf;
     int first = 1;
 
     for (;;) {
@@ -245,24 +262,50 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
         out_desc.cBuffers = 1;
         out_desc.pBuffers = &out_buf;
 
-        if (first) {
-            ZeroMemory(&in_desc, sizeof(in_desc)); /* no input yet */
-            in_desc.ulVersion = SECBUFFER_VERSION;
-            in_desc.cBuffers = 0;
-            in_desc.pBuffers = NULL;
-        } else {
-            in_buf.BufferType = SECBUFFER_TOKEN;
-            in_buf.cbBuffer = (ULONG)c->token_len;
-            in_buf.pvBuffer = c->token;
-            in_desc.ulVersion = SECBUFFER_VERSION;
-            in_desc.cBuffers = 1;
-            in_desc.pBuffers = &in_buf;
-        }
+        /* Two input buffers, the PSDK Schannel client sample's shape:
+         * the flight, plus an EMPTY buffer Schannel re-types to
+         * SECBUFFER_EXTRA with whatever it did not consume. */
+        in_bufs[0].BufferType = SECBUFFER_TOKEN;
+        in_bufs[0].cbBuffer = (ULONG)c->token_len;
+        in_bufs[0].pvBuffer = c->token;
+        in_bufs[1].BufferType = SECBUFFER_EMPTY;
+        in_bufs[1].cbBuffer = 0;
+        in_bufs[1].pvBuffer = NULL;
+        in_desc.ulVersion = SECBUFFER_VERSION;
+        in_desc.cBuffers = 2;
+        in_desc.pBuffers = in_bufs;
 
         sec = InitializeSecurityContextA(
             &c->cred, first ? NULL : &c->ctxt, (SEC_CHAR *)host, in_flags, 0,
-            SECURITY_NETWORK_DREP, first ? NULL : &in_desc, 0, &c->ctxt,
-            &out_desc, &flags_out, &expiry);
+            SECURITY_NETWORK_DREP, &in_desc, 0, &c->ctxt, &out_desc, &flags_out,
+            &expiry);
+
+        /* Keep whatever Schannel did not consume, at the front of the
+         * staging buffer. A flight is not always taken whole: the same
+         * server flight can arrive split across segments (a whole
+         * ServerHello, then part of a Certificate), and Schannel
+         * consumes message by message, reporting the unconsumed tail as
+         * SECBUFFER_EXTRA on the second input buffer — the PSDK
+         * Schannel client sample's convention. Those bytes are already
+         * off the wire, so dropping them (the old unconditional reset)
+         * leaves the next call parsing a buffer that starts mid-record,
+         * which Schannel answers with SEC_E_INVALID_TOKEN (0x80090308)
+         * — live-probed: the tail is non-empty on about 1 handshake in
+         * 4, and dropping it failed about 1 handshake in 10.
+         *
+         * SEC_E_INCOMPLETE_MESSAGE is handled first and keeps the whole
+         * accumulation: for a partial flight Schannel reports EXTRA for
+         * bytes it has already taken, and the sample re-feeds the whole
+         * buffer (it re-parses what it took), appending the next read. */
+        if (sec != SEC_E_INCOMPLETE_MESSAGE) {
+            NmTlsFlightView v;
+            nm_schannel_flight_view(in_bufs[1].BufferType == SECBUFFER_EXTRA,
+                                    in_bufs[1].cbBuffer, c->token_len, &v);
+            if (v.keep_len && v.keep_off)
+                memmove(c->token, c->token + v.keep_off, v.keep_len);
+            c->token_len = (DWORD)v.keep_len;
+        }
+
         if (sec == SEC_E_INCOMPLETE_MESSAGE) {
             /* Partial server flight: accumulate more and re-call with
              * the whole accumulation. (Free any output the call
@@ -288,10 +331,13 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
                 FreeContextBuffer(out_buf.pvBuffer);
             }
             if (sec == SEC_E_OK)
-                break; /* handshake complete */
+                break; /* handshake complete; whatever the last read
+                          overran into is carried to the record layer
+                          below */
             first = 0;
-            c->token_len = 0; /* consumed: the next flight starts fresh */
-            if (schannel_read_flight(c, fd, err) != 0) {
+            /* Read only when nothing is left to consume: a leftover
+             * record (or partial one) is re-fed first. */
+            if (c->token_len == 0 && schannel_read_flight(c, fd, err) != 0) {
                 schannel_close(c);
                 return NULL;
             }
@@ -400,6 +446,17 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
             *err = "out of memory";
         schannel_close(c);
         return NULL;
+    }
+
+    /* Hand the handshake's overrun to the record layer. The last read
+     * of the handshake can carry whole post-handshake records (TLS 1.3
+     * NewSessionTicket right behind the server's Finished); they are
+     * already off the wire, so dropping them would leave the record
+     * layer's first DecryptMessage starting mid-record. */
+    if (c->token_len) {
+        memcpy(c->recv_crypt, c->token, c->token_len);
+        c->recv_crypt_len = c->token_len;
+        c->token_len = 0;
     }
     c->have_ctxt = 1;
     return c;
