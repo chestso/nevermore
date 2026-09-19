@@ -89,6 +89,13 @@ static void test_unsetenv(const char *name)
 #define chat_mkdir(d) mkdir((d), 0755)
 #endif
 
+/* The app's agent source handle as an int (always the stream's
+ * socket/fd: these tests drive a stream, never a process job). */
+static int app_fd(NmChatApp *app)
+{
+    return (int)nm_chat_app_source(app).handle;
+}
+
 static char g_request[REQ_CAP];
 
 struct ServerScript
@@ -417,16 +424,57 @@ static unsigned app_interest(NmChatApp *app)
 {
     NmSource e[TUI_IO_SOURCE_MAX];
     size_t n = nm_chat_app_interest(app, e, TUI_IO_SOURCE_MAX);
-    int afd = nm_chat_app_fd(app);
+    int afd = app_fd(app);
     for (size_t i = 0; i < n; i++) {
         if (e[i].handle == afd)
             return e[i].flags;
     }
     return 0;
 }
+/* Wait up to `timeout_ms` for the app's agent source, the way boba's loop
+ * does. A Windows process job's readiness object is a waitable event, so
+ * select() cannot be used on it — it would fail at once and every caller
+ * here would spin instead of waiting (run_command and the job tools both
+ * ride that mechanism). */
+static void app_wait(AppHarness *h, int timeout_ms)
+{
+    NmSource s = nm_chat_app_source(h->app);
+    if (s.handle < 0 || !s.flags)
+        return;
+#ifdef _WIN32
+    if (s.kind == NM_SRC_HANDLE) {
+        WaitForSingleObject((HANDLE)s.handle, (DWORD)timeout_ms);
+        return;
+    }
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    if (s.flags & NM_INTEREST_READ)
+        FD_SET((SOCKET)s.handle, &r);
+    if (s.flags & NM_INTEREST_WRITE)
+        FD_SET((SOCKET)s.handle, &w);
+    select(0, (s.flags & NM_INTEREST_READ) ? &r : NULL,
+           (s.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#else
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    int fd = (int)s.handle;
+    if (s.flags & NM_INTEREST_READ)
+        FD_SET(fd, &r);
+    if (s.flags & NM_INTEREST_WRITE)
+        FD_SET(fd, &w);
+    select(fd + 1, (s.flags & NM_INTEREST_READ) ? &r : NULL,
+           (s.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#endif
+}
 
 /* Drive the agent to completion the way the runtime's external-fd
  * loop would: poll fd -> step. Bounded. */
+/* Drive the agent to completion the way the runtime's external-fd
+ * loop would: wait on the app's source -> step. Bounded. */
 static int harness_drive(AppHarness *h, int max_spins)
 {
     for (int i = 0; i < max_spins; i++) {
@@ -434,26 +482,12 @@ static int harness_drive(AppHarness *h, int max_spins)
         if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
             st == NM_AGENT_IDLE)
             return 0;
-        int fd = nm_chat_app_fd(h->app);
-        unsigned interest = app_interest(h->app);
-        if (fd >= 0 && interest) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (interest & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (interest & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-#ifdef _WIN32
-            select(fd + 1, (interest & NM_INTEREST_READ) ? &r : NULL,
-                   (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#else
-            select(fd + 1, &r, &w, NULL, &tv);
-#endif
+        NmSource s = nm_chat_app_source(h->app);
+        if (s.handle >= 0 && s.flags) {
+            app_wait(h, 10);
             nm_chat_app_step(h->app);
-        } else if (fd < 0) {
-            /* Tool phase (announce/execute): no fd, step makes
+        } else if (s.handle < 0) {
+            /* Tool phase (announce/execute): no source, step makes
              * progress immediately. */
             nm_chat_app_step(h->app);
         } else {
@@ -472,16 +506,13 @@ static int harness_drive(AppHarness *h, int max_spins)
  * for tests that intentionally STALL (no SSE payload at all), where
  * harness_step_once would burn its whole budget waiting for a tail
  * that never comes (5 s of the watchdog's 10 s per binary). */
+/* One step, plus the flush the event loop would do. No payload wait:
+ * for tests that intentionally STALL (no SSE payload at all), where
+ * harness_step_once would burn its whole budget waiting for a tail
+ * that never comes (5 s of the watchdog's 10 s per binary). */
 static void harness_single_step(AppHarness *h)
 {
-    int fd = nm_chat_app_fd(h->app);
-    if (fd >= 0) {
-        fd_set fds;
-        struct timeval tv = { 0, 50 * 1000 };
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-        select(fd + 1, &fds, NULL, NULL, &tv);
-    }
+    app_wait(h, 50);
     nm_chat_app_step(h->app);
     tui_runtime_flush(h->rt);
 }
@@ -489,17 +520,15 @@ static void harness_single_step(AppHarness *h)
 /* Step until the app's collector has tail bytes, then flush. Bounded
  * (100 × 50 ms select) — the payload-waiting sibling of
  * harness_single_step. */
+/* Step until the app's collector has tail bytes, then flush. Bounded
+ * (100 × 50 ms wait) — the payload-waiting sibling of
+ * harness_single_step. */
 static void harness_step_once(AppHarness *h)
 {
     for (int i = 0; i < 100; i++) {
-        int fd = nm_chat_app_fd(h->app);
-        if (fd < 0)
+        if (nm_chat_app_source(h->app).handle < 0)
             break;
-        fd_set fds;
-        struct timeval tv = { 0, 50 * 1000 };
-        FD_ZERO(&fds);
-        FD_SET(fd, &fds);
-        select(fd + 1, &fds, NULL, NULL, &tv);
+        app_wait(h, 50);
         nm_chat_app_step(h->app);
         if (nm_chat_app_tail_len(h->app) > 0)
             break;
@@ -1101,12 +1130,12 @@ static void test_cancel_midstream_returns_to_idle(void)
     harness_type(h, "stall please");
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
-    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
 
     /* Ctrl+C arrives as an interrupt message. */
     tui_runtime_send(h->rt, tui_msg_interrupt());
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
-    ASSERT_EQ(nm_chat_app_fd(h->app), -1);
+    ASSERT_EQ(app_fd(h->app), -1);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "stall please") != NULL);
     /* The interrupt marker: a full-width emoji in the tool role. */
@@ -1209,7 +1238,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     ASSERT_TRUE(strstr(out, "nevermore") != NULL);
 
     /* A fresh turn still works (ERROR does not wedge the app). */
-    ASSERT_EQ(nm_chat_app_fd(h->app), -1);
+    ASSERT_EQ(app_fd(h->app), -1);
 
     harness_free(h);
 }
@@ -1578,9 +1607,9 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     int spins = 0;
     while (spins++ < 2000) {
         if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
-            nm_chat_app_fd(h->app) >= 0)
+            app_fd(h->app) >= 0)
             break;
-        int fd = nm_chat_app_fd(h->app);
+        int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
@@ -1597,7 +1626,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
 
     /* The spinner tier paints "executing" while the child runs: the
      * charset-tier glyph in the Yellow activity role, the label muted
@@ -1662,9 +1691,9 @@ static void test_cancel_during_tool_closes_the_block(void)
     int spins = 0;
     while (spins++ < 2000) {
         if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
-            nm_chat_app_fd(h->app) >= 0)
+            app_fd(h->app) >= 0)
             break;
-        int fd = nm_chat_app_fd(h->app);
+        int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
@@ -1681,7 +1710,7 @@ static void test_cancel_during_tool_closes_the_block(void)
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
 
     tui_runtime_send(h->rt, tui_msg_interrupt());
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
@@ -2251,7 +2280,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         NmAgentState st = nm_chat_app_state(h->app);
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
             break;
-        int fd = nm_chat_app_fd(h->app);
+        int fd = app_fd(h->app);
         fd_set fds;
         struct timeval tv = { 0, 50 * 1000 };
         FD_ZERO(&fds);
@@ -2796,6 +2825,45 @@ static void test_job_cap_fits_the_fd_budget(void)
 #endif
 }
 
+#ifdef _WIN32
+/* The Windows job kind.  A registered job's wait entry must declare
+ * NM_SRC_HANDLE — a waitable event — and not a descriptor/socket: boba
+ * would otherwise hand a HANDLE to WSAEventSelect and fail to
+ * subscribe it at all, so the job would never be drained and its child
+ * would wedge on a full pipe.  The loop's dispatch must also resolve
+ * the handle back to the job. */
+static void test_windows_job_source_kind(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    NmSource set[TUI_IO_SOURCE_MAX];
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 0);
+
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("ping -n 31 127.0.0.1 >nul", NULL, &id, err,
+                              sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_TRUE(nm_proc_live(p) == 1); /* still running: a real job */
+
+    size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(set[0].handle, nm_proc_handle(p));
+    ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
+    ASSERT_EQ(set[0].kind, NM_SRC_HANDLE);
+    ASSERT_TRUE(nm_proc_by_handle(set[0].handle) == p);
+
+    /* Routing: the handle resolves to the background job and drains it
+     * (nothing is echoed, so this must not crash or step the agent). */
+    nm_chat_app_external_ready(h->app, set[0].handle, TUI_IO_READ);
+
+    nm_proc_close(p);
+    ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 0);
+    harness_free(h);
+}
+#endif
+
 #ifndef _WIN32
 /* Every registered job rides the wait set (one READ entry each),
  * because a job left out of the set is never drained and its child
@@ -2820,23 +2888,23 @@ static void test_interest_lists_every_job(void)
 
     size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
     ASSERT_EQ(n, 2);
-    ASSERT_EQ(set[0].handle, nm_proc_fd(p1));
-    ASSERT_EQ(set[1].handle, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].handle, nm_proc_handle(p1));
+    ASSERT_EQ(set[1].handle, nm_proc_handle(p2));
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
     ASSERT_EQ(set[1].flags, NM_INTEREST_READ);
     ASSERT_TRUE(set[0].handle != set[1].handle);
-    /* nm_proc_by_fd resolves what the loop is handed. */
-    ASSERT_TRUE(nm_proc_by_fd(set[1].handle) == p2);
+    /* nm_proc_by_handle resolves what the loop is handed. */
+    ASSERT_TRUE(nm_proc_by_handle(set[1].handle) == p2);
 
     /* A closed job stops being declared. */
     nm_proc_close(p1);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
-    ASSERT_EQ(set[0].handle, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].handle, nm_proc_handle(p2));
 
     /* A cap smaller than the set truncates (the caller's pool bound),
      * and the API never writes past it. */
     ASSERT_EQ(nm_chat_app_interest(h->app, set, 1), 1);
-    ASSERT_EQ(set[0].handle, nm_proc_fd(p2));
+    ASSERT_EQ(set[0].handle, nm_proc_handle(p2));
 
     harness_free(h);
     ASSERT_EQ(nm_proc_count(), 0); /* teardown killed the survivor */
@@ -2874,7 +2942,7 @@ static void test_external_ready_drains_background_job(void)
     NmProc *p = nm_proc_start("printf 'background output\\n'; sleep 30",
                               NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
-    int fd = nm_proc_fd(p);
+    int fd = nm_proc_handle(p);
     ASSERT_TRUE(fd >= 0);
 
     /* An unknown fd (and the -1 "nothing" case) is a safe no-op. */
@@ -2939,9 +3007,9 @@ static void test_interest_dedupes_active_exec_job(void)
     int spins = 0;
     while (spins++ < 2000) {
         if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
-            nm_chat_app_fd(h->app) >= 0)
+            app_fd(h->app) >= 0)
             break;
-        int fd = nm_chat_app_fd(h->app);
+        int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
@@ -2958,25 +3026,25 @@ static void test_interest_dedupes_active_exec_job(void)
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
-    int exec_fd = nm_chat_app_fd(h->app);
-    ASSERT_TRUE(exec_fd >= 0);
+    int job_handle = app_fd(h->app);
+    ASSERT_TRUE(job_handle >= 0);
     ASSERT_EQ(nm_proc_count(), 1);
-    ASSERT_EQ(exec_fd, nm_proc_fd(nm_proc_at(0)));
+    ASSERT_EQ(job_handle, nm_proc_handle(nm_proc_at(0)));
 
     NmSource set[TUI_IO_SOURCE_MAX];
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
-    ASSERT_EQ(set[0].handle, exec_fd);
+    ASSERT_EQ(set[0].handle, job_handle);
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
     /* The yield window closes, the call ends, the round finishes — and
      * the job survives on its own in the wait set. */
     ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-    ASSERT_EQ(nm_chat_app_fd(h->app), -1);
+    ASSERT_EQ(app_fd(h->app), -1);
     ASSERT_EQ(nm_proc_count(), 1);
     ASSERT_TRUE(harness_read(h) != NULL);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
-    ASSERT_EQ(set[0].handle, exec_fd);
+    ASSERT_EQ(set[0].handle, job_handle);
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
     harness_free(h);
@@ -2990,6 +3058,7 @@ static void test_interest_dedupes_active_exec_job(void)
 /* P4: /ps, /kill, and the exec spinner tier                         */
 /* ---------------------------------------------------------------- */
 
+#ifndef _WIN32
 /* 1 when every non-ASCII sequence in `s` is well-formed. A byte-count
  * cut through a multi-byte character leaves a lone continuation byte;
  * this is how the /ps command column's cluster-safe elision is checked
@@ -3013,10 +3082,10 @@ static int utf8_well_formed(const char *s)
     }
     return 1;
 }
+#endif
 
 /* /ps with no jobs: a note, not an empty table (and no crash on an
- * empty registry). Runs on every platform — jobs cannot start on
- * Windows, so this is its whole /ps story there. */
+ * empty registry). Runs on every platform. */
 static void test_ps_without_jobs(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
@@ -3248,9 +3317,9 @@ static void test_exec_command_spinner_tier(void)
     int spins = 0;
     while (spins++ < 2000) {
         if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
-            nm_chat_app_fd(h->app) >= 0)
+            app_fd(h->app) >= 0)
             break;
-        int fd = nm_chat_app_fd(h->app);
+        int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
         if (fd >= 0 && in) {
             fd_set r, w;
@@ -3267,7 +3336,7 @@ static void test_exec_command_spinner_tier(void)
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(nm_chat_app_fd(h->app) >= 0);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
 
     /* The yield window is open (a silent child): the spinner still
      * animates, tier "executing exec_command". */
@@ -3380,7 +3449,9 @@ int main(void)
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     RUN_TEST(test_job_cap_fits_the_fd_budget);
     RUN_TEST(test_ps_without_jobs);
-#ifndef _WIN32
+#ifdef _WIN32
+    RUN_TEST(test_windows_job_source_kind);
+#else
     RUN_TEST(test_interest_lists_every_job);
     RUN_TEST(test_app_teardown_kills_jobs);
     RUN_TEST(test_external_ready_drains_background_job);

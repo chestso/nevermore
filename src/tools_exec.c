@@ -9,8 +9,9 @@
  * stdin and reports what it has printed since; kill_job stops it.
  *
  * Async by construction (the event-driven principle): all three ride
- * the NmTool begin/step/exec_fd/interest/deadline_ms seam. The job's
- * PTY master is the wait fd, and the yield window is the deadline the
+ * the NmTool begin/step/source/deadline_ms seam. The job's readiness
+ * handle (a PTY master on POSIX, a waitable event on Windows) is the
+ * wait source, and the yield window is the deadline the
  * agent folds into the runtime's tick — so the spinner keeps ticking, a
  * silent child is still re-stepped when the window closes, and no read
  * or write ever blocks the event loop (a stdin write that would block
@@ -158,6 +159,8 @@ struct NmToolExec
     double deadline; /* yield-window end (monotonic seconds) */
     char *outbox;
     size_t outbox_len, outbox_off;
+    int close_stdin; /* the trailing marker asked for end-of-input */
+    int eof_sent;    /* nm_proc_write_eof already ran */
     int done;
     NmToolResult result; /* terminal result, handed out once */
 };
@@ -244,12 +247,36 @@ static int exec_deadline_ms(const NmToolExec *e)
     return ms_until(e->deadline);
 }
 
-static int exec_fd_generic(NmToolExec *e)
+/* A job's readiness source: its handle (a PTY master on POSIX, a
+ * waitable event on Windows), READ always, plus WRITE while stdin bytes
+ * remain unsent — a stdin write would otherwise block. */
+static int job_source(NmToolExec *e, NmSource *out, unsigned extra)
 {
     if (!e || e->done)
-        return -1;
+        return 0;
     NmProc *p = nm_proc_find(e->job_id);
-    return p ? nm_proc_fd(p) : -1;
+    if (!p)
+        return 0;
+    intptr_t h = nm_proc_handle(p);
+    if (h < 0)
+        return 0;
+    out->handle = h;
+    out->flags = NM_INTEREST_READ | extra;
+    out->kind = nm_proc_source_kind();
+    return 1;
+}
+
+static int exec_source(NmToolExec *e, NmSource *out)
+{
+    return job_source(e, out, 0);
+}
+
+static int write_stdin_source(NmToolExec *e, NmSource *out)
+{
+    unsigned extra = 0;
+    if (e && e->outbox_off < e->outbox_len)
+        extra = NM_INTEREST_WRITE;
+    return job_source(e, out, extra);
 }
 
 /* The job is NOT closed here: it outlives the call that started it
@@ -395,28 +422,17 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
         return fail_exec(nm_tool_result_error(msg));
     }
 
-    /* Build the outbox once: the body, then — on a close — the EOF
-     * sequence. A PTY's line discipline interprets C-d: at the start of
-     * a line it signals EOF, mid-line it only flushes the partial line,
-     * so a body that does not end in a newline needs a flush C-d of its
-     * own before the EOF C-d (quoth's process-send-eof dance). The
-     * body's bytes reach the child unchanged either way: a flush
-     * delivers the partial line byte-faithfully, with no added newline. */
-    char *outbox = malloc(ilen + 2);
+    /* Build the outbox once: just the body.  End-of-input is signalled
+     * separately (nm_proc_write_eof), because how a job's stdin ends is
+     * the process layer's business: a PTY needs the flush-C-d dance its
+     * line discipline reads as EOF, a Windows pipe just closes. */
+    char *outbox = malloc(ilen ? ilen : 1);
     if (!outbox) {
         nm_json_free(args);
         return NULL;
     }
-    size_t n = 0;
-    if (ilen) {
+    if (ilen)
         memcpy(outbox, input, ilen);
-        n = ilen;
-    }
-    if (close_stdin) {
-        if (n > 0 && outbox[n - 1] != '\n')
-            outbox[n++] = '\x04';
-        outbox[n++] = '\x04';
-    }
     nm_json_free(args);
 
     NmToolExec *e = calloc(1, sizeof(*e));
@@ -426,7 +442,8 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
     }
     e->job_id = (int)id;
     e->outbox = outbox;
-    e->outbox_len = n;
+    e->outbox_len = ilen;
+    e->close_stdin = close_stdin;
     e->deadline = nm_monotonic_seconds() + (double)yield_ms / 1000.0;
     return e;
 }
@@ -450,11 +467,12 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
         return take(e, out);
     }
 
-    /* Pump the outbox. A short write leaves a remainder and interest()
+    /* Pump the outbox. A short write leaves a remainder and source()
      * then declares WRITE, so the loop re-steps once the master accepts
      * more — never a blocking write here. -1 (the child closed stdin, or
      * the master is gone) stops rather than spins: its output is still
      * worth reporting. */
+    int broke = 0;
     while (e->outbox_off < e->outbox_len) {
         int w = nm_proc_write(p, e->outbox + e->outbox_off,
                               e->outbox_len - e->outbox_off);
@@ -463,9 +481,16 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
             continue;
         }
         if (w == 0)
-            break;                     /* would block: retry on writability */
-        e->outbox_off = e->outbox_len; /* broken stdin: give up quietly */
+            break; /* would block: retry on writability */
+        broke = 1; /* broken stdin: give up quietly */
+        e->outbox_off = e->outbox_len;
         break;
+    }
+    /* The body is out (or stdin is already gone): now end the input. */
+    if (e->close_stdin && !e->eof_sent && !broke &&
+        e->outbox_off >= e->outbox_len) {
+        nm_proc_write_eof(p);
+        e->eof_sent = 1;
     }
 
     nm_proc_drain(p);
@@ -485,15 +510,6 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
         return take(e, out);
     }
     return NM_TOOL_RUNNING;
-}
-
-/* Read the PTY, plus WRITE while stdin bytes remain unsent. */
-static unsigned write_stdin_interest(const NmToolExec *e)
-{
-    unsigned fl = NM_INTEREST_READ;
-    if (e && !e->done && e->outbox_off < e->outbox_len)
-        fl |= NM_INTEREST_WRITE;
-    return fl;
 }
 
 /* ---------------------------------------------------------------- */
@@ -519,22 +535,28 @@ static unsigned write_stdin_interest(const NmToolExec *e)
  * path (the agent) never reaches it — boba's fill/ready callbacks or
  * nm_agent_turn own the wait; this only serves nm_toolset_execute
  * callers (tests, tools driven without a loop). The timeout keeps the
- * yield deadline checkable even when the fd never becomes readable. */
-static void wait_ready(int fd, unsigned interest, int timeout_ms)
+ * yield deadline checkable even when the source never becomes ready. */
+static void wait_source(const NmSource *s, int timeout_ms)
 {
 #ifdef _WIN32
+    if (s->kind == NM_SRC_HANDLE) {
+        /* A processing job's readiness is an auto-reset event: waiting
+         * on it consumes the signal, exactly as boba's wait set does. */
+        WaitForSingleObject((HANDLE)s->handle, (DWORD)timeout_ms);
+        return;
+    }
     fd_set r, w;
     FD_ZERO(&r);
     FD_ZERO(&w);
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (interest & NM_INTEREST_READ)
-        FD_SET((SOCKET)fd, &r);
-    if (interest & NM_INTEREST_WRITE)
-        FD_SET((SOCKET)fd, &w);
-    select(0, (interest & NM_INTEREST_READ) ? &r : NULL,
-           (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+    if (s->flags & NM_INTEREST_READ)
+        FD_SET((SOCKET)s->handle, &r);
+    if (s->flags & NM_INTEREST_WRITE)
+        FD_SET((SOCKET)s->handle, &w);
+    select(0, (s->flags & NM_INTEREST_READ) ? &r : NULL,
+           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
 #else
     fd_set r, w;
     FD_ZERO(&r);
@@ -542,11 +564,13 @@ static void wait_ready(int fd, unsigned interest, int timeout_ms)
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (interest & NM_INTEREST_READ)
+    int fd = (int)s->handle;
+    if (s->flags & NM_INTEREST_READ)
         FD_SET(fd, &r);
-    if (interest & NM_INTEREST_WRITE)
+    if (s->flags & NM_INTEREST_WRITE)
         FD_SET(fd, &w);
-    select(fd + 1, &r, &w, NULL, &tv);
+    select(fd + 1, (s->flags & NM_INTEREST_READ) ? &r : NULL,
+           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
 #endif
 }
 
@@ -555,7 +579,7 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
                                                    const char *, void *),
                               NmToolStatus (*step)(NmToolExec *,
                                                    NmToolResult *),
-                              unsigned (*interest)(const NmToolExec *),
+                              int (*source)(NmToolExec *, NmSource *),
                               const NmTool *tool, const char *args_json,
                               void *userdata, const char *oom_msg)
 {
@@ -568,14 +592,14 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
             exec_end(e);
             return r;
         }
-        int fd = exec_fd_generic(e);
-        /* NULL interest means "readable" (the NmTool contract). */
-        unsigned fl = interest ? interest(e) : NM_INTEREST_READ;
+        NmSource src = { -1, 0, NM_SRC_FD };
+        /* NULL source means "readable" (the NmTool contract). */
+        int have = source ? source(e, &src) : exec_source(e, &src);
         int wait = exec_deadline_ms(e);
         if (wait <= 0 || wait > 1000)
             wait = 1000; /* at most a second between deadline checks */
-        if (fd >= 0 && fl)
-            wait_ready(fd, fl, wait);
+        if (have && src.handle >= 0 && src.flags)
+            wait_source(&src, wait);
         else
             exec_sleep_ms(wait < 10 ? 10 : wait);
     }
@@ -588,17 +612,11 @@ static NmToolResult exec_command_exec(const NmTool *tool,
                      args_json, userdata, "exec_command: out of memory");
 }
 
-static unsigned read_only_interest(const NmToolExec *e)
-{
-    (void)e;
-    return NM_INTEREST_READ;
-}
-
 static NmToolResult write_stdin_exec(const NmTool *tool, const char *args_json,
                                      void *userdata)
 {
     return exec_pump(write_stdin_begin, write_stdin_step,
-                     write_stdin_interest, tool, args_json, userdata,
+                     write_stdin_source, tool, args_json, userdata,
                      "write_stdin: out of memory");
 }
 
@@ -669,8 +687,7 @@ const NmTool nm_tool_exec_command = {
     .execute = exec_command_exec,
     .begin = exec_command_begin,
     .step = exec_command_step,
-    .exec_fd = exec_fd_generic,
-    .interest = read_only_interest,
+    .source = exec_source,
     .deadline_ms = exec_deadline_ms,
     .end = exec_end,
 };
@@ -696,8 +713,7 @@ const NmTool nm_tool_write_stdin = {
     .execute = write_stdin_exec,
     .begin = write_stdin_begin,
     .step = write_stdin_step,
-    .exec_fd = exec_fd_generic,
-    .interest = write_stdin_interest,
+    .source = write_stdin_source,
     .deadline_ms = exec_deadline_ms,
     .end = exec_end,
 };

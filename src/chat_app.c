@@ -500,26 +500,25 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
     tui_runtime_wakeup(app->rt);
 }
 
-void nm_chat_app_on_state(int state, void *userdata)
+void nm_chat_app_on_state(NmAgentState state, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
     if (!app)
         return;
-    NmAgentState st = (NmAgentState)state;
-    nm_spinner_set_state(app->spinner, st);
+    nm_spinner_set_state(app->spinner, state);
 
     /* A completed tool block already emitted its own blank line (the
      * END event in on_tool). A block whose END never arrives — a fatal
      * error or a cancel while the announced call was running — still
      * needs one, or the error/interrupt line glues itself to the plan.
      * current_tool is the signal: set at START, cleared at END. */
-    if (st == NM_AGENT_ERROR || st == NM_AGENT_IDLE) {
+    if (state == NM_AGENT_ERROR || state == NM_AGENT_IDLE) {
         if (app->current_tool)
             sys_blank(app);
     }
 
-    switch (st) {
+    switch (state) {
     case NM_AGENT_DONE:
         /* Close both streams, then the one blank line that separates the
          * answer from whatever follows. */
@@ -572,7 +571,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
         return -1;
     nm_agent_on_delta(a, nm_chat_app_on_delta);
     nm_agent_on_tool(a, nm_chat_app_on_tool);
-    nm_agent_on_state(a, (NmAgentStateFn)nm_chat_app_on_state);
+    nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     nm_agent_set_max_rounds(a, app->max_rounds);
     nm_agent_set_echo_reasoning(a, app->echo_reasoning);
@@ -814,61 +813,43 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
         nm_agent_set_echo_reasoning(app->agent, app->echo_reasoning);
 }
 
-int nm_chat_app_fd(NmChatApp *app) { return app ? nm_agent_fd(app->agent) : -1; }
+int nm_chat_app_fd(NmChatApp *app)
+{
+    return (int)nm_chat_app_source(app).handle;
+}
+
+NmSource nm_chat_app_source(NmChatApp *app)
+{
+    NmSource s = { -1, 0, NM_SRC_FD };
+    return app ? nm_agent_source(app->agent) : s;
+}
 
 /* boba's I/O-source pool must hold every job PLUS the agent's own
  * stream source: a job left out of the set is never drained, so its
- * child stalls on a full PTY (see NM_PROC_MAX_JOBS in nm_process.h). */
+ * child stalls on a full pipe (see NM_PROC_MAX_JOBS in nm_process.h). */
 typedef char nm_proc_source_budget_fits
     [(TUI_IO_SOURCE_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
 
-/* What kind of object a source's handle names.  POSIX has only
- * descriptors, so every source is NM_SRC_FD there.  On Windows the
- * agent's live fd is its HTTP stream socket (WSAEventSelect-bound);
- * a process job's readiness handle is a waitable event — but Windows
- * jobs are a later step (docs/PROCESS-PLAN.md P5), so nothing reaches
- * the loop as a job there yet.  Kept as helpers so the day a Windows
- * exec_command lands, its kind is decided in one place. */
-static int agent_source_kind(void)
-{
-#ifdef _WIN32
-    return NM_SRC_SOCKET;
-#else
-    return NM_SRC_FD;
-#endif
-}
-
-static int job_source_kind(void)
-{
-#ifdef _WIN32
-    return NM_SRC_HANDLE;
-#else
-    return NM_SRC_FD;
-#endif
-}
-
-/* The app's aggregate wait interest: the live agent stream (handle +
- * flags) first, then one READ entry per registered process job.
+/* The app's aggregate wait interest: the live agent source (handle +
+ * flags + kind) first, then one READ entry per registered process job.
  *
- * A job outlives the tool call that started it, so its master handle
- * must stay subscribed or the child blocks writing; the agent's own
- * stream/exec source takes priority so a small cap degrades to
- * "background jobs drain a cycle later", never to "the turn stalls".
- * An active exec_command's handle is its job's master — emitted once
- * (boba's contract: a duplicated handle across slots is undefined). */
+ * A job outlives the tool call that started it, so its handle must stay
+ * subscribed or the child blocks writing; the agent's own stream/exec
+ * source takes priority so a small cap degrades to "background jobs
+ * drain a cycle later", never to "the turn stalls".  An active
+ * exec_command's handle is its job's handle — emitted once (boba's
+ * contract: a duplicated handle across slots is undefined).  Each entry
+ * carries its kind, so the loop knows how to wait (a socket via
+ * WSAEventSelect, a job's event via WaitForMultipleObjects). */
 size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
 {
     if (!app || !out || cap == 0)
         return 0;
 
     size_t n = 0;
-    int agent_fd = nm_agent_fd(app->agent);
-    unsigned flags = nm_agent_interest(app->agent);
-    if (agent_fd >= 0 && flags) {
-        out[n].handle = (intptr_t)agent_fd;
-        out[n].flags = flags;
-        out[n].kind = agent_source_kind();
-        n++;
+    NmSource agent = nm_chat_app_source(app);
+    if (agent.handle >= 0 && agent.flags) {
+        out[n++] = agent;
     }
 
     int jobs = nm_proc_count();
@@ -876,12 +857,12 @@ size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
         NmProc *p = nm_proc_at(i);
         if (!p)
             continue;
-        int fd = nm_proc_fd(p);
-        if (fd < 0 || fd == agent_fd)
-            continue; /* dedupe: the active exec's fd is already here */
-        out[n].handle = (intptr_t)fd;
+        intptr_t h = nm_proc_handle(p);
+        if (h < 0 || h == agent.handle)
+            continue; /* dedupe: the active exec's handle is already here */
+        out[n].handle = h;
         out[n].flags = NM_INTEREST_READ;
-        out[n].kind = job_source_kind();
+        out[n].kind = nm_proc_source_kind();
         n++;
     }
     return n;
@@ -890,7 +871,7 @@ size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
 /* One source became ready.  The agent's source drives a step (whose
  * tool step drains and reaps); any other source is a background job,
  * drained into its bounded buffer so the child never blocks on a full
- * PTY.  The model reads that output later through write_stdin; nothing
+ * pipe.  The model reads that output later through write_stdin; nothing
  * here is echoed to the transcript — /ps is the human's window. */
 void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
                                 unsigned ready)
@@ -898,11 +879,11 @@ void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
     (void)ready;
     if (!app)
         return;
-    if (app->agent && handle == (intptr_t)nm_agent_fd(app->agent)) {
+    if (app->agent && handle == nm_chat_app_source(app).handle) {
         nm_chat_app_step(app);
         return;
     }
-    NmProc *p = nm_proc_by_fd((int)handle);
+    NmProc *p = nm_proc_by_handle(handle);
     if (p)
         nm_proc_drain(p);
 }
@@ -922,7 +903,7 @@ void nm_chat_app_step(NmChatApp *app)
             return;
         nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
         tui_runtime_flush(app->rt);
-        if (nm_agent_fd(app->agent) >= 0)
+        if (nm_chat_app_source(app).handle >= 0)
             return; /* waiting on the stream; the loop will call us back */
         st = nm_agent_state(app->agent);
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)

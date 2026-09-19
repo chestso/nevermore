@@ -228,7 +228,7 @@ static void *stub_server_thread(void *arg)
 }
 
 /* Poll an fd for the given interest bits (the test pump — what boba's
- * fill_external_fds + WaitForMultipleObjects does for real). */
+ * fill_io_sources + WSAEventSelect does for real). */
 static int win_wait_interest(int fd, unsigned interest, int timeout_ms)
 {
     fd_set r, w;
@@ -274,10 +274,10 @@ static void test_tls_handshake_on_loop_owned_socket(void)
      * the contract, never a verdict). */
     NmTransportStatus s = NM_TRANSPORT_OK;
     for (int spin = 0; spin < 200; spin++) {
-        NmConnectionInterest i = nm_connection_interest(c);
-        if (i.fd < 0 || i.flags == 0)
+        NmSource i = nm_connection_interest(c);
+        if (i.handle < 0 || i.flags == 0)
             break;
-        win_wait_interest(i.fd, i.flags, 50);
+        win_wait_interest((int)i.handle, i.flags, 50);
         s = nm_connection_step(c);
         if (s == NM_TRANSPORT_OK || s == NM_TRANSPORT_PENDING)
             continue;

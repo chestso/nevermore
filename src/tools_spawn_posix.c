@@ -448,7 +448,17 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     return NM_TOOL_DONE;
 }
 
-static int run_command_exec_fd(NmToolExec *e) { return e ? e->fd : -1; }
+/* The child's output pipe, readable (a descriptor on every POSIX
+ * host, so the kind is the platform's own). */
+static int run_command_source(NmToolExec *e, NmSource *out)
+{
+    if (!e || e->fd < 0)
+        return 0;
+    out->handle = (intptr_t)e->fd;
+    out->flags = NM_INTEREST_READ;
+    out->kind = NM_SRC_FD;
+    return 1;
+}
 
 static void run_command_end(NmToolExec *e)
 {
@@ -470,21 +480,24 @@ static void run_command_end(NmToolExec *e)
 
 static const char run_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
-    "\"cmd\":{\"type\":\"string\",\"description\":\"Shell command to "
-    "execute (runs under /bin/sh -c).\"},"
+    "\"cmd\":{\"type\":\"string\",\"description\":\"Short, non-interactive "
+    "shell command to execute (runs under /bin/sh -c, with no terminal and "
+    "no stdin).\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Working directory "
     "(reserved; the agent's working directory applies).\"}},"
     "\"required\":[\"cmd\"]}";
 
 const NmTool nm_tool_run_command = {
     .name = "run_command",
-    .description = "Run a shell command and capture its combined output "
-                   "and exit status",
+    .description = "Run a short, non-interactive shell command and capture "
+                   "its combined output and exit status (no terminal, no "
+                   "stdin). Use exec_command instead for anything long-lived "
+                   "or interactive",
     .emoji = "🖥️",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
     .begin = run_command_begin,
     .step = run_command_step,
-    .exec_fd = run_command_exec_fd,
+    .source = run_command_source,
     .end = run_command_end,
 };

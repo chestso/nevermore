@@ -106,7 +106,7 @@ struct NmAgent
      * run sequentially, so the transcript reads plan -> its own result,
      * call after call. tool_announced guards the once-per-call announce
      * (an async tool re-enters the step while it drains). An async tool
-     * (begin/step/exec_fd/end) runs across steps: exec is the live
+     * (begin/step/source/end) runs across steps: exec is the live
      * handle, exec_tool its vtable. */
     size_t tool_exec_idx;
     int tool_announced; /* this call's plan already emitted */
@@ -218,8 +218,10 @@ int nm_agent_timeout_ms(const NmAgent *a)
 }
 
 /* Millis left on a monotonic deadline, clamped to int range; a deadline
- * already in the past is 0 (which reads as "step now"). Truncated, so
- * the value never exceeds the budget that was set. */
+ * already in the past is 0.  Truncated, so the value never exceeds the
+ * budget that was set — which also means a sub-millisecond remainder
+ * reads as 0, so a caller that treats 0 as "due" must pair it with
+ * budget_spent (the stream-inactivity path does). */
 static int ms_until(double deadline)
 {
     double left = (deadline - nm_monotonic_seconds()) * 1000.0;
@@ -230,6 +232,19 @@ static int ms_until(double deadline)
     if (left >= 2147483000.0)
         return 2147483000;
     return (int)left;
+}
+
+/* Has a millisecond budget that started at `since` elapsed?  The ONE
+ * due-ness test for the stream-inactivity deadline: both the reported
+ * wait (nm_agent_next_timeout_ms's 0) and the step's enforcement call
+ * it, so "0 = step now" is literally true.  Testing them separately (a
+ * truncated remaining-millis reading against an exact comparison) let
+ * the deadline read as due up to a millisecond early, and a tick that
+ * woke on that 0 stepped into a stream that still had time left. */
+static int budget_spent(double since, int budget_ms)
+{
+    return budget_ms > 0 &&
+           (nm_monotonic_seconds() - since) * 1000.0 >= (double)budget_ms;
 }
 
 int nm_agent_next_timeout_ms(const NmAgent *a)
@@ -258,8 +273,14 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
      * tool phase has no stream and uses the tool's own deadline). */
     int to = nm_agent_timeout_ms(a);
     if (a->stream && to > 0) {
-        double deadline = a->last_activity + (double)to / 1000.0;
-        int t = ms_until(deadline);
+        int t;
+        if (budget_spent(a->last_activity, to)) {
+            t = 0; /* due now: the step enforces the same test */
+        } else {
+            t = ms_until(a->last_activity + (double)to / 1000.0);
+            if (t == 0)
+                t = 1; /* under a millisecond left: not due, wake again */
+        }
         if (best < 0 || t < best)
             best = t;
     }
@@ -683,8 +704,7 @@ int nm_agent_step(NmAgent *a)
      * turn instead of waiting forever. nm_agent_next_timeout_ms is what
      * tells the loop when to make this call. */
     int to = nm_agent_timeout_ms(a);
-    if (to > 0 &&
-        (nm_monotonic_seconds() - a->last_activity) * 1000.0 >= (double)to) {
+    if (budget_spent(a->last_activity, to)) {
         a->provider->chat_end(a->stream);
         a->stream = NULL;
         char msg[160];
@@ -710,38 +730,44 @@ int nm_agent_step(NmAgent *a)
     return fr >= 0 ? 0 : -1;
 }
 
-int nm_agent_fd(NmAgent *a)
+/* The stream's handle names a socket — a Windows SOCKET (the loop binds
+ * it with WSAEventSelect) or a POSIX descriptor.  An async tool supplies
+ * its own kind instead (see NmTool.source): only the tool knows whether
+ * it is waiting on a descriptor, a socket or a process job's event. */
+static int stream_source_kind(void)
 {
-    if (!a)
-        return -1;
-    /* The active async tool's output pipe takes precedence during the
-     * tool phase (the stream is closed then). */
-    if (a->exec && a->exec_tool && a->exec_tool->exec_fd)
-        return a->exec_tool->exec_fd(a->exec);
-    if (!a->stream || !a->provider->chat_stream_fd)
-        return -1;
-    return a->provider->chat_stream_fd(a->stream);
+#ifdef _WIN32
+    return NM_SRC_SOCKET;
+#else
+    return NM_SRC_FD;
+#endif
 }
 
-/* The active wait interest: the async tool's output pipe (readable) or
- * the stream's connect/send/response phase (mirrors transport's
- * NmSource). 0 = nothing to wait on (idle, synchronous tool
- * phase, or a provider without the step API). */
-unsigned nm_agent_interest(NmAgent *a)
+NmSource nm_agent_source(NmAgent *a)
 {
+    NmSource s = { -1, 0, NM_SRC_FD };
     if (!a)
-        return 0;
+        return s;
+    /* The active async tool's source takes precedence during the tool
+     * phase (the stream is closed then). */
     if (a->exec) {
-        /* The async tool declares its own interest (an HTTP tool waits
-         * for connect/send writability, then reads); a tool without the
-         * callback only ever reads (run_command's output pipe). */
-        if (a->exec_tool && a->exec_tool->interest)
-            return a->exec_tool->interest(a->exec);
-        return NM_INTEREST_READ;
+        if (a->exec_tool && a->exec_tool->source &&
+            a->exec_tool->source(a->exec, &s))
+            return s;
+        s.handle = -1;
+        s.flags = 0;
+        s.kind = NM_SRC_FD;
+        return s;
     }
-    if (!a->stream || !a->provider->chat_stream_interest)
-        return 0;
-    return a->provider->chat_stream_interest(a->stream);
+    if (!a->stream || !a->provider->chat_stream_fd ||
+        !a->provider->chat_stream_interest)
+        return s;
+    s.handle = (intptr_t)a->provider->chat_stream_fd(a->stream);
+    s.flags = a->provider->chat_stream_interest(a->stream);
+    s.kind = stream_source_kind();
+    if (s.handle < 0)
+        s.flags = 0;
+    return s;
 }
 
 /* Drop (and reap) a live async tool exec. */
@@ -809,29 +835,45 @@ int nm_agent_turn(NmAgent *a, const char *user_input)
         NmAgentState st = a->state;
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
             break;
-        int fd = nm_agent_fd(a);
-        unsigned interest = nm_agent_interest(a);
-        if (fd >= 0 && interest) {
+        NmSource src = nm_agent_source(a);
+        if (src.handle >= 0 && src.flags) {
             int wait_ms = nm_agent_next_timeout_ms(a);
             if (wait_ms < 0)
                 wait_ms = 10; /* purely readiness-driven: short poll */
             else if (wait_ms > 1000)
                 wait_ms = 1000; /* the deadline is the bound; stay live */
+#ifdef _WIN32
+            if (src.kind == NM_SRC_HANDLE) {
+                /* A process job's readiness is an auto-reset event, which
+                 * select() cannot wait on: wait it directly (the wait
+                 * consumes the signal, as boba's wait set does). */
+                WaitForSingleObject((HANDLE)src.handle, (DWORD)wait_ms);
+            } else {
+                fd_set r, w;
+                FD_ZERO(&r);
+                FD_ZERO(&w);
+                struct timeval tv = { wait_ms / 1000,
+                                      (wait_ms % 1000) * 1000 };
+                if (src.flags & NM_INTEREST_READ)
+                    FD_SET((SOCKET)src.handle, &r);
+                if (src.flags & NM_INTEREST_WRITE)
+                    FD_SET((SOCKET)src.handle, &w);
+                select(0, (src.flags & NM_INTEREST_READ) ? &r : NULL,
+                       (src.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL,
+                       &tv);
+            }
+#else
             fd_set r, w;
             FD_ZERO(&r);
             FD_ZERO(&w);
             struct timeval tv = { wait_ms / 1000, (wait_ms % 1000) * 1000 };
-            if (interest & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (interest & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-#ifdef _WIN32
-            select(fd + 1, interest & NM_INTEREST_READ ? &r : NULL,
-                   interest & NM_INTEREST_WRITE ? &w : NULL, NULL, &tv);
-#else
-            select(fd + 1, &r, &w, NULL, &tv);
+            if (src.flags & NM_INTEREST_READ)
+                FD_SET((int)src.handle, &r);
+            if (src.flags & NM_INTEREST_WRITE)
+                FD_SET((int)src.handle, &w);
+            select((int)src.handle + 1, &r, &w, NULL, &tv);
 #endif
-        } else if (fd >= 0) {
+        } else if (src.handle >= 0) {
             nm_usleep(10 * 1000); /* stream with no wait interest: brief */
         }
         if (nm_agent_step(a) != 0)

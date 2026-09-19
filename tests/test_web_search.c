@@ -166,7 +166,7 @@ static char *base_for(int port, char *buf, size_t cap)
 /* ---------------------------------------------------------------- */
 
 /* The tool advertises the async seam: an executor, a step machine, a
- * per-step wait interest and an fd — the agent's event-driven path. */
+ * per-step wait source and a handle — the agent's event-driven path. */
 static void test_web_search_is_async(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
@@ -175,8 +175,7 @@ static void test_web_search_is_async(void)
     ASSERT_NOT_NULL(t->execute);
     ASSERT_NOT_NULL(t->begin);
     ASSERT_NOT_NULL(t->step);
-    ASSERT_NOT_NULL(t->exec_fd);
-    ASSERT_NOT_NULL(t->interest);
+    ASSERT_NOT_NULL(t->source);
     ASSERT_NOT_NULL(t->deadline_ms);
     ASSERT_NOT_NULL(t->end);
     nm_toolset_free(ts);
@@ -503,8 +502,10 @@ static void test_web_search_async_step_seam(void)
     const NmTool *t = nm_toolset_find(ts, "web_search");
     NmToolExec *e = t->begin(t, "{\"query\":\"x\"}", NULL);
     ASSERT_NOT_NULL(e);
-    /* The fd is a live socket while the request is in flight. */
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    /* The handle is a live socket while the request is in flight. */
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
 
     NmToolResult out = { 0, NULL };
     NmToolStatus st = t->step(e, &out);
@@ -512,7 +513,8 @@ static void test_web_search_async_step_seam(void)
     /* A live wait target: write while connecting/sending, read while
      * waiting on the response (loopback may complete the connect in
      * the first step, so either is legal here). */
-    unsigned interest = t->interest(e);
+    ASSERT_TRUE(t->source(e, &src));
+    unsigned interest = src.flags;
     ASSERT_TRUE(interest == NM_INTEREST_READ ||
                 interest == NM_INTEREST_WRITE ||
                 interest == (NM_INTEREST_READ | NM_INTEREST_WRITE));

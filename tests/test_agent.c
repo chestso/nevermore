@@ -34,9 +34,25 @@
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 
+/* A job that prints a token and then stays alive — the yield window's
+ * silent-child case, in the shell each platform's spawn actually runs. */
+#ifdef _WIN32
+#define JOB_TOKEN_CMD "echo booting & ping -n 31 127.0.0.1 >nul"
+#else
+#define JOB_TOKEN_CMD "echo booting; sleep 30"
+#endif
+
 /* ---------------------------------------------------------------- */
 /* Canned server: N scripted rounds, requests captured                */
 /* ---------------------------------------------------------------- */
+
+/* The agent's live stream handle as an int. These tests never drive a
+ * process job, so the source is always the stream's socket/fd. */
+static int agent_fd(NmAgent *a) { return (int)nm_agent_source(a).handle; }
+static unsigned agent_interest(NmAgent *a)
+{
+    return nm_agent_source(a).flags;
+}
 
 #define MAX_ROUNDS 4
 #define REQ_CAP    16384
@@ -646,32 +662,51 @@ static void test_agent_unknown_tool_reports_error_result(void)
 /* Step API (phase 4: boba drives the agent from callbacks)         */
 /* ---------------------------------------------------------------- */
 
-/* Drive one turn to completion the way boba will: poll the agent's
- * fd + interest bits, step, repeat. Bounded spins; no blocking read
- * anywhere. */
+/* Wait up to `timeout_ms` for a source, the way the real loop does: a
+ * Windows process job's readiness object is a waitable event, not a
+ * socket, so it cannot go through select(). */
+static void wait_source(const NmSource *s, int timeout_ms)
+{
+#ifdef _WIN32
+    if (s->kind == NM_SRC_HANDLE) {
+        WaitForSingleObject((HANDLE)s->handle, (DWORD)timeout_ms);
+        return;
+    }
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    if (s->flags & NM_INTEREST_READ)
+        FD_SET((SOCKET)s->handle, &r);
+    if (s->flags & NM_INTEREST_WRITE)
+        FD_SET((SOCKET)s->handle, &w);
+    select(0, (s->flags & NM_INTEREST_READ) ? &r : NULL,
+           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#else
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    int fd = (int)s->handle;
+    if (s->flags & NM_INTEREST_READ)
+        FD_SET(fd, &r);
+    if (s->flags & NM_INTEREST_WRITE)
+        FD_SET(fd, &w);
+    select(fd + 1, (s->flags & NM_INTEREST_READ) ? &r : NULL,
+           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
+#endif
+}
+
+/* Drive one turn to completion the way boba will: wait on the agent's
+ * source, step, repeat. Bounded spins; no blocking read anywhere. */
 static int agent_drive(NmAgent *agent, int max_spins)
 {
     for (int spin = 0; spin < max_spins; spin++) {
-        int fd = nm_agent_fd(agent);
-        unsigned interest = nm_agent_interest(agent);
-        if (fd >= 0 && interest) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (interest & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (interest & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-#ifdef _WIN32
-            select(fd + 1, (interest & NM_INTEREST_READ) ? &r : NULL,
-                   (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#else
-            select(fd + 1, &r, &w, NULL, &tv);
-#endif
-        } else {
+        NmSource src = nm_agent_source(agent);
+        if (src.handle >= 0 && src.flags)
+            wait_source(&src, 10);
+        else
             usleep(10 * 1000); /* between rounds: brief yield */
-        }
         if (nm_agent_step(agent) != 0)
             return -1; /* fatal step error */
         if (nm_agent_state(agent) == NM_AGENT_DONE)
@@ -720,10 +755,10 @@ static void test_agent_step_driven_full_loop(void)
     nm_agent_on_state(agent, cap_state);
 
     /* Start: no fd before, an fd while the first round streams. */
-    ASSERT_EQ(nm_agent_fd(agent), -1);
+    ASSERT_EQ(agent_fd(agent), -1);
     ASSERT_EQ(nm_agent_start(agent, "change quick to slow"), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_STREAMING);
-    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
+    ASSERT_TRUE(agent_fd(agent) >= 0);
 
     /* Drive the whole tool-round -> answer cycle step-wise. */
     ASSERT_EQ(agent_drive(agent, 2000), 0);
@@ -733,7 +768,7 @@ static void test_agent_step_driven_full_loop(void)
     ASSERT_EQ(g_tool_starts, 1);
     ASSERT_EQ(g_tool_ends, 1);
     ASSERT_EQ(g_final_state, (int)NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_fd(agent), -1); /* no stream open at DONE */
+    ASSERT_EQ(agent_fd(agent), -1); /* no stream open at DONE */
 
     /* The edit really happened, and both rounds hit the wire with
      * the tool result riding round 2. */
@@ -857,8 +892,8 @@ static void test_agent_run_command_is_async(void)
      * final step announces the call and sets RUNNING_TOOL). */
     int spins = 0;
     while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
-        int fd = nm_agent_fd(agent);
-        unsigned in = nm_agent_interest(agent);
+        int fd = agent_fd(agent);
+        unsigned in = agent_interest(agent);
         if (fd >= 0 && in) {
             fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
@@ -879,8 +914,8 @@ static void test_agent_run_command_is_async(void)
      * pipe), not a blocked call. */
     ASSERT_EQ(nm_agent_step(agent), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
-    ASSERT_TRUE((nm_agent_interest(agent) & NM_INTEREST_READ) != 0);
+    ASSERT_TRUE(agent_fd(agent) >= 0);
+    ASSERT_TRUE((agent_interest(agent) & NM_INTEREST_READ) != 0);
 
     /* Finish the turn. */
     ASSERT_EQ(agent_drive(agent, 5000), 0);
@@ -942,11 +977,15 @@ static void test_agent_turn_runs_async_command(void)
     close(sc.fd);
 }
 
+#endif /* !_WIN32: run_command's async seam is POSIX-only */
+
 /* The process-job tools through the agent: exec_command's yield
  * window is a tool deadline, so the loop re-steps a SILENT child (no fd
  * activity) until the window closes and the job id is reported into
- * the transcript. Before the deadline seam, `sleep 30` would have held
- * the round open until the command finished. */
+ * the transcript.  Before the deadline seam, a silent `sleep 30` would
+ * have held the round open until the command finished.  Runs on both
+ * platforms: exec_command's async seam is real on Windows too (the
+ * job's readiness object is a waitable HANDLE, not a descriptor). */
 static void test_agent_exec_command_yields_job(void)
 {
     reset_capture();
@@ -958,7 +997,7 @@ static void test_agent_exec_command_yields_job(void)
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
         "{\"name\":\"exec_command\",\"arguments\":"
-        "\"{\\\"cmd\\\":\\\"echo booting; sleep 30\\\","
+        "\"{\\\"cmd\\\":\\\"" JOB_TOKEN_CMD "\\\","
         "\\\"yield_time_ms\\\":400}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
@@ -988,8 +1027,8 @@ static void test_agent_exec_command_yields_job(void)
      * that is what lets the runtime's tick close the window. */
     int spins = 0;
     while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
-        int fd = nm_agent_fd(agent);
-        unsigned in = nm_agent_interest(agent);
+        int fd = agent_fd(agent);
+        unsigned in = agent_interest(agent);
         if (fd >= 0 && in) {
             fd_set r, w;
             struct timeval tv = { 0, 10 * 1000 };
@@ -1007,7 +1046,7 @@ static void test_agent_exec_command_yields_job(void)
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
     ASSERT_EQ(nm_agent_step(agent), 0); /* begins the job */
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(nm_agent_fd(agent) >= 0); /* the PTY master */
+    ASSERT_TRUE(agent_fd(agent) >= 0); /* the job's readiness handle */
     int wait = nm_agent_next_timeout_ms(agent);
     ASSERT_TRUE(wait >= 0 && wait <= 400);
 
@@ -1035,7 +1074,6 @@ static void test_agent_exec_command_yields_job(void)
     pthread_join(th, NULL);
     close(sc.fd);
 }
-#endif /* !_WIN32 */
 
 /* Reasoning (opt-in echo-back): collected on the reasoning channel,
  * re-sent as reasoning_content on the next request carrying the turn
@@ -1224,10 +1262,10 @@ static void test_agent_cancel_then_next_turn_works(void)
     /* Turn 1: start, confirm the stream is open, cancel mid-stream.
      * The server thread's round-1 accept() gets the teardown. */
     ASSERT_EQ(nm_agent_start(agent, "first, get cancelled"), 0);
-    ASSERT_TRUE(nm_agent_fd(agent) >= 0);
+    ASSERT_TRUE(agent_fd(agent) >= 0);
     nm_agent_cancel(agent);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
-    ASSERT_EQ(nm_agent_fd(agent), -1);
+    ASSERT_EQ(agent_fd(agent), -1);
     ASSERT_EQ(g_tool_starts, 0);
 
     /* Turn 2 on the same agent + session: full tool loop works. */
@@ -1281,10 +1319,11 @@ static NmToolStatus hang_step(NmToolExec *e, NmToolResult *out)
     return NM_TOOL_RUNNING; /* never completes */
 }
 
-static int hang_exec_fd(NmToolExec *e)
+static int hang_source(NmToolExec *e, NmSource *out)
 {
     (void)e;
-    return -1;
+    (void)out;
+    return 0; /* never waits on anything */
 }
 
 static void hang_end(NmToolExec *e) { (void)e; }
@@ -1297,8 +1336,7 @@ static const NmTool hang_tool = {
     .execute = NULL,
     .begin = hang_begin,
     .step = hang_step,
-    .exec_fd = hang_exec_fd,
-    .interest = NULL,
+    .source = hang_source,
     .end = hang_end,
 };
 
@@ -1348,7 +1386,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
     ASSERT_EQ(nm_agent_start(agent, "hang for a while"), 0);
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
-        int fd = nm_agent_fd(agent);
+        int fd = agent_fd(agent);
         if (fd >= 0) {
             fd_set r;
             struct timeval tv = { 0, 10 * 1000 };
@@ -1624,7 +1662,7 @@ static void test_agent_stream_stall_times_out(void)
     ASSERT_NOT_NULL(nm_agent_last_error(agent));
     ASSERT_TRUE(strstr(nm_agent_last_error(agent), "timed out") != NULL);
     ASSERT_EQ(g_final_state, (int)NM_AGENT_ERROR);
-    ASSERT_EQ(nm_agent_fd(agent), -1); /* the stream was torn down */
+    ASSERT_EQ(agent_fd(agent), -1); /* the stream was torn down */
 
     /* Not busy any more: no deadline to report. */
     ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1);
@@ -1663,10 +1701,11 @@ static NmToolStatus stub_step(NmToolExec *e, NmToolResult *out)
     return NM_TOOL_DONE;
 }
 
-static int stub_exec_fd(NmToolExec *e)
+static int stub_source(NmToolExec *e, NmSource *out)
 {
     (void)e;
-    return -1;
+    (void)out;
+    return 0; /* deadline-driven only */
 }
 
 static int stub_deadline_ms(const NmToolExec *e)
@@ -1686,8 +1725,7 @@ static const NmTool stub_deadline_tool = {
     .execute = NULL,
     .begin = stub_begin,
     .step = stub_step,
-    .exec_fd = stub_exec_fd,
-    .interest = NULL,
+    .source = stub_source,
     .deadline_ms = stub_deadline_ms,
     .end = stub_end,
 };
@@ -1732,7 +1770,7 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
      * is readiness-driven). */
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
-        int fd = nm_agent_fd(agent);
+        int fd = agent_fd(agent);
         if (fd >= 0) {
             fd_set r;
             struct timeval tv = { 0, 10 * 1000 };
@@ -1785,10 +1823,10 @@ int main(void)
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_each_tool_as_it_runs);
+    RUN_TEST(test_agent_exec_command_yields_job);
 #ifndef _WIN32
     RUN_TEST(test_agent_run_command_is_async);
     RUN_TEST(test_agent_turn_runs_async_command);
-    RUN_TEST(test_agent_exec_command_yields_job);
 #endif
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);

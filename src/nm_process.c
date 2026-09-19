@@ -3,15 +3,35 @@
  * Platform-neutral half of the process layer (nm_process.h): the registry,
  * the bounded per-job output buffer with its omission counter, the
  * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
- * half (spawn/read/write/kill/reap) is process_posix.c / process_win.c.
+ * half (spawn/read/write/kill/reap) is nm_process_posix.c /
+ * nm_process_win.c.
  *
  * Memory-reuse: one raw buffer and one report buffer per job, both
  * grown geometrically and reused across drains and takes (the report is
  * handed out borrowed and rewritten in place on the next take).
+ * Threading: only a Windows job's pipe-reader thread feeds the buffer,
+ * so the append/take pair is lock-guarded there (a no-op where the
+ * neutral layer is the only reader).  The lock lives here, not in the
+ * OS layer, because the buffer does.
  */
 
 #include <stdlib.h>
 #include <string.h>
+
+#ifdef _WIN32
+#include <windows.h>
+typedef CRITICAL_SECTION NmProcLock;
+#define PROC_LOCK_INIT(l) InitializeCriticalSection(l)
+#define PROC_LOCK_FREE(l) DeleteCriticalSection(l)
+#define PROC_LOCK(l)      EnterCriticalSection(l)
+#define PROC_UNLOCK(l)    LeaveCriticalSection(l)
+#else
+typedef char NmProcLock;
+#define PROC_LOCK_INIT(l) ((void)0)
+#define PROC_LOCK_FREE(l) ((void)0)
+#define PROC_LOCK(l)      ((void)0)
+#define PROC_UNLOCK(l)    ((void)0)
+#endif
 
 #include "nm_process.h"
 #include "nm_process_internal.h"
@@ -22,12 +42,13 @@
 struct NmProc
 {
     int id;
-    int fd; /* PTY master; -1 once closed */
-    long pid;
-    int live; /* 1 while the child runs */
+    intptr_t handle; /* loop readiness handle; -1 once exhausted */
+    NmProcOs *os;    /* per-OS state (child, pipes, reader) */
+    int live;        /* 1 while the child runs */
     int reaped;
     int exit_code;
-    char *cmd; /* for /ps */
+    char *cmd;       /* for /ps */
+    NmProcLock lock; /* guards buf/len/report_pos/dropped (see above) */
     /* Raw accumulation: bytes [report_pos, len) are unreported. */
     char *buf;
     size_t len;
@@ -84,11 +105,11 @@ static void registry_remove(NmProc *p)
 
 static void proc_free(NmProc *p)
 {
-    if (p->fd >= 0)
-        nm_proc_os_close(p->fd);
+    nm_proc_os_free(p->os);
     free(p->cmd);
     free(p->buf);
     free(p->report);
+    PROC_LOCK_FREE(&p->lock);
     free(p);
 }
 
@@ -116,24 +137,25 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
         nm_proc_set_err(err, errsz, "out of memory");
         return NULL;
     }
-    p->fd = -1;
+    p->handle = -1;
+    PROC_LOCK_INIT(&p->lock);
 
-    long pid = -1;
-    int fd = -1;
-    if (nm_proc_os_spawn(cmd, cwd, &pid, &fd, err, errsz) != 0) {
+    NmProcOs *os = NULL;
+    if (nm_proc_os_spawn(p, cmd, cwd, &os, err, errsz) != 0) {
+        PROC_LOCK_FREE(&p->lock);
         free(p);
         return NULL;
     }
 
     p->id = g_next_id++;
-    p->pid = pid;
-    p->fd = fd;
+    p->os = os;
+    p->handle = nm_proc_os_handle(os);
     p->live = 1;
     p->cmd = strdup(cmd);
     if (registry_add(p) != 0) {
         /* Only reachable if the cap changed under us; be safe. */
-        nm_proc_os_kill(pid);
-        nm_proc_os_reap(pid, &p->exit_code, 1);
+        nm_proc_os_kill(os);
+        nm_proc_os_reap(os, &p->exit_code, 1);
         proc_free(p);
         nm_proc_set_err(err, errsz, "job cap reached");
         return NULL;
@@ -144,23 +166,22 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
 }
 
 /* Reap the child if it has exited (non-blocking).  Once reaped the
- * job is no longer live; the master fd is closed and the buffered
- * output stays available for a later take. */
+ * job is no longer live and its readiness handle is retired (POSIX
+ * closes the master, so a reaped job drops out of the loop's set
+ * instead of polling readable-forever); the buffered output stays
+ * available for a later take. */
 static void try_reap(NmProc *p)
 {
-    if (p->reaped || p->pid <= 0)
+    if (p->reaped || !p->os)
         return;
     int code = -1;
-    int r = nm_proc_os_reap(p->pid, &code, 0);
+    int r = nm_proc_os_reap(p->os, &code, 0);
     if (r == 0)
         return; /* still running */
     p->reaped = 1;
     p->live = 0;
     p->exit_code = (r == 1) ? code : -1;
-    if (p->fd >= 0) {
-        nm_proc_os_close(p->fd);
-        p->fd = -1;
-    }
+    p->handle = nm_proc_os_handle(p->os);
 }
 
 void nm_proc_close(NmProc *p)
@@ -169,14 +190,16 @@ void nm_proc_close(NmProc *p)
         return;
     registry_remove(p);
     if (!p->reaped) {
-        nm_proc_os_kill(p->pid);
-        /* Blocking reap: the child is a zombie or was just SIGKILLed,
-         * so waitpid returns at once (run_command's reap rationale). */
+        nm_proc_os_kill(p->os);
+        /* Blocking reap: the child is a zombie or was just killed, so
+         * waitpid/WaitForSingleObject returns at once (run_command's
+         * reap rationale). */
         int code = -1;
-        if (nm_proc_os_reap(p->pid, &code, 1) == 1)
+        if (nm_proc_os_reap(p->os, &code, 1) == 1)
             p->exit_code = code;
         p->reaped = 1;
         p->live = 0;
+        p->handle = -1;
     }
     proc_free(p);
 }
@@ -191,8 +214,27 @@ void nm_proc_close_all(void)
 
 int nm_proc_id(const NmProc *p) { return p ? p->id : -1; }
 const char *nm_proc_command(const NmProc *p) { return p ? p->cmd : NULL; }
-size_t nm_proc_buffered(const NmProc *p) { return p ? p->len : 0; }
-int nm_proc_fd(NmProc *p) { return p ? p->fd : -1; }
+intptr_t nm_proc_handle(NmProc *p) { return p ? p->handle : -1; }
+
+int nm_proc_source_kind(void)
+{
+#ifdef _WIN32
+    return NM_SRC_HANDLE;
+#else
+    return NM_SRC_FD;
+#endif
+}
+
+size_t nm_proc_buffered(const NmProc *p)
+{
+    if (!p)
+        return 0;
+    NmProc *m = (NmProc *)p; /* the lock is not part of the const view */
+    PROC_LOCK(&m->lock);
+    size_t n = m->len;
+    PROC_UNLOCK(&m->lock);
+    return n;
+}
 
 int nm_proc_live(NmProc *p)
 {
@@ -219,12 +261,12 @@ NmProc *nm_proc_find(int job_id)
     return NULL;
 }
 
-NmProc *nm_proc_by_fd(int fd)
+NmProc *nm_proc_by_handle(intptr_t handle)
 {
-    if (fd < 0)
+    if (handle < 0)
         return NULL;
     for (int i = 0; i < g_max_jobs; i++) {
-        if (g_jobs[i] && g_jobs[i]->fd == fd)
+        if (g_jobs[i] && g_jobs[i]->handle == handle)
             return g_jobs[i];
     }
     return NULL;
@@ -291,38 +333,38 @@ static void buf_append(NmProc *p, const char *data, size_t n)
     p->len += n;
 }
 
+void nm_proc_feed(NmProc *p, const char *data, size_t n)
+{
+    if (!p)
+        return;
+    PROC_LOCK(&p->lock);
+    buf_append(p, data, n);
+    PROC_UNLOCK(&p->lock);
+}
+
 void nm_proc_drain(NmProc *p)
 {
     if (!p)
         return;
-    if (p->fd >= 0) {
-        for (;;) {
-            char tmp[8192];
-            long n = nm_proc_os_read(p->fd, tmp, sizeof(tmp));
-            if (n > 0) {
-                buf_append(p, tmp, (size_t)n);
-                continue;
-            }
-            if (n == 0)
-                break; /* would block: nothing more right now */
-            /* EOF / terminal error: the master is exhausted. */
-            nm_proc_os_close(p->fd);
-            p->fd = -1;
-            break;
-        }
+    if (p->handle >= 0) {
+        /* POSIX reads here; on Windows the reader thread already fed the
+         * buffer, so this is the point where the handle's liveness is
+         * re-checked (a closed master / an ended reader retires it). */
+        nm_proc_os_gather(p->os, p);
+        p->handle = nm_proc_os_handle(p->os);
     }
     try_reap(p);
 }
 
 int nm_proc_write(NmProc *p, const char *bytes, size_t n)
 {
-    if (!p || p->fd < 0)
+    if (!p || !p->os)
         return -1;
     if (n == 0)
         return 0;
     size_t off = 0;
     while (off < n) {
-        long w = nm_proc_os_write(p->fd, bytes + off, n - off);
+        long w = nm_proc_os_write(p->os, bytes + off, n - off);
         if (w > 0) {
             off += (size_t)w;
             continue;
@@ -332,6 +374,12 @@ int nm_proc_write(NmProc *p, const char *bytes, size_t n)
         return off ? (int)off : -1;
     }
     return (int)off;
+}
+
+void nm_proc_write_eof(NmProc *p)
+{
+    if (p && p->os)
+        nm_proc_os_write_eof(p->os);
 }
 
 /* ---------------------------------------------------------------- */
@@ -630,7 +678,11 @@ const char *nm_proc_take_output(NmProc *p)
     if (!p)
         return "";
     /* The report buffer is reused in place (memory-reuse); it is handed
-     * out borrowed and rewritten on the next take. */
+     * out borrowed and rewritten on the next take.  The lock covers the
+     * raw buffer's state, not the report (which only this thread
+     * writes) — so the borrowed pointer stays valid after it is
+     * dropped. */
+    PROC_LOCK(&p->lock);
     RBuf out = { p->report, 0, p->report_cap };
 
     if (p->dropped) {
@@ -655,6 +707,7 @@ const char *nm_proc_take_output(NmProc *p)
     /* Delivered: reclaim the raw buffer (its allocation is kept). */
     p->len = 0;
     p->report_pos = 0;
+    PROC_UNLOCK(&p->lock);
 
     return out.p ? out.p : "";
 }

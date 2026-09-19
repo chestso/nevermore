@@ -8,6 +8,7 @@
 #ifdef _WIN32
 #include <direct.h> /* _mkdir */
 #include <process.h>
+#include <windows.h> /* HANDLE + WaitForSingleObject (the job wait source) */
 #define getpid      _getpid
 #define mkdir(d, m) _mkdir(d)
 #else
@@ -1014,22 +1015,25 @@ static void test_run_command_async(void)
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
 
     /* First step: the child is still sleeping, so RUNNING (not a
      * blocking wait). */
     NmToolResult r = { 0, NULL };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
 
-    /* Drain until DONE, waiting on the fd like the event loop does. */
+    /* Drain until DONE, waiting on the source like the event loop does. */
     int steps = 0;
     while (t->step(e, &r) == NM_TOOL_RUNNING) {
         ASSERT_TRUE(++steps < 100000);
-        int fd = t->exec_fd(e);
-        if (fd >= 0) {
+        if (t->source(e, &src) && src.handle >= 0) {
             fd_set fds;
             struct timeval tv = { 0, 200 * 1000 };
+            int fd = (int)src.handle;
             FD_ZERO(&fds);
             FD_SET(fd, &fds);
             select(fd + 1, &fds, NULL, NULL, &tv);
@@ -1090,7 +1094,9 @@ static void test_run_command_cancel_is_prompt(void)
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
 
     NmToolResult r = { 0, NULL };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING); /* the child is asleep */
@@ -1342,7 +1348,8 @@ static void test_run_command_async_stdin_is_dev_null(void)
     NmToolResult r = { 0, NULL };
     int status = NM_TOOL_RUNNING;
     while ((status = t->step(e, &r)) == NM_TOOL_RUNNING) {
-        int fd = t->exec_fd(e);
+        NmSource src = { -1, 0, NM_SRC_FD };
+        int fd = t->source(e, &src) ? (int)src.handle : -1;
         if (fd >= 0) {
             fd_set fds;
             struct timeval tv = { 0, 20 * 1000 };
@@ -1400,8 +1407,8 @@ static char *stdin_args(int job_id, const char *input)
 }
 
 /* Drive one async call the way the event loop does: step, then wait on
- * the fd + interest the tool declares (for min(deadline, 5 ms)); repeat
- * until DONE or the wall-clock budget runs out. This is the contract the
+ * the source the tool declares (for min(deadline, 5 ms)); repeat until
+ * DONE or the wall-clock budget runs out. This is the contract the
  * agent and boba's fill/ready callbacks rely on, so the tests exercise it
  * directly rather than only through the blocking pump. Returns 0 on DONE,
  * -1 on budget exhaustion. */
@@ -1413,20 +1420,22 @@ static int drive_async(const NmTool *t, NmToolExec *e, NmToolResult *out,
     for (;;) {
         if (t->step(e, out) == NM_TOOL_DONE)
             return 0;
-        int fd = t->exec_fd(e);
-        unsigned fl = t->interest ? t->interest(e) : NM_INTEREST_READ;
+        NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
+        if (t->source)
+            t->source(e, &src);
         int dl = t->deadline_ms ? t->deadline_ms(e) : -1;
         int slice = 5;
         if (dl >= 0 && dl < slice)
             slice = dl;
-        if (fd >= 0 && fl) {
+        if (src.handle >= 0 && src.flags) {
             fd_set r, w;
             FD_ZERO(&r);
             FD_ZERO(&w);
             struct timeval tv = { 0, slice * 1000 };
-            if (fl & NM_INTEREST_READ)
+            int fd = (int)src.handle;
+            if (src.flags & NM_INTEREST_READ)
                 FD_SET(fd, &r);
-            if (fl & NM_INTEREST_WRITE)
+            if (src.flags & NM_INTEREST_WRITE)
                 FD_SET(fd, &w);
             select(fd + 1, &r, &w, NULL, &tv);
         } else {
@@ -1509,19 +1518,21 @@ static void test_exec_command_yields_job_id(void)
     ASSERT_NOT_NULL(t);
     ASSERT_NOT_NULL(t->begin);
     ASSERT_NOT_NULL(t->step);
-    ASSERT_NOT_NULL(t->exec_fd);
+    ASSERT_NOT_NULL(t->source);
     ASSERT_NOT_NULL(t->deadline_ms);
 
     char *args = exec_args("printf 'starting\\n'; sleep 30", 400);
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    /* The PTY master is the subscribed fd... */
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    /* The PTY master is the subscribed source... */
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
     /* ...and the yield window is the declared step deadline. */
     int dl = t->deadline_ms(e);
     ASSERT_TRUE(dl >= 0 && dl <= 400);
-    ASSERT_EQ(t->interest(e), NM_INTEREST_READ);
+    ASSERT_EQ(src.flags, NM_INTEREST_READ);
 
     NmToolResult r = { 0, NULL };
     ASSERT_EQ(drive_async(t, e, &r, 5000), 0);
@@ -1792,9 +1803,11 @@ static void test_write_stdin_interest_includes_write(void)
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    ASSERT_TRUE((t->interest(e) & NM_INTEREST_WRITE) != 0);
-    ASSERT_TRUE((t->interest(e) & NM_INTEREST_READ) != 0);
-    ASSERT_TRUE(t->exec_fd(e) >= 0);
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE((src.flags & NM_INTEREST_WRITE) != 0);
+    ASSERT_TRUE((src.flags & NM_INTEREST_READ) != 0);
+    ASSERT_TRUE(src.handle >= 0);
 
     t->end(e);
     nm_proc_close_all();
@@ -1888,28 +1901,153 @@ static void test_exec_job_lifecycle(void)
 #endif /* !_WIN32 */
 
 #ifdef _WIN32
-/* The job tools are registered on every platform; on Windows the
- * spawn is the documented unsupported stub (nm_process_win.c) until
- * boba grows an I/O-source seam for pipes — so the model gets a clean
- * error instead of a half-working job. */
-static void test_exec_command_unsupported_on_windows(void)
+/* The job tools on Windows ride the same async seam as POSIX — the
+ * job's readiness object is a waitable event (NM_SRC_HANDLE) fed by a
+ * pipe reader, so exec_command yields a job id, write_stdin feeds it,
+ * and the trailing close marker ends the child's stdin.  findstr is
+ * used as the reader because MSYS's find.exe shadows the Windows one
+ * on the PATH a job inherits.
+ *
+ * Journal args are built with nm_json_set/dump (never raw snprintf):
+ * the command carries double quotes, which a hand-built JSON string
+ * would deliver unescaped. */
+static void test_exec_job_roundtrip_on_windows(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
-    NmToolResult r = nm_toolset_execute(ts, "exec_command",
-                                        "{\"cmd\":\"echo hi\"}", NULL);
-    ASSERT_FALSE(r.ok);
+    nm_proc_reset();
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("findstr /r \".*\""));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(300));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
-    ASSERT_TRUE(strstr(r.output, "not supported") != NULL);
+    const char *p = strstr(r.output, "job ID ");
+    ASSERT_NOT_NULL(p);
+    int job = atoi(p + 7);
+    ASSERT_TRUE(job > 0);
+    ASSERT_EQ(nm_proc_count(), 1);
     nm_tool_result_free(&r);
 
-    /* No job can exist, so the other two report not-found. */
-    r = nm_toolset_execute(ts, "write_stdin", "{\"job_id\":1}", NULL);
-    ASSERT_FALSE(r.ok);
+    /* Feed a line: findstr reads it and the job stays live.  (Its echo
+     * is block-buffered on a pipe, so it only surfaces when the child
+     * flushes — at exit, below.) */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+    nm_json_set(j, "input", nm_json_new_string("hello there\r\n"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(300));
+    args = nm_json_dump(j);
+    nm_json_free(j);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
     nm_tool_result_free(&r);
+    ASSERT_TRUE(nm_proc_find(job) != NULL);
 
-    r = nm_toolset_execute(ts, "kill_job", "{\"job_id\":1}", NULL);
+    /* The close marker ends stdin: closing the pipe IS the pipe's EOF,
+     * so the reader exits and flushes the line it echoed. */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+    nm_json_set(j, "input", nm_json_new_string("\\x04"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(1000));
+    args = nm_json_dump(j);
+    nm_json_free(j);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
+    ASSERT_TRUE(strstr(r.output, "hello there") != NULL);
+    nm_tool_result_free(&r);
+    ASSERT_NULL(nm_proc_find(job));
+    ASSERT_EQ(nm_proc_count(), 0);
+
+    /* kill_job reports an unknown id instead of inventing one. */
+    r = nm_toolset_execute(ts, "kill_job", "{\"job_id\":4242}", NULL);
     ASSERT_FALSE(r.ok);
     nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* run_command's event-driven drive on Windows. The POSIX siblings above
+ * cannot cover it (their commands are sh), yet the contract is the same
+ * one they pin: begin declares a wait source, a step returns RUNNING
+ * while the child works instead of blocking on a synchronous read, the
+ * turn still ends with the command's output and exit status, and
+ * cancelling a live child is prompt. On Windows the source is the
+ * process layer's job event (NM_SRC_HANDLE), because a one-shot command
+ * and a long-lived job are the same mechanism here: a child on anonymous
+ * pipes read by a per-job thread. */
+static void test_run_command_async_on_windows(void)
+{
+    nm_proc_reset();
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(t->begin);
+    ASSERT_NOT_NULL(t->step);
+    ASSERT_NOT_NULL(t->source);
+    ASSERT_NOT_NULL(t->end);
+
+    NmJson *j = nm_json_new_object();
+    /* ~1 s of silence, then output and a nonzero exit. */
+    nm_json_set(j, "cmd",
+                nm_json_new_string("ping -n 2 127.0.0.1 >nul & echo hello "
+                                   "async & exit /b 3"));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+
+    NmSource src = { -1, 0, NM_SRC_FD };
+    ASSERT_TRUE(t->source(e, &src));
+    ASSERT_TRUE(src.handle >= 0);
+    ASSERT_EQ(src.kind, NM_SRC_HANDLE);
+    ASSERT_EQ(src.flags, NM_INTEREST_READ);
+
+    /* First step: the child is asleep, so RUNNING — never a blocking
+     * read of the whole command. */
+    NmToolResult r = { 0, NULL };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+
+    /* Drive it the way the loop does: wait the event, step, repeat. */
+    int steps = 0;
+    while (t->step(e, &r) == NM_TOOL_RUNNING) {
+        ASSERT_TRUE(++steps < 20000);
+        if (t->source(e, &src) && src.handle >= 0)
+            WaitForSingleObject((HANDLE)src.handle, 50);
+    }
+    t->end(e);
+
+    ASSERT_EQ(r.ok, 0); /* exit 3 is a failure */
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "hello async") != NULL);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0); /* the call closed its own job */
+
+    /* Cancelling a live long child must not wait it out. */
+    j = nm_json_new_object();
+    nm_json_set(j, "cmd",
+                nm_json_new_string("ping -n 31 127.0.0.1 >nul"));
+    args = nm_json_dump(j);
+    nm_json_free(j);
+    e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+    long t0 = (long)GetTickCount64();
+    t->end(e);
+    ASSERT_TRUE((long)GetTickCount64() - t0 < 3000);
+    ASSERT_EQ(nm_proc_count(), 0);
+
     nm_toolset_free(ts);
 }
 #endif /* _WIN32 */
@@ -1975,7 +2113,8 @@ int main(void)
     RUN_TEST(test_exec_job_lifecycle);
 #endif
 #ifdef _WIN32
-    RUN_TEST(test_exec_command_unsupported_on_windows);
+    RUN_TEST(test_exec_job_roundtrip_on_windows);
+    RUN_TEST(test_run_command_async_on_windows);
 #endif
     TEST_SUMMARY();
 }

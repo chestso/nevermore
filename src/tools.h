@@ -12,6 +12,8 @@
 
 #include <stddef.h>
 
+#include "transport.h" /* NmSource: what an async tool waits on */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -42,9 +44,9 @@ typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
                                void *userdata);
 
 /* Optional asynchronous execution (spawn-based tools). When a tool sets
- * begin, the agent drives begin/step/exec_fd/end instead of execute, so
+ * begin, the agent drives begin/step/source/end instead of execute, so
  * a long-running tool never blocks the event loop (the spinner keeps
- * ticking, the child's output pipe is a subscribed fd). */
+ * ticking, the child's output pipe is a subscribed source). */
 typedef struct NmToolExec NmToolExec;
 
 typedef enum
@@ -74,18 +76,21 @@ typedef struct NmTool
                             void *userdata);
     /* Async path (NULL for synchronous tools). begin returns a handle,
      * or NULL to fall back to execute (bad args / spawn failure).
-     * exec_fd is the wait fd (or -1); step fills *out and reports
+     * source reports what the step is waiting on right now (object +
+     * interest bits + what the object IS); step fills *out and reports
      * NM_TOOL_DONE when finished; end frees the handle. */
     NmToolExec *(*begin)(const NmTool *tool, const char *args_json,
                          void *userdata);
     NmToolStatus (*step)(NmToolExec *e, NmToolResult *out);
-    int (*exec_fd)(NmToolExec *e);
-    /* Wait interest while a step is draining (transport's
-     * NM_INTEREST_READ / NM_INTEREST_WRITE bits), or NULL to mean
-     * "readable". run_command only ever reads its output pipe, but an
-     * HTTP tool must first wait for connect/send writability — the
-     * agent forwards these bits to the event loop's wait set. */
-    unsigned (*interest)(const NmToolExec *e);
+    /* The live wait source while a step is draining: fills *out and
+     * returns 1 when there is one, 0 when the tool has nothing to wait
+     * on (e.g. a synchronous phase).  The kind is the tool's to declare
+     * because only it knows what its handle names — a POSIX child's
+     * output pipe is a descriptor, a Windows job's readiness object is
+     * a waitable HANDLE, an HTTP tool's socket is a SOCKET — and the
+     * agent hands the whole triple to the event loop.  NULL means the
+     * tool never waits. */
+    int (*source)(NmToolExec *e, NmSource *out);
     /* Milliseconds until this live exec wants a step even though no fd
      * is ready (a tool-side deadline, e.g. an HTTP request timeout or a
      * job yield window), or -1 for "purely readiness-driven".

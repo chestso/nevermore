@@ -4,6 +4,15 @@
  * output (stdout+stderr to one pipe) and reports the exit status.
  * run_command runs its cmd through cmd.exe /c so the model gets
  * shell semantics.
+ *
+ * run_command has two drives over one capture: `execute` is a
+ * synchronous spawn + blocking read (direct callers: nm_toolset_execute,
+ * tests), and begin/step/source/end is the event-driven path the agent
+ * uses in the TUI, where a blocking read would freeze the UI.  The async
+ * half rides the process layer (src/nm_process.c), because on Windows a
+ * one-shot command and a long-lived job are the *same* mechanism — a
+ * child on anonymous pipes, read by a per-job thread whose auto-reset
+ * event is the loop's wait handle (see nm_process_win.c).
  */
 
 #include <stdio.h>
@@ -12,6 +21,7 @@
 #include <windows.h>
 
 #include "json.h"
+#include "nm_process.h"
 #include "tools.h"
 
 #include "tools_internal.h"
@@ -279,23 +289,169 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     return r;
 }
 
+/* ---------------------------------------------------------------- */
+/* run_command: the event-driven path (the TUI's)                    */
+/* ---------------------------------------------------------------- */
+
+/* One call's state. It holds the job **id**, never an NmProc * — the
+ * job is a live child the teardown path can free under us, so every
+ * step re-resolves it (the "job-pair" invariant AGENTS.md documents for
+ * the exec tools). */
+struct NmToolExec
+{
+    int job_id; /* -1 once the job was reported and closed */
+    int done;
+    NmToolResult result; /* terminal result, handed out once */
+};
+
+/* Hand the terminal result to the caller exactly once. */
+static NmToolStatus take(NmToolExec *e, NmToolResult *out)
+{
+    *out = e->result;
+    e->result = (NmToolResult){ 0, NULL };
+    return NM_TOOL_DONE;
+}
+
+static NmToolExec *run_command_begin(const NmTool *tool,
+                                     const char *args_json, void *userdata)
+{
+    (void)tool;
+    (void)userdata; /* workdir arg is reserved: the child inherits our cwd */
+    NmJson *args = nm_json_parse(args_json, strlen(args_json), NULL);
+    if (!args)
+        return NULL; /* bad args: the synchronous execute reports them */
+    const char *cmd_raw = nm_json_str(nm_json_get(args, "cmd"));
+    char *cmd = (cmd_raw && *cmd_raw) ? strdup(cmd_raw) : NULL;
+    nm_json_free(args);
+    if (!cmd)
+        return NULL;
+
+    char err[256];
+    int id = -1;
+    NmProc *p = nm_proc_start(cmd, NULL, &id, err, sizeof(err));
+    free(cmd);
+    if (!p)
+        return NULL; /* spawn failed: execute reports it verbatim */
+    /* No stdin, exactly like the synchronous path's NUL handle: the
+     * job's stdin is a live pipe, so it must be closed for the child to
+     * see EOF instead of blocking on a read forever. */
+    nm_proc_write_eof(p);
+
+    NmToolExec *e = calloc(1, sizeof(*e));
+    if (!e) {
+        nm_proc_close(p);
+        return NULL;
+    }
+    e->job_id = id;
+    return e;
+}
+
+static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
+{
+    if (!e) {
+        *out = nm_tool_result_error("internal: null run_command state");
+        return NM_TOOL_DONE;
+    }
+    if (e->done)
+        return take(e, out);
+
+    NmProc *p = e->job_id > 0 ? nm_proc_find(e->job_id) : NULL;
+    if (!p) {
+        e->result = nm_tool_result_error("run_command: the child is gone");
+        e->done = 1;
+        return take(e, out);
+    }
+
+    nm_proc_drain(p); /* reaps + retires the readiness handle on exit */
+    if (nm_proc_live(p))
+        return NM_TOOL_RUNNING;
+
+    /* Exited: report the exit status and the captured body, then close
+     * the job (nothing is left to poll, and the model never saw an id). */
+    int code = nm_proc_exit(p);
+    const char *body = nm_proc_take_output(p);
+    size_t n = body ? strlen(body) : 0;
+    char *raw = malloc(n + 32);
+    if (!raw) {
+        nm_proc_close(p);
+        e->job_id = -1;
+        e->result = nm_tool_result_error("out of memory");
+        e->done = 1;
+        return take(e, out);
+    }
+    if (n)
+        snprintf(raw, n + 32, "Output:\n%s", body);
+    else
+        snprintf(raw, n + 32, "Output: (empty)\n");
+    char *clamped = nm_clamp_output(raw);
+    free(raw);
+    nm_proc_close(p);
+    e->job_id = -1;
+    if (!clamped)
+        e->result = nm_tool_result_error("out of memory");
+    else
+        e->result = (NmToolResult){ code == 0, clamped };
+    e->done = 1;
+    return take(e, out);
+}
+
+static int run_command_source(NmToolExec *e, NmSource *out)
+{
+    if (!e || e->done || e->job_id <= 0)
+        return 0;
+    NmProc *p = nm_proc_find(e->job_id);
+    if (!p)
+        return 0;
+    intptr_t h = nm_proc_handle(p);
+    if (h < 0)
+        return 0;
+    out->handle = h;
+    out->flags = NM_INTEREST_READ;
+    out->kind = nm_proc_source_kind();
+    return 1;
+}
+
+/* Cancel / teardown: the job is a live child, so closing it kills the
+ * group (the same discipline as the synchronous path's child stop). */
+static void run_command_end(NmToolExec *e)
+{
+    if (!e)
+        return;
+    if (e->job_id > 0) {
+        NmProc *p = nm_proc_find(e->job_id);
+        if (p)
+            nm_proc_close(p);
+        e->job_id = -1;
+    }
+    nm_tool_result_free(&e->result);
+    free(e);
+}
+
 static const char run_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
-    "\"cmd\":{\"type\":\"string\",\"description\":\"Shell command to "
-    "execute (runs under cmd.exe /c).\"},"
+    "\"cmd\":{\"type\":\"string\",\"description\":\"Short, non-interactive "
+    "shell command to execute (runs under cmd.exe /c, with no console and "
+    "no stdin).\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Working directory "
     "(reserved; the agent's working directory applies).\"}},"
     "\"required\":[\"cmd\"]}";
 
-/* No async path on Windows yet: the anonymous-pipe read handle cannot
- * ride boba's socket-event subscription set, so run_command stays
- * synchronous here (begin = NULL -> the agent uses execute). POSIX
- * (tools_spawn_posix.c) is the event-driven path. */
+/* Both drives: `execute` for direct callers (nm_toolset_execute, tests)
+ * and the event-driven begin/step/source/end the agent's TUI loop uses —
+ * the sync read would otherwise freeze the UI for the whole command
+ * (that was the pre-P5b state; the process layer's pipe-reader thread is
+ * what made the async half possible). */
 const NmTool nm_tool_run_command = {
     .name = "run_command",
-    .description = "Run a shell command and capture its combined output "
-                   "and exit status",
+    .description = "Run a short, non-interactive shell command and capture "
+                   "its combined output and exit status (no terminal, no "
+                   "stdin). Use exec_command instead for anything long-lived "
+                   "or interactive",
     .emoji = "🖥️",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
+    .begin = run_command_begin,
+    .step = run_command_step,
+    .source = run_command_source,
+    .end = run_command_end,
 };

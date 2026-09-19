@@ -7,6 +7,11 @@
  * controlling terminal — work posix_spawn's file actions cannot
  * express.  The child calls only async-signal-safe functions before
  * exec.
+ *
+ * The readiness handle is the master fd (NM_SRC_FD): an fd is pollable
+ * for a PTY, so nothing else is needed here — the neutral layer reads
+ * it.  Windows has no such primitive, which is why its half carries a
+ * reader thread instead.
  */
 
 #define _XOPEN_SOURCE   700 /* posix_openpt / grantpt / unlockpt / ptsname */
@@ -26,6 +31,13 @@
 #include "nm_process_internal.h"
 
 extern char **environ;
+
+struct NmProcOs
+{
+    long pid;
+    int fd;          /* PTY master; -1 once exhausted or closed */
+    char stdin_last; /* last byte accepted on stdin (the C-d dance needs it) */
+};
 
 /* Interactive pagers off, git prompts off, a dumb terminal so column
  * tools degrade to plain text — the model must never block on a pager
@@ -76,40 +88,53 @@ static char **build_env(void)
     return env;
 }
 
-int nm_proc_os_spawn(const char *cmd, const char *cwd, long *pid_out,
-                     int *fd_out, char *err, size_t errsz)
+int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
+                     NmProcOs **os_out, char *err, size_t errsz)
 {
-    *pid_out = -1;
-    *fd_out = -1;
+    (void)owner; /* POSIX reads on the loop thread: nothing to hand over */
+    *os_out = NULL;
+
+    NmProcOs *os = calloc(1, sizeof(*os));
+    if (!os) {
+        nm_proc_set_err(err, errsz, "out of memory");
+        return -1;
+    }
+    os->pid = -1;
+    os->fd = -1;
 
     int master = posix_openpt(O_RDWR | O_NOCTTY);
     if (master < 0) {
         nm_proc_set_err(err, errsz, "posix_openpt failed");
+        free(os);
         return -1;
     }
     if (grantpt(master) != 0 || unlockpt(master) != 0) {
         nm_proc_set_err(err, errsz, "grantpt/unlockpt failed");
-        nm_proc_os_close(master);
+        close(master);
+        free(os);
         return -1;
     }
     const char *slave_name = ptsname(master);
     if (!slave_name) {
         nm_proc_set_err(err, errsz, "ptsname failed");
-        nm_proc_os_close(master);
+        close(master);
+        free(os);
         return -1;
     }
     int slave = open(slave_name, O_RDWR | O_NOCTTY);
     if (slave < 0) {
         nm_proc_set_err(err, errsz, "opening the PTY slave failed");
-        nm_proc_os_close(master);
+        close(master);
+        free(os);
         return -1;
     }
 
     char **env = build_env();
     if (!env) {
         nm_proc_set_err(err, errsz, "out of memory");
-        nm_proc_os_close(master);
-        nm_proc_os_close(slave);
+        close(master);
+        close(slave);
+        free(os);
         return -1;
     }
 
@@ -119,8 +144,9 @@ int nm_proc_os_spawn(const char *cmd, const char *cwd, long *pid_out,
     if (pid < 0) {
         nm_proc_set_err(err, errsz, "fork failed");
         free(env);
-        nm_proc_os_close(master);
-        nm_proc_os_close(slave);
+        close(master);
+        close(slave);
+        free(os);
         return -1;
     }
     if (pid == 0) {
@@ -143,39 +169,59 @@ int nm_proc_os_spawn(const char *cmd, const char *cwd, long *pid_out,
     }
 
     free(env);
-    nm_proc_os_close(slave);
+    close(slave);
 
     int fl = fcntl(master, F_GETFL, 0);
     if (fl >= 0)
         fcntl(master, F_SETFL, fl | O_NONBLOCK);
 
-    *pid_out = (long)pid;
-    *fd_out = master;
+    os->pid = (long)pid;
+    os->fd = master;
+    *os_out = os;
     return 0;
 }
 
-long nm_proc_os_read(int fd, char *buf, size_t cap)
+intptr_t nm_proc_os_handle(const NmProcOs *os)
 {
+    return os ? (intptr_t)os->fd : -1;
+}
+
+void nm_proc_os_gather(NmProcOs *os, NmProc *p)
+{
+    if (!os || os->fd < 0)
+        return;
     for (;;) {
-        ssize_t n = read(fd, buf, cap);
-        if (n > 0)
-            return (long)n;
-        if (n == 0)
-            return -1; /* EOF: all slave fds closed */
-        if (errno == EINTR)
+        char tmp[8192];
+        ssize_t n;
+        do {
+            n = read(os->fd, tmp, sizeof(tmp));
+        } while (n < 0 && errno == EINTR);
+        if (n > 0) {
+            nm_proc_feed(p, tmp, (size_t)n);
             continue;
-        if (errno == EAGAIN || errno == EWOULDBLOCK)
-            return 0; /* would block */
-        return -1;    /* EIO (child gone on Linux) and friends */
+        }
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return; /* would block: nothing more right now */
+        /* EOF (all slave fds closed) or EIO (the child is gone, Linux):
+         * the master is exhausted. */
+        close(os->fd);
+        os->fd = -1;
+        return;
     }
 }
 
-long nm_proc_os_write(int fd, const char *buf, size_t n)
+long nm_proc_os_write(NmProcOs *os, const char *buf, size_t n)
 {
+    if (!os || os->fd < 0)
+        return -1;
     for (;;) {
-        ssize_t w = write(fd, buf, n);
-        if (w >= 0)
+        ssize_t w = write(os->fd, buf, n);
+        if (w > 0) {
+            os->stdin_last = buf[w - 1];
             return (long)w;
+        }
+        if (w == 0)
+            return 0;
         if (errno == EINTR)
             continue;
         if (errno == EAGAIN || errno == EWOULDBLOCK)
@@ -184,33 +230,49 @@ long nm_proc_os_write(int fd, const char *buf, size_t n)
     }
 }
 
-void nm_proc_os_close(int fd)
+void nm_proc_os_write_eof(NmProcOs *os)
 {
-    if (fd >= 0)
-        close(fd);
-}
-
-void nm_proc_os_kill(long pid)
-{
-    if (pid <= 0)
+    if (!os || os->fd < 0)
         return;
-    /* The job is its own process group (setsid), so the negative
-     * pid takes the shell AND its descendants; a plain pid is the
-     * fallback when the group is already gone. */
-    if (kill(-(pid_t)pid, SIGKILL) != 0)
-        kill((pid_t)pid, SIGKILL);
+    /* quoth's process-send-eof dance: a C-d mid-line only flushes the
+     * partial line, so a body not ending in a newline needs a flush C-d
+     * before the EOF one.  A job that never received a byte is at the
+     * start of a line (stdin_last is the calloc'd 0), so one C-d
+     * suffices.  Best-effort (the master is non-blocking). */
+    static const char eof[] = { 0x04, 0x04 };
+    if (os->stdin_last == '\n' || os->stdin_last == '\0')
+        nm_proc_os_write(os, eof, 1);
+    else
+        nm_proc_os_write(os, eof, 2);
 }
 
-int nm_proc_os_reap(long pid, int *code, int block)
+void nm_proc_os_kill(NmProcOs *os)
 {
-    if (pid <= 0)
+    if (!os || os->pid <= 0)
+        return;
+    /* The job is its own process group (setsid), so the negative pid
+     * takes the shell AND its descendants; a plain pid is the fallback
+     * when the group is already gone. */
+    if (kill(-(pid_t)os->pid, SIGKILL) != 0)
+        kill((pid_t)os->pid, SIGKILL);
+}
+
+int nm_proc_os_reap(NmProcOs *os, int *code, int block)
+{
+    if (!os || os->pid <= 0)
         return -1;
     int st = 0;
     pid_t r;
     do {
-        r = waitpid((pid_t)pid, &st, block ? 0 : WNOHANG);
+        r = waitpid((pid_t)os->pid, &st, block ? 0 : WNOHANG);
     } while (r < 0 && errno == EINTR);
-    if (r == (pid_t)pid) {
+    if (r == (pid_t)os->pid) {
+        /* Retire the master with the child: a reaped job must stop
+         * being polled (an exhausted PTY master reads readable-forever). */
+        if (os->fd >= 0) {
+            close(os->fd);
+            os->fd = -1;
+        }
         if (WIFEXITED(st))
             *code = WEXITSTATUS(st);
         else if (WIFSIGNALED(st))
@@ -222,4 +284,13 @@ int nm_proc_os_reap(long pid, int *code, int block)
     if (r == 0)
         return 0; /* still running */
     return -1;    /* ECHILD: already reaped / not ours */
+}
+
+void nm_proc_os_free(NmProcOs *os)
+{
+    if (!os)
+        return;
+    if (os->fd >= 0)
+        close(os->fd);
+    free(os);
 }

@@ -110,11 +110,18 @@ void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on);
  */
 int nm_chat_app_fd(NmChatApp *app);
 
+/* The agent's own wait source (handle + interest + kind) — the entry
+ * nm_chat_app_interest emits first when the agent has something to wait
+ * on.  handle is -1 when it does not (idle, or a provider without the
+ * step API). */
+NmSource nm_chat_app_source(NmChatApp *app);
+
 /* The app's whole wait set, filled in priority order: the agent's live
  * stream/exec source first (when it has one), then one READ entry per
  * registered process job.  An active exec_command's handle IS its
- * job's master, so it is emitted once — boba treats a duplicated
- * handle as undefined.  Returns the number of entries written
+ * job's handle, so it is emitted once — boba treats a duplicated
+ * handle as undefined.  Every entry carries its NmSource kind, so the
+ * loop knows how to wait on it.  Returns the number of entries written
  * (<= cap), which is what main.c's TuiFillIoSources hands back.  A cap
  * too small for the set drops trailing jobs (they cannot be drained
  * while unsubscribed), which is why NM_PROC_MAX_JOBS leaves a slot for
@@ -141,7 +148,7 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
                          void *userdata);
-void nm_chat_app_on_state(int state, void *userdata);
+void nm_chat_app_on_state(NmAgentState state, void *userdata);
 
 /* Introspection / test seams. */
 NmAgentState nm_chat_app_state(const NmChatApp *app);

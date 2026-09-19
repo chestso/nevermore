@@ -613,18 +613,17 @@ static NmToolStatus ws_step(NmToolExec *e, NmToolResult *out)
     return ws_take(e, out);
 }
 
-static int ws_exec_fd(NmToolExec *e)
-{
-    if (!e || e->done || !e->conn)
-        return -1;
-    return nm_connection_fd(e->conn);
-}
-
-static unsigned ws_interest(const NmToolExec *e)
+/* The connection's own wait source (a socket, with the phase's
+ * connect/send/response interest bits). */
+static int ws_source(NmToolExec *e, NmSource *out)
 {
     if (!e || e->done || !e->conn)
         return 0;
-    return nm_connection_interest((NmConnection *)e->conn).flags;
+    NmSource s = nm_connection_interest(e->conn);
+    if (s.handle < 0 || s.flags == 0)
+        return 0;
+    *out = s;
+    return 1;
 }
 
 static void ws_end(NmToolExec *e)
@@ -772,15 +771,14 @@ static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
             ws_end(e);
             return r;
         }
-        int fd = ws_exec_fd(e);
-        unsigned interest = ws_interest(e);
-        if (fd < 0 || interest == 0) {
+        NmSource src = { -1, 0, NM_SRC_FD };
+        if (!ws_source(e, &src)) {
             /* No wait target but not done: a begin that queued nothing.
              * The deadline still bounds it — step again promptly. */
             ws_end(e);
             return nm_tool_result_error("web_search: request stalled");
         }
-        wait_ready(fd, interest, 50);
+        wait_ready((int)src.handle, src.flags, 50);
     }
 }
 
@@ -828,8 +826,7 @@ const NmTool nm_tool_web_search = {
     .execute = ws_execute,
     .begin = ws_begin,
     .step = ws_step,
-    .exec_fd = ws_exec_fd,
-    .interest = ws_interest,
+    .source = ws_source,
     .deadline_ms = ws_deadline_ms,
     .end = ws_end,
 };

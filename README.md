@@ -130,6 +130,12 @@ In the chat: `/config` shows where each setting comes from,
 server, a REPL, `ssh`, a test watcher. It reports either the exit
 status (the command finished inside its yield window) or a job id.
 
+`run_command` is the sibling for the other case: one short,
+non-interactive command, one result — no job, no terminal, no stdin.
+A one-shot `ls`, `grep` or `make` is a `run_command`; anything that
+might still be running, or that expects a terminal, is an
+`exec_command`.
+
 The job keeps running between turns, and the model drives it on its
 own: `write_stdin` feeds it input and reports what it has printed since,
 `kill_job` stops it. Output produced between calls is buffered for
@@ -147,10 +153,11 @@ You watch the same jobs from the chat:
 The spinner keeps ticking while a command runs, so a silent child never
 looks like a hang.
 
-Jobs are POSIX-only for now: on Windows the job tools answer
-"not supported" until boba grows an I/O-source seam for pipes. They are
-process-global and each occupies a slot in boba's external-fd pool, so
-at most `NM_PROC_MAX_JOBS` (31: the pool less the agent's own fd)
+Jobs run on both platforms, over the shell each one's spawn uses
+(`/bin/sh -c` on POSIX; `cmd.exe /d /c` on Windows, whose jobs are
+pipes plus a Job Object for the group kill). They are process-global
+and each occupies a slot in the event loop's I/O-source pool, so at
+most `NM_PROC_MAX_JOBS` (31: the pool less the agent's own source)
 run at once — one past that fails loudly rather than starting a child
 nothing would read. They die with nevermore.
 

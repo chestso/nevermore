@@ -128,15 +128,16 @@ int nm_agent_turn(NmAgent *a, const char *user_input);
  *
  *   nm_agent_start(a, input)   append the user message, open the
  *                              round-1 stream (blocking connect+send)
- *   fd = nm_agent_fd(a)        the active stream's socket, for the
- *                              event loop's poll set; -1 when idle
+ *   src = nm_agent_source(a)   the active source (object + interest +
+ *                              kind), for the event loop's wait set;
+ *                              handle -1 when idle
  *   nm_agent_step(a)           one pull: deltas/tool events fire from
  *                              inside; a completed round transitions
  *                              the state machine (tool execution is
  *                              synchronous inside the step). Returns
  *                              0 = keep going (more steps later),
  *                              -1 = fatal (state ERROR). The caller
- *                              re-checks state/fd each step.
+ *                              re-checks state/source each step.
  *   nm_agent_cancel(a)         abort the in-flight turn (user C-c);
  *                              tears the stream down, state IDLE
  *
@@ -144,12 +145,15 @@ int nm_agent_turn(NmAgent *a, const char *user_input);
  * share one implementation. */
 int nm_agent_start(NmAgent *a, const char *user_input);
 int nm_agent_step(NmAgent *a);
-int nm_agent_fd(NmAgent *a);
 
-/* The active stream's wait interest (NM_INTEREST_READ/WRITE bits;
- * the event loop waits on the current bits, re-checked every fill).
- * 0 = nothing to wait on. */
-unsigned nm_agent_interest(NmAgent *a);
+/* What the agent is waiting on right now: the active async tool's
+ * source while a tool runs, else the open stream's socket.  `flags` is
+ * the wait interest for the current phase (connect/send writability or
+ * response readability) and `kind` is what the handle names, so the
+ * loop knows how to wait.  handle is -1 and flags 0 when there is
+ * nothing to wait on (idle, or a provider without the step API). */
+NmSource nm_agent_source(NmAgent *a);
+
 void nm_agent_cancel(NmAgent *a);
 
 NmAgentState nm_agent_state(const NmAgent *a);
