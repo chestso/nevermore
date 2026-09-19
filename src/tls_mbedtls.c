@@ -8,9 +8,9 @@
  * mbedtls_x509_crt_parse_path, hostname verification via
  * mbedtls_ssl_set_hostname.
  *
- * Memory model: one config + trust store for the process lifetime
- * (created on first use, never freed); one ssl context + bio per
- * connection, freed at close. No per-read allocation.
+ * Memory model: one config + trust store + DRBG for the process
+ * lifetime (created on first use, never freed); one ssl context + bio
+ * per connection, freed at close. No per-read allocation.
  */
 
 #ifdef HAVE_CONFIG_H
@@ -22,9 +22,12 @@
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
+#include <mbedtls/ctr_drbg.h>
 #include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
@@ -43,6 +46,7 @@ typedef struct MbCtx
 static mbedtls_ssl_config g_conf;
 static mbedtls_x509_crt g_cacert;
 static mbedtls_entropy_context g_entropy;
+static mbedtls_ctr_drbg_context g_drbg;
 static int g_ready;
 
 static const char *mb_errstr(int ret)
@@ -59,9 +63,14 @@ static int mb_init_once(void)
     mbedtls_ssl_config_init(&g_conf);
     mbedtls_x509_crt_init(&g_cacert);
     mbedtls_entropy_init(&g_entropy);
-    int ret = mbedtls_ssl_config_defaults(&g_conf, MBEDTLS_SSL_IS_CLIENT,
-                                          MBEDTLS_SSL_TRANSPORT_STREAM,
-                                          MBEDTLS_SSL_PRESET_DEFAULT);
+    mbedtls_ctr_drbg_init(&g_drbg);
+    int ret = mbedtls_ctr_drbg_seed(&g_drbg, mbedtls_entropy_func, &g_entropy,
+                                    (const unsigned char *)"nevermore", 9);
+    if (ret != 0)
+        return ret;
+    ret = mbedtls_ssl_config_defaults(&g_conf, MBEDTLS_SSL_IS_CLIENT,
+                                      MBEDTLS_SSL_TRANSPORT_STREAM,
+                                      MBEDTLS_SSL_PRESET_DEFAULT);
     if (ret != 0)
         return ret;
     /* System trust anchors: the usual paths; at least one must load. */
@@ -79,7 +88,7 @@ static int mb_init_once(void)
         return MBEDTLS_ERR_X509_FILE_IO_ERROR;
     mbedtls_ssl_conf_ca_chain(&g_conf, &g_cacert, NULL);
     mbedtls_ssl_conf_authmode(&g_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
-    mbedtls_ssl_conf_rng(&g_conf, mbedtls_ctr_drbg_random, NULL);
+    mbedtls_ssl_conf_rng(&g_conf, mbedtls_ctr_drbg_random, &g_drbg);
     g_ready = 1;
     return 0;
 }
