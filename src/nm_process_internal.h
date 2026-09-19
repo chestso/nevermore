@@ -40,9 +40,13 @@ void nm_proc_os_free(NmProcOs *os);
  * the fallback).  A no-op when the group/process is already gone. */
 void nm_proc_os_kill(NmProcOs *os);
 
-/* Reap `os`'s child: 1 = exited (*code filled), 0 = still running (only
- * with block == 0), -1 = no such child (already reaped / never ours). */
-int nm_proc_os_reap(NmProcOs *os, int *code, int block);
+/* Reap `os`'s child: 1 = exited (*code filled), 0 = still exiting,
+ * -1 = no such child (already reaped / never ours).  Non-blocking by
+ * construction: on macOS a PTY session leader only finishes entering
+ * the exited state once its master is drained, so a blocking wait would
+ * deadlock against the very child it waits for.  Drain with
+ * nm_proc_os_gather() first, then reap; come back later otherwise. */
+int nm_proc_os_reap(NmProcOs *os, int *code);
 
 /* The loop-visible readiness handle: a descriptor on POSIX, a waitable
  * HANDLE (auto-reset event) on Windows; -1 once the child's output

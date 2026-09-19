@@ -225,7 +225,7 @@ for f in src/*.c; do
 		echo "SKIP $f (backend not selected on macOS CI)"
 		continue
 		;;
-	src/tools_spawn_win.c | src/os_compat_win.c)
+	src/*_win.c)
 		echo "SKIP $f (windows-only TU)"
 		continue
 		;;

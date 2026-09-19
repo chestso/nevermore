@@ -153,10 +153,10 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
     p->live = 1;
     p->cmd = strdup(cmd);
     if (registry_add(p) != 0) {
-        /* Only reachable if the cap changed under us; be safe. */
-        nm_proc_os_kill(os);
-        nm_proc_os_reap(os, &p->exit_code, 1);
-        proc_free(p);
+        /* Only reachable if the cap changed under us; be safe.  The job
+         * was never registered, so this unregisters nothing and just
+         * runs the kill/defer/free path. */
+        nm_proc_close(p);
         nm_proc_set_err(err, errsz, "job cap reached");
         return NULL;
     }
@@ -175,7 +175,7 @@ static void try_reap(NmProc *p)
     if (p->reaped || !p->os)
         return;
     int code = -1;
-    int r = nm_proc_os_reap(p->os, &code, 0);
+    int r = nm_proc_os_reap(p->os, &code);
     if (r == 0)
         return; /* still running */
     p->reaped = 1;
@@ -184,19 +184,82 @@ static void try_reap(NmProc *p)
     p->handle = nm_proc_os_handle(p->os);
 }
 
+/* Children killed but not yet reaped.  A close must never block on the
+ * child (see nm_proc_os_reap): when the OS reports it is still exiting,
+ * the state moves here and a later sweep finishes the job.  Keeping the
+ * whole NmProcOs (not just the pid) lets the sweep keep draining the
+ * child's output — which is what lets a PTY session leader finish its
+ * exit — and works unchanged on Windows (a HANDLE, not a pid). */
+static NmProcOs *g_orphans[NM_PROC_MAX_JOBS];
+static int g_n_orphans;
+
+static void orphan_add(NmProcOs *os)
+{
+    if (!os)
+        return;
+    for (int i = 0; i < g_n_orphans; i++) {
+        if (!g_orphans[i]) {
+            g_orphans[i] = os;
+            return;
+        }
+    }
+    if (g_n_orphans < NM_PROC_MAX_JOBS) {
+        g_orphans[g_n_orphans++] = os;
+        return;
+    }
+    /* More un-reaped children than the registry can ever hold: give up
+     * tracking this one rather than grow (the OS reaps it when we
+     * exit).  Freeing still closes the master/pipe handles. */
+    nm_proc_os_free(os);
+}
+
+/* Finish off orphaned children without blocking: keep draining each one
+ * (an undrained PTY output queue is what keeps a session leader stuck in
+ * exit on macOS) and free whatever the OS now reports as exited. */
+static void orphan_sweep(void)
+{
+    if (g_n_orphans == 0)
+        return;
+    int k = 0;
+    for (int i = 0; i < g_n_orphans; i++) {
+        NmProcOs *os = g_orphans[i];
+        if (!os)
+            continue;
+        nm_proc_os_gather(os, NULL); /* drain + discard */
+        int code = -1;
+        if (nm_proc_os_reap(os, &code) != 0)
+            nm_proc_os_free(os);
+        else
+            g_orphans[k++] = os;
+    }
+    g_n_orphans = k;
+}
+
 void nm_proc_close(NmProc *p)
 {
     if (!p)
         return;
     registry_remove(p);
-    if (!p->reaped) {
+    orphan_sweep();
+    if (!p->reaped && p->os) {
         nm_proc_os_kill(p->os);
-        /* Blocking reap: the child is a zombie or was just killed, so
-         * waitpid/WaitForSingleObject returns at once (run_command's
-         * reap rationale). */
+        /* Never block on the reap.  On macOS a PTY session leader does
+         * not finish exiting until its master is drained (the kernel
+         * waits in ttywait for the output queue), so a blocking
+         * waitpid() deadlocks the loop against the child it is waiting
+         * for — and the child never becomes reapable.  Drain first,
+         * reap only if the OS says it is done, and defer otherwise. */
+        nm_proc_os_gather(p->os, NULL);
         int code = -1;
-        if (nm_proc_os_reap(p->os, &code, 1) == 1)
+        int r = nm_proc_os_reap(p->os, &code);
+        if (r == 1)
             p->exit_code = code;
+        else if (r == 0) {
+            /* Still exiting: hand it to the orphan list, which drains
+             * and reaps it later (never blocks). */
+            orphan_add(p->os);
+            p->os = NULL;
+        }
         p->reaped = 1;
         p->live = 0;
         p->handle = -1;
@@ -210,6 +273,7 @@ void nm_proc_close_all(void)
         if (g_jobs[i])
             nm_proc_close(g_jobs[i]);
     }
+    orphan_sweep();
 }
 
 int nm_proc_id(const NmProc *p) { return p ? p->id : -1; }

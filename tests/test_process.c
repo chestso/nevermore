@@ -267,6 +267,40 @@ static void test_close_is_prompt(void)
     ASSERT_EQ(nm_proc_count(), 0);
 }
 
+/* Closing must be prompt even when nobody ever read the child's output.
+ * On macOS a PTY session leader will not finish exiting until its master
+ * is drained (the kernel waits in ttywait for the terminal output
+ * queue), so a blocking reap here deadlocks the loop against the child
+ * it is waiting for — and that child never becomes reapable.  The close
+ * drains, reaps only if the OS agrees the child is gone, and otherwise
+ * defers; the later sweep must not block either. */
+static void test_close_of_undrained_job_is_prompt(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, &id, err,
+                              sizeof(err));
+    ASSERT_NOT_NULL(p);
+    tsleep(300); /* let it print and reach the long part... */
+#ifndef _WIN32
+    /* ...and leave it unread on the PTY master (the Windows reader
+     * thread has already fed the buffer — there is no master to drain,
+     * which is exactly why the macOS trap is POSIX-only). */
+    ASSERT_EQ(nm_proc_buffered(p), 0u);
+#endif
+
+    long t0 = now_ms();
+    nm_proc_close(p);
+    long elapsed_ms = now_ms() - t0;
+    ASSERT_TRUE(elapsed_ms < 3000);
+    ASSERT_EQ(nm_proc_count(), 0);
+
+    /* A deferred child left on the orphan list is finished off (or at
+     * least drained again) without blocking. */
+    nm_proc_reset();
+}
+
 static void test_bounded_buffer_reports_omission(void)
 {
     nm_proc_reset();
@@ -435,6 +469,7 @@ int main(void)
     RUN_TEST(test_write_stdin_and_eof);
     RUN_TEST(test_live_and_handle);
     RUN_TEST(test_close_is_prompt);
+    RUN_TEST(test_close_of_undrained_job_is_prompt);
     RUN_TEST(test_bounded_buffer_reports_omission);
     RUN_TEST(test_job_cap);
     RUN_TEST(test_registry_iteration);

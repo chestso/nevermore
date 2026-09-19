@@ -107,8 +107,11 @@ const char *nm_proc_take_output(NmProc *p);
 /* Bytes currently held in the job's buffer (for `/ps`). */
 size_t nm_proc_buffered(const NmProc *p);
 
-/* Kill the job's process group, reap it, unregister it, and free
- * it.  Safe on an already-exited job. */
+/* Kill the job's process group, unregister it, and free it.  Never
+ * blocks the loop waiting for the child: the reap is best-effort, and a
+ * child the OS still reports as exiting is finished off by a later
+ * close/teardown sweep instead of a blocking wait.  Safe on an
+ * already-exited job. */
 void nm_proc_close(NmProc *p);
 
 NmProc *nm_proc_find(int job_id);

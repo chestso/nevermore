@@ -257,14 +257,14 @@ void nm_proc_os_kill(NmProcOs *os)
         kill((pid_t)os->pid, SIGKILL);
 }
 
-int nm_proc_os_reap(NmProcOs *os, int *code, int block)
+int nm_proc_os_reap(NmProcOs *os, int *code)
 {
     if (!os || os->pid <= 0)
         return -1;
     int st = 0;
     pid_t r;
     do {
-        r = waitpid((pid_t)os->pid, &st, block ? 0 : WNOHANG);
+        r = waitpid((pid_t)os->pid, &st, WNOHANG);
     } while (r < 0 && errno == EINTR);
     if (r == (pid_t)os->pid) {
         /* Retire the master with the child: a reaped job must stop

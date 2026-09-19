@@ -411,13 +411,13 @@ void nm_proc_os_kill(NmProcOs *os)
     TerminateProcess(os->process, 1);
 }
 
-int nm_proc_os_reap(NmProcOs *os, int *code, int block)
+int nm_proc_os_reap(NmProcOs *os, int *code)
 {
     if (!os || !os->process)
         return -1;
-    DWORD w = WaitForSingleObject(os->process, block ? INFINITE : 0);
+    DWORD w = WaitForSingleObject(os->process, 0);
     if (w == WAIT_TIMEOUT)
-        return 0; /* still running */
+        return 0; /* still exiting */
     if (w != WAIT_OBJECT_0)
         return -1;
     DWORD ec = 0;
