@@ -219,7 +219,16 @@ PY
 fi
 
 fail=0
+# Compile logs land next to the objects (same /tmp scratch the -o uses).
+# The compiler writes to the FILE, never into a `| head`: head exits
+# after its line count and SIGPIPEs the compiler, so a TU that emits
+# more than the shown number of errors could be killed mid-write and
+# report fewer problems than it has (the same trap win-wine-check.sh
+# hit, where a warning-flooded TU "failed" with its error unprinted).
+logdir=/tmp
 for f in src/*.c; do
+	base=$(basename "$f" .c)
+	log="$logdir/nmm_$base.build.log"
 	case "$f" in
 	src/tls_openssl.c | src/tls_schannel.c | src/tls_mbedtls.c)
 		echo "SKIP $f (backend not selected on macOS CI)"
@@ -230,16 +239,19 @@ for f in src/*.c; do
 		continue
 		;;
 	src/tls_sectransport.c)
-		out=$(zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
+		zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
 			-include "$cache/nm-zig-shim.h" \
-			-c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
+			-c -o "$logdir/nmm_$base.o" "$f" \
 			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
-			-isysroot "$cache" -F "$cache" 2>&1 | grep -E "error:" | head -2)
+			-isysroot "$cache" -F "$cache" >"$log" 2>&1 || true
+		out=$(grep -E "error:" "$log" | head -2)
 		;;
 	*)
-		out=$(zig cc -target aarch64-macos \
-			-c -o "/tmp/nmm_$(basename "$f" .c).o" "$f" \
-			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" 2>&1 | grep -E "error:" | head -2)
+		zig cc -target aarch64-macos \
+			-c -o "$logdir/nmm_$base.o" "$f" \
+			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
+			>"$log" 2>&1 || true
+		out=$(grep -E "error:" "$log" | head -2)
 		;;
 	esac
 	if [ -n "$out" ]; then

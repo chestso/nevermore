@@ -45,12 +45,28 @@ run_build() {
 	# previous run's exe behind to "pass" under wine (that is how a
 	# src/process.h shadowing <process.h> hid a broken Windows build).
 	rm -f "$OUT/$name.exe"
+	# Capture the compiler's output to a file; never pipe it straight
+	# into `head`. head exits after its line count and SIGPIPEs the
+	# compiler, killing it before the link — so a TU whose build emits
+	# five warning lines "fails" with its real error line unprinted
+	# (transport_socket.c's -Wformat-truncation warnings did exactly
+	# that to test_tools).
+	buildlog="$OUT/$name.build.log"
 	# shellcheck disable=SC2086
-	$CC -o "$OUT/$name.exe" "$@" $COMMON 2>&1 | head -5
-	[ -f "$OUT/$name.exe" ] || {
+	if ! $CC -o "$OUT/$name.exe" "$@" $COMMON >"$buildlog" 2>&1; then
 		echo "BUILD FAIL: $name"
+		cat "$buildlog"
+		exit 1
+	fi
+	[ -f "$OUT/$name.exe" ] || {
+		# rc was 0 but no artifact: never let a stale/missing exe read
+		# as a pass under wine.
+		echo "BUILD FAIL: $name (no $name.exe produced)"
+		cat "$buildlog"
 		exit 1
 	}
+	# Warnings still surface (the first few), now safely off a file.
+	head -5 "$buildlog"
 }
 
 run_build test_sse tests/test_sse.c src/sse.c
