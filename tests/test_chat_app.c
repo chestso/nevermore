@@ -1329,10 +1329,17 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     ASSERT_TRUE(to >= 0 && to <= 250);
 
     /* Drive the loop the way boba does: wait on the fd source, tick at
-     * the reported interval. Bounded far under the inactivity default,
-     * so reaching ERROR here can ONLY be the connect budget. */
+     * the reported interval. Bounded by WALL CLOCK, not an iteration
+     * count: the source can read ready on every pass (a non-blocking
+     * connect's socket), so a pass can cost microseconds and a fixed
+     * iteration budget (400) could be spent in ~20 ms — before the
+     * 250 ms budget even elapsed — leaving the agent STREAMING. That
+     * was a ~40% flake on a fast box; the deadline drives the walk as
+     * soon as the wall clock passes it (the tick re-checks the clock,
+     * so a hot pass loop still fires it). No sleep floor needed: the
+     * point is that the deadline, not the pass count, ends the walk. */
     time_t t0 = time(NULL);
-    for (int i = 0; i < 400; i++) {
+    for (;;) {
         NmAgentState st = nm_chat_app_state(h->app);
         if (st == NM_AGENT_ERROR || st == NM_AGENT_DONE ||
             st == NM_AGENT_IDLE)
@@ -1348,6 +1355,10 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
         }
         nm_chat_app_tick(h->app);
         tui_runtime_flush(h->rt);
+        if (time(NULL) - t0 >= 5)
+            break; /* far under the 300 s inactivity default: a
+                    * STREAMING exit here is a missing drive, not a
+                    * slow box */
     }
     time_t dt = time(NULL) - t0;
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
