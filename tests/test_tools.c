@@ -1554,6 +1554,82 @@ static void test_exec_command_yields_job_id(void)
     nm_toolset_free(ts);
 }
 
+/* yield_time_ms arrives as a decimal STRING too (models emit both forms
+ * for numeric args, the same reason arg_int reads job_id either way), and
+ * the string form must open the same window — not be silently dropped to
+ * the tool's default (which reads as "the parameter has no effect").
+ * Under the 10 s default `sleep 2` would exit inside the window; a
+ * string "1" (clamped to 250 ms) must close it first. */
+static void test_exec_command_yield_string_form(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("sleep 2"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_string("1"));
+    char *args = args_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    nm_proc_close_all(); /* the job outlives the call: retire it here */
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A malformed yield_time_ms falls back to the default window (the arg is
+ * ignored, never reinterpreted as a zero/instant yield). */
+static void test_exec_command_yield_garbage_string_uses_default(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("sleep 1; echo ok"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_string("soon"));
+    char *args = args_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
+    ASSERT_NOT_NULL(strstr(r.output, "ok"));
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* write_stdin reads the same either-form value: a long string window
+ * waits for the child to finish instead of falling back to its 1 s
+ * default (the child stays asleep well past that default). */
+static void test_write_stdin_yield_string_form(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    /* Blocks on stdin, then takes 2 s to finish — longer than the 1 s
+     * write_stdin default, shorter than the requested window. */
+    char *args = exec_args("read x; sleep 2; echo done", 300);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    int sid = reported_job_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "input", nm_json_new_string("go\n"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_string("30000"));
+    args = args_dump(j);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    int live = (int)nm_proc_count();
+    nm_proc_close_all(); /* never leak a live job into the next test */
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
+    ASSERT_NOT_NULL(strstr(r.output, "done"));
+    ASSERT_EQ(live, 0); /* the reported exit retired the job itself */
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 /* Missing/empty cmd is an error result, not a spawn. */
 static void test_exec_command_missing_cmd(void)
 {
@@ -2098,11 +2174,14 @@ int main(void)
     RUN_TEST(test_exec_command_nonzero_exit);
     RUN_TEST(test_exec_command_is_a_pty_with_merged_streams);
     RUN_TEST(test_exec_command_yields_job_id);
+    RUN_TEST(test_exec_command_yield_string_form);
+    RUN_TEST(test_exec_command_yield_garbage_string_uses_default);
     RUN_TEST(test_exec_command_missing_cmd);
     RUN_TEST(test_exec_command_workdir);
     RUN_TEST(test_exec_command_output_clamped_head_and_tail);
     RUN_TEST(test_clamp_job_output_trims_and_marks_empty);
     RUN_TEST(test_write_stdin_round_trip);
+    RUN_TEST(test_write_stdin_yield_string_form);
     RUN_TEST(test_write_stdin_partial_line_and_eof);
     RUN_TEST(test_write_stdin_interior_marker_rejected);
     RUN_TEST(test_write_stdin_unknown_job);

@@ -106,14 +106,15 @@ static int arg_int(NmJson *args, const char *key, long *out)
     return -1;
 }
 
-/* The yield window: the caller's yield_time_ms clamped to Codex's
- * range, else the tool's default. */
+/* The yield window: the caller's yield_time_ms — a JSON number or a
+ * decimal string (models emit both for numeric args, the same either-form
+ * read arg_int gives job_id) — clamped to Codex's range, else the tool's
+ * default. A malformed value is ignored, never read as an instant yield. */
 static int resolve_yield_ms(NmJson *args, int dflt)
 {
-    const NmJson *v = nm_json_get(args, "yield_time_ms");
-    if (nm_json_type(v) != NM_JSON_NUMBER)
+    long ms = 0;
+    if (arg_int(args, "yield_time_ms", &ms) != 0)
         return dflt;
-    long ms = (long)nm_json_num(v);
     if (ms < NM_EXEC_YIELD_MIN_MS)
         ms = NM_EXEC_YIELD_MIN_MS;
     if (ms > NM_EXEC_YIELD_MAX_MS)
