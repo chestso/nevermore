@@ -71,6 +71,26 @@ static const char *openssl_call_errstr(SSL *ssl, int ret)
     }
 }
 
+/* True when an SSL_* call merely needs the fd to become ready (a
+ * non-blocking record layer with no plaintext pending). The handshake
+ * loop retries these on a blocking fd; the record layer maps them to
+ * NM_READ_WOULD_BLOCK so the event loop can re-drive on readiness —
+ * this is what makes TLS streaming event-driven like a plain socket
+ * (the old blocking SSL_read froze the whole TUI for the length of a
+ * response, so the spinner stalled and Ctrl+C wasn't honored until
+ * the stream ended). Drain any error-queue entry first: OpenSSL
+ * pushes the WANT_READ/WANT_WRITE reason as a queue entry too, and a
+ * stale one would otherwise be mistaken for a real protocol failure. */
+static int openssl_is_would_block(SSL *ssl, int ret)
+{
+    int why = SSL_get_error(ssl, ret);
+    if (why == SSL_ERROR_WANT_READ || why == SSL_ERROR_WANT_WRITE) {
+        ERR_clear_error();
+        return 1;
+    }
+    return 0;
+}
+
 static void *openssl_handshake(int fd, const char *host, const char **err)
 {
     SSL *ssl = SSL_new(openssl_ctx());
@@ -102,6 +122,12 @@ static long openssl_write(void *ctx, const char *buf, size_t len,
     SSL *ssl = ctx;
     int n = SSL_write(ssl, buf, (int)len);
     if (n <= 0) {
+        /* Would-block on a non-blocking fd is a normal "not ready",
+         * not a failure: -1 with no error string tells the record
+         * layer to step again on writability (nm_conn_write's
+         * convention). */
+        if (openssl_is_would_block(ssl, n))
+            return -1;
         if (err)
             *err = openssl_call_errstr(ssl, n);
         return -1;
@@ -119,6 +145,10 @@ static long openssl_read(void *ctx, char *buf, size_t len, const char **err)
             if (err)
                 *err = NULL;
             return 0; /* clean EOF */
+        }
+        if (why == SSL_ERROR_WANT_READ || why == SSL_ERROR_WANT_WRITE) {
+            ERR_clear_error();
+            return NM_READ_WOULD_BLOCK; /* event loop re-drives on ready */
         }
         if (err)
             *err = openssl_call_errstr(ssl, n);

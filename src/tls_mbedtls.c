@@ -145,7 +145,8 @@ static void *mbedtls_handshake(int fd, const char *host, const char **err)
     mbedtls_ssl_set_bio(&c->ssl, c, mb_send, mb_recv, NULL);
 
     while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+            ret == MBEDTLS_ERR_SSL_WANT_WRITE)
             continue;
         if (err)
             *err = mb_errstr(ret);
@@ -165,8 +166,12 @@ static long mbedtls_write(void *ctx, const char *buf, size_t len,
     while (off < len) {
         int ret = mbedtls_ssl_write(&c->ssl, (const unsigned char *)buf + off,
                                     len - off);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
-            continue;
+        /* Not ready on a non-blocking fd: the send path steps again on
+         * writability (-1 with *err NULL is the record layer's
+         * would-block convention). */
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+            ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+            return -1;
         if (ret <= 0) {
             if (err)
                 *err = mb_errstr(ret);
@@ -184,8 +189,9 @@ static long mbedtls_read(void *ctx, char *buf, size_t len, const char **err)
         *err = NULL;
     for (;;) {
         int ret = mbedtls_ssl_read(&c->ssl, (unsigned char *)buf, len);
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ || ret == MBEDTLS_ERR_SSL_WANT_WRITE)
-            continue;
+        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+            ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+            return NM_READ_WOULD_BLOCK; /* event loop re-drives on ready */
         if (ret == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
             return 0;
         if (ret < 0) {

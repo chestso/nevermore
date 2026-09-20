@@ -180,8 +180,9 @@ NmConnection *nm_connect_async(const char *host, int port,
  *
  *   CONNECTING: finish connect() when writable — writable means
  *              completed (SO_ERROR distinguishes failure), then
- *              TLS handshake (blocking, sub-second — the narrowed
- *              deferral), phase -> SENDING
+ *              TLS handshake (blocking on a blocking fd; on a socket
+ *              the event loop owns non-blocking it runs through the
+ *              backend's own readiness waits), phase -> SENDING
  *   SENDING:   drain req_buf into the socket; EAGAIN leaves the
  *              remainder for the next step, phase -> READING when
  *              fully sent
@@ -263,14 +264,14 @@ const NmResponse *nm_response(NmConnection *conn);
  * connection, nothing is dropped between calls. */
 long nm_read_body(NmConnection *conn, char *buf, size_t buf_len);
 
-#define NM_READ_WOULD_BLOCK (-2) /* socket would block: call again later */
+#define NM_READ_WOULD_BLOCK  (-2) /* socket would block: call again later */
+#define NM_WRITE_WOULD_BLOCK (-3) /* socket send would block: later */
 
 /* Flip the connection's socket to non-blocking for the body-streaming
  * phase. Call AFTER nm_request() (the request send + response-head
  * wait are the blocking phase; the body stream is the event-driven
- * one). Only plain sockets: TLS backends block today (documented
- * phase-4 deferral) — returns NM_TRANSPORT_ERR_TLS for TLS
- * connections. */
+ * one). Works for plain AND TLS connections: the TLS record layer
+ * reports would-block so the body stream is event-driven there too. */
 NmTransportStatus nm_connection_set_nonblocking(NmConnection *conn);
 
 /* The OS socket fd, for an event loop's poll set (boba's
@@ -288,8 +289,12 @@ typedef struct NmTlsBackend
     /* Perform the TLS handshake over an already-connected TCP socket.
      * Returns an opaque context, or NULL on failure. */
     void *(*handshake)(int fd, const char *host, const char **err);
-    /* Returns bytes written, or -1 on failure. A non-blocking fd is
-     * waited for, not reported: writes keep the blocking shape. */
+    /* Returns bytes written, or -1 on failure or would-block. A
+     * would-block write (a non-blocking fd whose send window is full)
+     * is reported as -1 with *err left NULL, so the caller steps again
+     * on writability; a real failure sets *err. The blocking send path
+     * (request drain before the fd is flipped) never sees would-block,
+     * so -1 is unambiguously fatal there. */
     long (*write)(void *ctx, const char *buf, size_t len, const char **err);
     /* Returns bytes read, 0 = EOF, -1 = error, or NM_READ_WOULD_BLOCK
      * when the socket is non-blocking and nothing is pending. The

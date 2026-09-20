@@ -345,28 +345,27 @@ NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
 {
     if (!conn || !conn->tls || conn->tls_ctx)
         return conn ? NM_TRANSPORT_OK : NM_TRANSPORT_ERR_SOCKET;
-    /* The handshake blocks (the documented sub-second deferral), so a
-     * blocking fd is its natural home: an async connection's socket
-     * was flipped non-blocking for connect(), and a non-blocking fd
-     * makes the blocking backends fail mid-handshake (they don't loop
-     * on WANT_READ/WANT_WRITE).
-     *
-     * But the fd belongs to the event loop, and on Windows a
-     * WSAEventSelect-associated socket REFUSES the flip: for as long
-     * as the association stands, ioctlsocket(FIONBIO, 0) answers
-     * WSAEINVAL (10022, proved with a minimal repro). The association
-     * is boba's subscription — the thing that keeps the TUI fed — so
-     * dropping it is not ours to do. Hence a BEST-EFFORT flip: a
-     * socket that stays non-blocking is served by the backends' own
-     * readiness waits (tls_schannel.c waits for the handshake, and
-     * reports would-block from the record layer so the loop stays in
-     * charge of when a read happens). */
+    /* The handshake itself wants a blocking fd (the backends run
+     * blocking handshakes: SSL_connect/mbedtls loop on readiness
+     * internally, Schannel waits itself). But the OWNER's mode must
+     * survive it: the async stream path (openai_client chat_begin)
+     * already flipped this fd non-blocking for the body stream, and
+     * the record layer only reports would-block on a non-blocking
+     * fd — without the restore, every SSL_read after the handshake
+     * blocks the event loop for the whole response (dead spinner,
+     * Ctrl+C postponed to the stream's end). Best-effort on Windows,
+     * where a WSAEventSelect-associated socket refuses flips but is
+     * kept non-blocking by the association itself. */
+    int owner_nonblocking = conn->nonblocking;
     if (conn->nonblocking && nm_socket_set_blocking(conn->fd) == 0)
         conn->nonblocking = 0;
     const char *err = NULL;
     conn->tls_ctx = conn->tls->handshake(conn->fd, host, &err);
-    if (conn->tls_ctx)
+    if (conn->tls_ctx) {
+        if (owner_nonblocking)
+            nm_socket_set_nonblocking(conn); /* restore; sets the flag */
         return NM_TRANSPORT_OK;
+    }
     conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
               "TLS handshake with %s failed: %s", host,
               err ? err : "unknown TLS error");

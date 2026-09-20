@@ -791,13 +791,12 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         free(st);
         return NULL;
     }
-    /* Async sockets are already non-blocking from connect_async; TLS
-     * connections still refuse the flip — the documented narrowed
-     * deferral; their reads block inside chat_step, which the
-     * blocking pump and the TUI both tolerate sub-second. */
-    if (nm_connection_set_nonblocking(conn) == NM_TRANSPORT_OK) {
-        /* plain socket: flipped, nothing more to do */
-    } else if (mode == NM_TRANSPORT_PLAIN) {
+    /* The body stream is event-driven for plain AND TLS: the fd is
+     * flipped here and the TLS record layer reports would-block, so
+     * reads return to the event loop instead of blocking inside
+     * chat_step (the old TLS deferral froze the loop for the whole
+     * response: dead spinner, Ctrl+C postponed to the end). */
+    if (nm_connection_set_nonblocking(conn) != NM_TRANSPORT_OK) {
         if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
             snprintf(err->message, sizeof(err->message),

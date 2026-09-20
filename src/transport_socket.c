@@ -803,19 +803,24 @@ NmTransportStatus nm_socket_step_send(NmConnection *conn)
             conn_tap_error(conn);
             return NM_TRANSPORT_ERR_SEND;
         }
-        /* n < 0: EAGAIN/EWOULDBLOCK (non-blocking drain) vs real
-         * error. TLS writes report -1 without errno — treat any
-         * -1 on a TLS connection as a hard error (the backends block
-         * today, so -1 is never EAGAIN there). */
+        /* n < 0: a would-block send (the fd is non-blocking and the
+         * send window is full) means step again on writability. Plain
+         * sockets report it via errno; TLS backends report it as the
+         * NM_WRITE_WOULD_BLOCK sentinel (errno does not reflect the
+         * TLS layer's buffer state). Anything else is a hard error. */
+        if (n == NM_WRITE_WOULD_BLOCK)
+            return NM_TRANSPORT_PENDING;
+        if (!conn->tls_ctx) {
 #ifdef _WIN32
-        if (!conn->tls_ctx && conn->nonblocking &&
-            WSAGetLastError() == WSAEWOULDBLOCK)
-            return NM_TRANSPORT_PENDING;
+            if (conn->nonblocking &&
+                WSAGetLastError() == WSAEWOULDBLOCK)
+                return NM_TRANSPORT_PENDING;
 #else
-        if (!conn->tls_ctx && conn->nonblocking &&
-            (errno == EAGAIN || errno == EWOULDBLOCK))
-            return NM_TRANSPORT_PENDING;
+            if (conn->nonblocking &&
+                (errno == EAGAIN || errno == EWOULDBLOCK))
+                return NM_TRANSPORT_PENDING;
 #endif
+        }
         conn->err = NM_TRANSPORT_ERR_SEND;
         conn_set_err_detail(conn, "send: %s", nm_sock_errstr());
         conn_tap_error(conn);
@@ -889,6 +894,9 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
         long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
                               sizeof(conn->scratch) - conn->scratch_len);
         if (n <= 0) {
+            /* n == 0 EOF; n < 0 real error; NM_READ_WOULD_BLOCK only
+             * on an already-non-blocking fd (async connect path) —
+             * treat as a stalled/closed peer, never a busy-loop. */
             conn->err = NM_TRANSPORT_ERR_CLOSED;
             conn_set_err_detail(conn, "peer closed before the response "
                                       "head completed");
@@ -928,9 +936,11 @@ NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn)
 {
     if (!conn || conn->fd < 0)
         return NM_TRANSPORT_ERR_SOCKET;
-    if (conn->tls_ctx)
-        return NM_TRANSPORT_ERR_TLS; /* TLS backends block today (phase-4
-                                        deferral, documented in transport.h) */
+    /* TLS too: the backends report would-block out of their record
+     * layer, so the body stream is event-driven for TLS exactly as
+     * for a plain socket — the live spinner and Ctrl+C are honored
+     * between SSE events instead of hanging the loop inside a
+     * blocking SSL_read. */
 #ifdef _WIN32
     u_long mode = 1;
     if (ioctlsocket(conn->fd, FIONBIO, &mode) != 0)
@@ -1362,8 +1372,17 @@ void nm_socket_shutdown(int fd)
 
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len)
 {
-    if (conn->tls_ctx)
-        return conn->tls->write(conn->tls_ctx, buf, len, NULL);
+    if (conn->tls_ctx) {
+        const char *err = NULL;
+        long n = conn->tls->write(conn->tls_ctx, buf, len, &err);
+        /* A TLS write that fails without an error string is a
+         * would-block (non-blocking fd, full send window): hand the
+         * caller a distinct sentinel so it can wait for writability
+         * instead of treating it as fatal. */
+        if (n < 0 && !err)
+            return NM_WRITE_WOULD_BLOCK;
+        return n;
+    }
     if (conn->fd < 0)
         return -1;
     long n;

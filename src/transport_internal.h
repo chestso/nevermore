@@ -88,7 +88,12 @@ int nm_socket_connect_walk(NmConnection *conn);
  * after it returns. */
 void nm_socket_wait_writable_budget(NmConnection *conn, int ms);
 
-/* Raw I/O over whichever channel the connection uses (plain or TLS). */
+/* Raw I/O over whichever channel the connection uses (plain or TLS).
+ * nm_conn_read returns bytes, 0 = EOF, -1 = error, or
+ * NM_READ_WOULD_BLOCK when a non-blocking socket has nothing pending;
+ * nm_conn_write returns bytes, -1 = error, or NM_WRITE_WOULD_BLOCK
+ * (the write backends' sentinel: a full send window on a non-blocking
+ * fd, distinct from a real failure). */
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len);
 long nm_conn_read(NmConnection *conn, char *buf, size_t len);
 

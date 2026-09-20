@@ -46,16 +46,19 @@ typedef struct StCtx
     int fd;
 } StCtx;
 
-/* Secure Transport IO callbacks: bridge the socket. Blocking reads —
- * phase 4 lifts the fd nonblocking behind the same seam. */
+/* Secure Transport IO callbacks: bridge the socket. The fd may be
+ * non-blocking (an async stream flips it after the request), so a
+ * would-block read/write callback returns errSSLWouldBlock — Secure
+ * Transport surfaces that as errSSLWouldBlock out of SSLRead/SSLWrite
+ * and the record layer maps it to the transport's would-block
+ * sentinel. */
 static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
 {
-    StCtx *c = (StCtx *)conn;
-    (void)c;
-    ssize_t n = read(*(int *)conn, data, *len);
+    ssize_t n = read(((StCtx *)conn)->fd, data, *len);
     if (n < 0) {
         *len = 0;
-        return errno == EAGAIN ? errSSLWouldBlock : errSSLClosedAbort;
+        return (errno == EAGAIN || errno == EWOULDBLOCK) ? errSSLWouldBlock
+                                                         : errSSLClosedAbort;
     }
     if (n == 0) {
         *len = 0;
@@ -68,12 +71,11 @@ static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
 static OSStatus st_write(SSLConnectionRef conn, const void *data,
                          size_t *len)
 {
-    StCtx *c = (StCtx *)conn;
-    (void)c;
-    ssize_t n = write(*(int *)conn, data, *len);
+    ssize_t n = write(((StCtx *)conn)->fd, data, *len);
     if (n < 0) {
         *len = 0;
-        return errno == EAGAIN ? errSSLWouldBlock : errSSLClosedAbort;
+        return (errno == EAGAIN || errno == EWOULDBLOCK) ? errSSLWouldBlock
+                                                         : errSSLClosedAbort;
     }
     *len = (size_t)n;
     return noErr;
@@ -142,6 +144,8 @@ static long sectransport_write(void *ctx, const char *buf, size_t len,
     while (done < len) {
         size_t chunk = len - done;
         OSStatus st = SSLWrite(c->ssl, buf + done, chunk, &chunk);
+        if (st == errSSLWouldBlock)
+            return done > 0 ? (long)done : -1; /* step again on writable */
         if (st != noErr) {
             if (err)
                 *err = "SSLWrite failed";
@@ -158,21 +162,17 @@ static long sectransport_read(void *ctx, char *buf, size_t len,
     StCtx *c = ctx;
     if (err)
         *err = NULL;
-    size_t done = 0;
-    while (done == 0) {
-        size_t got = len - done;
-        OSStatus st = SSLRead(c->ssl, buf + done, got, &got);
-        if (st == noErr) {
-            done += got;
-            break;
-        }
-        if (st == errSSLClosedGraceful || st == errSSLClosedNoNotify)
-            return done > 0 ? (long)done : 0;
-        if (err)
-            *err = "SSLRead failed";
-        return -1;
-    }
-    return (long)done;
+    size_t got = len;
+    OSStatus st = SSLRead(c->ssl, buf, got, &got);
+    if (st == errSSLWouldBlock)
+        return got > 0 ? (long)got : NM_READ_WOULD_BLOCK;
+    if (st == noErr)
+        return (long)got;
+    if (st == errSSLClosedGraceful || st == errSSLClosedNoNotify)
+        return got > 0 ? (long)got : 0;
+    if (err)
+        *err = "SSLRead failed";
+    return -1;
 }
 
 static void sectransport_close(void *ctx)
