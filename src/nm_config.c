@@ -37,7 +37,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 5
+#define NM_CFG_NKEYS 7
 
 typedef struct
 {
@@ -81,6 +81,8 @@ static void init_keys(NmConfig *c)
         { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL" },
         { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS" },
         { NM_CFG_KEY_REASONING, "NEVERMORE_ECHO_REASONING" },
+        { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS" },
+        { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP" },
         { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL" },
     };
     for (int i = 0; i < NM_CFG_NKEYS; i++) {
@@ -121,7 +123,10 @@ int nm_config_valid_provider(const char *name)
     return 1;
 }
 
-int nm_config_valid_rounds(const char *value)
+/* Plain positive decimal, 0 refused: the shape `rounds` and
+ * `connect_timeout` share (a zero budget would fail every connect; a
+ * zero tool-round cap is meaningless). Clamped by nm_config_get_int. */
+int nm_config_valid_positive_int(const char *value)
 {
     if (!value || !*value)
         return 0;
@@ -132,6 +137,13 @@ int nm_config_valid_rounds(const char *value)
         v = v * 10 + (*p - '0');
     }
     return v > 0;
+}
+
+/* The `rounds` spelling of the shared positive-int shape (kept as its
+ * own name because the key vocabulary reads better for it). */
+int nm_config_valid_rounds(const char *value)
+{
+    return nm_config_valid_positive_int(value);
 }
 
 int nm_config_valid_reasoning(const char *value)
@@ -162,11 +174,41 @@ static const char *normalize_bool(const char *value)
                : "off";
 }
 
+/* Validate + normalize ONE key's raw value into `out` (capped at
+ * NM_CONFIG_VAL): 1 = accepted, 0 = rejected. The single place the
+ * file layer, the environment layer and the shadow write-back all
+ * agree about what a key accepts (before this, three if/else chains
+ * had to be kept in step by hand). */
+static int normalize_value(const char *key, const char *raw, char *out,
+                           size_t cap)
+{
+    if (strcmp(key, NM_CFG_KEY_PROVIDER) == 0) {
+        if (!nm_config_valid_provider(raw))
+            return 0;
+    } else if (strcmp(key, NM_CFG_KEY_ROUNDS) == 0 ||
+               strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0) {
+        if (!nm_config_valid_positive_int(raw))
+            return 0;
+    } else if (strcmp(key, NM_CFG_KEY_REASONING) == 0 ||
+               strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0) {
+        if (!nm_config_valid_reasoning(raw))
+            return 0;
+        snprintf(out, cap, "%s", normalize_bool(raw));
+        return 1;
+    }
+    /* model: any non-empty id (a local daemon may serve private ids
+     * the static catalog does not know); searxng: any non-empty URL
+     * (an endpoint). */
+    snprintf(out, cap, "%s", raw);
+    return 1;
+}
+
 const char *nm_config_key_at(size_t i)
 {
     static const char *const names[NM_CFG_NKEYS] = {
         NM_CFG_KEY_PROVIDER, NM_CFG_KEY_MODEL, NM_CFG_KEY_ROUNDS,
-        NM_CFG_KEY_REASONING, NM_CFG_KEY_SEARXNG
+        NM_CFG_KEY_REASONING, NM_CFG_KEY_CONNECT_TIMEOUT,
+        NM_CFG_KEY_FAMILY_SKIP, NM_CFG_KEY_SEARXNG
     };
     return i < NM_CFG_NKEYS ? names[i] : NULL;
 }
@@ -175,7 +217,8 @@ const char *nm_config_env_name(const char *key)
 {
     static const char *const envs[NM_CFG_NKEYS] = {
         "NEVERMORE_PROVIDER", "NEVERMORE_MODEL", "NEVERMORE_MAX_ROUNDS",
-        "NEVERMORE_ECHO_REASONING", "NEVERMORE_SEARXNG_URL"
+        "NEVERMORE_ECHO_REASONING", "NEVERMORE_CONNECT_TIMEOUT_MS",
+        "NEVERMORE_CONNECT_FAMILY_SKIP", "NEVERMORE_SEARXNG_URL"
     };
     for (size_t i = 0; i < NM_CFG_NKEYS; i++) {
         if (key && strcmp(key, nm_config_key_at(i)) == 0)
@@ -385,32 +428,20 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
         if (!k) {
             fprintf(stderr,
                     "nevermore: %s: unknown key '%s' (keys: provider, "
-                    "model, rounds, reasoning, searxng): ignored\n",
+                    "model, rounds, reasoning, connect_timeout, "
+                    "family_skip, searxng): ignored\n",
                     which, key);
             continue;
         }
-        int ok;
-        if (strcmp(k->name, NM_CFG_KEY_PROVIDER) == 0)
-            ok = nm_config_valid_provider(val);
-        else if (strcmp(k->name, NM_CFG_KEY_ROUNDS) == 0)
-            ok = nm_config_valid_rounds(val);
-        else if (strcmp(k->name, NM_CFG_KEY_REASONING) == 0)
-            ok = nm_config_valid_reasoning(val);
-        else
-            ok = 1; /* model: any non-empty id (a local daemon may serve
-                     * private ids the static catalog does not know);
-                     * searxng: any non-empty URL (an endpoint) */
-        if (!ok) {
+        char norm[NM_CONFIG_VAL];
+        if (!normalize_value(k->name, val, norm, sizeof(norm))) {
             fprintf(stderr, "nevermore: %s: %s: invalid value '%s': "
                             "ignored\n",
                     which, k->name, val);
             continue;
         }
         char *slot = into_shadow ? k->shadow : k->user;
-        if (strcmp(k->name, NM_CFG_KEY_REASONING) == 0)
-            snprintf(slot, NM_CONFIG_VAL, "%s", normalize_bool(val));
-        else
-            snprintf(slot, NM_CONFIG_VAL, "%s", val);
+        snprintf(slot, NM_CONFIG_VAL, "%s", norm);
         count++;
     }
     return count;
@@ -552,23 +583,12 @@ void nm_config_set_env(NmConfig *c)
         const char *v = getenv(k->env);
         if (!v || !*v)
             continue;
-        /* Validated exactly like the file layer: a typo can never
-         * silently enable, disable or repoint anything. */
-        if (strcmp(k->name, NM_CFG_KEY_PROVIDER) == 0) {
-            if (!nm_config_valid_provider(v))
-                continue;
-            snprintf(k->env_v, NM_CONFIG_VAL, "%s", v);
-        } else if (strcmp(k->name, NM_CFG_KEY_ROUNDS) == 0) {
-            if (!nm_config_valid_rounds(v))
-                continue;
-            snprintf(k->env_v, NM_CONFIG_VAL, "%s", v);
-        } else if (strcmp(k->name, NM_CFG_KEY_REASONING) == 0) {
-            if (!nm_config_valid_reasoning(v))
-                continue;
-            snprintf(k->env_v, NM_CONFIG_VAL, "%s", normalize_bool(v));
-        } else {
-            snprintf(k->env_v, NM_CONFIG_VAL, "%s", v);
-        }
+        /* Validated + normalized exactly like the file layer: a typo
+         * can never silently enable, disable or repoint anything. */
+        char norm[NM_CONFIG_VAL];
+        if (!normalize_value(k->name, v, norm, sizeof(norm)))
+            continue;
+        snprintf(k->env_v, NM_CONFIG_VAL, "%s", norm);
     }
 }
 
@@ -713,21 +733,8 @@ int nm_config_shadow_set(NmConfig *c, const char *key, const char *value)
         return nm_config_shadow_reset(c, key);
 
     char norm[NM_CONFIG_VAL];
-    if (strcmp(k->name, NM_CFG_KEY_REASONING) == 0) {
-        if (!nm_config_valid_reasoning(value))
-            return -1;
-        snprintf(norm, sizeof(norm), "%s", normalize_bool(value));
-    } else if (strcmp(k->name, NM_CFG_KEY_ROUNDS) == 0) {
-        if (!nm_config_valid_rounds(value))
-            return -1;
-        snprintf(norm, sizeof(norm), "%s", value);
-    } else if (strcmp(k->name, NM_CFG_KEY_PROVIDER) == 0) {
-        if (!nm_config_valid_provider(value))
-            return -1;
-        snprintf(norm, sizeof(norm), "%s", value);
-    } else {
-        snprintf(norm, sizeof(norm), "%s", value);
-    }
+    if (!normalize_value(k->name, value, norm, sizeof(norm)))
+        return -1;
 
     if (!k->shadow[0])
         c->shadow_count++;

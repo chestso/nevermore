@@ -44,6 +44,7 @@ NmTransportStatus nm_socket_request_send(NmConnection *conn,
                                          size_t body_len);
 NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn);
 int nm_socket_fd(NmConnection *conn);
+int nm_socket_wait_ms(const NmConnection *conn);
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len);
 void nm_socket_shutdown(int fd);
 
@@ -61,6 +62,13 @@ NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
 int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port);
 void nm_socket_arm_attempt(NmConnection *conn, int idx);
 double nm_socket_now(void);
+
+/* Publish/recover the family (NM_FAMILY_*) of attempt `idx` in the
+ * last walk: the notice tap carries only the index, and the agent
+ * names the family through nm_connection_attempt_family. Defined in
+ * transport.c (the pure-naming TU), read by transport_socket.c as it
+ * fills the address list. */
+void nm_connection_set_attempt_family(int idx, int family);
 
 /* Blocking connect with the bounded address walk: resolve + arm the
  * first attempt, then pump nm_socket_connect_walk (the same walk the

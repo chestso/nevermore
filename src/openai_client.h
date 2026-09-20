@@ -92,8 +92,12 @@ int nm_openai_stream_fd(NmChatStream *h);
  * nm_connection_interest (NM_INTEREST_*); the app forwards it into
  * boba's fill_io_sources array. */
 unsigned nm_openai_stream_interest(NmChatStream *h);
-void nm_openai_chat_end(NmChatStream *h);
 
+/* The stream's deadline seam: milliseconds until it wants a step with
+ * no fd ready (a connect attempt's per-address budget), or -1 when it
+ * is purely interest-driven. See NmProvider.chat_stream_wait_ms. */
+int nm_openai_stream_wait_ms(NmChatStream *h);
+void nm_openai_chat_end(NmChatStream *h);
 /* Split "http(s)://host[:port]" into host/port/mode (shared with the
  * providers' catalog fetches). Writes into caller buffers. 0 on
  * success. */

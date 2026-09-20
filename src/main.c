@@ -251,6 +251,13 @@ static int run_interactive(const char *provider_name, const char *model,
     nm_chat_app_set_timeout_ms(app, resolved_timeout_ms());
     nm_chat_app_set_echo_reasoning(
         app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
+    /* Connect-walk knobs: the transport reads no config, so resolve
+     * them here and push (the same "apply at construction" rule as the
+     * rest of the resolved settings). */
+    nm_chat_app_set_connect_timeout_ms(
+        app, nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
+    nm_chat_app_set_family_skip(
+        app, nm_config_get_bool(cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
     /* Base URL override only: the API key is left NULL so the app
      * resolves it per provider (env then ~/.authinfo) — a /provider
      * switch must resolve the new provider's own key, never reuse the
@@ -436,6 +443,12 @@ int main(int argc, char *argv[])
         nm_agent_set_timeout_ms(agent, resolved_timeout_ms());
         nm_agent_set_echo_reasoning(
             agent, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
+        /* One-shot (ask) mode: the walk's budget comes from config too —
+         * no app here to own the setting, so push it straight onto the
+         * transport. `family_skip` is deliberately NOT pushed: the
+         * transport's slot stays 0, which is exactly "never latch". */
+        nm_connection_set_connect_timeout_ms(
+            nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);

@@ -229,6 +229,7 @@ const struct NmProvider nm_openai_provider = {
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
+    nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     openai_models,
     openai_needs_auth,

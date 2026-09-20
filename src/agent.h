@@ -85,10 +85,13 @@ int nm_agent_timeout_ms(const NmAgent *a);
  * or -1 when it is purely readiness-driven (idle, or a live stream/tool
  * with no pending deadline). The runtime's tick folds this into its wait
  * timeout so a silent stream or a tool-side deadline still gets stepped:
- *   - a live async tool's deadline_ms (its own clock), and
+ *   - a live async tool's deadline_ms (its own clock),
+ *   - the open stream's chat_stream_wait_ms (a connect attempt's
+ *     per-address budget — a black-holed address never signals at
+ *     all, so without this the walk would never advance), and
  *   - the remaining stream-inactivity budget.
- * nm_agent_step enforces both when it is called; this only tells the
- * event loop WHEN to call it. Never a poll loop: the value is the
+ * nm_agent_step enforces all three when it is called; this only tells
+ * the event loop WHEN to call it. Never a poll loop: the value is the
  * single nearest deadline, not a fixed tick. */
 int nm_agent_next_timeout_ms(const NmAgent *a);
 

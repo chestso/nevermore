@@ -167,6 +167,13 @@ void nm_wire_tap_connect_retry(const struct NmConnection *conn,
  * it. 0 means "use the default" so a zeroed BSS reads correctly. */
 static int g_connect_ms;
 
+/* The last walk's per-attempt families (NM_FAMILY_*), so the notice
+ * tap — which only carries the attempt index — can be translated to
+ * a family name for the UI. Process-global and overwritten per
+ * connect: it describes the walk that is currently running (or the
+ * last one that ran), never history. */
+static int g_attempt_families[NM_CONNECT_MAX_ADDRS];
+
 void nm_connection_set_connect_timeout_ms(int ms)
 {
     g_connect_ms = ms < 0 ? 0 : ms;
@@ -175,6 +182,38 @@ void nm_connection_set_connect_timeout_ms(int ms)
 int nm_connection_connect_timeout_ms(void)
 {
     return g_connect_ms > 0 ? g_connect_ms : NM_CONNECT_ATTEMPT_MS;
+}
+
+/* Record one attempt's family for the notice translation (called by
+ * the walk as each address is stored). Out-of-range indexes are
+ * ignored — a walk longer than the cap does not exist. */
+void nm_connection_set_attempt_family(int idx, int family)
+{
+    if (idx >= 0 && idx < NM_CONNECT_MAX_ADDRS)
+        g_attempt_families[idx] = family;
+}
+
+int nm_connection_attempt_family(int idx)
+{
+    if (idx >= 0 && idx < NM_CONNECT_MAX_ADDRS)
+        return g_attempt_families[idx];
+    return 0;
+}
+
+/* Address-family vocabulary: the ONE spelling per family (see
+ * transport.h). Pure naming, so it lives in this TU (which links no
+ * socket code) — the walk's diagnostics, the agent's notice line and
+ * the app's skip notice all read it from here. */
+const char *nm_family_name(int family)
+{
+    if ((family & (NM_FAMILY_V4 | NM_FAMILY_V6)) ==
+        (NM_FAMILY_V4 | NM_FAMILY_V6))
+        return "IPv4+IPv6";
+    if (family & NM_FAMILY_V6)
+        return "IPv6";
+    if (family & NM_FAMILY_V4)
+        return "IPv4";
+    return "none";
 }
 
 /* Last connect failure detail (process-global, borrow-until-next-
@@ -394,6 +433,10 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
             char detail[NM_ERR_DETAIL_MAX];
             snprintf(detail, sizeof(detail), "%s",
                      conn->err_detail[0] ? conn->err_detail : "connect failed");
+            /* The walk is over: leave CONNECTING, or the deadline seam
+             * (nm_connection_wait_ms) keeps reporting "budget spent" and
+             * a caller that keeps stepping would never see the end. */
+            conn->phase = NM_CONN_IDLE;
             conn_fail(conn, "connect", NM_TRANSPORT_ERR_SOCKET, "%s", detail);
             return NM_TRANSPORT_ERR_SOCKET;
         }
@@ -500,4 +543,9 @@ NmTransportStatus nm_connection_set_nonblocking(NmConnection *conn)
 int nm_connection_fd(NmConnection *conn)
 {
     return nm_socket_fd(conn);
+}
+
+int nm_connection_wait_ms(const NmConnection *conn)
+{
+    return nm_socket_wait_ms(conn);
 }

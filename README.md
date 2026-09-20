@@ -81,6 +81,7 @@ Settings resolve once, lowest to highest:
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`,
+   `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
    `NEVERMORE_SEARXNG_URL`
 5. **command line** — `-p` / `-m`
 
@@ -90,21 +91,23 @@ you last typed in a chat. When a change is inert for that reason, the
 chat says so.
 
 A change made in the chat (`/model`, `/provider`, `/rounds`,
-`/reasoning`) never edits your config file. It is written to the shadow
-file, which holds only the keys you changed at the prompt — so `rm
-~/.local/state/nevermore/config` (or `/config reset all`) puts the user
-config back in charge, with nothing else to unwind.
+`/reasoning`, `/connect`) never edits your config file. It is written
+to the shadow file, which holds only the keys you changed at the
+prompt — so `rm ~/.local/state/nevermore/config` (or `/config reset
+all`) puts the user config back in charge, with nothing else to unwind.
 
 ```
 # ~/.config/nevermore/config — '#' comment, blank lines ignored
-provider  = openai
-model     = glm-5.3
-rounds    = 40
-reasoning = on
-searxng   = http://127.0.0.1:8888
+provider         = openai
+model            = glm-5.3
+rounds           = 40
+reasoning        = on
+connect_timeout  = 1500
+family_skip      = on
+searxng          = http://127.0.0.1:8888
 ```
 
-Five keys, one spelling each. The value is the rest of the line,
+Seven keys, one spelling each. The value is the rest of the line,
 trimmed and taken verbatim — no quoting, no inline comments. Unknown
 keys and invalid values warn and are skipped, so a stale file can never
 break startup. No secrets: API keys stay in the environment or
@@ -116,13 +119,25 @@ queries it when it needs live web results. If the instance is
 unreachable, `web_search` says so once and short-circuits for the rest
 of the session rather than hammering a dead server.
 
+`connect_timeout` is the per-address budget in milliseconds for the
+bounded connect walk (default 750): a hostname resolves to several
+addresses and each is dialled in turn, so a black-holed one — the
+classic unroutable IPv6 on a v4-only network, no RST and no SYN-ACK —
+is abandoned after the budget instead of the OS's ~130 s. `family_skip`
+(a bool) goes one step further: once an address of a family burns the
+budget and an address of _another_ family then answers, that family is
+not dialled again for the rest of the session, so later connects pay no
+budget at all. It only fires on that evidence — a walk that failed
+everywhere latches nothing. `/connect` reports and sets both
+(`/connect 1500`, `/connect on`, `/connect reset`).
+
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
 endpoint for one run — a testing knob, deliberately not a config key.
 
 In the chat: `/config` shows where each setting comes from,
 `/config reset [key|all]` clears shadow lines, and `/rounds reset` /
-`/reasoning reset` do the same for one key.
+`/reasoning reset` / `/connect reset` do the same for one key.
 
 ## Long-running commands
 

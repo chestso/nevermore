@@ -33,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <boba/dynamic_buffer.h>
 #include <boba/msg.h>
@@ -407,6 +408,10 @@ static NmConfig *cfg_for(AppHarness *h)
                                nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
     nm_chat_app_set_echo_reasoning(
         h->app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
+    nm_chat_app_set_connect_timeout_ms(
+        h->app, nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
+    nm_chat_app_set_family_skip(
+        h->app, nm_config_get_bool(cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
     return cfg;
 }
 
@@ -1251,6 +1256,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
  * the live one is dialled. */
 static void test_connect_walk_notice_is_printed(void)
 {
+    nm_connection_reset_family_skips();
     int port = 0;
     int lfd = test_bind_last_localhost_addr(&port);
     if (lfd < 0) {
@@ -1289,6 +1295,70 @@ static void test_connect_walk_notice_is_printed(void)
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* The walk's budget needs a DRIVE on the event-driven path. A
+ * black-holed address (RFC 5737's TEST-NET-1 range: reserved, routed
+ * nowhere) produces NO socket event at all — never writable, never
+ * exceptional, never readable — so an interest-only loop never steps
+ * the walk, and the per-address budget, the walk's entire point, never
+ * fires. nm_agent_next_timeout_ms must hand that budget to the tick.
+ *
+ * The endpoint is a bracketed IPv6 literal, the exact shape the
+ * family-skip feature exists for: one address, unroutable here, so the
+ * walk exhausts its single attempt and the turn reports within the
+ * budget instead of hanging for the 300 s inactivity default. */
+static void test_black_hole_connect_is_bounded_by_the_tick(void)
+{
+    nm_connection_reset_family_skips();
+    nm_connection_set_connect_timeout_ms(250);
+
+    AppHarness *h = harness_new("openai", "test-model",
+                                "http://[2001:db8:dead::1]:9/v1");
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "anyone there");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* The seam under test: while connecting, the agent must report the
+     * budget as its next deadline. Without the fix this is the 300 s
+     * inactivity value (or -1), and the tick below never fires the
+     * walk's advance. */
+    int to = nm_agent_next_timeout_ms(nm_chat_app_agent(h->app));
+    ASSERT_TRUE(to >= 0 && to <= 250);
+
+    /* Drive the loop the way boba does: wait on the fd source, tick at
+     * the reported interval. Bounded far under the inactivity default,
+     * so reaching ERROR here can ONLY be the connect budget. */
+    time_t t0 = time(NULL);
+    for (int i = 0; i < 400; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_ERROR || st == NM_AGENT_DONE ||
+            st == NM_AGENT_IDLE)
+            break;
+        NmSource s = nm_chat_app_source(h->app);
+        int wait = nm_chat_app_tick_ms(h->app);
+        if (wait < 0)
+            wait = 5;
+        if (s.handle >= 0 && s.flags) {
+            app_wait(h, wait);
+        } else {
+            usleep((useconds_t)wait * 1000);
+        }
+        nm_chat_app_tick(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    time_t dt = time(NULL) - t0;
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
+    ASSERT_TRUE(dt <= 5);
+
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(harness_read(h), "nevermore") != NULL);
+
+    harness_free(h);
+    nm_connection_set_connect_timeout_ms(-1);
+    nm_connection_reset_family_skips();
 }
 
 /* Raw responder thread: drain the request, write bytes verbatim (no
@@ -2827,6 +2897,147 @@ static void test_config_absent_is_no_persistence(void)
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 
 /* ---------------------------------------------------------------- */
+/* The connect knobs: /connect + their config plumbing            */
+/* ---------------------------------------------------------------- */
+
+/* /connect sets both knobs and persists them to the shadow; a bare
+ * /connect reports. The transport sees the budget (process-global),
+ * and family_skip crosses the same seam. */
+static void test_connect_command_sets_and_persists(void)
+{
+    pin_cfg_paths("connectcmd");
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/connect 1200");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "connect: 1200 ms per address") != NULL);
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), 1200);
+    ASSERT_EQ(nm_chat_app_connect_timeout_ms(h->app), 1200);
+
+    harness_type(h, "/connect family_skip on");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "connect: family_skip on") != NULL);
+    ASSERT_EQ(nm_chat_app_family_skip(h->app), 1);
+    ASSERT_STR_EQ(cfg_read_shadow(),
+                  "connect_timeout = 1200\nfamily_skip = on\n");
+
+    /* A bare /connect reports both. */
+    harness_type(h, "/connect");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "1200 ms per address") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "family_skip on") != NULL);
+
+    /* Garbage is refused; the current value stands. */
+    harness_type(h, "/connect nope");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "expected a positive ms budget") !=
+                NULL);
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), 1200);
+
+    /* reset clears the shadow line and the live value (budget back to
+     * the transport's default). */
+    harness_type(h, "/connect reset connect_timeout");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "connect_timeout reset") != NULL);
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), NM_CONNECT_ATTEMPT_MS);
+    ASSERT_STR_EQ(cfg_read_shadow(), "family_skip = on\n");
+
+    /* Turning the skip off clears the walk's latch, so the decision is
+     * re-earned next time. */
+    nm_connection_set_skipped_families(NM_FAMILY_V6);
+    ASSERT_TRUE(nm_connection_skipped_families() != 0);
+    harness_type(h, "/connect off");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "connect: family_skip off") != NULL);
+    ASSERT_EQ(nm_chat_app_family_skip(h->app), 0);
+    ASSERT_EQ(nm_connection_skipped_families(), 0);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    nm_connection_reset_family_skips();
+    nm_connection_set_connect_timeout_ms(-1);
+}
+
+/* A config file's connect knobs reach the transport when main.c's
+ * wiring is reproduced (cfg_for does it): both land on the transport's
+ * process-global slots. */
+static void test_connect_knobs_from_config_reach_transport(void)
+{
+    pin_cfg_paths("connectcfg");
+    write_file_at(g_cfg_user, "connect_timeout = 850\nfamily_skip = on\n");
+
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), 850);
+    ASSERT_EQ(nm_chat_app_connect_timeout_ms(h->app), 850);
+    ASSERT_EQ(nm_chat_app_family_skip(h->app), 1);
+    ASSERT_EQ(nm_connection_family_skip(), 1);
+
+    /* Off on the app pushes off to the transport — the walk's latch
+     * never fires again (and any live latch is cleared). */
+    nm_connection_set_skipped_families(NM_FAMILY_V6);
+    nm_chat_app_set_family_skip(h->app, 0);
+    ASSERT_EQ(nm_connection_family_skip(), 0);
+    ASSERT_EQ(nm_connection_skipped_families(), 0);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    nm_connection_reset_family_skips();
+    nm_connection_set_connect_timeout_ms(-1);
+    nm_connection_set_family_skip(0);
+}
+
+/* Count non-overlapping occurrences of `needle` in `hay` (no regex —
+ * a literal scan; the tests' own small helper). */
+static int count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    size_t nl = strlen(needle);
+    if (!nl)
+        return 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += nl)
+        n++;
+    return n;
+}
+
+/* A latched family prints one line (the app notices the fresh bit) —
+ * and only one: a later step with the same latch stays silent. */
+static void test_family_skip_notice_prints_once(void)
+{
+    pin_cfg_paths("connectskip");
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    harness_type(h, "/connect on");
+    harness_enter(h);
+
+    /* Drive the app's step: the latch lands at connect completion, and
+     * the step is where the app reports a fresh one. */
+    nm_connection_set_skipped_families(NM_FAMILY_V6);
+    nm_chat_app_step(h->app);
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_EQ(count_substr(out, "skipping it for this session"), 1);
+    ASSERT_TRUE(strstr(out, "IPv6") != NULL);
+
+    /* The latch did not change: a second step adds no skip line. */
+    nm_chat_app_step(h->app);
+    tui_runtime_flush(h->rt);
+    ASSERT_EQ(count_substr(harness_read(h), "skipping it for this session"),
+              1);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    nm_connection_reset_family_skips();
+    nm_connection_set_family_skip(0);
+}
+
+/* ---------------------------------------------------------------- */
 /* P3: the multi-fd wait set + job teardown                      */
 /*                                                                    */
 /* Jobs cannot be started on Windows yet (nm_process_win.c stub,   */
@@ -3470,6 +3681,9 @@ int main(void)
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_absent_is_no_persistence);
+    RUN_TEST(test_connect_command_sets_and_persists);
+    RUN_TEST(test_connect_knobs_from_config_reach_transport);
+    RUN_TEST(test_family_skip_notice_prints_once);
     RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);
@@ -3477,6 +3691,7 @@ int main(void)
     RUN_TEST(test_tick_fires_stream_inactivity_timeout);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_connect_walk_notice_is_printed);
+    RUN_TEST(test_black_hole_connect_is_bounded_by_the_tick);
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);

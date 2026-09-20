@@ -857,6 +857,40 @@ static int g_notice_last_idx;
 static int g_notice_last_n;
 static char g_notice_host[2];
 
+/* The notice's family translation: the tap carries only the attempt
+ * index, and the UI names the family (this is the pair the agent's
+ * notice callback uses). */
+static void test_connect_walk_notice_reports_the_family(void)
+{
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; walk family not exercised\n");
+        return;
+    }
+
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+
+    /* The abandoned attempt names its family; the winner's family is
+     * NOT the abandoned one (the walk moved to a different family). */
+    int fam = nm_connection_attempt_family(0);
+    ASSERT_TRUE(fam == NM_FAMILY_V4 || fam == NM_FAMILY_V6);
+    ASSERT_TRUE(nm_connection_attempt_family(-1) == 0);
+    ASSERT_TRUE(nm_connection_attempt_family(999) == 0);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void test_notice_cb(void *ud, const char *host, int port, int idx,
                            int n_addrs)
 {
@@ -917,6 +951,114 @@ static void test_connect_walk_notice_reports_the_next_address(void)
     close(lfd);
 }
 
+/* The walk needs a DRIVE on the event-driven path, and that drive is
+ * nm_connection_wait_ms: a black-holed address (RFC 5737 TEST-NET-1 —
+ * reserved, routed nowhere) signals NOTHING: not writable, not
+ * exceptional, not readable. An interest-only loop therefore never
+ * steps the walk, so the per-address budget never fires and the walk's
+ * whole purpose (bounding a dead address) is void in the TUI.
+ * nm_connection_wait_ms is what the agent folds into the tick. */
+static void test_async_black_hole_reports_a_deadline(void)
+{
+    nm_connection_reset_family_skips();
+    nm_connection_set_connect_timeout_ms(300);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c =
+        nm_connect_async("192.0.2.1", 9, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request_queue(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+
+    /* Still CONNECTING (write interest only), and the seam reports the
+     * attempt's remaining budget as a positive deadline. */
+    NmSource i = nm_connection_interest(c);
+    ASSERT_TRUE(i.flags & NM_INTEREST_WRITE);
+    int ms = nm_connection_wait_ms(c);
+    ASSERT_TRUE(ms >= 0 && ms <= 300);
+
+    /* Step at the reported deadline (nothing else will ever wake us):
+     * the walk abandons the silent address, reports the budget, and
+     * with one address the walk is exhausted -> the connect errors. */
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    fd_set w;
+    FD_ZERO(&w);
+    FD_SET((int)i.handle, &w);
+#ifdef _WIN32
+    select(1, NULL, &w, NULL, &tv);
+#else
+    select((int)i.handle + 1, NULL, &w, NULL, &tv);
+#endif
+
+    NmTransportStatus s = NM_TRANSPORT_PENDING;
+    for (int spin = 0; spin < 50 && s == NM_TRANSPORT_PENDING; spin++) {
+        s = nm_connection_step(c);
+        if (s == NM_TRANSPORT_PENDING) {
+            int left = nm_connection_wait_ms(c);
+            if (left == 0) {
+                usleep(1000);
+                continue;
+            }
+            usleep(5000);
+        }
+    }
+    ASSERT_TRUE(s != NM_TRANSPORT_PENDING);
+    ASSERT_TRUE(strstr(nm_connection_last_error(c), "timed out") != NULL);
+
+    /* Connected/idle afterwards: no deadline (the walk is over). */
+    ASSERT_EQ(nm_connection_wait_ms(c), -1);
+
+    nm_connection_close(c);
+    nm_connection_set_connect_timeout_ms(-1);
+}
+
+/* The family skip: a latched family's addresses are dropped at resolve
+ * time, before the walk dials anything (that is what makes it free),
+ * and dropping every family is reported as OUR reason — "no usable
+ * addresses" would read as a DNS failure, which it is not. */
+static void test_family_skip_drops_addresses(void)
+{
+    nm_connection_reset_family_skips();
+    ASSERT_EQ(nm_connection_skipped_families(), 0);
+
+    nm_connection_set_skipped_families(NM_FAMILY_V4 | NM_FAMILY_V6);
+    ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4 | NM_FAMILY_V6);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", 80, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NULL(c);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
+    ASSERT_TRUE(strstr(ci.detail, "skipped family") != NULL);
+    ASSERT_NOT_NULL(nm_connection_connect_error());
+    ASSERT_TRUE(strstr(nm_connection_connect_error(), "IPv4") != NULL);
+
+    /* The vocabulary the notice and the app both print. */
+    ASSERT_STR_EQ(nm_family_name(NM_FAMILY_V6), "IPv6");
+    ASSERT_STR_EQ(nm_family_name(NM_FAMILY_V4 | NM_FAMILY_V6), "IPv4+IPv6");
+    ASSERT_STR_EQ(nm_family_name(0), "none");
+
+    /* Cleared: resolution is whole again, and connect works. */
+    nm_connection_reset_family_skips();
+    ASSERT_EQ(nm_connection_skipped_families(), 0);
+    nm_connection_set_skipped_families(NM_FAMILY_V4);
+    ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4);
+    nm_connection_reset_family_skips();
+
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd >= 0) {
+        struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+        sc.len = strlen(sc.response);
+        pthread_t th;
+        pthread_create(&th, NULL, one_shot_server, &sc);
+        c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);
+        ASSERT_NOT_NULL(c);
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        close(sc.fd);
+    }
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -943,5 +1085,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_async_connect_walks_to_reachable_address);
     RUN_TEST(test_connect_budget_bounds_a_black_hole);
     RUN_TEST(test_connect_walk_notice_reports_the_next_address);
+    RUN_TEST(test_connect_walk_notice_reports_the_family);
+    RUN_TEST(test_async_black_hole_reports_a_deadline);
+    RUN_TEST(test_family_skip_drops_addresses);
     TEST_SUMMARY();
 }

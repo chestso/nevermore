@@ -32,6 +32,7 @@ const struct NmProvider nm_opencode_zen_provider = {
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
+    nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     nm_opencode_models,
     nm_opencode_needs_auth,

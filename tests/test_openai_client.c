@@ -1676,6 +1676,45 @@ static void test_reasoning_content_omitted_when_absent(void)
     close(lfd);
 }
 
+/* base_url split: a bracketed IPv6 literal must survive, because
+ * "http://[::1]:8080/v1" is the only way to point an endpoint at a v6
+ * host (and the only way a test can drive one address). The old
+ * first-colon split left the host as "[". */
+static void test_split_base_url_accepts_bracketed_ipv6(void)
+{
+    char host[256];
+    int port = 0;
+    NmTransportMode mode = NM_TRANSPORT_PLAIN;
+
+    ASSERT_EQ(nm_openai_split_base_url("http://[2001:db8:dead::1]:9/v1",
+                                       host, sizeof(host), &port, &mode),
+              0);
+    ASSERT_STR_EQ(host, "2001:db8:dead::1");
+    ASSERT_EQ(port, 9);
+    ASSERT_EQ(mode, NM_TRANSPORT_PLAIN);
+
+    /* TLS + the scheme's default port, bracketed literal. */
+    ASSERT_EQ(nm_openai_split_base_url("https://[::1]/v1", host,
+                                       sizeof(host), &port, &mode),
+              0);
+    ASSERT_STR_EQ(host, "::1");
+    ASSERT_EQ(port, 443);
+    ASSERT_EQ(mode, NM_TRANSPORT_TLS);
+
+    /* Plain host:port still splits on the colon. */
+    ASSERT_EQ(nm_openai_split_base_url("http://127.0.0.1:8123/v1", host,
+                                       sizeof(host), &port, &mode),
+              0);
+    ASSERT_STR_EQ(host, "127.0.0.1");
+    ASSERT_EQ(port, 8123);
+
+    /* Malformed brackets are refused, not silently half-parsed. */
+    ASSERT_TRUE(nm_openai_split_base_url("http://[::1/v1", host,
+                                         sizeof(host), &port, &mode) != 0);
+    ASSERT_TRUE(nm_openai_split_base_url("http://[]:80/v1", host,
+                                         sizeof(host), &port, &mode) != 0);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1711,5 +1750,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_affinity_headers_logged_verbatim);
     RUN_TEST(test_reasoning_content_serialized_when_attached);
     RUN_TEST(test_reasoning_content_omitted_when_absent);
+    RUN_TEST(test_split_base_url_accepts_bracketed_ipv6);
     TEST_SUMMARY();
 }

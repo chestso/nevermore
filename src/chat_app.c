@@ -106,6 +106,12 @@ struct NmChatApp
     int max_rounds;     /* tool-round cap; <=0 = agent default */
     int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
     int timeout_ms;     /* stream-inactivity ms; 0 = agent default */
+    /* The bounded connect walk's knobs (see transport.h). Both resolve
+     * from config; the transport itself reads no config, so the app is
+     * the one that pushes them across the seam. */
+    int connect_timeout_ms; /* per-address budget; <=0 = transport default */
+    int family_skip;        /* 1 = latch a family that burns the budget */
+    int skipped_families;   /* last NM_FAMILY_* latch seen, to report once */
 
     /* The resolved config (nm_config.h), borrowed; NULL = no
      * persistence. The app WRITES runtime changes to its shadow file
@@ -545,20 +551,9 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
 }
 
 /* Transport notice (the connect walk abandoning an address that went
- * silent for the per-address budget). The one visible sign of life
- * during an otherwise silent multi-second connect: a system-stream
- * line, so a user staring at a spinner learns why. Fires from inside
- * nm_agent_step; the step's flush commits it with the rest of the
- * step's units. */
-void nm_chat_app_on_notice(const char *msg, void *userdata)
-{
-    (void)userdata;
-    NmChatApp *app = s_app;
-    if (!app || !msg || !*msg)
-        return;
-    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
-    tui_runtime_wakeup(app->rt);
-}
+ * silent for the per-address budget) — the definition lives below,
+ * next to the family-skip reporter; chat_app.h declares it for
+ * build_agent's registration. */
 
 /* ---------------------------------------------------------------- */
 /* Construction / destruction                                       */
@@ -821,6 +816,78 @@ void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg)
     app->cfg = cfg;
 }
 
+/* The connect knobs the transport does not read from config: config
+ * lives here, so this pushes the resolved value across (process-
+ * global, like the transport's other slots — one app per process). */
+void nm_chat_app_set_connect_timeout_ms(NmChatApp *app, int ms)
+{
+    if (!app)
+        return;
+    app->connect_timeout_ms = ms > 0 ? ms : 0;
+    /* 0 = the transport's built-in default (the setter's < 0 restores
+     * it), so a session with no `connect_timeout` key never pins one. */
+    nm_connection_set_connect_timeout_ms(app->connect_timeout_ms > 0
+                                             ? app->connect_timeout_ms
+                                             : -1);
+}
+
+void nm_chat_app_set_family_skip(NmChatApp *app, int on)
+{
+    if (!app)
+        return;
+    app->family_skip = on ? 1 : 0;
+    nm_connection_set_family_skip(app->family_skip);
+    /* Off is "never skip", so it also clears the walk's latch: the
+     * decision must be re-earned if the user turns it back on. */
+    if (!app->family_skip) {
+        nm_connection_reset_family_skips();
+        app->skipped_families = 0;
+    }
+}
+
+/* Report a family the walk has newly latched (once per family), so the
+ * user learns why later connects skip it — the connect error text is
+ * the transport's, but this line is the app's (system stream). */
+static void report_family_skips(NmChatApp *app)
+{
+    int now = nm_connection_skipped_families();
+    int fresh = now & ~app->skipped_families;
+    app->skipped_families = now;
+    if (!fresh)
+        return;
+    sys_line(app,
+             NM_SGR_TOOL
+             "connect: %s did not answer — skipping it for this session "
+             "(family_skip)" NM_SGR_RESET,
+             nm_family_name(fresh));
+}
+
+/* The agent's connect-walk notice (nm_agent_on_notice): the seam that
+ * turns an abandoned address into a system-stream line. Called from
+ * inside nm_agent_step; the step's flush commits it with the rest of
+ * the step's units. The skip LATCH is reported by nm_chat_app_step
+ * (it lands later, when a connect completes). */
+void nm_chat_app_on_notice(const char *msg, void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !msg || !*msg)
+        return;
+    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    tui_runtime_wakeup(app->rt);
+}
+
+/* The knobs, from the app's side (see chat_app.h). */
+int nm_chat_app_connect_timeout_ms(const NmChatApp *app)
+{
+    return app ? app->connect_timeout_ms : 0;
+}
+
+int nm_chat_app_family_skip(const NmChatApp *app)
+{
+    return app ? app->family_skip : 0;
+}
+
 void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
 {
     if (!app)
@@ -909,6 +976,12 @@ void nm_chat_app_step(NmChatApp *app)
 {
     if (!app || !app->agent)
         return;
+    /* A family the walk latched is reported HERE, not at the notice:
+     * the latch lands when a connect COMPLETES (the step that sees the
+     * winner), several steps after the notice about the address that
+     * burned the budget. Before the flush, so the line coalesces with
+     * the step's other units. */
+    report_family_skips(app);
     /* Drive the agent's steps, flushing between them. A step that
      * leaves the agent waiting on I/O (its stream fd is live) ends the
      * loop; the tool phase has no fd, so its announce/execute steps
@@ -919,6 +992,7 @@ void nm_chat_app_step(NmChatApp *app)
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
             return;
         nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
+        report_family_skips(app);
         tui_runtime_flush(app->rt);
         if (nm_chat_app_source(app).handle >= 0)
             return; /* waiting on the stream; the loop will call us back */
@@ -1021,6 +1095,8 @@ static void print_help(NmChatApp *app)
                   "                     (fresh session)\n"
                   "  /rounds [n|reset]  show or set the tool-round cap\n"
                   "  /reasoning [on|off|reset]  echo reasoning traces back\n"
+                  "  /connect [ms|on|off|reset]\n"
+                  "                     per-address connect budget + family skip\n"
                   "  /config [reset [k|all]]    where each setting comes from\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
@@ -1213,7 +1289,7 @@ static void print_config(NmChatApp *app)
     for (size_t i = 0; nm_config_key_at(i); i++) {
         const char *k = nm_config_key_at(i);
         const char *v = nm_config_get(app->cfg, k);
-        sys_line(app, "  %-10s %-14s (%s)", k, v ? v : "-",
+        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-",
                  nm_config_source_name(nm_config_source(app->cfg, k)));
     }
 }
@@ -1246,6 +1322,16 @@ static void config_reset(NmChatApp *app, const char *key)
         nm_chat_app_set_max_rounds(app, resolved_rounds(app));
     if (!key || strcmp(key, NM_CFG_KEY_REASONING) == 0)
         nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
+    /* The connect-walk knobs are process-global transport state: a
+     * reset must push the layer below back across the seam (and a
+     * family_skip reset clears the latch, so the walk tries every
+     * family again). */
+    if (!key || strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0)
+        nm_chat_app_set_connect_timeout_ms(
+            app, nm_config_get_int(app->cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
+    if (!key || strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0)
+        nm_chat_app_set_family_skip(
+            app, nm_config_get_bool(app->cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
     /* The web_search endpoint is process-global tool state; reset it so
      * the layer below applies and the new endpoint is probed fresh. */
     if (!key || strcmp(key, NM_CFG_KEY_SEARXNG) == 0) {
@@ -1595,6 +1681,118 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         persist_and_report(app, NM_CFG_KEY_REASONING, on ? "on" : "off", line);
         return;
     }
+    if (NAME_IS("connect")) {
+        if (!*arg) {
+            sys_line(app, "connect: %d ms per address (built-in default %d), "
+                          "family_skip %s%s",
+                     nm_connection_connect_timeout_ms(),
+                     NM_CONNECT_ATTEMPT_MS,
+                     app->family_skip ? "on" : "off",
+                     nm_connection_skipped_families() ? " (a family is "
+                                                        "skipped now)"
+                                                      : "");
+            return;
+        }
+        /* Two shapes: a positive per-address budget in ms, or the
+         * family-skip bool. `reset` applies to whichever follows, and
+         * a bare `reset` drops both. */
+        const char *what = arg;
+        while (*what == ' ' || *what == '\t')
+            what++;
+        static const char *const KNOWN[] = { NM_CFG_KEY_CONNECT_TIMEOUT,
+                                             NM_CFG_KEY_FAMILY_SKIP, NULL };
+        int is_reset = strncmp(what, "reset", 5) == 0 &&
+                       (what[5] == '\0' || what[5] == ' ' ||
+                        what[5] == '\t');
+        if (is_reset) {
+            const char *which = what + 5;
+            while (*which == ' ' || *which == '\t')
+                which++;
+            if (!*which) {
+                if (app->cfg) {
+                    nm_config_shadow_reset(app->cfg,
+                                           NM_CFG_KEY_CONNECT_TIMEOUT);
+                    nm_config_shadow_reset(app->cfg, NM_CFG_KEY_FAMILY_SKIP);
+                }
+                nm_chat_app_set_connect_timeout_ms(app, 0);
+                nm_chat_app_set_family_skip(app, 0);
+                sys_line(app, "connect: timeout and family_skip reset "
+                              "(shadow reset)");
+                return;
+            }
+            for (int i = 0; KNOWN[i]; i++) {
+                if (strcmp(which, KNOWN[i]) != 0)
+                    continue;
+                if (app->cfg &&
+                    nm_config_shadow_reset(app->cfg, which) != 0) {
+                    sys_line(app, NM_SGR_ERROR "connect: could not write "
+                                               "the shadow file" NM_SGR_RESET);
+                    return;
+                }
+                if (strcmp(which, NM_CFG_KEY_CONNECT_TIMEOUT) == 0)
+                    nm_chat_app_set_connect_timeout_ms(
+                        app, nm_config_get_int(app->cfg, which, 0));
+                else
+                    nm_chat_app_set_family_skip(
+                        app, nm_config_get_bool(app->cfg, which, 0));
+                sys_line(app, "connect: %s reset (shadow reset)", which);
+                return;
+            }
+            sys_line(app, NM_SGR_ERROR "connect: reset expects "
+                                       "connect_timeout or family_skip" NM_SGR_RESET);
+            return;
+        }
+        /* Family skip: "family_skip <bool>" or a bare bool. */
+        const char *boolarg = what;
+        if (strncmp(boolarg, NM_CFG_KEY_FAMILY_SKIP, 11) == 0 &&
+            (boolarg[11] == '\0' || boolarg[11] == ' ' ||
+             boolarg[11] == '\t')) {
+            boolarg += 11;
+            while (*boolarg == ' ' || *boolarg == '\t')
+                boolarg++;
+        }
+        if (nm_config_valid_reasoning(boolarg)) {
+            char v[8];
+            size_t vn = 0;
+            for (; boolarg[vn] && vn < sizeof(v) - 1; vn++) {
+                char ch = boolarg[vn];
+                v[vn] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a')
+                                                 : ch;
+            }
+            v[vn] = '\0';
+            int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
+                     strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
+            nm_chat_app_set_family_skip(app, on);
+            char line[128];
+            snprintf(line, sizeof(line), "connect: family_skip %s",
+                     on ? "on" : "off");
+            persist_and_report(app, NM_CFG_KEY_FAMILY_SKIP,
+                               on ? "on" : "off", line);
+            return;
+        }
+        /* Otherwise a per-address budget in ms. */
+        int v = 0;
+        int ok = *what != '\0';
+        for (const char *p = what; *p; p++) {
+            if (*p < '0' || *p > '9' || v > 100000) {
+                ok = 0;
+                break;
+            }
+            v = v * 10 + (*p - '0');
+        }
+        if (!ok || v <= 0) {
+            sys_line(app, NM_SGR_ERROR
+                     "connect: expected a positive ms budget, on|off, or "
+                     "reset" NM_SGR_RESET);
+            return;
+        }
+        nm_chat_app_set_connect_timeout_ms(app, v);
+        char line[128];
+        snprintf(line, sizeof(line), "connect: %d ms per address",
+                 nm_connection_connect_timeout_ms());
+        persist_and_report(app, NM_CFG_KEY_CONNECT_TIMEOUT, what, line);
+        return;
+    }
     if (NAME_IS("config")) {
         if (!*arg) {
             print_config(app);
@@ -1680,8 +1878,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/rounds", "/reasoning", "/config",
-        "/ps", "/kill", "/quit", NULL
+        "/help", "/model", "/provider", "/rounds", "/reasoning", "/connect",
+        "/config", "/ps", "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
@@ -1703,6 +1901,11 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
     }
     tui_list_popup_set_items(app->popup, matches, (int)n_matches);
     tui_list_popup_set_title(app->popup, "commands");
+    /* The command set is short and fixed by design: show every match
+     * (boba's default viewport is 8 rows, which would hide the tail —
+     * a completion popup that cannot show a command it matched is a
+     * lie). Models/providers keep the scrolling default. */
+    tui_list_popup_set_size(app->popup, 0, (int)n_matches);
     tui_list_popup_set_filter(app->popup, prefix);
     tui_list_popup_show(app->popup, word_start);
     app->popup_kind = POPUP_COMMANDS;

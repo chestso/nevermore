@@ -87,6 +87,11 @@ struct NmConnection
     int conn_addr_idx;      /* current attempt index */
     unsigned addr_len;      /* current attempt's sockaddr length; 0 = none */
     double conn_attempt_t0; /* monotonic start of the current attempt */
+    /* Families whose address burned the budget in THIS walk
+     * (NM_FAMILY_*). Latched process-wide only when another family
+     * answers the same host — see note_family_skips in
+     * transport_socket.c. */
+    unsigned conn_abandoned_fams;
 
     /* Owned request buffer (memory-reuse principle: one allocation
      * per connection, grown geometrically, reused across request

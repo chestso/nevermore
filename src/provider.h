@@ -230,6 +230,13 @@ struct NmProvider
     NmChatStatus (*chat_step)(NmChatStream *h, NmChatResult *result);
     int (*chat_stream_fd)(NmChatStream *h);
     unsigned (*chat_stream_interest)(NmChatStream *h);
+    /* Milliseconds until the open stream wants a step with no fd ready
+     * (a connect attempt's per-address budget), or -1 when the stream
+     * is purely interest-driven. The transport's own
+     * nm_connection_wait_ms; folded into the loop's tick exactly as a
+     * tool's deadline_ms is, so a black-holed connect address — which
+     * signals nothing, ever — still gets its budget enforced. */
+    int (*chat_stream_wait_ms)(NmChatStream *h);
     void (*chat_end)(NmChatStream *h);
 
     /* Model catalog. Returns a NULL-terminated array of NmModel

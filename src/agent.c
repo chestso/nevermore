@@ -184,9 +184,14 @@ static void agent_notice_tap(void *ud, const char *host, int port, int idx,
     if (!a || !a->on_notice)
         return;
     char msg[256];
+    /* The family of the abandoned attempt: the transport publishes the
+     * last walk's families by attempt index, and nm_family_name is the
+     * one spelling (the walk's diagnostics and the app's skip notice
+     * read it too), so the line names IPv4/IPv6, not an opaque index. */
     snprintf(msg, sizeof(msg),
-             "connect: %s %d/%d did not answer — trying the next address",
-             host && *host ? host : "host", idx + 1, n_addrs);
+             "connect: %s %d/%d (%s) did not answer — trying the next address",
+             host && *host ? host : "host", idx + 1, n_addrs,
+             nm_family_name(nm_connection_attempt_family(idx)));
     a->on_notice(msg, a->userdata);
 }
 
@@ -307,6 +312,17 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     if (a->exec && a->exec_tool && a->exec_tool->deadline_ms) {
         int t = a->exec_tool->deadline_ms(a->exec);
         if (t >= 0)
+            best = t;
+    }
+
+    /* The open stream's own deadline (the connect walk's per-address
+     * budget). A black-holed address produces NO socket event — never
+     * writable, never exceptional — so an interest-only wait would
+     * never step the walk and the budget would never fire; this is
+     * what gives the walk its drive on the event-driven path. */
+    if (a->stream && a->provider->chat_stream_wait_ms) {
+        int t = a->provider->chat_stream_wait_ms(a->stream);
+        if (t >= 0 && (best < 0 || t < best))
             best = t;
     }
 

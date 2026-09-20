@@ -101,6 +101,20 @@ void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
  * observed hyper requirement). */
 void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on);
 
+/* The bounded connect walk's knobs (see transport.h). Neither is read
+ * from config by the transport — config lives here, so main.c resolves
+ * `connect_timeout` / `family_skip` and pushes them across:
+ *   set_connect_timeout_ms: per-address budget; <=0 = the transport's
+ *     built-in default (NM_CONNECT_ATTEMPT_MS).
+ *   set_family_skip: 1 = after a family's address burns the budget and
+ *     another family answers, stop dialling the burned family for the
+ *     rest of the session. Both push the resolved value straight onto
+ *     the transport's process-global slots. */
+void nm_chat_app_set_connect_timeout_ms(NmChatApp *app, int ms);
+void nm_chat_app_set_family_skip(NmChatApp *app, int on);
+int nm_chat_app_connect_timeout_ms(const NmChatApp *app);
+int nm_chat_app_family_skip(const NmChatApp *app);
+
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):
  *   fill_io_sources     -> nm_chat_app_interest (translated in main.c)

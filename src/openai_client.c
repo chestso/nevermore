@@ -97,6 +97,27 @@ int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
     }
     const char *slash = strchr(url, '/');
     size_t hlen = slash ? (size_t)(slash - url) : strlen(url);
+    /* Bracketed IPv6 literal ("[::1]:8080"): the colons inside the
+     * literal are not the port delimiter, so the split must skip to the
+     * closing bracket and only a colon AFTER it is the port. Without
+     * this a v6 endpoint was silently impossible: "[::1]:8080" split at
+     * the first colon, leaving the host as "[". */
+    if (hlen > 0 && url[0] == '[') {
+        const char *close = memchr(url, ']', hlen);
+        if (!close)
+            return -1; /* malformed: no closing bracket */
+        size_t lit_len = (size_t)(close - url - 1);
+        if (lit_len == 0 || lit_len >= host_cap)
+            return -1;
+        memcpy(host, url + 1, lit_len);
+        host[lit_len] = '\0';
+        if (close + 1 < url + hlen) {
+            if (close[1] != ':')
+                return -1; /* host:port — anything else is malformed */
+            *port = atoi(close + 2);
+        }
+        return 0;
+    }
     const char *colon = memchr(url, ':', hlen);
     if (colon) {
         hlen = (size_t)(colon - url);
@@ -1026,6 +1047,13 @@ unsigned nm_openai_stream_interest(NmChatStream *h)
         return 0;
     NmSource i = nm_connection_interest(h->conn);
     return i.handle >= 0 ? i.flags : 0;
+}
+
+int nm_openai_stream_wait_ms(NmChatStream *h)
+{
+    if (!h || !h->conn)
+        return -1;
+    return nm_connection_wait_ms(h->conn);
 }
 
 void nm_openai_chat_end(NmChatStream *h)

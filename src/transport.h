@@ -100,16 +100,72 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
 /* Per-address connect budget (ms). A hostname can resolve to several
  * addresses (typically IPv6 first, then IPv4); the connect walks them
  * one at a time and moves on when one goes silent for this long, so a
- * black-holed address family degrades in ~a second per address instead
- * of the OS's ~130 s connect timeout (which is what an IPv4-only
- * network with advertised-but-unroutable IPv6 looks like). Applies to
- * both the blocking nm_connect and the async step machine. Setter
- * values < 0 restore the default (NM_CONNECT_ATTEMPT_MS); 0 is not
- * used (a zero budget would fail every connect). Test seam + the
- * anchor for a future `connect_timeout` knob. */
-#define NM_CONNECT_ATTEMPT_MS 2000
+ * black-holed address family degrades in under a second per address
+ * instead of the OS's ~130 s connect timeout (which is what an
+ * IPv4-only network with advertised-but-unroutable IPv6 looks like).
+ * Applies to both the blocking nm_connect and the async step machine.
+ * 750 ms: the budget bounds SYN-ACK, and a healthy peer answers a
+ * loopback/co-LAN/anycast endpoint far inside it, while a black hole
+ * surfaces in time for a human to still connect the dots with the
+ * notice line. The knob is the `connect_timeout` config key
+ * (NEVERMORE_CONNECT_TIMEOUT_MS / the user+shadow files, resolved
+ * once by main.c). Setter values < 0 restore the default; 0 is not
+ * used (a zero budget would fail every connect). */
+#define NM_CONNECT_ATTEMPT_MS 750
 void nm_connection_set_connect_timeout_ms(int ms);
 int nm_connection_connect_timeout_ms(void);
+
+/* Address-family skip: the answer to "that address went silent — so
+ * don't dial that FAMILY again". Not an OS knob (no portable socket
+ * option exists) and not a getaddrinfo knob (AI_ADDRCONFIG is
+ * documented-unreliable: a static interface enumeration, not a route
+ * probe); instead the walk itself remembers, once per process, which
+ * families have burned an address budget, and
+ * nm_socket_resolve_addrs leaves those addresses out of the list
+ * before anything is dialled. IPv6 is the case that matters: a host
+ * whose advertised IPv6 path is unroutable (an IPv4-only network, a
+ * broken tunnel) otherwise pays the budget on EVERY connect, while
+ * IPv4 answers instantly. The latch is per family and one-way,
+ * cleared by nm_connection_reset_family_skips (a test clears it to
+ * stay deterministic).
+ *
+ * The setting belongs to the app, not the transport: `family_skip`
+ * lives in config, and the transport reads no config. chat_app/main.c
+ * push the resolved bool across with nm_connection_set_family_skip
+ * (the same shape as the budget above); OFF — the default the unit
+ * tests and headless modes see — means the walk never latches. */
+void nm_connection_set_family_skip(int on);
+int nm_connection_family_skip(void);
+
+/* Which families the walk has actually skipped (a bitmask of
+ * NM_FAMILY_*), and the latch reset. The bit is set the moment a
+ * family is skipped, so a UI can say so. */
+#define NM_FAMILY_V4 1 /* AF_INET */
+#define NM_FAMILY_V6 2 /* AF_INET6 */
+int nm_connection_skipped_families(void);
+void nm_connection_reset_family_skips(void);
+
+/* Set the latch directly (NM_FAMILY_* mask). The walk earns it, so
+ * this is the TEST seam for the skip path (resolving without an
+ * address of that family) — the same shape as
+ * nm_connection_set_connect_timeout_ms. It is also the hook an
+ * explicit "never dial IPv6" override would use. */
+void nm_connection_set_skipped_families(int mask);
+
+/* Address-family vocabulary: the ONE spelling per family ("IPv4",
+ * "IPv6"), shared by the walk's diagnostics, the agent's notice line
+ * and the app's skip notice — so a family can never be named two
+ * ways. 0 (no family) is "none". Defined in transport.c. */
+const char *nm_family_name(int family);
+
+/* The family of the connect walk's attempt `idx` on the last
+ * connection the process connected (NM_FAMILY_*; 0 when the index is
+ * out of range or no walk ran). The notice tap receives only the
+ * index (the walk's own vocabulary), and the UI wants the family
+ * name: the transport keeps the last walk's list so the agent can
+ * translate without a second resolve. Process-global, borrowed —
+ * exactly the nm_connection_connect_error() shape. */
+int nm_connection_attempt_family(int idx);
 
 /* Human-readable detail of the LAST connect failure, for a UI that
  * wants to say something even when the transport status is the only
@@ -278,6 +334,24 @@ NmTransportStatus nm_connection_set_nonblocking(NmConnection *conn);
  * get_external_fd). -1 if not connected. TLS connections still expose
  * the underlying fd, but reads must go through nm_read_body. */
 int nm_connection_fd(NmConnection *conn);
+
+/* Milliseconds until this connection wants a step even though no fd is
+ * ready, or -1 when it is purely interest-driven.
+ *
+ * The connect walk is the reason this exists. A black-holed address
+ * (no SYN-ACK, no RST — an IPv6 route that goes nowhere) produces NO
+ * socket event at all: never writable, never exceptional, never
+ * readable. An interest-driven loop therefore never steps the walk,
+ * and the per-address budget — the whole point of the walk — never
+ * fires. Folding this into the loop's tick gives the budget a drive
+ * on the event-driven path, exactly as a tool's deadline_ms gives a
+ * silent child a drive (see NmTool.deadline_ms).
+ *
+ * 0 = the current attempt's budget is spent: step NOW and the walk
+ * advances to the next address. -1 = nothing to wait for (not
+ * connecting). Non-blocking connect only: the blocking nm_connect
+ * walks inline and needs no external drive. */
+int nm_connection_wait_ms(const NmConnection *conn);
 
 /* ---------------------------------------------------------------- */
 /* TLS backend interface (internal — implemented per OS)            */

@@ -495,15 +495,63 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
     ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
     ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING);
-    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_SEARXNG);
-    ASSERT_NULL(nm_config_key_at(5));
+    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_CONNECT_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_FAMILY_SKIP);
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SEARXNG);
+    ASSERT_NULL(nm_config_key_at(7));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
+                  "NEVERMORE_CONNECT_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
+                  "NEVERMORE_CONNECT_FAMILY_SKIP");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG),
                   "NEVERMORE_SEARXNG_URL");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
+}
+
+/* The connect knobs (bounded walk budget + family skip) are durable
+ * keys like the rest: file < env, a runtime change persists to the
+ * shadow, and a garbage value is dropped — a typo must never yield a
+ * zero per-address budget (which would fail every connect) or flip
+ * the skip on by accident. */
+static void test_connect_knobs(void)
+{
+    pin_paths("connect");
+    write_file_at(g_user, "connect_timeout = 900\nfamily_skip = on\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_CONNECT_TIMEOUT, 0), 900);
+    ASSERT_TRUE(nm_config_get_bool(c, NM_CFG_KEY_FAMILY_SKIP, 0));
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_CONNECT_TIMEOUT), NM_CFG_USER);
+
+    test_setenv("NEVERMORE_CONNECT_TIMEOUT_MS", "1500");
+    test_setenv("NEVERMORE_CONNECT_FAMILY_SKIP", "NO");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_CONNECT_TIMEOUT, 0), 1500);
+    ASSERT_FALSE(nm_config_get_bool(c, NM_CFG_KEY_FAMILY_SKIP, 1));
+    /* Normalized to the file vocabulary, like every bool key. */
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_FAMILY_SKIP), "off");
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_CONNECT_TIMEOUT_MS");
+    test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
+
+    /* A zero budget and an unparseable bool are both refused, in the
+     * file layer and in the shadow write-back alike. */
+    pin_paths("connect-bad");
+    write_file_at(g_user, "connect_timeout = 0\nfamily_skip = maybe\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_NULL(nm_config_get(c2, NM_CFG_KEY_CONNECT_TIMEOUT));
+    ASSERT_NULL(nm_config_get(c2, NM_CFG_KEY_FAMILY_SKIP));
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_CONNECT_TIMEOUT, "abc"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_CONNECT_TIMEOUT, "0"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_FAMILY_SKIP, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_FAMILY_SKIP, "yes"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "family_skip = on\n");
+    nm_config_free(c2);
 }
 
 int main(void)
@@ -517,6 +565,8 @@ int main(void)
     test_unsetenv("NEVERMORE_CONFIG");
     test_unsetenv("NEVERMORE_SHADOW_CONFIG");
     test_unsetenv("NEVERMORE_SEARXNG_URL");
+    test_unsetenv("NEVERMORE_CONNECT_TIMEOUT_MS");
+    test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
@@ -541,5 +591,6 @@ int main(void)
     RUN_TEST(test_path_env_overrides);
     RUN_TEST(test_provider_validator_hook);
     RUN_TEST(test_key_vocabulary);
+    RUN_TEST(test_connect_knobs);
     TEST_SUMMARY();
 }

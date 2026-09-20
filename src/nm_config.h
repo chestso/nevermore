@@ -56,6 +56,21 @@ extern "C" {
 #define NM_CFG_KEY_MODEL     "model"
 #define NM_CFG_KEY_ROUNDS    "rounds"
 #define NM_CFG_KEY_REASONING "reasoning"
+/* Per-address connect budget in ms (the bounded connect walk). A
+ * positive decimal; unset = the transport's built-in default
+ * (NM_CONNECT_ATTEMPT_MS). A durable profile value: a slow network
+ * wants a longer budget, a v6-broken one wants `family_skip` below.
+ * Env spelling: NEVERMORE_CONNECT_TIMEOUT_MS. */
+#define NM_CFG_KEY_CONNECT_TIMEOUT "connect_timeout"
+/* Address-family skip: after an address of a family burns the
+ * connect budget (a black hole — the classic unroutable IPv6 on a
+ * v4-only network), stop dialling that family for the rest of the
+ * session. `on`/`off` (a bool, normalized like `reasoning`); unset =
+ * off, so the walk keeps trying every address. The families to skip
+ * are the ones that actually time out, never a fixed list: the walk
+ * latches per family as the network proves itself. Env spelling:
+ * NEVERMORE_CONNECT_FAMILY_SKIP. */
+#define NM_CFG_KEY_FAMILY_SKIP "family_skip"
 /* Local SearXNG endpoint for the web_search tool; the env spelling is
  * NEVERMORE_SEARXNG_URL. A durable profile value (not an exploratory
  * base_url like NEVERMORE_BASE_URL), so it is a first-class key. */
@@ -83,8 +98,9 @@ void nm_config_free(NmConfig *c);
 const char *nm_config_get(const NmConfig *c, const char *key);
 NmCfgSource nm_config_source(const NmConfig *c, const char *key);
 
-/* Truthiness for `reasoning`: 1/true/on/yes, case-insensitive. Unset or
- * unparseable yields `fallback` (set_env already dropped garbage). */
+/* Truthiness for a bool key (`reasoning`, `family_skip`):
+ * 1/true/on/yes, case-insensitive. Unset or unparseable yields
+ * `fallback` (set_env already dropped garbage). */
 int nm_config_get_bool(const NmConfig *c, const char *key, int fallback);
 
 /* Positive decimal, clamped to 100000; `fallback` when unset. */
@@ -159,6 +175,12 @@ int nm_config_valid_provider(const char *name);
 /* Install the provider-name validator (NULL = restore "non-empty").
  * Call before nm_config_load. */
 void nm_config_set_provider_validator(int (*fn)(const char *name));
+/* Is `value` a plain positive decimal (no sign, no fraction, 0
+ * refused)? The shape `rounds` and `connect_timeout` share — a zero
+ * tool-round cap is meaningless and a zero connect budget would fail
+ * every attempt. nm_config_get_int clamps the accepted range. The
+ * `rounds` name is this shape under its own key's spelling. */
+int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
 int nm_config_valid_reasoning(const char *value);
 

@@ -190,6 +190,7 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
+    nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     openrouter_models,
     openrouter_needs_auth,
