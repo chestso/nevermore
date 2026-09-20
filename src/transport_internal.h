@@ -62,18 +62,24 @@ int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port);
 void nm_socket_arm_attempt(NmConnection *conn, int idx);
 double nm_socket_now(void);
 
-/* Blocking connect with the bounded address walk: returns 0 when
+/* Blocking connect with the bounded address walk: resolve + arm the
+ * first attempt, then pump nm_socket_connect_walk (the same walk the
+ * async phase machine drives) until a verdict. Returns 0 when
  * connected (conn->fd live, blocking again, conn_addr_idx naming the
  * winner), -1 on exhaustion (err_detail carries the summary, and the
  * process-global connect error is stamped). transport.c's nm_connect
  * is a thin wrapper. */
 int nm_socket_connect_blocking(NmConnection *conn);
 
-/* One step of the CONNECTING phase: returns 1 = connected, 0 = still
- * in flight (or freshly re-armed on the next address), -1 = every
- * address failed (err_detail + the process-global connect error carry
- * the reason). Each address the walk abandons fires the connect notice
- * once, from inside this call. */
+/* The address walk, one CONNECTING step: arms the current address if
+ * none is in flight (the async path does it itself), and otherwise
+ * probes it, moving on when it failed or burned its per-address
+ * budget. Returns 1 = connected, 0 = still in flight (or freshly
+ * re-armed on the next address), -1 = every address failed
+ * (err_detail + the process-global connect error carry the reason).
+ * Each abandoned address fires the connect notice once. The ONLY walk
+ * implementation: the blocking drive is a pump over this, so "arm
+ * each attempt exactly once" cannot diverge between the two callers. */
 int nm_socket_connect_walk(NmConnection *conn);
 
 /* Wait for the current attempt to become writable (connect

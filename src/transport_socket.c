@@ -441,57 +441,48 @@ int nm_socket_connect_walk(NmConnection *conn)
     }
 }
 
-/* The blocking connect: the same walk, driven by select() on each
- * attempt's socket with the remaining budget. Used by nm_connect. */
+/* The blocking connect: ONE walk implementation, a second drive.
+ *
+ * The address walk itself lives in nm_socket_connect_walk (the async
+ * phase machine's step) and is where "arm each attempt exactly once"
+ * is enforced. This drive resolves + arms attempt 0, then pumps that
+ * same step, waiting on the current attempt's socket for its
+ * remaining budget between pumps. The old hand-rolled blocking walk
+ * re-armed at the top of its loop *and* inside walk_next, so a
+ * successful attempt was closed and re-dialled: the peer accepted the
+ * first connection and saw EOF when it closed, while the re-dial sat
+ * unaccepted in the backlog looking connected (every Ubuntu run of
+ * test_wire hung on it — Ubuntu resolves localhost ::1-first, so the
+ * walk advanced; the dev box resolves v4-first and never walked).
+ * Sharing the step makes that shape unrepresentable.
+ *
+ * Used by nm_connect; nm_request's send/read are blocking, so the
+ * winner is flipped back to blocking before returning. */
 int nm_socket_connect_blocking(NmConnection *conn)
 {
     if (nm_socket_resolve_addrs(conn, conn->tls_host, conn->port) != 0)
         return -1;
+    /* Arm the first attempt; the step takes it from here. */
+    nm_socket_arm_attempt(conn, conn->conn_addr_idx);
     for (;;) {
-        nm_socket_arm_attempt(conn, conn->conn_addr_idx);
-        if (conn->fd < 0) {
-            if (walk_next(conn) != 0) {
-                walk_fail(conn);
-                return -1;
-            }
-            continue;
-        }
-        for (;;) {
-            int probe = nm_socket_connect_probe(conn);
-            if (probe == 1) {
-                conn->addr_len = 0;
-                /* This is the BLOCKING connect: the caller expects a
-                 * blocking socket (nm_request's send/read are
-                 * blocking). The walk dialled non-blocking; flip the
-                 * winner back. */
+        int w = nm_socket_connect_walk(conn);
+        if (w < 0)
+            return -1; /* walk_fail already stamped the reason */
+        if (w == 1) {
+            if (conn->fd >= 0) {
                 nm_socket_set_blocking(conn->fd);
                 conn->nonblocking = 0;
-                return 0;
             }
-            if (probe < 0) {
-                char target[300];
-                target_text(conn, target, sizeof(target));
-                conn_set_err_detail(conn, "connect %s: %s", target,
-                                    nm_sock_errstr());
-                break; /* attempt failed: next address */
-            }
-            int left = (int)((double)nm_connection_connect_timeout_ms() -
-                             (nm_socket_now() - conn->conn_attempt_t0) *
-                                 1000.0);
-            if (left <= 0) {
-                char target[300];
-                target_text(conn, target, sizeof(target));
-                conn_set_err_detail(conn, "connect %s: timed out after %d ms",
-                                    target,
-                                    nm_connection_connect_timeout_ms());
-                break; /* budget spent: next address */
-            }
+            return 0;
+        }
+        /* In flight: wait for writability, but never past the current
+         * attempt's budget. A spent budget is deliberately NOT slept
+         * on — the next step's own budget test advances the address,
+         * so this cannot spin. */
+        int left = (int)((double)nm_connection_connect_timeout_ms() -
+                         (nm_socket_now() - conn->conn_attempt_t0) * 1000.0);
+        if (left > 0)
             nm_socket_wait_writable_budget(conn, left);
-        }
-        if (walk_next(conn) != 0) {
-            walk_fail(conn);
-            return -1;
-        }
     }
 }
 

@@ -661,40 +661,16 @@ static void test_async_send_partial_resume(void)
 /* The bounded connect walk                                          */
 /* ---------------------------------------------------------------- */
 
-/* A listener on 127.0.0.1 only (no ::1). "localhost" resolves to both
- * everywhere it resolves at all, so a connect by name must walk past
- * the address without a listener and land on this one. That is the
- * regression the walk exists for: the old async connect dialled the
- * FIRST address and never tried the second (a v6-first resolver on a
- * v4-only listener = "connection refused" for a host that is up). */
-static int bind_v4_loopback(int *port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        close(fd);
-        return -1;
-    }
-    socklen_t gl = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &gl) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(a.sin_port);
-    if (listen(fd, 1) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
 static const char CANNED_OK[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
                                 "Content-Length: 5\r\n\r\nhello";
 
+/* One accept, one drain, one canned answer — and a count of how many
+ * connections the client actually dialled. The listener stays open
+ * (the caller closes it) so the backlog is inspectable afterwards:
+ * "exactly one" is the property the double-arm bug broke (the walk
+ * closed a successful attempt and re-dialled, so the server accepted
+ * a connection that immediately EOF'd while a second one sat
+ * unconsumed in the backlog). */
 static void *one_shot_server(void *arg)
 {
     struct ServerCase *sc = arg;
@@ -708,18 +684,51 @@ static void *one_shot_server(void *arg)
     return NULL;
 }
 
+/* No second connection is waiting: the listener must not be readable
+ * (a pending accept is a dialled-then-abandoned peer). Catches "the
+ * walk dialled more than once" whatever order the resolver hands
+ * back. Returns 1 when the backlog is empty. */
+static int no_extra_connection(int lfd)
+{
+    fd_set r;
+    FD_ZERO(&r);
+    FD_SET(lfd, &r);
+    struct timeval tv = { 0, 0 };
+#ifdef _WIN32
+    int n = select(0, &r, NULL, NULL, &tv);
+#else
+    int n = select(lfd + 1, &r, NULL, NULL, &tv);
+#endif
+    if (n <= 0)
+        return n == 0;
+    int extra = accept(lfd, NULL, NULL);
+    if (extra >= 0) {
+#ifdef _WIN32
+        closesocket(extra);
+#else
+        close(extra);
+#endif
+    }
+    return 0; /* a second peer was dialled */
+}
+
 static void test_blocking_connect_walks_to_reachable_address(void)
 {
-    struct ServerCase sc = { CANNED_OK, 0, 0, 0 };
-    sc.len = strlen(sc.response);
-    sc.fd = bind_v4_loopback(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; blocking walk not exercised\n");
+        return;
+    }
 
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
     pthread_t th;
     pthread_create(&th, NULL, one_shot_server, &sc);
 
     NmConnectInfo ci = { 0 };
-    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    NmConnection *c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
     const NmResponse *r = nm_response(c);
@@ -733,6 +742,10 @@ static void test_blocking_connect_walks_to_reachable_address(void)
 
     /* A successful connect clears the process-global failure notice. */
     ASSERT_NULL(nm_connection_connect_error());
+    /* And the walk dialled exactly once: a second dial (the
+     * re-arm-after-success bug) leaves a connection stranded in the
+     * backlog, which is what a non-blocking accept here finds. */
+    ASSERT_TRUE(no_extra_connection(lfd));
 
     nm_connection_close(c);
     pthread_join(th, NULL);
@@ -743,17 +756,22 @@ static void test_blocking_connect_walks_to_reachable_address(void)
  * dead address and completes on the live one. */
 static void test_async_connect_walks_to_reachable_address(void)
 {
-    struct ServerCase sc = { CANNED_OK, 0, 0, 0 };
-    sc.len = strlen(sc.response);
-    sc.fd = bind_v4_loopback(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; async walk not exercised\n");
+        return;
+    }
 
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
     pthread_t th;
     pthread_create(&th, NULL, one_shot_server, &sc);
 
     NmConnectInfo ci = { 0 };
-    NmConnection *c =
-        nm_connect_async("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    NmConnection *c = nm_connect_async("localhost", port, NM_TRANSPORT_PLAIN,
+                                       &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request_queue(c, "GET", "/", NULL, 0, NULL, 0),
               NM_TRANSPORT_OK);
@@ -883,7 +901,6 @@ static void test_connect_walk_notice_reports_the_next_address(void)
     nm_transport_set_connect_notice(NULL, NULL);
     nm_connection_close(c);
     pthread_join(th, NULL);
-    close(sc.fd);
 
     /* The connect landed on the LAST address, so at least one earlier
      * one was abandoned — the notice must have fired. idx is the
@@ -894,6 +911,10 @@ static void test_connect_walk_notice_reports_the_next_address(void)
     ASSERT_TRUE(g_notice_last_idx >= 0);
     ASSERT_TRUE(g_notice_last_n >= 2);
     ASSERT_TRUE(g_notice_last_idx < g_notice_last_n - 1);
+    /* The walk that produced the notice dialled exactly once too. */
+    ASSERT_TRUE(no_extra_connection(lfd));
+
+    close(lfd);
 }
 
 int main(int argc, char *argv[])
