@@ -54,6 +54,34 @@ void nm_socket_shutdown(int fd);
  * failure; a 0 timeout clears it. */
 NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
 
+/* Connect-walk helpers (transport_socket.c): resolve + store the
+ * address list on the connection, start the attempt at index `idx`,
+ * and read the monotonic clock the per-attempt budget is measured
+ * against (the process-global nm_connection_connect_timeout_ms). */
+int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port);
+void nm_socket_arm_attempt(NmConnection *conn, int idx);
+double nm_socket_now(void);
+
+/* Blocking connect with the bounded address walk: returns 0 when
+ * connected (conn->fd live, blocking again, conn_addr_idx naming the
+ * winner), -1 on exhaustion (err_detail carries the summary, and the
+ * process-global connect error is stamped). transport.c's nm_connect
+ * is a thin wrapper. */
+int nm_socket_connect_blocking(NmConnection *conn);
+
+/* One step of the CONNECTING phase: returns 1 = connected, 0 = still
+ * in flight (or freshly re-armed on the next address), -1 = every
+ * address failed (err_detail + the process-global connect error carry
+ * the reason). Each address the walk abandons fires the connect notice
+ * once, from inside this call. */
+int nm_socket_connect_walk(NmConnection *conn);
+
+/* Wait for the current attempt to become writable (connect
+ * completion) or for the remaining budget to expire, whichever comes
+ * first. The blocking walk's wait; a verdict is read by the probe
+ * after it returns. */
+void nm_socket_wait_writable_budget(NmConnection *conn, int ms);
+
 /* Raw I/O over whichever channel the connection uses (plain or TLS). */
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len);
 long nm_conn_read(NmConnection *conn, char *buf, size_t len);

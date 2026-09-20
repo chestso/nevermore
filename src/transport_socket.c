@@ -37,6 +37,11 @@
 #include <unistd.h>
 #endif
 
+/* The one clock (nm_clock.h) for the connect walk's per-attempt
+ * budget. Included after winsock2.h on Windows (nm_clock.h pulls in
+ * <windows.h>, and winsock2.h must come first — house rule). */
+#include "nm_clock.h"
+
 /* ---------------------------------------------------------------- */
 /* Diagnostics                                                        */
 /* ---------------------------------------------------------------- */
@@ -136,6 +141,7 @@ static NmConnection *nm_socket_conn_new(int fd, const char *host, int port)
         return NULL;
     }
     conn->fd = fd;
+    conn->port = port;
     conn->phase = NM_CONN_IDLE;
     conn->resp.content_len = -1;
     conn->conn_id = ++g_conn_seq;
@@ -173,49 +179,38 @@ NmConnection *nm_socket_connect(const char *host, int port,
         return NULL;
     }
 
-    char portstr[8];
-    snprintf(portstr, sizeof(portstr), "%d", port);
-    struct addrinfo hints, *res = NULL, *ai;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    int grc = getaddrinfo(host, portstr, &hints, &res);
-    if (grc != 0 || !res) {
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_SOCKET;
-            snprintf(info->detail, sizeof(info->detail),
-                     "DNS: %s: %s", host,
-                     grc != 0 ? gai_strerror(grc) : "no addresses");
-        }
-        return NULL;
-    }
-
-    int fd = -1;
-    for (ai = res; ai; ai = ai->ai_next) {
-        fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-        if (fd < 0)
-            continue;
-        if (connect(fd, ai->ai_addr, (int)ai->ai_addrlen) == 0)
-            break;
-        nm_socket_shutdown(fd);
-        fd = -1;
-    }
-    freeaddrinfo(res);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_SOCKET;
             snprintf(info->detail, sizeof(info->detail),
-                     "connect %s:%d: %s", host, port, nm_sock_errstr());
+                     "socket: %s", nm_sock_errstr());
+        }
+        return NULL;
+    }
+    NmConnection *conn = nm_socket_conn_new(fd, host, port);
+    if (!conn) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_NOMEM;
+            snprintf(info->detail, sizeof(info->detail), "out of memory");
         }
         return NULL;
     }
 
-    NmConnection *conn = nm_socket_conn_new(fd, host, port);
-    if (!conn && info) {
-        info->status = NM_TRANSPORT_ERR_NOMEM;
-        snprintf(info->detail, sizeof(info->detail), "out of memory");
+    /* Bounded address walk (see the header's nm_connect contract):
+     * resolve, dial each address with the per-attempt budget, move on
+     * when one is black-holed. */
+    if (nm_socket_connect_blocking(conn) != 0) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail), "%s",
+                     nm_connection_last_error(conn));
+        }
+        nm_connection_set_connect_error(nm_connection_last_error(conn));
+        nm_connection_close(conn);
+        return NULL;
     }
+    nm_connection_set_connect_error(NULL);
     return conn;
 }
 
@@ -248,12 +243,283 @@ int nm_socket_set_blocking(int fd)
 #endif
 }
 
-/* Async connect: non-blocking socket, connect() in flight. The
- * caller steps the CONNECTING phase to completion (writability =
- * completion; SO_ERROR distinguishes failure). Only the FIRST
- * resolved address is tried — an async multi-address walk needs
- * per-address retry state that no consumer needs yet (local Ollama
- * and cloud hosts resolve to one address). */
+/* ---------------------------------------------------------------- */
+/* The bounded connect walk                                          */
+/* ---------------------------------------------------------------- */
+
+/* Monotonic seconds, for the per-attempt budget arithmetic. The one
+ * clock lives in nm_clock.h (nm_monotonic_seconds); this is a thin
+ * alias so the walk's call sites read in its own vocabulary. */
+double nm_socket_now(void)
+{
+    return nm_monotonic_seconds();
+}
+
+/* Address-family text for the walk's diagnostics ("IPv6"/"IPv4"). */
+static const char *addr_family_name(const struct sockaddr_storage *a)
+{
+    if (a->ss_family == AF_INET6)
+        return "IPv6";
+    if (a->ss_family == AF_INET)
+        return "IPv4";
+    return "address";
+}
+
+/* Resolve host:port into conn->conn_addrs (first NM_CONNECT_MAX_ADDRS
+ * of getaddrinfo's order — see the header on why the order is the
+ * only sane policy). Returns 0 on success, -1 on failure (err_detail
+ * stamped). */
+int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
+{
+    char portstr[8];
+    snprintf(portstr, sizeof(portstr), "%d", port);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    int grc = getaddrinfo(host, portstr, &hints, &res);
+    if (grc != 0 || !res) {
+        conn_set_err_detail(conn, "DNS: %s: %s", host,
+                            grc != 0 ? gai_strerror(grc) : "no addresses");
+        return -1;
+    }
+    int n = 0;
+    for (ai = res; ai && n < NM_CONNECT_MAX_ADDRS; ai = ai->ai_next) {
+        if ((size_t)ai->ai_addrlen > sizeof(struct sockaddr_storage))
+            continue;
+        memcpy(&conn->conn_addrs[n], ai->ai_addr, ai->ai_addrlen);
+        conn->conn_addr_lens[n] = (unsigned)ai->ai_addrlen;
+        n++;
+    }
+    freeaddrinfo(res);
+    if (n == 0) {
+        conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
+        return -1;
+    }
+    conn->conn_n_addrs = n;
+    conn->conn_addr_idx = 0;
+    return 0;
+}
+
+/* Start attempt `idx`: close the socket the previous attempt left,
+ * open a fresh one, put connect() in flight non-blocking, and stamp
+ * the monotonic attempt start. Returns 0 when the attempt is in
+ * flight (or already connected synchronously), -1 when even the
+ * socket could not be created. */
+void nm_socket_arm_attempt(NmConnection *conn, int idx)
+{
+    if (conn->fd >= 0)
+        nm_socket_shutdown(conn->fd);
+    conn->fd = -1;
+    conn->conn_addr_idx = idx;
+    conn->conn_attempt_t0 = nm_socket_now();
+    if (idx < 0 || idx >= conn->conn_n_addrs)
+        return;
+    int fam = conn->conn_addrs[idx].ss_family;
+    int fd = socket(fam, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0)
+        return;
+    if (socket_set_nonblocking(fd) != 0) {
+        nm_socket_shutdown(fd);
+        return;
+    }
+    conn->fd = fd;
+    conn->addr_len = conn->conn_addr_lens[idx];
+    connect(fd, (struct sockaddr *)&conn->conn_addrs[idx], conn->addr_len);
+    /* Whether EINPROGRESS or an immediate verdict, the probe below
+     * classifies it — the two-stage probe tolerates both. */
+}
+
+/* Human text of the current attempt's target, for err_detail. */
+static void target_text(const NmConnection *conn, char *out, size_t cap)
+{
+    const char *host = conn->tls_host[0] ? conn->tls_host : "?";
+    if (conn->conn_n_addrs > 0 && conn->conn_addr_idx >= 0 &&
+        conn->conn_addr_idx < conn->conn_n_addrs) {
+        snprintf(out, cap, "%s (%s)", host,
+                 addr_family_name(&conn->conn_addrs[conn->conn_addr_idx]));
+    } else {
+        snprintf(out, cap, "%s", host);
+    }
+}
+
+/* Exhaustion report: every address in the walk failed or went
+ * silent. The detail names the host and the number of attempts (the
+ * per-attempt reason was already reported by the walk's notice /
+ * err_detail as it happened; this is the summary the UI prints). */
+static void walk_fail(NmConnection *conn)
+{
+    char target[300];
+    target_text(conn, target, sizeof(target));
+    const char *last = conn->err_detail[0] ? conn->err_detail : "";
+    conn_set_err_detail(conn, "connect %s: all %d attempt%s failed%s%s",
+                        target, conn->conn_n_addrs,
+                        conn->conn_n_addrs == 1 ? "" : "s", *last ? " — " : "",
+                        last);
+    conn->addr_len = 0;
+    nm_connection_set_connect_error(conn->err_detail);
+}
+
+/* Is the per-address budget spent? (The black-hole detector — every
+ * attempt that is still EALREADY/EWOULDBLOCK past this is moved on.) */
+static int attempt_budget_spent(const NmConnection *conn)
+{
+    return (nm_socket_now() - conn->conn_attempt_t0) * 1000.0 >=
+           (double)nm_connection_connect_timeout_ms();
+}
+
+/* Advance from the attempt at conn_addr_idx to the next address.
+ * Fires the connect-walk notice (the UI's "trying the next address"
+ * line) exactly once per re-arm, naming the attempt that was
+ * abandoned (0-based — walk_next is called before the index moves
+ * on). Returns 0 if a new attempt is in flight, -1 when the walk is
+ * exhausted. */
+static int walk_next(NmConnection *conn)
+{
+    if (conn->conn_addr_idx + 1 < conn->conn_n_addrs)
+        nm_wire_tap_connect_retry(conn, conn->tls_host, conn->port,
+                                  conn->conn_addr_idx, conn->conn_n_addrs);
+    conn->conn_addr_idx++;
+    if (conn->conn_addr_idx >= conn->conn_n_addrs)
+        return -1;
+    nm_socket_arm_attempt(conn, conn->conn_addr_idx);
+    return conn->fd >= 0 ? 0 : walk_next(conn);
+}
+
+/* One step of the CONNECTING phase machine: 1 = connected, 0 = still
+ * in flight (or re-armed on the next address), -1 = all failed.
+ *
+ * The loop is what makes the walk transparent to the caller: an
+ * address that fails instantly (refused) or that burned its budget is
+ * replaced within the same step, so the phase machine only ever sees
+ * "in flight" or "connected" — except for the final verdict, which
+ * carries the summary. */
+int nm_socket_connect_walk(NmConnection *conn)
+{
+    for (;;) {
+        if (conn->fd < 0)
+            nm_socket_arm_attempt(conn, conn->conn_addr_idx);
+        if (conn->fd < 0) {
+            char target[300];
+            target_text(conn, target, sizeof(target));
+            conn_set_err_detail(conn, "socket for %s: %s", target,
+                                nm_sock_errstr());
+            if (walk_next(conn) == 0)
+                continue;
+            walk_fail(conn);
+            return -1;
+        }
+        int probe = nm_socket_connect_probe(conn);
+        if (probe == 1) {
+            conn->addr_len = 0;
+            return 1;
+        }
+        if (probe < 0) {
+            char target[300];
+            target_text(conn, target, sizeof(target));
+            conn_set_err_detail(conn, "connect %s: %s", target,
+                                nm_sock_errstr());
+            if (walk_next(conn) == 0)
+                continue;
+            walk_fail(conn);
+            return -1;
+        }
+        /* In flight. A black-holed address (no RST, no SYN-ACK) never
+         * fails — the budget is what moves the walk on. */
+        if (attempt_budget_spent(conn)) {
+            char target[300];
+            target_text(conn, target, sizeof(target));
+            conn_set_err_detail(conn, "connect %s: timed out after %d ms",
+                                target, nm_connection_connect_timeout_ms());
+            if (walk_next(conn) == 0)
+                continue;
+            walk_fail(conn);
+            return -1;
+        }
+        return 0;
+    }
+}
+
+/* The blocking connect: the same walk, driven by select() on each
+ * attempt's socket with the remaining budget. Used by nm_connect. */
+int nm_socket_connect_blocking(NmConnection *conn)
+{
+    if (nm_socket_resolve_addrs(conn, conn->tls_host, conn->port) != 0)
+        return -1;
+    for (;;) {
+        nm_socket_arm_attempt(conn, conn->conn_addr_idx);
+        if (conn->fd < 0) {
+            if (walk_next(conn) != 0) {
+                walk_fail(conn);
+                return -1;
+            }
+            continue;
+        }
+        for (;;) {
+            int probe = nm_socket_connect_probe(conn);
+            if (probe == 1) {
+                conn->addr_len = 0;
+                /* This is the BLOCKING connect: the caller expects a
+                 * blocking socket (nm_request's send/read are
+                 * blocking). The walk dialled non-blocking; flip the
+                 * winner back. */
+                nm_socket_set_blocking(conn->fd);
+                conn->nonblocking = 0;
+                return 0;
+            }
+            if (probe < 0) {
+                char target[300];
+                target_text(conn, target, sizeof(target));
+                conn_set_err_detail(conn, "connect %s: %s", target,
+                                    nm_sock_errstr());
+                break; /* attempt failed: next address */
+            }
+            int left = (int)((double)nm_connection_connect_timeout_ms() -
+                             (nm_socket_now() - conn->conn_attempt_t0) *
+                                 1000.0);
+            if (left <= 0) {
+                char target[300];
+                target_text(conn, target, sizeof(target));
+                conn_set_err_detail(conn, "connect %s: timed out after %d ms",
+                                    target,
+                                    nm_connection_connect_timeout_ms());
+                break; /* budget spent: next address */
+            }
+            nm_socket_wait_writable_budget(conn, left);
+        }
+        if (walk_next(conn) != 0) {
+            walk_fail(conn);
+            return -1;
+        }
+    }
+}
+
+/* Wait for writability (connect completion) or the remaining budget,
+ * whichever comes first — the blocking walk's wait. A failed attempt
+ * is writable-or-exceptional; nm_socket_connect_probe reads the
+ * verdict after this returns. */
+void nm_socket_wait_writable_budget(NmConnection *conn, int ms)
+{
+    if (!conn || conn->fd < 0 || ms <= 0)
+        return;
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    fd_set w, e;
+    FD_ZERO(&w);
+    FD_ZERO(&e);
+    FD_SET(conn->fd, &w);
+#ifdef _WIN32
+    FD_SET(conn->fd, &e);
+    select(0, NULL, &w, &e, &tv);
+#else
+    select(conn->fd + 1, NULL, &w, NULL, &tv);
+#endif
+}
+
+/* Async connect: non-blocking socket, connect() in flight, the rest
+ * of the address list kept on the connection so the CONNECTING phase
+ * can move on when one address is black-holed (the bounded walk —
+ * see nm_connect_async's contract in transport.h). */
 NmConnection *nm_socket_connect_async(const char *host, int port,
                                       NmConnectInfo *info)
 {
@@ -270,31 +536,7 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         return NULL;
     }
 
-    char portstr[8];
-    snprintf(portstr, sizeof(portstr), "%d", port);
-    struct addrinfo hints, *res = NULL;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    int grc = getaddrinfo(host, portstr, &hints, &res);
-    if (grc != 0 || !res) {
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_SOCKET;
-            snprintf(info->detail, sizeof(info->detail),
-                     "DNS: %s: %s", host,
-                     grc != 0 ? gai_strerror(grc) : "no addresses");
-        }
-        return NULL;
-    }
-
-    int fd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    struct sockaddr *ai_addr = res->ai_addr;
-    socklen_t ai_addrlen = (socklen_t)res->ai_addrlen;
-    /* Copy the first address out before freeaddrinfo. */
-    struct sockaddr_storage addr_copy;
-    memcpy(&addr_copy, ai_addr, ai_addrlen);
-    freeaddrinfo(res);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_SOCKET;
@@ -303,36 +545,8 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         }
         return NULL;
     }
-
-    if (socket_set_nonblocking(fd) != 0) {
-        nm_socket_shutdown(fd);
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_SOCKET;
-            snprintf(info->detail, sizeof(info->detail),
-                     "nonblocking: %s", nm_sock_errstr());
-        }
-        return NULL;
-    }
-
-    int rc = connect(fd, (struct sockaddr *)&addr_copy, ai_addrlen);
-#ifdef _WIN32
-    int in_flight = rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK;
-#else
-    int in_flight = rc != 0 && errno == EINPROGRESS;
-#endif
-    if (rc != 0 && !in_flight) {
-        nm_socket_shutdown(fd);
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_SOCKET;
-            snprintf(info->detail, sizeof(info->detail),
-                     "connect %s:%d: %s", host, port, nm_sock_errstr());
-        }
-        return NULL;
-    }
-
     NmConnection *conn = nm_socket_conn_new(fd, host, port);
     if (!conn) {
-        nm_socket_shutdown(fd);
         if (info) {
             info->status = NM_TRANSPORT_ERR_NOMEM;
             snprintf(info->detail, sizeof(info->detail),
@@ -341,14 +555,29 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         return NULL;
     }
     conn->nonblocking = 1;
-    if (in_flight) {
-        memcpy(&conn->addr, &addr_copy, sizeof(addr_copy));
-        conn->addr_len = ai_addrlen;
-        conn->phase = NM_CONN_CONNECTING;
-    } else {
-        conn->addr_len = 0;
-        conn->phase = NM_CONN_IDLE;
+    if (nm_socket_resolve_addrs(conn, host, port) != 0) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail), "%s",
+                     nm_connection_last_error(conn));
+        }
+        nm_connection_set_connect_error(nm_connection_last_error(conn));
+        nm_connection_close(conn);
+        return NULL;
     }
+    /* Arm the first attempt; the phase machine takes it from here. */
+    nm_socket_arm_attempt(conn, 0);
+    if (conn->fd < 0) {
+        if (info) {
+            info->status = NM_TRANSPORT_ERR_SOCKET;
+            snprintf(info->detail, sizeof(info->detail),
+                     "socket (attempt 1): %s", nm_sock_errstr());
+        }
+        nm_connection_set_connect_error(info ? info->detail : NULL);
+        nm_connection_close(conn);
+        return NULL;
+    }
+    conn->phase = NM_CONN_CONNECTING;
     return conn;
 }
 
@@ -402,7 +631,10 @@ int nm_socket_connect_probe(NmConnection *conn)
     }
     return 0; /* neither set: still genuinely in flight */
 #else
-    int rc = connect(conn->fd, (struct sockaddr *)&conn->addr,
+    if (conn->conn_addr_idx < 0 || conn->conn_addr_idx >= conn->conn_n_addrs)
+        return -1;
+    int rc = connect(conn->fd,
+                     (struct sockaddr *)&conn->conn_addrs[conn->conn_addr_idx],
                      conn->addr_len);
     if (rc == 0)
         return 1;

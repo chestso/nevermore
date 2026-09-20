@@ -246,6 +246,30 @@ static void tap_error(const NmConnection *conn, const char *stage,
     write_line(o);
 }
 
+/* Connect-walk notice: one address went silent for the per-address
+ * budget (or failed instantly) and the walk moved on to the next.
+ * Pre-connection (no xchg), but the connection exists by then (the
+ * walk lives on it), so conn_id correlates the retry with the
+ * eventual connect/error line. `idx` is 0-based, as in the tap. */
+static void tap_connect_retry(const NmConnection *conn, const char *host,
+                              int port, int idx, int n_addrs)
+{
+    if (!g_rec.f)
+        return;
+    NmJson *o = nm_json_new_object();
+    if (!o)
+        return;
+    nm_json_set(o, "t", nm_json_new_number(nm_wire_recorder_now()));
+    nm_json_set(o, "kind", nm_json_new_string("connect-retry"));
+    nm_json_set(o, "conn",
+                nm_json_new_number(conn ? (double)conn->conn_id : 0.0));
+    nm_json_set(o, "host", nm_json_new_string(host ? host : ""));
+    nm_json_set(o, "port", nm_json_new_number(port));
+    nm_json_set(o, "address", nm_json_new_number(idx + 1));
+    nm_json_set(o, "addresses", nm_json_new_number(n_addrs));
+    write_line(o);
+}
+
 /* Copy the queued headers into the recorder (the value pointers
  * (authbuf etc.) do not outlive the request). The secret flag rides
  * along — the request event redacts through the same marker. */
@@ -362,7 +386,7 @@ static void tap_stream_event(const NmConnection *conn, const char *event,
 /* Process-global tap, installed once at startup (nm_transport_set_wire_tap). */
 static NmWireTap g_tap = {
     tap_connect, tap_request, tap_response_head, tap_response,
-    tap_stream_event, tap_error
+    tap_stream_event, tap_error, tap_connect_retry
 };
 
 /* ---------------------------------------------------------------- */

@@ -119,6 +119,16 @@ void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */
 void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
 
+/* One transport notice, for the UI to print as a system line while it
+ * is the only sign of life. Fires from inside nm_agent_step when the
+ * connect walk abandons an address that went silent for the per-
+ * address budget ("connect 1/8: IPv6 did not answer — trying the next
+ * address"): without it, a dead address family is a multi-second
+ * stall with nothing on screen. The message is a borrowed pointer,
+ * valid for the call. */
+typedef void (*NmAgentNoticeFn)(const char *msg, void *userdata);
+void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
+
 /* Run one user turn to completion: the full
  * stream -> tool-call -> execute -> stream cycle. Blocking; UI
  * callbacks fire from inside. Returns 0 on success. */

@@ -149,6 +149,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
                          void *userdata);
 void nm_chat_app_on_state(NmAgentState state, void *userdata);
+void nm_chat_app_on_notice(const char *msg, void *userdata);
 
 /* Introspection / test seams. */
 NmAgentState nm_chat_app_state(const NmChatApp *app);

@@ -1243,6 +1243,54 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     harness_free(h);
 }
 
+/* The connect walk's notice reaches the transcript: a turn whose host
+ * has a black-holed address prints a system line about it while the
+ * connect is still in flight, instead of spinning silently. The
+ * listener lives on the LAST address "localhost" resolves to, so the
+ * walk's first attempt is guaranteed to be abandoned (refused) before
+ * the live one is dialled. */
+static void test_connect_walk_notice_is_printed(void)
+{
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; notice line not exercised\n");
+        return;
+    }
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.fd = lfd;
+    sc.port = port;
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://localhost:%d/v1", port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    /* The notice names the abandoned attempt and the walk length. */
+    ASSERT_TRUE(strstr(out, "did not answer") != NULL);
+    ASSERT_TRUE(strstr(out, "1/") != NULL);
+    /* And the turn still completed on the live address. */
+    ASSERT_TRUE(strstr(out, "hi") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* Raw responder thread: drain the request, write bytes verbatim (no
  * chunked/SSE machinery). Used to script wire-truth error pages
  * whose bodies end with a trailing newline — raw-mode transcript
@@ -3428,6 +3476,7 @@ int main(void)
     RUN_TEST(test_cancel_midstream_returns_to_idle);
     RUN_TEST(test_tick_fires_stream_inactivity_timeout);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
+    RUN_TEST(test_connect_walk_notice_is_printed);
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_tool_round_prints_panels);

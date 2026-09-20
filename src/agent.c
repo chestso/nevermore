@@ -62,6 +62,7 @@ struct NmAgent
     NmStreamCallback on_delta; /* text chunks */
     NmToolCallback on_tool;    /* tool start/end */
     NmAgentStateFn on_state;   /* spinner state */
+    NmAgentNoticeFn on_notice; /* transport notices (connect walk) */
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -151,6 +152,7 @@ void nm_agent_free(NmAgent *a)
 {
     if (!a)
         return;
+    nm_agent_on_notice(a, NULL); /* release the transport notice slot */
     if (a->stream && a->provider->chat_end)
         a->provider->chat_end(a->stream);
     if (a->exec && a->exec_tool && a->exec_tool->end)
@@ -166,9 +168,48 @@ void nm_agent_free(NmAgent *a)
     free(a);
 }
 
+/* The transport's connect-walk notice arrives through a separate
+ * process-global channel (a wire tap slot cannot be shared: the debug
+ * recorder owns it when armed), reaches the notice callback on
+ * whichever agent opened the round. One process-global agent pointer —
+ * one chat app per process (the same reason chat_app.c has s_app). */
+static NmAgent *g_notice_agent;
+
+static void agent_notice_tap(void *ud, const char *host, int port, int idx,
+                             int n_addrs)
+{
+    (void)ud;
+    (void)port;
+    NmAgent *a = g_notice_agent;
+    if (!a || !a->on_notice)
+        return;
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "connect: %s %d/%d did not answer — trying the next address",
+             host && *host ? host : "host", idx + 1, n_addrs);
+    a->on_notice(msg, a->userdata);
+}
+
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb) { a->on_delta = cb; }
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb) { a->on_tool = cb; }
 void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb) { a->on_state = cb; }
+void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb)
+{
+    if (!a)
+        return;
+    a->on_notice = cb;
+    /* The transport's notice channel is process-global (one chat app
+     * per process — chat_app.c's s_app singleton is the same fact).
+     * Registering claims it for this agent; clearing (cb NULL) or
+     * freeing the agent releases it so no dangling pointer survives. */
+    if (cb) {
+        g_notice_agent = a;
+        nm_transport_set_connect_notice(agent_notice_tap, NULL);
+    } else if (g_notice_agent == a) {
+        g_notice_agent = NULL;
+        nm_transport_set_connect_notice(NULL, NULL);
+    }
+}
 
 void nm_agent_set_endpoint(NmAgent *a, const char *base_url, const char *api_key)
 {

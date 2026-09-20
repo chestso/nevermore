@@ -97,6 +97,29 @@ const char *nm_connection_last_error(const NmConnection *conn);
 NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
                                                  int seconds);
 
+/* Per-address connect budget (ms). A hostname can resolve to several
+ * addresses (typically IPv6 first, then IPv4); the connect walks them
+ * one at a time and moves on when one goes silent for this long, so a
+ * black-holed address family degrades in ~a second per address instead
+ * of the OS's ~130 s connect timeout (which is what an IPv4-only
+ * network with advertised-but-unroutable IPv6 looks like). Applies to
+ * both the blocking nm_connect and the async step machine. Setter
+ * values < 0 restore the default (NM_CONNECT_ATTEMPT_MS); 0 is not
+ * used (a zero budget would fail every connect). Test seam + the
+ * anchor for a future `connect_timeout` knob. */
+#define NM_CONNECT_ATTEMPT_MS 2000
+void nm_connection_set_connect_timeout_ms(int ms);
+int nm_connection_connect_timeout_ms(void);
+
+/* Human-readable detail of the LAST connect failure, for a UI that
+ * wants to say something even when the transport status is the only
+ * signal it kept. NULL when the last connect succeeded. Process-
+ * global, borrow-until-next-connect — the same one-shot shape as an
+ * NmConnectInfo's detail, kept for the paths that do not carry one
+ * (the app's status-line notice). */
+const char *nm_connection_connect_error(void);
+void nm_connection_set_connect_error(const char *detail);
+
 /* ---------------------------------------------------------------- */
 /* Async connect + resumable send (N1; boba subscriptions seam)      */
 /* ---------------------------------------------------------------- */
@@ -312,6 +335,14 @@ typedef struct NmWireTap
                             size_t data_len);
     void (*on_error)(const struct NmConnection *conn, const char *stage,
                      const char *detail);
+    /* Connect-walk notice: the walk abandoned the attempt at `idx` and
+     * moved on to the next address. Fired for any abandonment —
+     * instant (refused) or the per-address budget running out on a
+     * black-holed address. Pre-connection (no xchg), but the
+     * connection exists by then (the walk lives on it), so conn_id
+     * correlates the retry with the eventual connect/error line. */
+    void (*on_connect_retry)(const struct NmConnection *conn, const char *host,
+                             int port, int idx, int n_addrs);
 } NmWireTap;
 
 /* Install (or clear with NULL) the process-global tap. */
@@ -346,6 +377,24 @@ void nm_wire_tap_error(const struct NmConnection *conn, const char *stage,
 void nm_wire_tap_error_status(const struct NmConnection *conn,
                               const char *stage, const char *detail,
                               int http_status);
+
+/* Connect-walk notice (see NmWireTap.on_connect_retry): the attempt at
+ * index `idx` of `n_addrs` went silent for the per-address budget and
+ * the walk is moving on. No-op when no tap is installed. */
+void nm_wire_tap_connect_retry(const struct NmConnection *conn,
+                               const char *host, int port, int idx,
+                               int n_addrs);
+
+/* Connect-walk notice channel for the UI (separate from the wire tap:
+ * the recorder and the agent both want this event, and a tap is a
+ * single process-global slot that only one of them can own). The agent
+ * installs its thunk around each round; the walk fires it right before
+ * re-arming the next address. idx is 0-based; n_addrs is the walk
+ * length. One process-global slot (one chat app per process). fn NULL
+ * clears it. */
+typedef void (*NmConnectNoticeFn)(void *ud, const char *host, int port,
+                                  int idx, int n_addrs);
+void nm_transport_set_connect_notice(NmConnectNoticeFn fn, void *ud);
 
 #ifdef __cplusplus
 }

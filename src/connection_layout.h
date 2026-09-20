@@ -47,12 +47,19 @@ enum
     NM_CONN_READING
 };
 
+/* How many addresses of one hostname the connect walk will hold. A
+ * name resolving to more than this is walked up to the cap (the tail
+ * is unreachable anyway once an earlier address answers). Fixed, in
+ * the connection — no per-connect allocation (memory-reuse). */
+#define NM_CONNECT_MAX_ADDRS 8
+
 struct NmConnection
 {
     int fd;
     void *tls_ctx; /* opaque backend context, or NULL for plain HTTP */
     const NmTlsBackend *tls;
     NmResponse resp;
+    int port;           /* connect port (the failure detail's target) */
     char host[256];     /* Host header source, set at connect */
     char tls_host[256]; /* bare hostname (no port): TLS SNI + cert
                             verification target. host above carries
@@ -64,13 +71,22 @@ struct NmConnection
     int nonblocking;    /* 1 = socket flipped non-blocking (read phase) */
     int phase;          /* NM_CONN_* — see the enum above */
 
-    /* Async-connect target (NM_CONN_CONNECTING only): the step's
-     * completion probe re-calls connect() on this stored address
-     * (two-stage probe: re-connect + SO_ERROR consult — see
-     * nm_socket_connect_probe in transport_socket.c for the
-     * platform disagreement). */
-    struct sockaddr_storage addr;
-    unsigned addr_len; /* 0 = no async connect in progress */
+    /* Connect walk (the bounded address walk, see nm_socket_connect in
+     * transport_socket.c). A hostname resolves to a list; the connect
+     * dials them one at a time and moves on when one goes silent for
+     * the per-address budget (nm_connection_connect_timeout_ms), so a
+     * dead IPv6 address on an IPv4-only network costs a second instead
+     * of the OS's two-minute timeout. addr_len is the current
+     * attempt's sockaddr length and doubles as the "connect in
+     * progress / completion probe target" flag the async step reads
+     * (0 = not connecting: connect resolved or never started). The
+     * blocking path walks the same list inline. */
+    struct sockaddr_storage conn_addrs[NM_CONNECT_MAX_ADDRS];
+    unsigned conn_addr_lens[NM_CONNECT_MAX_ADDRS];
+    int conn_n_addrs;
+    int conn_addr_idx;      /* current attempt index */
+    unsigned addr_len;      /* current attempt's sockaddr length; 0 = none */
+    double conn_attempt_t0; /* monotonic start of the current attempt */
 
     /* Owned request buffer (memory-reuse principle: one allocation
      * per connection, grown geometrically, reused across request

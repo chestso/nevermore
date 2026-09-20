@@ -41,6 +41,7 @@ static int test_wsa_init(void)
 }
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <signal.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -51,6 +52,61 @@ static int test_wsa_init(void)
     return 0; /* POSIX: nothing to init */
 }
 #endif
+
+/* Bind a listener on the LAST address "localhost" resolves to, so a
+ * connect by NAME must walk past the earlier one(s). That makes the
+ * transport's bounded connect walk deterministic to exercise whatever
+ * the resolver's family order is (glibc ranks IPv4 first; other stacks
+ * may not). Returns the listening fd with *port filled, or -1 when the
+ * name resolves to a single address (nothing to walk) or the tail
+ * family has no loopback to bind — both healthy boxes, which callers
+ * report as "walk not exercised" rather than a failure. */
+static int test_bind_last_localhost_addr(int *port) TEST_NET_HELPERS_UNUSED;
+static int test_bind_last_localhost_addr(int *port)
+{
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo("localhost", "0", &hints, &res) != 0 || !res)
+        return -1;
+    struct sockaddr_storage last;
+    socklen_t last_len = 0;
+    int n = 0;
+    for (ai = res; ai; ai = ai->ai_next) {
+        if ((size_t)ai->ai_addrlen > sizeof(last))
+            continue;
+        memcpy(&last, ai->ai_addr, ai->ai_addrlen);
+        last_len = (socklen_t)ai->ai_addrlen;
+        n++;
+    }
+    freeaddrinfo(res);
+    if (n < 2 || last_len == 0)
+        return -1;
+
+    int fd = socket(last.ss_family, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0)
+        return -1;
+    if (bind(fd, (struct sockaddr *)&last, last_len) < 0) {
+        close(fd);
+        return -1;
+    }
+    socklen_t gl = last_len;
+    if (getsockname(fd, (struct sockaddr *)&last, &gl) < 0) {
+        close(fd);
+        return -1;
+    }
+    if (last.ss_family == AF_INET)
+        *port = ntohs(((struct sockaddr_in *)&last)->sin_port);
+    else
+        *port = ntohs(((struct sockaddr_in6 *)&last)->sin6_port);
+    if (listen(fd, 1) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
 
 /* Pin the process cwd to a scratch directory (per-pid temp dir).
  *

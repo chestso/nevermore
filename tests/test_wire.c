@@ -13,6 +13,7 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -21,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "transport.h"
 #include "test_net_helpers.h"
@@ -655,6 +657,245 @@ static void test_async_send_partial_resume(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* The bounded connect walk                                          */
+/* ---------------------------------------------------------------- */
+
+/* A listener on 127.0.0.1 only (no ::1). "localhost" resolves to both
+ * everywhere it resolves at all, so a connect by name must walk past
+ * the address without a listener and land on this one. That is the
+ * regression the walk exists for: the old async connect dialled the
+ * FIRST address and never tried the second (a v6-first resolver on a
+ * v4-only listener = "connection refused" for a host that is up). */
+static int bind_v4_loopback(int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+        close(fd);
+        return -1;
+    }
+    socklen_t gl = sizeof(a);
+    if (getsockname(fd, (struct sockaddr *)&a, &gl) < 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    if (listen(fd, 1) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static const char CANNED_OK[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                                "Content-Length: 5\r\n\r\nhello";
+
+static void *one_shot_server(void *arg)
+{
+    struct ServerCase *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
+    send(cfd, sc->response, sc->len, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_blocking_connect_walks_to_reachable_address(void)
+{
+    struct ServerCase sc = { CANNED_OK, 0, 0, 0 };
+    sc.len = strlen(sc.response);
+    sc.fd = bind_v4_loopback(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    const NmResponse *r = nm_response(c);
+    ASSERT_EQ(r->status, 200);
+
+    char buf[64];
+    long n = nm_read_body(c, buf, sizeof(buf));
+    ASSERT_EQ(n, 5L);
+    buf[n] = '\0';
+    ASSERT_STR_EQ(buf, "hello");
+
+    /* A successful connect clears the process-global failure notice. */
+    ASSERT_NULL(nm_connection_connect_error());
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Same walk through the async seam: the phase machine steps over the
+ * dead address and completes on the live one. */
+static void test_async_connect_walks_to_reachable_address(void)
+{
+    struct ServerCase sc = { CANNED_OK, 0, 0, 0 };
+    sc.len = strlen(sc.response);
+    sc.fd = bind_v4_loopback(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c =
+        nm_connect_async("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request_queue(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+
+    NmTransportStatus s = NM_TRANSPORT_OK;
+    for (int spin = 0; spin < 400; spin++) {
+        NmSource i = nm_connection_interest(c);
+        if (i.flags == 0)
+            break;
+        wait_interest(i.handle, i.flags, 20);
+        s = nm_connection_step(c);
+        if (s != NM_TRANSPORT_OK && s != NM_TRANSPORT_PENDING)
+            break;
+        if (s == NM_TRANSPORT_OK &&
+            nm_connection_interest(c).flags == (unsigned)NM_INTEREST_READ)
+            break;
+    }
+    ASSERT_TRUE(s == NM_TRANSPORT_OK || s == NM_TRANSPORT_PENDING);
+
+    char buf[64];
+    size_t got = 0;
+    for (int spin = 0; spin < 400 && got < 5; spin++) {
+        NmSource i = nm_connection_interest(c);
+        long n = nm_read_body(c, buf + got, sizeof(buf) - got);
+        if (n == NM_READ_WOULD_BLOCK) {
+            wait_interest(i.handle, NM_INTEREST_READ, 20);
+            continue;
+        }
+        ASSERT_TRUE(n > 0);
+        got += (size_t)n;
+    }
+    buf[got] = '\0';
+    ASSERT_STR_EQ(buf, "hello");
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The budget is what bounds a black-holed address. RFC 5737's
+ * TEST-NET-1 (192.0.2.0/24) is reserved and routed nowhere: a host
+ * with a default route sends the SYN into the void and the OS's own
+ * connect timeout (~130 s) is the only thing that would end the wait.
+ * Two legitimate outcomes exist for the test to tolerate — the SYN is
+ * absorbed (budget spent, "timed out") or there is no route at all
+ * (instant "network unreachable") — so the assertion is the WALL
+ * CLOCK, which is exactly the property the walk added. */
+static void test_connect_budget_bounds_a_black_hole(void)
+{
+    int saved = nm_connection_connect_timeout_ms();
+    nm_connection_set_connect_timeout_ms(300);
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), 300);
+
+    time_t t0 = time(NULL);
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("192.0.2.1", 9, NM_TRANSPORT_PLAIN, &ci);
+    time_t dt = time(NULL) - t0;
+    nm_connection_set_connect_timeout_ms(saved);
+
+    ASSERT_NULL(c);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
+    /* Always-set contract still holds: the failure names the target. */
+    ASSERT_TRUE(ci.detail[0] != '\0');
+    ASSERT_TRUE(strstr(ci.detail, "192.0.2.1") != NULL);
+    /* The walk's bound: 1 address x 300 ms, with slack for a slow
+     * runner. The pre-walk behavior (the OS's ~130 s) fails here. */
+    ASSERT_TRUE(dt <= 5);
+
+    /* The same reason is readable process-globally (the chat app's
+     * notice path reads it). */
+    ASSERT_NOT_NULL(nm_connection_connect_error());
+    ASSERT_TRUE(strstr(nm_connection_connect_error(), "192.0.2.1") != NULL);
+}
+
+/* The walk's notice: fired once per address abandoned in favour of the
+ * next one. A multi-homed name ("localhost") with a listener on only
+ * one of its addresses makes at least one hop mandatory on any
+ * resolver that returns both (the universal case for "localhost");
+ * where the resolver hands back a single address there is no hop to
+ * report, and the test says so instead of failing a healthy box. */
+static int g_notice_count;
+static int g_notice_last_idx;
+static int g_notice_last_n;
+static char g_notice_host[2];
+
+static void test_notice_cb(void *ud, const char *host, int port, int idx,
+                           int n_addrs)
+{
+    (void)ud;
+    (void)port;
+    if (host)
+        g_notice_host[0] = host[0];
+    g_notice_count++;
+    g_notice_last_idx = idx;
+    g_notice_last_n = n_addrs;
+}
+
+static void test_connect_walk_notice_reports_the_next_address(void)
+{
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        /* Single-address resolver or no loopback of the tail family:
+         * there is no hop to make, so the notice cannot be exercised
+         * on this host. A healthy box, not a failure. */
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; walk notice not exercised\n");
+        return;
+    }
+
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    g_notice_count = 0;
+    g_notice_host[0] = '\0';
+    g_notice_last_n = 0;
+    nm_transport_set_connect_notice(test_notice_cb, NULL);
+
+    /* Blocking connect: the walk runs inline, the notice fires from
+     * inside it. */
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+
+    nm_transport_set_connect_notice(NULL, NULL);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+
+    /* The connect landed on the LAST address, so at least one earlier
+     * one was abandoned — the notice must have fired. idx is the
+     * ABANDONED attempt (0-based); the app prints idx+1 as the "1/2"
+     * attempt number, so idx must still be short of the last one. */
+    ASSERT_TRUE(g_notice_count >= 1);
+    ASSERT_TRUE(g_notice_host[0] != '\0');
+    ASSERT_TRUE(g_notice_last_idx >= 0);
+    ASSERT_TRUE(g_notice_last_n >= 2);
+    ASSERT_TRUE(g_notice_last_idx < g_notice_last_n - 1);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -677,5 +918,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_async_connect_interest_and_phases);
     RUN_TEST(test_async_connect_refused_step_errors);
     RUN_TEST(test_async_send_partial_resume);
+    RUN_TEST(test_blocking_connect_walks_to_reachable_address);
+    RUN_TEST(test_async_connect_walks_to_reachable_address);
+    RUN_TEST(test_connect_budget_bounds_a_black_hole);
+    RUN_TEST(test_connect_walk_notice_reports_the_next_address);
     TEST_SUMMARY();
 }

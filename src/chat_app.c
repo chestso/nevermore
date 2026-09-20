@@ -544,6 +544,22 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
+/* Transport notice (the connect walk abandoning an address that went
+ * silent for the per-address budget). The one visible sign of life
+ * during an otherwise silent multi-second connect: a system-stream
+ * line, so a user staring at a spinner learns why. Fires from inside
+ * nm_agent_step; the step's flush commits it with the rest of the
+ * step's units. */
+void nm_chat_app_on_notice(const char *msg, void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !msg || !*msg)
+        return;
+    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    tui_runtime_wakeup(app->rt);
+}
+
 /* ---------------------------------------------------------------- */
 /* Construction / destruction                                       */
 /* ---------------------------------------------------------------- */
@@ -572,6 +588,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_delta(a, nm_chat_app_on_delta);
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, nm_chat_app_on_state);
+    nm_agent_on_notice(a, nm_chat_app_on_notice);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     nm_agent_set_max_rounds(a, app->max_rounds);
     nm_agent_set_echo_reasoning(a, app->echo_reasoning);

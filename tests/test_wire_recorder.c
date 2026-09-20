@@ -339,6 +339,48 @@ static void test_error_line_shape(void)
     free(log);
 }
 
+/* The bounded connect walk's line: one "connect-retry" per abandoned
+ * address, carrying the walk's shape (host, port, attempt, length) and
+ * the connection id (the walk lives on the connection, so the retry
+ * correlates with the connect/error line that follows). */
+static void test_connect_retry_line_shape(void)
+{
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; connect-retry line not exercised\n");
+        return;
+    }
+
+    log_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c); /* the listener on the last address answers */
+    nm_connection_close(c);
+    nm_wire_recorder_shutdown();
+    close(lfd);
+
+    char *log = log_read();
+    ASSERT_NOT_NULL(log);
+    ASSERT_TRUE(strstr(log, "\"kind\":\"connect-retry\"") != NULL);
+    ASSERT_TRUE(strstr(log, "\"host\":\"localhost\"") != NULL);
+    ASSERT_TRUE(strstr(log, "\"address\":1") != NULL);
+    ASSERT_TRUE(strstr(log, "\"addresses\":") != NULL);
+    /* Pre-request: the retry line itself carries no xchg (the
+     * successful connect that follows does — it is a separate line). */
+    char *line = strstr(log, "connect-retry");
+    ASSERT_NOT_NULL(line);
+    char *nl = strchr(line, '\n');
+    if (nl)
+        *nl = '\0';
+    ASSERT_TRUE(strstr(line, "\"xchg\"") == NULL);
+    free(log);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -356,5 +398,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_explicit_path_and_empty_env);
     RUN_TEST(test_truncation_tolerance);
     RUN_TEST(test_error_line_shape);
+    RUN_TEST(test_connect_retry_line_shape);
     TEST_SUMMARY();
 }

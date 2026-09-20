@@ -134,6 +134,70 @@ void nm_wire_tap_error_status(const struct NmConnection *conn,
     nm_wire_tap_error(conn, stage, detail);
 }
 
+/* The UI's connect-walk notice channel (see transport.h). One
+ * process-global slot, set around each round by the agent; a wire tap
+ * cannot serve it because the debug recorder owns that slot when
+ * armed. */
+static NmConnectNoticeFn g_connect_notice;
+static void *g_connect_notice_ud;
+
+void nm_transport_set_connect_notice(NmConnectNoticeFn fn, void *ud)
+{
+    g_connect_notice = fn;
+    g_connect_notice_ud = ud;
+}
+
+void nm_wire_tap_connect_retry(const struct NmConnection *conn,
+                               const char *host, int port, int idx,
+                               int n_addrs)
+{
+    if (g_wire_tap && g_wire_tap->on_connect_retry)
+        g_wire_tap->on_connect_retry(conn, host, port, idx, n_addrs);
+    if (g_connect_notice)
+        g_connect_notice(g_connect_notice_ud, host, port, idx, n_addrs);
+}
+
+/* ---------------------------------------------------------------- */
+/* Connect budget + last connect failure                             */
+/* ---------------------------------------------------------------- */
+
+/* Per-address connect budget in ms (see nm_connection_set_connect_
+ * timeout_ms). One process-global: the walk is a transport-wide
+ * policy, not a per-connection tuning knob, and every connect uses
+ * it. 0 means "use the default" so a zeroed BSS reads correctly. */
+static int g_connect_ms;
+
+void nm_connection_set_connect_timeout_ms(int ms)
+{
+    g_connect_ms = ms < 0 ? 0 : ms;
+}
+
+int nm_connection_connect_timeout_ms(void)
+{
+    return g_connect_ms > 0 ? g_connect_ms : NM_CONNECT_ATTEMPT_MS;
+}
+
+/* Last connect failure detail (process-global, borrow-until-next-
+ * connect). The app's status-line notice reads it: by the time a
+ * turn errors, nm_agent_last_error carries "chat failed: …", not the
+ * transport's own reason, and the reason is exactly what a human
+ * needs ("connect opencode.ai:443: timed out"). */
+static char g_connect_error[NM_ERR_DETAIL_MAX];
+
+const char *nm_connection_connect_error(void)
+{
+    return g_connect_error[0] ? g_connect_error : NULL;
+}
+
+void nm_connection_set_connect_error(const char *detail)
+{
+    if (!detail) {
+        g_connect_error[0] = '\0';
+        return;
+    }
+    snprintf(g_connect_error, sizeof(g_connect_error), "%s", detail);
+}
+
 /* Record a failure with its stage tag AND stamp the in-memory detail
  * (the always-set contract keeps running for the UI regardless of
  * recording). */
@@ -175,8 +239,15 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
     NmConnection *conn = nm_socket_connect(host, port, info);
     if (!conn) {
         /* Pre-connection failure: no conn exists to correlate to, so
-         * the error line carries no xchg (WIRE-DEBUG §3). */
-        nm_wire_tap_error(NULL, "connect", info ? info->detail : "");
+         * the error line carries no xchg (WIRE-DEBUG §3). The socket
+         * layer stamped the process-global reason; surface it on the
+         * tap too (info may be NULL on the catalog-fetch paths). */
+        nm_wire_tap_error(NULL, "connect",
+                          info && info->detail[0]
+                              ? info->detail
+                              : (nm_connection_connect_error()
+                                     ? nm_connection_connect_error()
+                                     : ""));
         return NULL;
     }
     if (mode == NM_TRANSPORT_TLS) {
@@ -310,19 +381,24 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
     switch (conn->phase) {
     case NM_CONN_CONNECTING:
     {
-        /* Completion probe: re-connect the stored target (the
-         * deterministic idiom; see connection_layout.h for why
-         * SO_ERROR is not used). 0 = still in flight (PENDING —
-         * step again on writability), 1 = connected, -1 = failed. */
-        int probe = nm_socket_connect_probe(conn);
-        if (probe == 0)
+        /* Bounded address walk: the attempt at conn_addr_idx is
+         * probed (1 = connected, 0 = in flight, -1 = failed). An
+         * in-flight attempt that has burned the per-address budget
+         * (a black-holed address: no RST, no SYN-ACK — an IPv6
+         * address on an IPv4-only network) is abandoned for the next
+         * one; the walk reports that with a tap notice, so the UI can
+         * say something instead of going silent for a minute. */
+        int w = nm_socket_connect_walk(conn);
+        if (w == 0)
             return NM_TRANSPORT_PENDING;
-        if (probe < 0) {
-            conn_fail(conn, "connect", NM_TRANSPORT_ERR_SOCKET,
-                      "connect to %s failed: %s", conn->host,
-                      nm_sock_errstr());
+        if (w < 0) {
+            char detail[NM_ERR_DETAIL_MAX];
+            snprintf(detail, sizeof(detail), "%s",
+                     conn->err_detail[0] ? conn->err_detail : "connect failed");
+            conn_fail(conn, "connect", NM_TRANSPORT_ERR_SOCKET, "%s", detail);
             return NM_TRANSPORT_ERR_SOCKET;
         }
+        nm_connection_set_connect_error(NULL); /* connected: clear the notice */
         /* Connect complete. TLS: run the (blocking) handshake now —
          * the narrowed deferral (sub-second, post-writability). The
          * bare hostname (no port): SNI/cert verification. */
