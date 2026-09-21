@@ -1345,15 +1345,18 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
         if (st == NM_AGENT_ERROR || st == NM_AGENT_DONE ||
             st == NM_AGENT_IDLE)
             break;
-        NmSource s = nm_chat_app_source(h->app);
+        /* Drive by the app's CADENCE, not by the fd source. In boba's
+         * loop the tick is a TIMER (get_tick_timeout_ms), separate from
+         * the fd-ready path; here the unroutable socket is ready the
+         * whole time, so an fd wait returns at once and paints a
+         * spinner frame per microsecond — ~250k frames and 16 MB in a
+         * couple hundred ms on a slow box, which pushes the error line
+         * past what harness_read can see (the CI-only failure). Waiting
+         * the cadence is what the timer does. */
         int wait = nm_chat_app_tick_ms(h->app);
         if (wait < 0)
             wait = 5;
-        if (s.handle >= 0 && s.flags) {
-            app_wait(h, wait);
-        } else {
-            usleep((useconds_t)wait * 1000);
-        }
+        usleep((useconds_t)wait * 1000);
         nm_chat_app_tick(h->app);
         tui_runtime_flush(h->rt);
         if (time(NULL) - t0 >= 5)
