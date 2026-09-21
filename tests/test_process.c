@@ -314,6 +314,14 @@ static void test_bounded_buffer_reports_omission(void)
     const char *out = nm_proc_take_output(p);
     ASSERT_NOT_NULL(strstr(out, "omitted"));
 
+    /* total_output survived the eviction and the take: it counts what
+     * the child PRODUCED, not what the buffer still holds (the signal
+     * run_command's inactivity deadline reads). */
+    size_t total = nm_proc_total_output(p);
+    ASSERT_TRUE(total >= 64u);
+    ASSERT_TRUE(nm_proc_buffered(p) <= 64u);
+    ASSERT_TRUE(nm_proc_total_output(p) == total); /* monotonic across takes */
+
     nm_proc_close(p);
     /* reset() restores the default buffer cap as well. */
     nm_proc_reset();
