@@ -436,16 +436,14 @@ static unsigned app_interest(NmChatApp *app)
     }
     return 0;
 }
-/* Wait up to `timeout_ms` for the app's agent source, the way boba's loop
+/* Wait up to `timeout_ms` on an arbitrary source, the way boba's loop
  * does. A Windows process job's readiness object is a waitable event, so
  * select() cannot be used on it — it would fail at once and every caller
  * here would spin instead of waiting (run_command and the job tools both
  * ride that mechanism). */
-static void app_wait(AppHarness *h, int timeout_ms)
+static void app_wait_src(const NmSource *sp, int timeout_ms)
 {
-    NmSource s = nm_chat_app_source(h->app);
-    if (s.handle < 0 || !s.flags)
-        return;
+    NmSource s = *sp;
 #ifdef _WIN32
     if (s.kind == NM_SRC_HANDLE) {
         WaitForSingleObject((HANDLE)s.handle, (DWORD)timeout_ms);
@@ -474,6 +472,15 @@ static void app_wait(AppHarness *h, int timeout_ms)
     select(fd + 1, (s.flags & NM_INTEREST_READ) ? &r : NULL,
            (s.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
 #endif
+}
+
+/* Wait up to `timeout_ms` for the app's agent source. */
+static void app_wait(AppHarness *h, int timeout_ms)
+{
+    NmSource s = nm_chat_app_source(h->app);
+    if (s.handle < 0 || !s.flags)
+        return;
+    app_wait_src(&s, timeout_ms);
 }
 
 /* Drive the agent to completion the way the runtime's external-fd
@@ -1192,7 +1199,7 @@ static void test_tick_fires_stream_inactivity_timeout(void)
      * tick drives the step that fires the timeout. Bounded. */
     for (int i = 0;
          i < 200 && nm_chat_app_state(h->app) == NM_AGENT_STREAMING; i++) {
-        usleep(10 * 1000);
+        usleep(2 * 1000);
         nm_chat_app_tick(h->app);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
@@ -1229,13 +1236,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     /* The async transport seam: submit returns while the connect is
      * still in flight (STREAMING, connect pending); the failure
      * surfaces through steps, exactly as boba's loop would. */
-    for (int i = 0; i < 200; i++) {
-        NmAgentState st = nm_chat_app_state(h->app);
-        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR || st == NM_AGENT_IDLE)
-            break;
-        nm_chat_app_step(h->app);
-        usleep(5 * 1000);
-    }
+    ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "anyone there") != NULL);
@@ -1445,13 +1446,7 @@ static void test_reasoning_prints_before_answer(void)
 
     harness_type(h, "think");
     harness_enter(h);
-    for (int i = 0; i < 200; i++) {
-        NmAgentState st = nm_chat_app_state(h->app);
-        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR || st == NM_AGENT_IDLE)
-            break;
-        nm_chat_app_step(h->app);
-        usleep(5 * 1000);
-    }
+    ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
     const char *out = harness_read(h);
@@ -1503,14 +1498,7 @@ static void test_error_line_endings_are_crnl(void)
 
     harness_type(h, "hello");
     harness_enter(h);
-    for (int i = 0; i < 200; i++) {
-        NmAgentState st = nm_chat_app_state(h->app);
-        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
-            st == NM_AGENT_IDLE)
-            break;
-        nm_chat_app_step(h->app);
-        usleep(5 * 1000);
-    }
+    ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
 
     const char *out = harness_read(h);
@@ -3388,17 +3376,24 @@ static void test_ps_lists_and_kill_removes(void)
     /* This one exits on its own: /ps must show BOTH states. */
     ASSERT_NOT_NULL(
         nm_proc_start("exit 3", NULL, &id_done, err, sizeof(err)));
-    for (int i = 0; i < 300 && nm_proc_count() < 2; i++)
-        usleep(5 * 1000);
-    /* Let the second one actually leave. */
-    int reaped = 0;
-    for (int i = 0; i < 300 && !reaped; i++) {
-        NmProc *d = nm_proc_find(id_done);
-        reaped = d && nm_proc_exit(d) >= 0;
-        if (!reaped)
-            usleep(5 * 1000);
+    ASSERT_EQ(nm_proc_count(), 2);
+    /* Wait for the second one to actually leave — on its own handle
+     * (its exit is what makes the handle readable/EOF), not a sleep. */
+    NmProc *d = NULL;
+    for (int i = 0; i < 3000; i++) {
+        d = nm_proc_find(id_done);
+        if (d && nm_proc_exit(d) >= 0)
+            break;
+        if (d) {
+            NmSource s = { nm_proc_handle(d), NM_INTEREST_READ,
+                           nm_proc_source_kind() };
+            app_wait_src(&s, 10);
+        } else {
+            usleep(1000);
+        }
     }
-    ASSERT_TRUE(reaped);
+    ASSERT_NOT_NULL(d);
+    ASSERT_TRUE(nm_proc_exit(d) >= 0);
 
     harness_type(h, "/ps");
     harness_enter(h);

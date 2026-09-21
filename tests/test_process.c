@@ -137,21 +137,55 @@ static void test_render_drops_sgr_and_osc(void)
 /* Job lifecycle (both platforms)                                    */
 /* ---------------------------------------------------------------- */
 
-/* Pump drain() until `done` or the budget elapses.  On Windows drain
- * itself only reaps — the reader thread feeds the buffer — so this
- * still observes completion. */
+/* Bounded wait on the job's readiness handle — the event loop's own
+ * wait (a PTY master fd on POSIX, a waitable auto-reset event on
+ * Windows), never a fixed sleep.  Returns 0 when the handle signalled,
+ * -1 on timeout (or when there is nothing left to wait on). */
+static int proc_wait(NmProc *p, int timeout_ms)
+{
+    intptr_t h = nm_proc_handle(p);
+    if (h < 0) {
+        tsleep(timeout_ms); /* exhausted: just yield */
+        return -1;
+    }
+#ifdef _WIN32
+    return WaitForSingleObject((HANDLE)h, (DWORD)timeout_ms) ==
+                   WAIT_OBJECT_0
+               ? 0
+               : -1;
+#else
+    fd_set rfds;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&rfds);
+    FD_SET((int)h, &rfds);
+    return select((int)h + 1, &rfds, NULL, NULL, &tv) > 0 ? 0 : -1;
+#endif
+}
+
+/* Pump drain() until `done` or the budget elapses, waiting on the job's
+ * readiness handle between drains rather than sleeping a fixed slice.
+ * On Windows drain itself only reaps — the reader thread feeds the
+ * buffer — so this still observes completion. */
 static int pump_until(NmProc *p, int (*done)(NmProc *), int max_ms)
 {
-    for (int t = 0; t < max_ms; t += 5) {
+    long deadline = now_ms() + max_ms;
+    for (;;) {
         nm_proc_drain(p);
         if (done(p))
             return 0;
-        tsleep(5);
+        if (now_ms() >= deadline)
+            return -1;
+        proc_wait(p, 5); /* woken by the child speaking (5 ms cap) */
     }
-    return -1;
 }
 
 static int done_exited(NmProc *p) { return !nm_proc_live(p); }
+/* "The child has printed" — but ONLY for a test willing to drain: this
+ * reads the buffer, which POSIX fills solely inside nm_proc_drain (a
+ * read of the master). A test that must leave the master undrained (see
+ * test_close_of_undrained_job_is_prompt) has to probe the handle with
+ * proc_wait instead. */
+static int done_printed(NmProc *p) { return nm_proc_buffered(p) > 0; }
 
 static void test_spawn_output_and_exit(void)
 {
@@ -206,8 +240,9 @@ static void test_write_stdin_and_eof(void)
     NmProc *p = nm_proc_start(TEST_READER, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
 
-    /* Give the shell a beat to arm its read. */
-    tsleep(150);
+    /* No arming delay needed: stdin bytes sit in the PTY/pipe buffer
+     * until the child reads them, so the write is safe to issue as soon
+     * as the spawn returns. */
     ASSERT_TRUE(nm_proc_write(p, TEST_STDIN_LINE,
                               strlen(TEST_STDIN_LINE)) > 0);
     nm_proc_write_eof(p);
@@ -256,7 +291,9 @@ static void test_close_is_prompt(void)
     NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, &id, err,
                               sizeof(err));
     ASSERT_NOT_NULL(p);
-    tsleep(300); /* let it print and reach the long part */
+    /* Wait for the child's first line (its readiness handle), not a
+     * guessed delay: take_output is then non-empty by construction. */
+    ASSERT_EQ(pump_until(p, done_printed, 5000), 0);
     nm_proc_drain(p);
     ASSERT_NOT_NULL(strstr(nm_proc_take_output(p), "start"));
 
@@ -282,12 +319,24 @@ static void test_close_of_undrained_job_is_prompt(void)
     NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, &id, err,
                               sizeof(err));
     ASSERT_NOT_NULL(p);
-    tsleep(300); /* let it print and reach the long part... */
 #ifndef _WIN32
+    /* Readiness here MUST be probed by SELECT (proc_wait), never by
+     * done_printed/pump_until: those call nm_proc_drain, which reads
+     * the master — and an already-drained master is the one case this
+     * test must NOT set up (the whole point is the undrained macOS
+     * trap below). proc_wait blocks on readability and consumes
+     * nothing, so the child has provably printed while the master is
+     * still unread. */
+    ASSERT_EQ(proc_wait(p, 5000), 0);
     /* ...and leave it unread on the PTY master (the Windows reader
      * thread has already fed the buffer — there is no master to drain,
      * which is exactly why the macOS trap is POSIX-only). */
     ASSERT_EQ(nm_proc_buffered(p), 0u);
+#else
+    /* Windows has no master to leave undrained: the reader thread feeds
+     * the buffer itself, so waiting on the buffer (which drains nothing
+     * there) is the same "the child printed" signal. */
+    ASSERT_EQ(pump_until(p, done_printed, 5000), 0);
 #endif
 
     long t0 = now_ms();

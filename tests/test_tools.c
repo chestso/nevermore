@@ -12,6 +12,7 @@
 #define getpid      _getpid
 #define mkdir(d, m) _mkdir(d)
 #else
+#include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <sys/select.h>
@@ -83,6 +84,80 @@ static char *scratch_in(const char *dir, const char *name)
 #endif
     return p;
 }
+
+/* ---------------------------------------------------------------- */
+/* Event-driven waits (POSIX: the header's fd_set/select/usleep)     */
+/* ---------------------------------------------------------------- */
+
+#ifndef _WIN32
+static long long elapsed_us(const struct timeval *a, const struct timeval *b);
+
+/* Wait on a readable fd until `fn(user)` holds or the budget runs out.
+ * The event-driven alternative to "sleep long enough that it is
+ * probably true": the caller names the condition, this polls the fd the
+ * way the loop would. `fd` < 0 means "nothing to watch — just poll".
+ * Returns 1 on success, 0 on budget exhaustion. */
+static int wait_for_fd(int fd, int (*fn)(void *), void *user, int budget_ms)
+{
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    for (;;) {
+        if (fn(user))
+            return 1;
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > (long long)budget_ms * 1000)
+            return 0;
+        if (fd >= 0) {
+            fd_set rfds;
+            struct timeval tv = { 0, 5 * 1000 };
+            FD_ZERO(&rfds);
+            FD_SET(fd, &rfds);
+            select(fd + 1, &rfds, NULL, NULL, &tv);
+        } else {
+            usleep(1000);
+        }
+    }
+}
+
+/* Is the cancelled child's process group still alive? The kill takes
+ * the whole session group (setsid in the spawn), so ESRCH here means no
+ * survivor can ever write the marker — the check the tests used to
+ * reach by sleeping past the write point. `probe` is any pid in the
+ * group. */
+static int group_alive(pid_t probe)
+{
+    return kill(-probe, 0) == 0 || errno == EPERM;
+}
+
+/* Does the path exist? For the marker-file probes below. */
+static int path_exists(void *u)
+{
+    FILE *f = fopen((const char *)u, "rb");
+    if (!f)
+        return 0;
+    fclose(f);
+    return 1;
+}
+
+/* Block until `fd` is readable (a PTY master / pipe), or the budget
+ * runs out. Returns 0 when readable, -1 on timeout. */
+static int wait_readable(int fd, int budget_ms)
+{
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    for (;;) {
+        fd_set rfds;
+        struct timeval tv = { 0, 5 * 1000 };
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (select(fd + 1, &rfds, NULL, NULL, &tv) > 0)
+            return 0;
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > (long long)budget_ms * 1000)
+            return -1;
+    }
+}
+#endif /* !_WIN32 */
 
 /* ---------------------------------------------------------------- */
 /* Registry                                                          */
@@ -1120,7 +1195,9 @@ static void test_run_command_cancel_is_prompt(void)
 static void test_run_command_cancel_kills_the_child(void)
 {
     char *leak = scratch_path("leaked.txt");
+    char *pidfile = scratch_path("leak-child.pid");
     remove(leak); /* scratch_dir is per-pid, but be explicit */
+    remove(pidfile);
 
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, "run_command");
@@ -1129,9 +1206,13 @@ static void test_run_command_cancel_kills_the_child(void)
     NmJson *jargs = nm_json_new_object();
     /* The shell writes the marker file only if it survives the cancel;
      * nm_json_set + nm_json_dump keep the path escaped whatever it
-     * holds. */
+     * holds. It also records its own pid ($$ IS the group leader: the
+     * spawn execs /bin/sh directly), which is the probe the liveness
+     * check below needs. */
     char cmd[1024];
-    snprintf(cmd, sizeof(cmd), "sleep 0.5; printf 'leaked\\n' > %s", leak);
+    snprintf(cmd, sizeof(cmd),
+             "printf '%%d\\n' $$ > %s; sleep 0.5; printf 'leaked\\n' > %s",
+             pidfile, leak);
     nm_json_set(jargs, "cmd", nm_json_new_string(cmd));
     char *args = nm_json_dump(jargs);
     nm_json_free(jargs);
@@ -1141,17 +1222,48 @@ static void test_run_command_cancel_kills_the_child(void)
     ASSERT_NOT_NULL(e);
     NmToolResult r = { 0, NULL };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
-    t->end(e); /* cancel before the child wakes up */
 
-    /* Past the child's write point: a survivor would have created the
-     * file by now. */
-    usleep(900 * 1000);
+    /* Read the child's own pid (the session/group leader the spawn
+     * created — SETPGROUP), so after the cancel the test can wait on a
+     * POSITIVE liveness signal (the group is gone) instead of sleeping
+     * past the write point. */
+    pid_t child = 0;
+    for (int i = 0; i < 2000 && child <= 0; i++) {
+        FILE *f = fopen(pidfile, "rb");
+        if (f) {
+            long v = 0;
+            if (fscanf(f, "%ld", &v) == 1)
+                child = (pid_t)v;
+            fclose(f);
+            break;
+        }
+        usleep(1000);
+    }
+    ASSERT_TRUE(child > 0);
+
+    t->end(e); /* cancel kills the group: shell + descendants */
+
+    /* The cancel SIGKILLed the whole group. Once every member is gone
+     * no writer can exist, so the absence check is valid immediately —
+     * this replaces the old "sleep past the write point" (900 ms). */
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    while (group_alive(child)) {
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > 3000 * 1000)
+            break;
+        usleep(1000);
+    }
+    ASSERT_FALSE(group_alive(child));
+
     FILE *g = fopen(leak, "rb");
     if (g)
         fclose(g);
     ASSERT_NULL(g);
 
+    remove(pidfile);
     remove(leak);
+    free(pidfile);
     free(leak);
     nm_toolset_free(ts);
 }
@@ -1164,8 +1276,10 @@ static void test_run_command_cancel_kills_the_process_group(void)
 {
     char *up = scratch_path("grand-up.txt");
     char *leak = scratch_path("leaked-grand.txt");
+    char *pidfile = scratch_path("grand.pid");
     remove(up);
     remove(leak);
+    remove(pidfile);
 
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, "run_command");
@@ -1174,12 +1288,14 @@ static void test_run_command_cancel_kills_the_process_group(void)
     /* The background grandchild (in the shell's group) announces
      * itself, then sleeps and writes the leak marker. The announce is
      * what makes this deterministic: cancelling before the shell forks
-     * would leave no grandchild to detect. */
+     * would leave no grandchild to detect. The shell records its own
+     * pid ($$ — the group leader) so the liveness probe below is a
+     * positive signal, not a sleep. */
     char cmd[1024];
     snprintf(cmd, sizeof(cmd),
-             "sh -c \"printf 'up\\n' > %s; sleep 0.4; printf 'grand\\n' > "
-             "%s\" & wait",
-             up, leak);
+             "printf '%%d\\n' $$ > %s; sh -c \"printf 'up\\n' > %s; sleep "
+             "0.4; printf 'grand\\n' > %s\" & wait",
+             pidfile, up, leak);
     NmJson *jargs = nm_json_new_object();
     nm_json_set(jargs, "cmd", nm_json_new_string(cmd));
     char *args = nm_json_dump(jargs);
@@ -1191,23 +1307,37 @@ static void test_run_command_cancel_kills_the_process_group(void)
     NmToolResult r = { 0, NULL };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
 
-    /* Bounded wait for the grandchild to exist. */
-    int alive = 0;
-    for (int i = 0; i < 200 && !alive; i++) {
-        FILE *f = fopen(up, "rb");
-        if (f) {
-            fclose(f);
-            alive = 1;
-            break;
-        }
-        usleep(10 * 1000);
+    /* Bounded wait for the pid file, then for the grandchild's
+     * announcement — both real signals, no guessed delay. */
+    ASSERT_TRUE(wait_for_fd(-1, path_exists, pidfile, 3000));
+    ASSERT_TRUE(wait_for_fd(-1, path_exists, up, 3000));
+
+    pid_t leader = 0;
+    {
+        FILE *f = fopen(pidfile, "rb");
+        ASSERT_NOT_NULL(f);
+        long v = 0;
+        int got = fscanf(f, "%ld", &v);
+        fclose(f);
+        ASSERT_EQ(got, 1);
+        leader = (pid_t)v;
     }
-    ASSERT_TRUE(alive);
+    ASSERT_TRUE(leader > 0);
 
     t->end(e); /* cancel kills the group: shell + grandchild */
 
-    /* Past the grandchild's write point. */
-    usleep(900 * 1000);
+    /* The group is SIGKILLed; once it is gone no writer can exist, so
+     * the marker's absence is meaningful at once. */
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    while (group_alive(leader)) {
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > 3000 * 1000)
+            break;
+        usleep(1000);
+    }
+    ASSERT_FALSE(group_alive(leader));
+
     FILE *g = fopen(leak, "rb");
     if (g)
         fclose(g);
@@ -1215,8 +1345,10 @@ static void test_run_command_cancel_kills_the_process_group(void)
 
     remove(up);
     remove(leak);
+    remove(pidfile);
     free(up);
     free(leak);
+    free(pidfile);
     nm_toolset_free(ts);
 }
 
@@ -1457,6 +1589,103 @@ static int reported_job_id(const char *output)
     return atoi(p + sizeof(key) - 1);
 }
 
+/* ---------------------------------------------------------------- */
+/* run_command inactivity deadline (tools.h)                         */
+/* ---------------------------------------------------------------- */
+
+/* One run_command call, driven by the async seam, with `budget_ms` as
+ * the process-global inactivity budget. The knob is restored to its
+ * default afterwards so a later test is never left with a short one. */
+static NmToolResult run_command_driven(const char *cmd, int budget_ms,
+                                       int *declared_dl)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    if (declared_dl)
+        *declared_dl = -2;
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string(cmd));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+    nm_tool_run_command_set_timeout_ms(budget_ms);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    NmToolResult r = { 0, NULL };
+    if (e) {
+        if (declared_dl && t->deadline_ms)
+            *declared_dl = t->deadline_ms(e);
+        drive_async(t, e, &r, 15000);
+        t->end(e);
+    }
+    nm_tool_run_command_set_timeout_ms(0); /* restore the default */
+    nm_toolset_free(ts);
+    return r;
+}
+
+/* A child that produces nothing is stopped once the budget has passed:
+ * without the deadline the turn waits forever (`sleep 30` never makes
+ * the pipe readable, so nothing ever re-steps the tool). Kept short —
+ * the whole test binary shares the harness's runtime cap. */
+static void test_run_command_silent_child_is_stopped(void)
+{
+    struct timeval t0, t1;
+    gettimeofday(&t0, NULL);
+    int dl = -2;
+    NmToolResult r = run_command_driven("sleep 30; printf 'never\\n'", 250,
+                                        &dl);
+    gettimeofday(&t1, NULL);
+
+    /* The budget is declared on the NmTool.deadline_ms seam — the drive a
+     * silent child needs. */
+    ASSERT_TRUE(dl >= 0 && dl <= 250);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "timed out"));
+    ASSERT_TRUE(strstr(r.output, "never") == NULL); /* the child never got there */
+    long long ms = elapsed_us(&t0, &t1) / 1000;
+    ASSERT_TRUE(ms < 4000); /* nowhere near the 30 s sleep */
+    nm_tool_result_free(&r);
+}
+
+/* ...and a child that keeps printing is NOT cut off: every read pushes
+ * the deadline out, so a slow-but-noisy command runs to completion. */
+static void test_run_command_output_resets_the_deadline(void)
+{
+    /* Prints every ~60 ms for ~0.3 s: each line resets the 300 ms
+     * budget, so this must finish with its own exit status (were the
+     * deadline absolute it would be stopped around 300 ms). */
+    NmToolResult r = run_command_driven(
+        "i=0; while [ $i -lt 5 ]; do printf 'tick\\n'; i=$((i+1)); "
+        "sleep 0.06; done; exit 0",
+        300, NULL);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "tick") != NULL);
+    ASSERT_TRUE(strstr(r.output, "timed out") == NULL);
+    nm_tool_result_free(&r);
+}
+
+/* A negative budget disables the deadline entirely (no drive declared),
+ * for a caller that supplies its own bound. */
+static void test_run_command_deadline_can_be_disabled(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("sleep 30"));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+    nm_tool_run_command_set_timeout_ms(-1);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    ASSERT_NOT_NULL(t->deadline_ms);
+    ASSERT_EQ(t->deadline_ms(e), -1); /* no deadline: readiness-driven */
+    t->end(e);                        /* cancel kills the `sleep 30` */
+    nm_tool_run_command_set_timeout_ms(0);
+    nm_toolset_free(ts);
+}
+
 /* A command that finishes inside the yield window reports its exit code
  * and its output, and retires the job (nothing left to poll). */
 static void test_exec_command_exits_within_window(void)
@@ -1583,7 +1812,7 @@ static void test_exec_command_yield_garbage_string_uses_default(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     NmJson *j = nm_json_new_object();
-    nm_json_set(j, "cmd", nm_json_new_string("sleep 1; echo ok"));
+    nm_json_set(j, "cmd", nm_json_new_string("sleep 0.3; echo ok"));
     nm_json_set(j, "yield_time_ms", nm_json_new_string("soon"));
     char *args = args_dump(j);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
@@ -1602,9 +1831,9 @@ static void test_exec_command_yield_garbage_string_uses_default(void)
 static void test_write_stdin_yield_string_form(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
-    /* Blocks on stdin, then takes 2 s to finish — longer than the 1 s
+    /* Blocks on stdin, then takes 1 s to finish — longer than the 1 s
      * write_stdin default, shorter than the requested window. */
-    char *args = exec_args("read x; sleep 2; echo done", 300);
+    char *args = exec_args("read x; sleep 1; echo done", 300);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
     ASSERT_TRUE(r.ok);
@@ -1731,8 +1960,14 @@ static void test_write_stdin_round_trip(void)
     ASSERT_TRUE(sid > 0);
     nm_tool_result_free(&r);
 
-    /* Feed a line: still running. */
-    args = stdin_args(sid, "hello there\n");
+    /* Feed a line: still running. A short yield window (the default is
+     * 1 s) keeps the round-trip quick — the window is not what this
+     * test is about. */
+    NmJson *j1 = nm_json_new_object();
+    nm_json_set(j1, "job_id", nm_json_new_number(sid));
+    nm_json_set(j1, "input", nm_json_new_string("hello there\n"));
+    nm_json_set(j1, "yield_time_ms", nm_json_new_number(300));
+    args = args_dump(j1);
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
     ASSERT_TRUE(r.ok);
@@ -1742,7 +1977,11 @@ static void test_write_stdin_round_trip(void)
     ASSERT_TRUE(nm_proc_find(sid) != NULL);
 
     /* Close stdin: cat sees EOF, exits 0, and the job retires. */
-    args = stdin_args(sid, "\\x04");
+    NmJson *j2 = nm_json_new_object();
+    nm_json_set(j2, "job_id", nm_json_new_number(sid));
+    nm_json_set(j2, "input", nm_json_new_string("\\x04"));
+    nm_json_set(j2, "yield_time_ms", nm_json_new_number(300));
+    args = args_dump(j2);
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
     ASSERT_TRUE(r.ok);
@@ -1841,7 +2080,10 @@ static void test_write_stdin_reads_progress(void)
     nm_tool_result_free(&r);
 
     /* Poll with no input: the second line arrives, and with it the exit. */
-    args = stdin_args(sid, NULL);
+    NmJson *jp = nm_json_new_object();
+    nm_json_set(jp, "job_id", nm_json_new_number(sid));
+    nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
+    args = args_dump(jp);
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
     ASSERT_TRUE(r.ok);
@@ -1908,10 +2150,15 @@ static void test_kill_job_stops_and_reports(void)
     ASSERT_EQ(nm_proc_count(), 1);
 
     /* Let it print again, and drain the way the event loop will (P3): the
-     * kill report carries the bytes taken since the last report. */
-    usleep(900 * 1000);
+     * kill report carries the bytes taken since the last report. Wait
+     * for the job's master to go readable (its next line) instead of
+     * sleeping past its `sleep 0.5` — and do NOT take the output here:
+     * the take is kill_job's, and a delta consumed now would be gone. */
     NmProc *p = nm_proc_find(sid);
     ASSERT_NOT_NULL(p);
+    intptr_t h = nm_proc_handle(p);
+    ASSERT_TRUE(h >= 0);
+    ASSERT_EQ(wait_readable((int)h, 3000), 0);
     nm_proc_drain(p);
 
     NmJson *j = nm_json_new_object();
@@ -1961,6 +2208,18 @@ static void test_exec_job_lifecycle(void)
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(strstr(r.output, "got one"));
+    nm_tool_result_free(&r);
+
+    /* One poll with no input: the reading half of the pair (short
+     * window, so two window-lengths do not dominate the test). */
+    NmJson *jp = nm_json_new_object();
+    nm_json_set(jp, "job_id", nm_json_new_number(sid));
+    nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
+    args = args_dump(jp);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
     nm_tool_result_free(&r);
 
     NmJson *j = nm_json_new_object();
@@ -2126,6 +2385,55 @@ static void test_run_command_async_on_windows(void)
 
     nm_toolset_free(ts);
 }
+
+/* The inactivity deadline on Windows: a silent job's readiness event
+ * never fires, so deadline_ms is what re-steps the tool and stops the
+ * child (the POSIX twin is test_run_command_silent_child_is_stopped). */
+static void test_run_command_silent_child_times_out_on_windows(void)
+{
+    nm_proc_reset();
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(t->deadline_ms);
+
+    nm_tool_run_command_set_timeout_ms(500);
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd",
+                nm_json_new_string("ping -n 31 127.0.0.1 >nul"));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+    int dl = t->deadline_ms(e);
+    ASSERT_TRUE(dl >= 0 && dl <= 500);
+
+    NmToolResult r = { 0, NULL };
+    long t0 = (long)GetTickCount64();
+    int steps = 0;
+    while (t->step(e, &r) == NM_TOOL_RUNNING && ++steps < 20000) {
+        int left = t->deadline_ms(e);
+        if (left < 0 || left > 50)
+            left = 50; /* wait the event, then re-check the deadline */
+        NmSource src = { -1, 0, NM_SRC_HANDLE };
+        if (t->source(e, &src) && src.handle >= 0)
+            WaitForSingleObject((HANDLE)src.handle, (DWORD)left);
+        else
+            Sleep((DWORD)left);
+    }
+    t->end(e);
+    long elapsed = (long)GetTickCount64() - t0;
+    nm_tool_run_command_set_timeout_ms(0); /* restore the default */
+
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "timed out"));
+    ASSERT_TRUE(elapsed < 10000); /* nowhere near the 31 s ping */
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0); /* the timeout closed the job itself */
+    nm_toolset_free(ts);
+}
 #endif /* _WIN32 */
 
 int main(void)
@@ -2170,6 +2478,9 @@ int main(void)
     RUN_TEST(test_run_command_cancel_kills_the_process_group);
     RUN_TEST(test_run_command_stdin_is_dev_null);
     RUN_TEST(test_run_command_async_stdin_is_dev_null);
+    RUN_TEST(test_run_command_silent_child_is_stopped);
+    RUN_TEST(test_run_command_output_resets_the_deadline);
+    RUN_TEST(test_run_command_deadline_can_be_disabled);
     RUN_TEST(test_exec_command_exits_within_window);
     RUN_TEST(test_exec_command_nonzero_exit);
     RUN_TEST(test_exec_command_is_a_pty_with_merged_streams);
@@ -2194,6 +2505,7 @@ int main(void)
 #ifdef _WIN32
     RUN_TEST(test_exec_job_roundtrip_on_windows);
     RUN_TEST(test_run_command_async_on_windows);
+    RUN_TEST(test_run_command_silent_child_times_out_on_windows);
 #endif
     TEST_SUMMARY();
 }
