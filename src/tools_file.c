@@ -829,21 +829,20 @@ static void search_file(const char *path, const char *needle,
     free(text);
 }
 
-#ifdef _WIN32
-static void search_dir_walk(const char *dir, const char *needle, char *body,
-                            size_t *bo, int depth)
-#else
-static void search_dir_walk(const char *dir, const char *needle, char *body,
-                            size_t *bo, int depth)
-#endif
+/* Returns nonzero when `dir' was actually searched. Only the ROOT's
+ * answer matters to the caller: a subdirectory that cannot be opened
+ * is skipped silently (a stale entry, a race), but a root that cannot
+ * be opened is the whole call failing — see search_dir_exec. */
+static int search_dir_walk(const char *dir, const char *needle, char *body,
+                           size_t *bo, int depth)
 {
     if (depth > 8 || *bo >= NM_TOOL_MAX_OUTPUT)
-        return;
+        return 1; /* out of depth/budget, not a failure to open */
     /* Skip VCS/build noise: .git, node_modules, build dirs. */
 #ifdef _WIN32
     wchar_t *wdir = utf8_to_wide_path(dir);
     if (!wdir)
-        return;
+        return 0; /* unsearchable path (allocation), not a miss */
     wchar_t wpat[1024];
     _snwprintf(wpat, 1024, L"%s\\*", wdir);
     wpat[1023] = L'\0';
@@ -851,7 +850,7 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(wpat, &fd);
     if (h == INVALID_HANDLE_VALUE)
-        return;
+        return 0;
     do {
         char name[256];
         WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name,
@@ -869,10 +868,11 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
         }
     } while (FindNextFileW(h, &fd) && *bo < NM_TOOL_MAX_OUTPUT);
     FindClose(h);
+    return 1;
 #else
     DIR *d = opendir(dir);
     if (!d)
-        return;
+        return 0;
     struct dirent *ent;
     char full[4096];
     while ((ent = readdir(d)) != NULL && *bo < NM_TOOL_MAX_OUTPUT) {
@@ -891,6 +891,7 @@ static void search_dir_walk(const char *dir, const char *needle, char *body,
         }
     }
     closedir(d);
+    return 1;
 #endif
 }
 
@@ -924,7 +925,23 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("out of memory");
     }
     size_t bo = 0;
-    search_dir_walk(path, needle, body, &bo, 0);
+    /* A root that cannot be opened is this call FAILING, never "no
+     * hits": the empty body used to shape into an ok result with a
+     * bare "(empty)" Output section, indistinguishable from a real
+     * miss, so an agent that passed a file path got "no matches" for
+     * a file it never searched (and re-issued the same search).
+     * search_dir is directory-only by design — a single file is
+     * read_file's job. */
+    if (!search_dir_walk(path, needle, body, &bo, 0)) {
+        free(body);
+        char *msg = malloc(strlen(path) + 64);
+        if (msg)
+            snprintf(msg, strlen(path) + 64,
+                     "cannot search %s: not a readable directory", path);
+        free(path);
+        free(needle);
+        return (NmToolResult){ 0, msg };
+    }
     free(path);
     free(needle);
     /* Same seam as list_dir: the walk stopped at the budget, so name
@@ -992,7 +1009,8 @@ static const char list_dir_schema[] =
 static const char search_dir_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"Directory to search "
-    "recursively (VCS and build noise skipped).\"},"
+    "recursively (VCS and build noise skipped); a path that is not a "
+    "readable directory is an error, not a single-file search.\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Base directory for "
     "a relative path.\"},"
     "\"needle\":{\"type\":\"string\",\"description\":\"Literal string to "

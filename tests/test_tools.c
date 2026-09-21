@@ -779,6 +779,64 @@ static void test_search_dir_literal(void)
     nm_toolset_free(ts);
 }
 
+/* A root that is not a readable directory is a hard error, not "no
+ * hits": the walk used to return an ok result with a bare "(empty)"
+ * Output section for a path it never opened, so an agent that passed
+ * a FILE path read the silence as a miss and re-ran the same search
+ * (the 2026-09-20 draft). The same needle pointed at the directory
+ * still hits — the error is about the root, not the content. */
+static void test_search_dir_root_must_be_a_directory(void)
+{
+    char *dir = scratch_sub_dir("bad_root_dir");
+    char *file = scratch_in(dir, "not_a_dir.txt");
+    FILE *f = fopen(file, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("the NEEDLE line\n", f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+
+    /* The file path: refused. */
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(file));
+    nm_json_set(jargs, "needle", nm_json_new_string("NEEDLE"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "cannot search") != NULL);
+    nm_tool_result_free(&r);
+
+    /* ... and a path that exists nowhere, same shape. */
+    NmToolResult r2 =
+        nm_toolset_execute(ts, "search_dir",
+                           "{\"path\":\"/no/such/dir\",\"needle\":\"NEEDLE\"}",
+                           NULL);
+    ASSERT_FALSE(r2.ok);
+    ASSERT_NOT_NULL(r2.output);
+    ASSERT_TRUE(strstr(r2.output, "cannot search") != NULL);
+    nm_tool_result_free(&r2);
+
+    /* The directory itself: the hit. */
+    NmJson *jargs2 = nm_json_new_object();
+    nm_json_set(jargs2, "path", nm_json_new_string(dir));
+    nm_json_set(jargs2, "needle", nm_json_new_string("NEEDLE"));
+    char *args2 = nm_json_dump(jargs2);
+    nm_json_free(jargs2);
+    NmToolResult r3 = nm_toolset_execute(ts, "search_dir", args2, NULL);
+    free(args2);
+    ASSERT_TRUE(r3.ok);
+    ASSERT_NOT_NULL(r3.output);
+    ASSERT_TRUE(strstr(r3.output, "not_a_dir.txt:1:the NEEDLE line") != NULL);
+    nm_tool_result_free(&r3);
+
+    nm_toolset_free(ts);
+    free(file);
+    free(dir);
+}
+
 /* A hit line longer than the per-hit clamp is cut on a character
  * boundary: the fixed 200-byte clamp split a 2-byte letter, and the
  * hit reached the transcript as a lone 0xC3. */
@@ -2457,6 +2515,7 @@ int main(void)
     RUN_TEST(test_edit_file_multiline_diff_fits);
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
+    RUN_TEST(test_search_dir_root_must_be_a_directory);
     RUN_TEST(test_search_dir_hit_clamp_is_char_safe);
     RUN_TEST(test_search_dir_truncates_with_budget_notice);
     RUN_TEST(test_truncate_tail_fits_and_caps);
