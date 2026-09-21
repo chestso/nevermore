@@ -594,12 +594,14 @@ static void test_agent_system_message_carries_agents_md(void)
     int rc = nm_agent_turn(agent, "what is the rule?");
     /* Restore best-effort (glibc's chdir is warn_unused_result; the
      * cwd was valid a moment ago, and a test has nothing to do about a
-     * failure here anyway). */
+     * failure here anyway). Consume the result into a sink — a (void)
+     * cast does not silence warn_unused_result. */
 #ifdef _WIN32
-    (void)_chdir(saved);
+    int rc_restore = _chdir(saved);
 #else
-    (void)chdir(saved);
+    int rc_restore = chdir(saved);
 #endif
+    (void)rc_restore;
     ASSERT_EQ(rc, 0);
 
     ASSERT_EQ(g_n_requests, 1);
