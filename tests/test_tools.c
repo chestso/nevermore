@@ -522,12 +522,13 @@ static void test_edit_file_writes_astral_escaping(void)
     char *path_json = nm_json_dump(jp);
     nm_json_free(jp);
     ASSERT_NOT_NULL(path_json);
-    char *args = malloc(strlen(path_json) + 128);
+    size_t args_cap = strlen(path_json) + 128;
+    char *args = malloc(args_cap);
     ASSERT_NOT_NULL(args);
-    sprintf(args,
-            "{\"path\":%s,\"old_string\":\"hello\","
-            "\"new_string\":\"hi \\ud83d\\ude00\"}",
-            path_json);
+    snprintf(args, args_cap,
+             "{\"path\":%s,\"old_string\":\"hello\","
+             "\"new_string\":\"hi \\ud83d\\ude00\"}",
+             path_json);
     free(path_json);
 
     NmToolset *ts = nm_toolset_new_defaults();

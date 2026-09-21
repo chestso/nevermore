@@ -330,7 +330,8 @@ static H *h_new(void)
     static NmMarkdown m0, m1;
     nm_markdown_init(&m0);
     nm_markdown_init(&m1);
-    static const TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    static const TuiStreamSpec streams[2] = { { "content", NULL },
+                                              { "reasoning", NULL } };
     static const TuiClassifier *classifiers[2];
     classifiers[0] = nm_markdown_classifier(&m0);
     classifiers[1] = nm_markdown_classifier(&m1);
@@ -538,7 +539,7 @@ static H *h_new_render(void)
 
     static NmMarkdown m0;
     nm_markdown_init(&m0);
-    static const TuiStreamSpec streams[1] = { { "content" } };
+    static const TuiStreamSpec streams[1] = { { "content", NULL } };
     static const TuiClassifier *classifiers[1];
     classifiers[0] = nm_markdown_classifier(&m0);
 
@@ -783,7 +784,8 @@ static H *h_new_render_streams(size_t n_streams)
     h->out = tmpfile();
 
     static NmMarkdown ms[2];
-    static const TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    static const TuiStreamSpec streams[2] = { { "content", NULL },
+                                              { "reasoning", NULL } };
     static const TuiClassifier *classifiers[2];
     for (size_t i = 0; i < n_streams; i++) {
         nm_markdown_init(&ms[i]);
@@ -837,7 +839,8 @@ static H *h_new_render_hl(size_t n_streams)
     static NmMarkdown ms[2];
     static NmMarkdownRenderState rs;
     nm_markdown_render_state_init(&rs);
-    static const TuiStreamSpec streams[2] = { { "content" }, { "reasoning" } };
+    static const TuiStreamSpec streams[2] = { { "content", NULL },
+                                              { "reasoning", NULL } };
     static const TuiClassifier *classifiers[2];
     for (size_t i = 0; i < n_streams; i++) {
         nm_markdown_init(&ms[i]);

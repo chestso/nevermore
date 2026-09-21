@@ -178,7 +178,8 @@ static void *chat_server_thread(void *arg)
             int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
             memcpy(chunk + cl, body + off, ev_len);
             cl += (int)ev_len;
-            cl += sprintf(chunk + cl, "\r\n");
+            memcpy(chunk + cl, "\r\n", 2);
+            cl += 2;
             size_t cs = 0;
             while (cs < (size_t)cl) {
                 long n = send(cfd, chunk + cs, (size_t)cl - cs, 0);
@@ -462,10 +463,15 @@ static void harness_enter(AppHarness *h)
     tui_runtime_flush(h->rt);
 }
 
+#ifndef _WIN32
 /* The agent's own entry in the app's wait set. The set is an array now
  * (agent stream/exec fd first, then one READ entry per process
  * session), so a test that wants "the agent's interest" looks up its
- * fd rather than assuming slot 0 is a single connection. */
+ * fd rather than assuming slot 0 is a single connection.
+ *
+ * POSIX-only: every caller pairs the flags with a select() on the fd,
+ * so the Windows build (where a job's source is a waitable HANDLE, not
+ * a socket) never reaches here. */
 static unsigned app_interest(NmChatApp *app)
 {
     NmSource e[TUI_IO_SOURCE_MAX];
@@ -477,6 +483,8 @@ static unsigned app_interest(NmChatApp *app)
     }
     return 0;
 }
+#endif /* !_WIN32 */
+
 /* Wait up to `timeout_ms` on an arbitrary source, the way boba's loop
  * does. A Windows process job's readiness object is a waitable event, so
  * select() cannot be used on it — it would fail at once and every caller

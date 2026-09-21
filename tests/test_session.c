@@ -106,7 +106,7 @@ static void test_context_view_budget_trims_oldest(void)
 {
     NmSession *s = nm_session_new("system prompt");
     for (int i = 0; i < 10; i++) {
-        char buf[32];
+        char buf[64];
         snprintf(buf, sizeof(buf), "user message %d padding", i);
         nm_session_append(s, NM_ROLE_USER, buf);
     }

@@ -131,7 +131,8 @@ static void *agent_server_thread(void *arg)
             int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
             memcpy(chunk + cl, body + off, ev_len);
             cl += (int)ev_len;
-            cl += sprintf(chunk + cl, "\r\n");
+            memcpy(chunk + cl, "\r\n", 2);
+            cl += 2;
             size_t cs = 0;
             while (cs < (size_t)cl) {
                 long n = send(cfd, chunk + cs, (size_t)cl - cs, 0);

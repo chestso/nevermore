@@ -80,6 +80,12 @@ static const TuiAttr NM_DIM = { .dim = 1 };
 #define PROMPT              "❯ "
 #define CONTINUATION_PROMPT "  "
 
+/* One system-stream line: 1 KiB (the config store's value cap) plus the
+ * "key = value" framing. Both sys_line and the /config reply buffer a
+ * whole value here, so a long setting clips only if its full line does
+ * — never mid-value for want of a smaller local buffer. */
+#define SYS_LINE_BUF 1088
+
 /* Popup flavors. */
 typedef enum
 {
@@ -207,7 +213,7 @@ static void sys_line(NmChatApp *app, const char *fmt, ...)
 {
     if (!app)
         return;
-    char buf[1088];
+    char buf[SYS_LINE_BUF];
     va_list ap;
     va_start(ap, fmt);
     int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
@@ -1323,7 +1329,7 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
      * env/CLI pin is reported as inert, like every other write). */
     NmCfgSource src = NM_CFG_DEFAULT;
     const char *eff = nm_config_resolve(app->cfg, key, &src);
-    char line[160];
+    char line[SYS_LINE_BUF];
     snprintf(line, sizeof(line), "config: %s = %s", key, eff ? eff : value);
     if (src == NM_CFG_ENV || src == NM_CFG_CLI) {
         const char *pin = src == NM_CFG_ENV ? nm_config_env_name(key)

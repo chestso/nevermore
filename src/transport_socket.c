@@ -466,15 +466,19 @@ static void walk_fail(NmConnection *conn)
      * attempt failed — … 0 ms" that hid the real reason entirely). */
     char last[NM_ERR_DETAIL_MAX];
     snprintf(last, sizeof(last), "%s", conn->err_detail);
-    char summary[NM_ERR_DETAIL_MAX];
-    snprintf(summary, sizeof(summary), "connect %s: all %d attempt%s failed",
-             target, conn->conn_n_addrs, conn->conn_n_addrs == 1 ? "" : "s");
+    /* Compose through the capped store helper: a long host or reason is
+     * expected to overrun NM_ERR_DETAIL_MAX, and conn_set_err_detail's
+     * vsnprintf truncates the tail by contract (a diagnostic, not data).
+     * Spelling the append as an explicit snprintf here is what made gcc
+     * read the deliberate cap as a -Wformat-truncation bug. */
     if (last[0])
-        snprintf(conn->err_detail, sizeof(conn->err_detail),
-                 "%s — %s", summary, last);
+        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed — %s",
+                            target, conn->conn_n_addrs,
+                            conn->conn_n_addrs == 1 ? "" : "s", last);
     else
-        snprintf(conn->err_detail, sizeof(conn->err_detail), "%s",
-                 summary);
+        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed",
+                            target, conn->conn_n_addrs,
+                            conn->conn_n_addrs == 1 ? "" : "s");
     conn->addr_len = 0;
     nm_connection_set_connect_error(conn->err_detail);
 }
