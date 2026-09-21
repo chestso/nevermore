@@ -161,8 +161,13 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         dup2(slave, STDERR_FILENO);
         if (slave > STDERR_FILENO)
             close(slave);
+        /* Best-effort: a workdir that cannot be entered leaves the
+         * child in the parent's cwd (the command still runs). The
+         * (void) is the explicit "deliberately unchecked" — glibc
+         * declares chdir warn_unused_result, so the ignore must be
+         * spelled, not merely implied. */
         if (cwd && *cwd)
-            chdir(cwd);
+            (void)chdir(cwd);
         signal(SIGPIPE, SIG_DFL); /* do not inherit a SIG_IGN */
         execve("/bin/sh", (char *const *)argv_sh, env);
         _exit(127);

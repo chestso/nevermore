@@ -592,10 +592,13 @@ static void test_agent_system_message_carries_agents_md(void)
     nm_agent_on_delta(agent, cap_delta);
 
     int rc = nm_agent_turn(agent, "what is the rule?");
+    /* Restore best-effort (glibc's chdir is warn_unused_result; the
+     * cwd was valid a moment ago, and a test has nothing to do about a
+     * failure here anyway). */
 #ifdef _WIN32
-    _chdir(saved);
+    (void)_chdir(saved);
 #else
-    chdir(saved);
+    (void)chdir(saved);
 #endif
     ASSERT_EQ(rc, 0);
 
