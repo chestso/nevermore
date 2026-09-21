@@ -259,21 +259,15 @@ static int run_interactive(const char *provider_name, const char *model,
         fprintf(stderr, "nevermore: failed to initialize the chat\n");
         return 1;
     }
-    /* The resolved config: the app writes runtime changes to its shadow
-     * and reads nothing from it (the values below are already applied
-     * to the agent it builds). */
+    /* The resolved config: the app installs it as the process-wide
+     * store (nm_chat_app_set_config → nm_config_set_store), so the
+     * machinery resolves every setting from it at the point of use.
+     * Nothing is pushed — the agent reads `rounds`/`reasoning`, the
+     * connect walk reads `connect_timeout`/`family_skip`/
+     * `skip_families`, the web_search tool reads `searxng`/
+     * `searxng_enabled`. */
     nm_chat_app_set_config(app, cfg);
-    nm_chat_app_set_max_rounds(app, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
     nm_chat_app_set_timeout_ms(app, resolved_timeout_ms());
-    nm_chat_app_set_echo_reasoning(
-        app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
-    /* Connect-walk knobs: the transport reads no config, so resolve
-     * them here and push (the same "apply at construction" rule as the
-     * rest of the resolved settings). */
-    nm_chat_app_set_connect_timeout_ms(
-        app, nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
-    nm_chat_app_set_family_skip(
-        app, nm_config_get_bool(cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
     /* Base URL override only: the API key is left NULL so the app
      * resolves it per provider (env then ~/.authinfo) — a /provider
      * switch must resolve the new provider's own key, never reuse the
@@ -396,11 +390,12 @@ int main(int argc, char *argv[])
     nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, cli_provider);
     nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, cli_model);
 
-    /* The web_search endpoint is process-global tool state (no
-     * per-session plumbing): resolve it once from the `searxng` key
-     * (env NEVERMORE_SEARXNG_URL, else the built-in localhost default)
-     * before either the ask or the TUI path builds its toolset. */
-    nm_tool_web_search_set_base_url(nm_config_get(cfg, NM_CFG_KEY_SEARXNG));
+    /* Publish the store: the machinery (connect walk, web_search probe,
+     * agent round cap + reasoning echo) resolves its settings from it
+     * at the point of use. Set here so BOTH the ask and TUI paths see
+     * the same resolved values — main.c is the store's owner, the app
+     * only borrows it. */
+    nm_config_set_store(cfg);
 
     /* run_command's inactivity budget: process-global too, and read at
      * each tool call, so push it once here for BOTH paths (see tools.h).
@@ -459,17 +454,11 @@ int main(int argc, char *argv[])
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
         nm_agent_set_endpoint(agent, base_url, api_key);
-        nm_agent_set_max_rounds(
-            agent, nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
+        /* The round cap, the reasoning echo, the connect budget and the
+         * family policy are all store values now — resolved by the
+         * agent / the walk themselves. Nothing to push here beyond the
+         * stream-inactivity timeout, which is not a config key. */
         nm_agent_set_timeout_ms(agent, resolved_timeout_ms());
-        nm_agent_set_echo_reasoning(
-            agent, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
-        /* One-shot (ask) mode: the walk's budget comes from config too —
-         * no app here to own the setting, so push it straight onto the
-         * transport. `family_skip` is deliberately NOT pushed: the
-         * transport's slot stays 0, which is exactly "never latch". */
-        nm_connection_set_connect_timeout_ms(
-            nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
         int rc = nm_agent_turn(agent, prompt);

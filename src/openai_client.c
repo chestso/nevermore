@@ -187,7 +187,7 @@ static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
          * round's trace as reasoning_content. The composer decides
          * whether it does — nevermore's agent attaches a trace only
          * when its echo-back is on (off by default; see
-         * nm_agent_set_echo_reasoning). The client serializes what it
+         * nm_agent_echo_reasoning). The client serializes what it
          * was handed, nothing more: hyper is the provider that
          * prompts the echo, and only on docs/HYPER-API.md's
          * inherited, unverified claim that the field is required on

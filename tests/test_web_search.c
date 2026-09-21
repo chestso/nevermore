@@ -24,11 +24,33 @@
 #include <string.h>
 
 #include "json.h"
+#include "nm_config.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* */
 
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+
+/* The web_search endpoint and its reachability latch live in the config
+ * STORE now (keys `searxng` / `searxng_enabled`); the tests install a
+ * scratch store (no file I/O) and drive it on the runtime layer, the
+ * same way the tool's own failure latch and /config do. */
+static NmConfig *g_cfg;
+
+/* Point the tool at a canned endpoint: set `searxng` and clear the
+ * self-disabling so the next call probes (a changed endpoint
+ * re-enables, exactly as the tool's own memo does). */
+static void ws_set_url(const char *url)
+{
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_SEARXNG, url);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SEARXNG_ENABLED);
+}
+
+/* Forget a self-disabling latch the tool set. */
+static void ws_reset_health(void)
+{
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SEARXNG_ENABLED);
+}
 
 /* test_net_helpers maps usleep -> Sleep on Windows; one spelling here. */
 #define tsleep(ms) usleep((unsigned)(ms) * 1000)
@@ -189,11 +211,11 @@ static void test_web_search_deadline_ms_seam(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     s.send_nothing = 1;
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -230,7 +252,7 @@ static void test_web_search_happy_path(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     set_response(&s, 200, "OK",
                  "{\"results\":["
@@ -243,7 +265,7 @@ static void test_web_search_happy_path(void)
                  "\"infoboxes\":[{\"infobox\":\"Example\"}],"
                  "\"suggestions\":[\"hello\",\"world\"]}");
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -277,7 +299,7 @@ static void test_web_search_dedup_and_cap(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     set_response(&s, 200, "OK",
                  "{\"results\":["
@@ -290,7 +312,7 @@ static void test_web_search_dedup_and_cap(void)
                  "{\"url\":\"https://two.example\",\"title\":\"Two\","
                  "\"content\":\"2\",\"engines\":[\"e\"],\"score\":0.6}]}");
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -322,11 +344,11 @@ static void test_web_search_extra_params(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     set_response(&s, 200, "OK", "{\"results\":[]}");
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -351,11 +373,11 @@ static void test_web_search_http_error_then_cached(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     set_response(&s, 403, "Forbidden", "{\"error\":\"format disabled\"}");
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -385,11 +407,11 @@ static void test_web_search_malformed_json(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     set_response(&s, 200, "OK", "not json at all");
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -409,14 +431,14 @@ static void test_web_search_malformed_json(void)
  * cached for the session. */
 static void test_web_search_refused_then_cached(void)
 {
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     int port = 0;
     int fd = server_bind(&port);
     ASSERT_TRUE(fd >= 0);
     close(fd); /* nothing listens now */
 
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(port, base, sizeof(base)));
+    ws_set_url(base_for(port, base, sizeof(base)));
 
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
@@ -439,12 +461,12 @@ static void test_web_search_timeout(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     s.send_nothing = 1;
     s.delay_ms = 800; /* outlives the client's 300 ms deadline */
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -465,7 +487,7 @@ static void test_web_search_timeout(void)
 /* Argument validation happens before any connection. */
 static void test_web_search_args_validation(void)
 {
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     NmToolset *ts = nm_toolset_new_defaults();
 
     NmToolResult r = nm_toolset_execute(ts, "web_search", "{}", NULL);
@@ -488,12 +510,12 @@ static void test_web_search_async_step_seam(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
-    nm_tool_web_search_reset_health();
+    ws_reset_health();
     s.fd = server_bind(&s.port);
     s.send_nothing = 1;
     s.delay_ms = 400;
     char base[64];
-    nm_tool_web_search_set_base_url(base_for(s.port, base, sizeof(base)));
+    ws_set_url(base_for(s.port, base, sizeof(base)));
 
     pthread_t th = srv_launch(&s);
 
@@ -534,6 +556,12 @@ int main(void)
         return 77;
     }
     printf("test_web_search:\n");
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
 
     RUN_TEST(test_web_search_is_async);
     RUN_TEST(test_web_search_happy_path);

@@ -74,10 +74,12 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 
-/* Tool-call round cap for the agent this app builds and the live
- * agent (<=0 = agent default, NM_AGENT_DEFAULT_MAX_ROUNDS). main.c
- * wires the resolved config here. */
-void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
+/* Tool-call round cap and reasoning echo-back are NOT app state: they
+ * are config values (the store's `rounds` and `reasoning` keys) that
+ * the agent resolves at the point of use (nm_agent_max_rounds /
+ * nm_agent_echo_reasoning). Setting them goes through the store
+ * (/config set, /rounds, /reasoning), which main.c installs as the
+ * process store via nm_chat_app_set_config. */
 
 /* Stream-inactivity timeout for the agent this app builds and the live
  * agent (0 = agent default NM_AGENT_DEFAULT_TIMEOUT_MS, <0 = disable).
@@ -85,33 +87,22 @@ void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds);
 void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms);
 
 /* The resolved config (nm_config.h), BORROWED: the app writes runtime
- * changes (/model, /provider, /rounds, /reasoning) to its shadow file
- * and never reads a value from it — main.c has already applied the
- * resolved settings. NULL (the default, and what tests get) means no
- * persistence: the commands still work in-process and print plain
- * lines, and nothing is written anywhere. */
+ * changes (/config set, /model, /provider, …) to its shadow file AND
+ * installs the config as the process-wide store (nm_config_set_store)
+ * the machinery resolves from. NULL (the default, and what tests get)
+ * means no persistence and no store: the commands still work in-process
+ * and print plain lines, and the machinery uses built-in defaults. */
 void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
 
-/* Reasoning echo-back for the agent this app builds and the live
- * agent: re-send the transcript's reasoning traces to the provider
- * as reasoning_content (OFF by default — the traces are received and
- * displayed either way). main.c wires $NEVERMORE_ECHO_REASONING
- * here. See nm_agent_set_echo_reasoning for why the echo is a
- * question at all (docs/HYPER-API.md's unverified claim, not an
- * observed hyper requirement). */
-void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on);
-
-/* The bounded connect walk's knobs (see transport.h). Neither is read
- * from config by the transport — config lives here, so main.c resolves
- * `connect_timeout` / `family_skip` and pushes them across:
- *   set_connect_timeout_ms: per-address budget; <=0 = the transport's
- *     built-in default (NM_CONNECT_ATTEMPT_MS).
- *   set_family_skip: 1 = after a family's address burns the budget and
+/* The bounded connect walk's knobs (see transport.h), resolved from the
+ * store at the point of use — the app keeps no copy. The transport
+ * reads the store too (neither reads config FILES):
+ *   connect_timeout: per-address budget in ms (default
+ *     NM_CONNECT_ATTEMPT_MS).
+ *   family_skip: 1 = after a family's address burns the budget and
  *     another family answers, stop dialling the burned family for the
- *     rest of the session. Both push the resolved value straight onto
- *     the transport's process-global slots. */
-void nm_chat_app_set_connect_timeout_ms(NmChatApp *app, int ms);
-void nm_chat_app_set_family_skip(NmChatApp *app, int on);
+ *     rest of the session; the LATCH itself is the store's
+ *     `skip_families` value (runtime layer). */
 int nm_chat_app_connect_timeout_ms(const NmChatApp *app);
 int nm_chat_app_family_skip(const NmChatApp *app);
 

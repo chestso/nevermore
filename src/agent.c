@@ -24,6 +24,7 @@
 #include "agent.h"
 #include "context.h"
 #include "json.h"
+#include "nm_config.h" /* the store the machinery reads (no proxies) */
 #include "session.h"
 #include "transport.h"
 
@@ -76,19 +77,17 @@ struct NmAgent
      * round buffer below is reused across rounds of the same turn
      * (memory-reuse principle: grown, not reallocated per delta). */
     NmChatStream *stream;
-    int round;      /* rounds started this turn */
-    int max_rounds; /* cap; <=0 means the default */
+    int round; /* rounds started this turn */
     /* Stream-inactivity timeout (nm_agent_set_timeout_ms): 0 = follow
      * NM_AGENT_DEFAULT_TIMEOUT_MS, >0 = this value, <0 = disabled.
      * last_activity is the monotonic timestamp of the last streaming
      * delta (or the round's start); the deadline seam compares it
-     * against the effective timeout. */
+     * against the effective timeout. (The tool-round cap and the
+     * reasoning echo are NOT fields: they are config values the agent
+     * resolves from the store at the point of use — see
+     * nm_agent_max_rounds / nm_agent_echo_reasoning.) */
     int timeout_ms;
     double last_activity;
-    /* Opt-in (nm_agent_set_echo_reasoning): re-send the transcript's
-     * reasoning traces as reasoning_content on later requests.
-     * OFF by default — a trace is kept for display either way. */
-    int echo_reasoning;
     char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
@@ -235,18 +234,17 @@ void nm_agent_set_model(NmAgent *a, const char *model)
     a->model = strdup(model);
 }
 
-void nm_agent_set_max_rounds(NmAgent *a, int max_rounds)
-{
-    if (!a)
-        return;
-    a->max_rounds = max_rounds > 0 ? max_rounds : 0;
-}
-
+/* The tool-round cap is the config store's `rounds` key, resolved at
+ * the point of use (the agent keeps no copy — a setter that pushed one
+ * was the proxy this design deletes). No store installed (a unit test
+ * with no config) = the built-in default. */
 int nm_agent_max_rounds(const NmAgent *a)
 {
-    if (!a || a->max_rounds <= 0)
-        return NM_AGENT_DEFAULT_MAX_ROUNDS;
-    return a->max_rounds;
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_int(c, NM_CFG_KEY_ROUNDS,
+                                     NM_AGENT_DEFAULT_MAX_ROUNDS)
+             : NM_AGENT_DEFAULT_MAX_ROUNDS;
 }
 
 void nm_agent_set_timeout_ms(NmAgent *a, int ms)
@@ -345,16 +343,17 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     return best;
 }
 
-void nm_agent_set_echo_reasoning(NmAgent *a, int on)
-{
-    if (!a)
-        return;
-    a->echo_reasoning = on ? 1 : 0;
-}
-
+/* Reasoning echo-back is the config store's `reasoning` key, resolved
+ * at the point of use (OFF by default — the trace is received and
+ * displayed either way). The agent keeps no copy; the store is the
+ * source. See docs/HYPER-API.md on why the echo is a question at all
+ * (an unverified hand-written claim, not an observed hyper
+ * requirement). */
 int nm_agent_echo_reasoning(const NmAgent *a)
 {
-    return a ? a->echo_reasoning : 0;
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_REASONING, 0) : 0;
 }
 
 NmAgentState nm_agent_state(const NmAgent *a)
@@ -546,10 +545,11 @@ static int begin_round(NmAgent *a)
         msgs[i].content = sm->content;
         msgs[i].tool_calls_json = sm->tool_calls_json;
         msgs[i].tool_call_id = sm->tool_call_id;
-        /* Reasoning echo-back is opt-in (nm_agent_set_echo_reasoning):
-         * the session keeps every trace for display either way, but
-         * only an enabled agent hands it to the wire. */
-        msgs[i].reasoning = a->echo_reasoning ? sm->reasoning : NULL;
+        /* Reasoning echo-back is the store's `reasoning` value: the
+         * session keeps every trace for display either way, but only an
+         * enabled store hands it to the wire. */
+        msgs[i].reasoning =
+            nm_agent_echo_reasoning(a) ? sm->reasoning : NULL;
     }
 
     NmChatRequest req = {
@@ -600,7 +600,7 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     /* Record what the model said, with the round's reasoning trace
      * kept alongside it. The trace is display/history material: the
      * wire sees it again only when the agent's echo-back is enabled
-     * (nm_agent_set_echo_reasoning). */
+     * (nm_agent_echo_reasoning / the store's `reasoning` key). */
     if (a->n_calls == 0) {
         if (a->text && *a->text)
             nm_session_append_reasoning(a->session, a->reasoning, a->text);

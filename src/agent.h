@@ -31,8 +31,8 @@ typedef enum
 
 typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
 
-/* Default cap on tool-call rounds per turn (see
- * nm_agent_set_max_rounds). */
+/* Default cap on tool-call rounds per turn; the built-in default for
+ * the store's `rounds` key (see nm_agent_max_rounds). */
 #define NM_AGENT_DEFAULT_MAX_ROUNDS 25
 
 /* Default stream-inactivity timeout (ms): while a round is streaming,
@@ -59,10 +59,9 @@ void nm_agent_set_model(NmAgent *a, const char *model);
 
 /* Tool-call rounds allowed in one turn before the loop bails out with
  * "too many tool rounds without a final answer" (NM_AGENT_ERROR). The
- * default is NM_AGENT_DEFAULT_MAX_ROUNDS; setter values <= 0 restore
- * it. Takes effect on the next round (a turn already in flight honors
- * the new cap from its next begin_round). */
-void nm_agent_set_max_rounds(NmAgent *a, int max_rounds);
+ * value is the config store's `rounds` key, resolved at the point of
+ * use with NM_AGENT_DEFAULT_MAX_ROUNDS as the default; the agent keeps
+ * no copy. Takes effect on the next round. */
 int nm_agent_max_rounds(const NmAgent *a);
 
 /* Stream-inactivity timeout (ms). While a round streams, if no delta
@@ -98,8 +97,10 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 /* Reasoning echo-back. OFF by default: every round's trace stays in
  * the session (it is displayed, and turning the echo on later still
  * sends the history's traces), but it is NOT re-sent to the provider
- * unless this is enabled. Enabled, each assistant message riding a
- * later request carries its trace as "reasoning_content".
+ * unless the config store's `reasoning` key is on. Enabled, each
+ * assistant message riding a later request carries its trace as
+ * "reasoning_content". The agent keeps no copy: it resolves the store
+ * at the point of use.
  *
  * NOTE: the reason to offer this at all is docs/HYPER-API.md's claim
  * that a trace "must be echoed back" on any request carrying the turn
@@ -114,7 +115,6 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  *
  * Takes effect when the next round is composed (a turn already in
  * flight honours it from its next round). */
-void nm_agent_set_echo_reasoning(NmAgent *a, int on);
 int nm_agent_echo_reasoning(const NmAgent *a);
 
 /* Register UI callbacks. */

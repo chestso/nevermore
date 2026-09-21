@@ -101,22 +101,23 @@ struct NmChatApp
 
     const NmProvider *provider; /* registry-owned */
     char *model;
-    char *base_url;     /* our copy; (re)applied to built agents */
-    char *api_key;      /* explicit key override; NULL = resolve per provider */
-    int max_rounds;     /* tool-round cap; <=0 = agent default */
-    int echo_reasoning; /* 1 = re-send reasoning traces (opt-in) */
-    int timeout_ms;     /* stream-inactivity ms; 0 = agent default */
-    /* The bounded connect walk's knobs (see transport.h). Both resolve
-     * from config; the transport itself reads no config, so the app is
-     * the one that pushes them across the seam. */
-    int connect_timeout_ms; /* per-address budget; <=0 = transport default */
-    int family_skip;        /* 1 = latch a family that burns the budget */
-    int skipped_families;   /* last NM_FAMILY_* latch seen, to report once */
+    char *base_url; /* our copy; (re)applied to built agents */
+    char *api_key;  /* explicit key override; NULL = resolve per provider */
+    int timeout_ms; /* stream-inactivity ms; 0 = agent default */
+    /* The bounded connect walk's observation, for the one-shot skip
+     * notice only: the last NM_FAMILY_* latch the app has reported, so
+     * the line prints once per family. The latch itself lives in the
+     * config store (skip_families); this is UI dedup state, NOT a copy
+     * of any config value. The tool-round cap, the reasoning echo and
+     * both connect-knob settings are config values the machinery
+     * resolves from the store at the point of use — the app mirrors
+     * none of them. */
+    int skipped_families;
 
     /* The resolved config (nm_config.h), borrowed; NULL = no
-     * persistence. The app WRITES runtime changes to its shadow file
-     * and reads nothing from it — main.c has already applied every
-     * resolved setting to the agent. */
+     * persistence. The app owns it as the process's config store (it
+     * installs it via nm_config_set_store), and every setting is read
+     * through it — the machinery included. */
     NmConfig *cfg;
 
     NmToolset *tools;
@@ -585,8 +586,11 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_on_notice(a, nm_chat_app_on_notice);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
-    nm_agent_set_max_rounds(a, app->max_rounds);
-    nm_agent_set_echo_reasoning(a, app->echo_reasoning);
+    /* The tool-round cap and the reasoning echo are NOT pushed: the
+     * agent resolves them from the config store at the point of use
+     * (nm_agent_max_rounds / nm_agent_echo_reasoning). Only the
+     * stream-inactivity timeout, which has no config key yet, is a
+     * per-agent value. */
     nm_agent_set_timeout_ms(a, app->timeout_ms);
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
@@ -706,6 +710,11 @@ void nm_chat_app_free(NmChatApp *app)
         return;
     if (s_app == app)
         s_app = NULL;
+    /* Drop the process-global store if it is ours (the app installed
+     * it in nm_chat_app_set_config); the config object itself is owned
+     * by the caller (main.c / the test). */
+    if (app->cfg && nm_config_store() == app->cfg)
+        nm_config_set_store(NULL);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
     if (app->agent)
@@ -791,15 +800,6 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               endpoint_key(app, app->provider));
 }
 
-void nm_chat_app_set_max_rounds(NmChatApp *app, int max_rounds)
-{
-    if (!app)
-        return;
-    app->max_rounds = max_rounds > 0 ? max_rounds : 0;
-    if (app->agent)
-        nm_agent_set_max_rounds(app->agent, app->max_rounds);
-}
-
 void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms)
 {
     if (!app)
@@ -814,40 +814,18 @@ void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg)
     if (!app)
         return;
     app->cfg = cfg;
-}
-
-/* The connect knobs the transport does not read from config: config
- * lives here, so this pushes the resolved value across (process-
- * global, like the transport's other slots — one app per process). */
-void nm_chat_app_set_connect_timeout_ms(NmChatApp *app, int ms)
-{
-    if (!app)
-        return;
-    app->connect_timeout_ms = ms > 0 ? ms : 0;
-    /* 0 = the transport's built-in default (the setter's < 0 restores
-     * it), so a session with no `connect_timeout` key never pins one. */
-    nm_connection_set_connect_timeout_ms(app->connect_timeout_ms > 0
-                                             ? app->connect_timeout_ms
-                                             : -1);
-}
-
-void nm_chat_app_set_family_skip(NmChatApp *app, int on)
-{
-    if (!app)
-        return;
-    app->family_skip = on ? 1 : 0;
-    nm_connection_set_family_skip(app->family_skip);
-    /* Off is "never skip", so it also clears the walk's latch: the
-     * decision must be re-earned if the user turns it back on. */
-    if (!app->family_skip) {
-        nm_connection_reset_family_skips();
-        app->skipped_families = 0;
-    }
+    /* The app is the process's config owner: installing the config
+     * installs the one store the machinery (the connect walk, the
+     * web_search probe, the agent's round cap + reasoning echo) reads
+     * at the point of use. */
+    nm_config_set_store(cfg);
 }
 
 /* Report a family the walk has newly latched (once per family), so the
  * user learns why later connects skip it — the connect error text is
- * the transport's, but this line is the app's (system stream). */
+ * the transport's, but this line is the app's (system stream). The
+ * latch is read from the store (skip_families); skipped_families is
+ * only the app's "already announced" marker. */
 static void report_family_skips(NmChatApp *app)
 {
     int now = nm_connection_skipped_families();
@@ -858,7 +836,7 @@ static void report_family_skips(NmChatApp *app)
     sys_line(app,
              NM_SGR_TOOL
              "connect: %s did not answer — skipping it for this session "
-             "(family_skip)" NM_SGR_RESET,
+             "(skip_families)" NM_SGR_RESET,
              nm_family_name(fresh));
 }
 
@@ -877,24 +855,20 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-/* The knobs, from the app's side (see chat_app.h). */
+/* The knobs, from the app's side (see chat_app.h): resolved from the
+ * store at the point of use, never copied. */
 int nm_chat_app_connect_timeout_ms(const NmChatApp *app)
 {
-    return app ? app->connect_timeout_ms : 0;
+    NmConfig *c = app && app->cfg ? app->cfg : nm_config_store();
+    return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONNECT_TIMEOUT,
+                                     NM_CONNECT_ATTEMPT_MS)
+             : NM_CONNECT_ATTEMPT_MS;
 }
 
 int nm_chat_app_family_skip(const NmChatApp *app)
 {
-    return app ? app->family_skip : 0;
-}
-
-void nm_chat_app_set_echo_reasoning(NmChatApp *app, int on)
-{
-    if (!app)
-        return;
-    app->echo_reasoning = on ? 1 : 0;
-    if (app->agent)
-        nm_agent_set_echo_reasoning(app->agent, app->echo_reasoning);
+    NmConfig *c = app && app->cfg ? app->cfg : nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_FAMILY_SKIP, 0) : 0;
 }
 
 int nm_chat_app_fd(NmChatApp *app)
@@ -1097,7 +1071,9 @@ static void print_help(NmChatApp *app)
                   "  /reasoning [on|off|reset]  echo reasoning traces back\n"
                   "  /connect [ms|on|off|reset]\n"
                   "                     per-address connect budget + family skip\n"
-                  "  /config [reset [k|all]]    where each setting comes from\n"
+                  "  /config            every setting, its value + source\n"
+                  "  /config set <k> <v>  write one key to the session shadow\n"
+                  "  /config reset [k|all]  drop a shadow line + runtime value\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
@@ -1259,22 +1235,11 @@ static void persist_and_report(NmChatApp *app, const char *key,
     }
 }
 
-/* The effective value for a key, with the config's layer resolution
- * applied (used by `reset`: resetting reveals the layer below, not the
- * built-in default). */
-static int resolved_rounds(NmChatApp *app)
-{
-    return app->cfg ? nm_config_get_int(app->cfg, NM_CFG_KEY_ROUNDS, 0) : 0;
-}
-
-static int resolved_reasoning(NmChatApp *app)
-{
-    return app->cfg ? nm_config_get_bool(app->cfg, NM_CFG_KEY_REASONING, 0)
-                    : app->echo_reasoning;
-}
-
-/* /config: where each setting comes from. The paths first (that is the
- * question the command answers), then one row per key. */
+/* /config: the store's current state. The paths first (that is the
+ * question the command answers), then one row per key — the EFFECTIVE
+ * value (including a machinery-written runtime latch) and the layer
+ * that dictates it. `-` appears only for provider/model, which have no
+ * store default (their own commands set them). */
 static void print_config(NmChatApp *app)
 {
     if (!app->cfg) {
@@ -1288,26 +1253,44 @@ static void print_config(NmChatApp *app)
              n == 1 ? "" : "s");
     for (size_t i = 0; nm_config_key_at(i); i++) {
         const char *k = nm_config_key_at(i);
-        const char *v = nm_config_get(app->cfg, k);
+        NmCfgSource src = NM_CFG_DEFAULT;
+        const char *v = nm_config_resolve(app->cfg, k, &src);
         sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-",
-                 nm_config_source_name(nm_config_source(app->cfg, k)));
+                 nm_config_source_name(src));
     }
 }
 
-/* /config reset [key|all]: drop shadow lines so the layer below
- * applies again. `key` NULL = every key. */
+/* Apply one key from the store: clears the machinery's runtime layer
+ * for it (if any) so the persisted layer below shows through, then
+ * drops the shadow line so the user config / built-in default applies.
+ * The machinery re-reads the store at its next point of use, so there
+ * is nothing to push. Returns 1 if the files were written (or there
+ * was no shadow to write), 0 on a write failure. */
+static int config_apply_reset(NmChatApp *app, const char *key)
+{
+    nm_config_runtime_clear(app->cfg, key);
+    if (nm_config_shadow_reset(app->cfg, key) != 0)
+        return 0;
+    /* A cleared family latch must be re-earned (and re-announced). */
+    if (!key || strcmp(key, NM_CFG_KEY_SKIP_FAMILIES) == 0)
+        app->skipped_families = 0;
+    return 1;
+}
+
+/* /config reset [key|all]: drop the shadow line AND any runtime layer
+ * so the layer below applies again. `key` NULL = every key. */
 static void config_reset(NmChatApp *app, const char *key)
 {
     if (!app->cfg) {
         sys_line(app, "no config: this session does not persist settings");
         return;
     }
-    if (key && !nm_config_env_name(key) && strcmp(key, NM_CFG_KEY_MODEL) != 0) {
+    if (key && !nm_config_env_name(key)) {
         sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
                  key);
         return;
     }
-    if (nm_config_shadow_reset(app->cfg, key) != 0) {
+    if (!config_apply_reset(app, key)) {
         sys_line(app, NM_SGR_ERROR
                  "config: could not write the shadow file" NM_SGR_RESET);
         return;
@@ -1316,28 +1299,60 @@ static void config_reset(NmChatApp *app, const char *key)
         sys_line(app, "config: %s reset", key);
     else
         sys_line(app, "config: all keys reset");
-    /* Re-resolve what the live agent needs (rounds and the echo flag
-     * are agent state; model/provider are set by their own commands). */
-    if (!key || strcmp(key, NM_CFG_KEY_ROUNDS) == 0)
-        nm_chat_app_set_max_rounds(app, resolved_rounds(app));
-    if (!key || strcmp(key, NM_CFG_KEY_REASONING) == 0)
-        nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
-    /* The connect-walk knobs are process-global transport state: a
-     * reset must push the layer below back across the seam (and a
-     * family_skip reset clears the latch, so the walk tries every
-     * family again). */
-    if (!key || strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0)
-        nm_chat_app_set_connect_timeout_ms(
-            app, nm_config_get_int(app->cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
-    if (!key || strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0)
-        nm_chat_app_set_family_skip(
-            app, nm_config_get_bool(app->cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
-    /* The web_search endpoint is process-global tool state; reset it so
-     * the layer below applies and the new endpoint is probed fresh. */
-    if (!key || strcmp(key, NM_CFG_KEY_SEARXNG) == 0) {
-        nm_tool_web_search_set_base_url(
-            nm_config_get(app->cfg, NM_CFG_KEY_SEARXNG));
-        nm_tool_web_search_reset_health();
+}
+
+/* /config set <key> <value>: validate + normalize + persist one plain
+ * key on the shadow layer, clearing its runtime layer first (so the
+ * user's write is what the machinery sees). provider/model are set by
+ * their own commands (the picker), never here. */
+static void config_set(NmChatApp *app, const char *key, const char *value)
+{
+    if (!app->cfg) {
+        sys_line(app, "no config: this session does not persist settings");
+        return;
+    }
+    if (!nm_config_env_name(key)) {
+        sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
+                 key);
+        return;
+    }
+    if (strcmp(key, NM_CFG_KEY_PROVIDER) == 0 ||
+        strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+        sys_line(app, NM_SGR_ERROR "config: use /provider or /model for "
+                                   "'%s'" NM_SGR_RESET,
+                 key);
+        return;
+    }
+    if (!*value) {
+        sys_line(app, NM_SGR_ERROR "config: set %s needs a value" NM_SGR_RESET,
+                 key);
+        return;
+    }
+    /* Validate + persist first: an invalid value must not disturb the
+     * runtime layer (the machinery's value stands). */
+    if (nm_config_shadow_set(app->cfg, key, value) != 0) {
+        sys_line(app, NM_SGR_ERROR "config: %s: invalid value '%s'" NM_SGR_RESET,
+                 key, value);
+        return;
+    }
+    /* The runtime layer is above the shadow, so a valid write must
+     * supersede it for the machinery to see the new value. */
+    nm_config_runtime_clear(app->cfg, key);
+    /* Read back after the write: the value shown is the normalized
+     * one, and the source is the layer that actually decides it (the
+     * env/CLI pin is reported as inert, like every other write). */
+    NmCfgSource src = NM_CFG_DEFAULT;
+    const char *eff = nm_config_resolve(app->cfg, key, &src);
+    char line[160];
+    snprintf(line, sizeof(line), "config: %s = %s", key, eff ? eff : value);
+    if (src == NM_CFG_ENV || src == NM_CFG_CLI) {
+        const char *pin = src == NM_CFG_ENV ? nm_config_env_name(key)
+                                            : "the command line";
+        sys_line(app, "%s — saved to the session shadow, but %s pins this "
+                      "run (unset it to make the choice effective)",
+                 line, pin ? pin : "a higher layer");
+    } else {
+        sys_line(app, "%s — saved to the session shadow", line);
     }
 }
 
@@ -1607,16 +1622,13 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         /* "0" / "reset" drop the shadow line and reveal the layer
          * below (the user config, or the built-in default) — "default"
          * was a lie under shadow semantics. Otherwise a positive
-         * decimal, character-level scanned. */
+         * decimal, character-level scanned. The agent resolves the
+         * store, so nothing needs pushing. */
         if (strcmp(arg, "reset") == 0) {
             if (app->cfg) {
-                if (nm_config_shadow_reset(app->cfg, NM_CFG_KEY_ROUNDS) != 0) {
-                    sys_line(app, NM_SGR_ERROR
-                             "rounds: could not write the shadow file" NM_SGR_RESET);
-                    return;
-                }
+                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_ROUNDS);
+                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_ROUNDS);
             }
-            nm_chat_app_set_max_rounds(app, resolved_rounds(app));
             sys_line(app, "tool rounds: %d (shadow reset)",
                      nm_agent_max_rounds(app->agent));
             return;
@@ -1634,10 +1646,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                                        "or 'reset'" NM_SGR_RESET);
             return;
         }
-        nm_chat_app_set_max_rounds(app, v);
         char line[128];
-        snprintf(line, sizeof(line), "tool rounds: %d",
-                 nm_agent_max_rounds(app->agent));
+        snprintf(line, sizeof(line), "tool rounds: %d", v);
         persist_and_report(app, NM_CFG_KEY_ROUNDS, arg, line);
         return;
     }
@@ -1648,15 +1658,12 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             return;
         }
         if (strcmp(arg, "reset") == 0) {
-            if (app->cfg &&
-                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_REASONING) != 0) {
-                sys_line(app, NM_SGR_ERROR "reasoning: could not write the "
-                                           "shadow file" NM_SGR_RESET);
-                return;
+            if (app->cfg) {
+                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_REASONING);
+                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_REASONING);
             }
-            nm_chat_app_set_echo_reasoning(app, resolved_reasoning(app));
             sys_line(app, "reasoning echo: %s (shadow reset)",
-                     app->echo_reasoning ? "on" : "off");
+                     nm_agent_echo_reasoning(app->agent) ? "on" : "off");
             return;
         }
         if (!nm_config_valid_reasoning(arg)) {
@@ -1675,7 +1682,6 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         v[vn] = '\0';
         int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
                  strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
-        nm_chat_app_set_echo_reasoning(app, on);
         char line[128];
         snprintf(line, sizeof(line), "reasoning echo: %s", on ? "on" : "off");
         persist_and_report(app, NM_CFG_KEY_REASONING, on ? "on" : "off", line);
@@ -1687,7 +1693,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                           "family_skip %s%s",
                      nm_connection_connect_timeout_ms(),
                      NM_CONNECT_ATTEMPT_MS,
-                     app->family_skip ? "on" : "off",
+                     nm_connection_family_skip() ? "on" : "off",
                      nm_connection_skipped_families() ? " (a family is "
                                                         "skipped now)"
                                                       : "");
@@ -1695,7 +1701,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         }
         /* Two shapes: a positive per-address budget in ms, or the
          * family-skip bool. `reset` applies to whichever follows, and
-         * a bare `reset` drops both. */
+         * a bare `reset` drops both. All of it is store state; nothing
+         * is pushed. */
         const char *what = arg;
         while (*what == ' ' || *what == '\t')
             what++;
@@ -1713,9 +1720,12 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                     nm_config_shadow_reset(app->cfg,
                                            NM_CFG_KEY_CONNECT_TIMEOUT);
                     nm_config_shadow_reset(app->cfg, NM_CFG_KEY_FAMILY_SKIP);
+                    nm_config_runtime_clear(app->cfg,
+                                            NM_CFG_KEY_CONNECT_TIMEOUT);
+                    nm_config_runtime_clear(app->cfg,
+                                            NM_CFG_KEY_FAMILY_SKIP);
                 }
-                nm_chat_app_set_connect_timeout_ms(app, 0);
-                nm_chat_app_set_family_skip(app, 0);
+                app->skipped_families = 0;
                 sys_line(app, "connect: timeout and family_skip reset "
                               "(shadow reset)");
                 return;
@@ -1723,18 +1733,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             for (int i = 0; KNOWN[i]; i++) {
                 if (strcmp(which, KNOWN[i]) != 0)
                     continue;
-                if (app->cfg &&
-                    nm_config_shadow_reset(app->cfg, which) != 0) {
-                    sys_line(app, NM_SGR_ERROR "connect: could not write "
-                                               "the shadow file" NM_SGR_RESET);
-                    return;
-                }
-                if (strcmp(which, NM_CFG_KEY_CONNECT_TIMEOUT) == 0)
-                    nm_chat_app_set_connect_timeout_ms(
-                        app, nm_config_get_int(app->cfg, which, 0));
-                else
-                    nm_chat_app_set_family_skip(
-                        app, nm_config_get_bool(app->cfg, which, 0));
+                config_apply_reset(app, which);
                 sys_line(app, "connect: %s reset (shadow reset)", which);
                 return;
             }
@@ -1762,12 +1761,18 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             v[vn] = '\0';
             int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
                      strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
-            nm_chat_app_set_family_skip(app, on);
             char line[128];
             snprintf(line, sizeof(line), "connect: family_skip %s",
                      on ? "on" : "off");
             persist_and_report(app, NM_CFG_KEY_FAMILY_SKIP,
                                on ? "on" : "off", line);
+            /* Off is "never skip", so it also clears the walk's latch:
+             * the decision must be re-earned if the user turns it back
+             * on. */
+            if (!on && app->cfg) {
+                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_SKIP_FAMILIES);
+                app->skipped_families = 0;
+            }
             return;
         }
         /* Otherwise a per-address budget in ms. */
@@ -1786,10 +1791,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                      "reset" NM_SGR_RESET);
             return;
         }
-        nm_chat_app_set_connect_timeout_ms(app, v);
         char line[128];
-        snprintf(line, sizeof(line), "connect: %d ms per address",
-                 nm_connection_connect_timeout_ms());
+        snprintf(line, sizeof(line), "connect: %d ms per address", v);
         persist_and_report(app, NM_CFG_KEY_CONNECT_TIMEOUT, what, line);
         return;
     }
@@ -1812,7 +1815,39 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                 config_reset(app, kw);
             return;
         }
-        sys_line(app, NM_SGR_ERROR "config: expected 'reset [key|all]'" NM_SGR_RESET);
+        if (kwlen == 3 && strncmp(what, "set", 3) == 0) {
+            /* set <key> <value...>: value is the whole remainder, so a
+             * URL may contain spaces? No — keys' values have no spaces
+             * (URLs, ids, numbers, bools, family sets), but take the
+             * rest verbatim and trim the trailing whitespace. */
+            const char *key = kw;
+            const char *sp = key;
+            while (*sp && *sp != ' ' && *sp != '\t')
+                sp++;
+            if (!*sp) {
+                sys_line(app, NM_SGR_ERROR
+                         "config: set expects '<key> <value>'" NM_SGR_RESET);
+                return;
+            }
+            char kbuf[32];
+            size_t klen = (size_t)(sp - key);
+            if (klen >= sizeof(kbuf))
+                klen = sizeof(kbuf) - 1;
+            memcpy(kbuf, key, klen);
+            kbuf[klen] = '\0';
+            while (*sp == ' ' || *sp == '\t')
+                sp++;
+            char vbuf[1024];
+            snprintf(vbuf, sizeof(vbuf), "%s", sp);
+            /* Trim trailing whitespace. */
+            size_t vlen = strlen(vbuf);
+            while (vlen > 0 && (vbuf[vlen - 1] == ' ' || vbuf[vlen - 1] == '\t'))
+                vbuf[--vlen] = '\0';
+            config_set(app, kbuf, vbuf);
+            return;
+        }
+        sys_line(app, NM_SGR_ERROR
+                 "config: expected 'set <key> <value>' or 'reset [key|all]'" NM_SGR_RESET);
         return;
     }
     if (NAME_IS("ps")) {

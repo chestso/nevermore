@@ -71,10 +71,24 @@ extern "C" {
  * latches per family as the network proves itself. Env spelling:
  * NEVERMORE_CONNECT_FAMILY_SKIP. */
 #define NM_CFG_KEY_FAMILY_SKIP "family_skip"
+/* Which families the connect walk is NOT dialling — the walk's own
+ * latch, kept as a value in this store (never a private transport
+ * global) so /config shows it and can reset it. A family-set value:
+ * `none` / `IPv4` / `IPv6` / `IPv4+IPv6` (the nm_family_name
+ * vocabulary). Default `none`; the machinery writes it (runtime
+ * layer) when a family black-holes a connect, and a user may set it
+ * directly to pin a family off. Env spelling:
+ * NEVERMORE_CONNECT_SKIP_FAMILIES. */
+#define NM_CFG_KEY_SKIP_FAMILIES "skip_families"
 /* Local SearXNG endpoint for the web_search tool; the env spelling is
  * NEVERMORE_SEARXNG_URL. A durable profile value (not an exploratory
  * base_url like NEVERMORE_BASE_URL), so it is a first-class key. */
 #define NM_CFG_KEY_SEARXNG "searxng"
+/* Whether the web_search tool may run, a bool (default on). The user
+ * sets it durably; the tool writes the RUNTIME layer (`off`) when a
+ * probe fails, so a self-disabling search is visible to /config and
+ * resettable. Env spelling: NEVERMORE_SEARXNG_ENABLED. */
+#define NM_CFG_KEY_SEARXNG_ENABLED "searxng_enabled"
 
 typedef enum
 {
@@ -82,7 +96,8 @@ typedef enum
     NM_CFG_USER,        /* the user's config file */
     NM_CFG_SHADOW,      /* the runtime shadow file */
     NM_CFG_ENV,         /* the environment */
-    NM_CFG_CLI          /* -p / -m */
+    NM_CFG_CLI,         /* -p / -m */
+    NM_CFG_RUNTIME      /* transient machinery value (never persisted) */
 } NmCfgSource;
 
 typedef struct NmConfig NmConfig;
@@ -91,6 +106,12 @@ typedef struct NmConfig NmConfig;
  * missing/unreadable/malformed file (absent = no keys; bad lines warn
  * on stderr and are skipped). NULL only on OOM. */
 NmConfig *nm_config_load(void);
+
+/* A fresh, in-memory config with NO file I/O: built-in defaults only
+ * (plus whatever the caller sets on the runtime layer). What a unit
+ * test that needs a store installs (no path pinning, no scratch dir),
+ * and what an embedder wanting pure defaults uses. NULL only on OOM. */
+NmConfig *nm_config_new(void);
 void nm_config_free(NmConfig *c);
 
 /* Winning value for a key (borrowed, valid while `c` lives), or NULL
@@ -105,6 +126,25 @@ int nm_config_get_bool(const NmConfig *c, const char *key, int fallback);
 
 /* Positive decimal, clamped to 100000; `fallback` when unset. */
 int nm_config_get_int(const NmConfig *c, const char *key, int fallback);
+
+/* The EFFECTIVE value for a key: the highest layer that sets it
+ * (runtime > cli > env > shadow > user), else the key's built-in
+ * default. `*src` (may be NULL) reports the dictating layer, and is
+ * NM_CFG_DEFAULT when the built-in default is what applies. NULL only
+ * for an unknown key. This is the one resolution the machinery reads
+ * at the point of use and the /config view prints — never a proxy. */
+const char *nm_config_resolve(const NmConfig *c, const char *key,
+                              NmCfgSource *src);
+
+/* nm_config_resolve + parse, with `fallback` only for an unknown key /
+ * an unparseable value (the store's own values are validated on
+ * write, so this never actually falls back for a known key). */
+int nm_config_resolve_int(const NmConfig *c, const char *key, int fallback);
+int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback);
+
+/* The built-in default text for a key (stringized macro), or NULL when
+ * the key has no default. Never a file layer, never persisted. */
+const char *nm_config_default(const char *key);
 
 /* Human name of a layer, for /config and messages. */
 const char *nm_config_source_name(NmCfgSource s);
@@ -127,6 +167,25 @@ void nm_config_set_env(NmConfig *c);
  * provider name is the invoker's explicit intent and the consumer
  * reports it loudly. `value` NULL/empty clears the layer. */
 void nm_config_set_cli(NmConfig *c, const char *key, const char *value);
+
+/* The RUNTIME layer: transient machinery values, above every persisted
+ * layer, NEVER written to a file. The machinery (the connect walk, the
+ * web_search probe) writes the fact it learned here; /config shows it
+ * (source `runtime`) and a set/reset clears it. Values are validated +
+ * normalized exactly like the shadow layer. `value` NULL/empty (or
+ * nm_config_runtime_clear with a NULL key) clears the layer.
+ * Returns 0 on success, -1 for an unknown key or an invalid value. */
+int nm_config_runtime_set(NmConfig *c, const char *key, const char *value);
+void nm_config_runtime_clear(NmConfig *c, const char *key); /* NULL = all */
+
+/* The process-global store. The machinery is process-global (the
+ * walk, the probe) but receives no config handle, so main.c installs
+ * the one NmConfig here after load, the same shape as the provider
+ * validator hook. NULL (the default, and what a unit test gets) means
+ * built-in defaults only — a test installs a scratch store when it
+ * needs one and clears it (nm_config_set_store(NULL)) afterwards. */
+void nm_config_set_store(NmConfig *c);
+NmConfig *nm_config_store(void);
 
 /* Runtime write-back: update the shadow layer AND rewrite the shadow
  * file atomically (tmp + rename), so the file always holds exactly the
@@ -183,6 +242,20 @@ void nm_config_set_provider_validator(int (*fn)(const char *name));
 int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
 int nm_config_valid_reasoning(const char *value);
+
+/* Is `value` a family set: `none`, or one or both families joined by
+ * '+' (`IPv4`, `IPv6`, `IPv4+IPv6`)? The tokens are the nm_family_name
+ * vocabulary (transport.h); this file spells them literally because
+ * its unit test links nothing but nm_config.c (a drift test pins the
+ * two). Validation is case-sensitive on the canonical form; the file
+ * layer normalizes accepted spellings (see nm_config_family_set_canon).
+ * A valid set is normalized to its canonical order (IPv4 before IPv6,
+ * `none` alone). */
+int nm_config_valid_family_set(const char *value);
+
+/* Normalize a family set (validated first) into its canonical
+ * spelling. Returns 1 on success, 0 when `value` is not valid. */
+int nm_config_family_set_canon(const char *value, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

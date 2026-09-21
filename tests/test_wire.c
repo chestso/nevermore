@@ -24,9 +24,40 @@
 #include <string.h>
 #include <time.h>
 
+#include "nm_config.h"
 #include "transport.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
+
+/* The transport resolves its connect knobs (per-address budget, family
+ * policy, family latch) from the process config STORE at the point of
+ * use. The tests install a scratch store — no file I/O — and drive it
+ * on the runtime layer, exactly the way the machinery (the walk's own
+ * latch, /config) does. */
+static NmConfig *g_cfg;
+
+static void knobs_set_timeout(int ms)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", ms);
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_CONNECT_TIMEOUT, buf);
+}
+
+static void knobs_clear_timeout(void)
+{
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_CONNECT_TIMEOUT);
+}
+
+static void knobs_set_skip_families(int mask)
+{
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_SKIP_FAMILIES,
+                          nm_family_name(mask));
+}
+
+static void knobs_clear_skip_families(void)
+{
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SKIP_FAMILIES);
+}
 
 /* ---------------------------------------------------------------- */
 /* Dummy server                                                      */
@@ -821,15 +852,14 @@ static void test_async_connect_walks_to_reachable_address(void)
  * CLOCK, which is exactly the property the walk added. */
 static void test_connect_budget_bounds_a_black_hole(void)
 {
-    int saved = nm_connection_connect_timeout_ms();
-    nm_connection_set_connect_timeout_ms(300);
+    knobs_set_timeout(300);
     ASSERT_EQ(nm_connection_connect_timeout_ms(), 300);
 
     time_t t0 = time(NULL);
     NmConnectInfo ci = { 0 };
     NmConnection *c = nm_connect("192.0.2.1", 9, NM_TRANSPORT_PLAIN, &ci);
     time_t dt = time(NULL) - t0;
-    nm_connection_set_connect_timeout_ms(saved);
+    knobs_clear_timeout();
 
     ASSERT_NULL(c);
     ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
@@ -960,8 +990,8 @@ static void test_connect_walk_notice_reports_the_next_address(void)
  * nm_connection_wait_ms is what the agent folds into the tick. */
 static void test_async_black_hole_reports_a_deadline(void)
 {
-    nm_connection_reset_family_skips();
-    nm_connection_set_connect_timeout_ms(300);
+    knobs_clear_skip_families();
+    knobs_set_timeout(300);
 
     NmConnectInfo ci = { 0 };
     NmConnection *c =
@@ -1009,7 +1039,7 @@ static void test_async_black_hole_reports_a_deadline(void)
     ASSERT_EQ(nm_connection_wait_ms(c), -1);
 
     nm_connection_close(c);
-    nm_connection_set_connect_timeout_ms(-1);
+    knobs_clear_timeout();
 }
 
 /* The family skip: a latched family's addresses are dropped at resolve
@@ -1018,10 +1048,10 @@ static void test_async_black_hole_reports_a_deadline(void)
  * addresses" would read as a DNS failure, which it is not. */
 static void test_family_skip_drops_addresses(void)
 {
-    nm_connection_reset_family_skips();
+    knobs_clear_skip_families();
     ASSERT_EQ(nm_connection_skipped_families(), 0);
 
-    nm_connection_set_skipped_families(NM_FAMILY_V4 | NM_FAMILY_V6);
+    knobs_set_skip_families(NM_FAMILY_V4 | NM_FAMILY_V6);
     ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4 | NM_FAMILY_V6);
 
     NmConnectInfo ci = { 0 };
@@ -1038,11 +1068,11 @@ static void test_family_skip_drops_addresses(void)
     ASSERT_STR_EQ(nm_family_name(0), "none");
 
     /* Cleared: resolution is whole again, and connect works. */
-    nm_connection_reset_family_skips();
+    knobs_clear_skip_families();
     ASSERT_EQ(nm_connection_skipped_families(), 0);
-    nm_connection_set_skipped_families(NM_FAMILY_V4);
+    knobs_set_skip_families(NM_FAMILY_V4);
     ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4);
-    nm_connection_reset_family_skips();
+    knobs_clear_skip_families();
 
     int port = 0;
     int lfd = test_bind_last_localhost_addr(&port);
@@ -1071,6 +1101,12 @@ int main(int argc, char *argv[])
         return 1;
     }
     printf("test_wire:\n");
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_http_error_status);

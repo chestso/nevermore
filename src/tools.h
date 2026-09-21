@@ -160,20 +160,22 @@ NmToolset *nm_toolset_new_defaults(void);
 /* wire tap: configured once at startup, no per-session state)       */
 /* ---------------------------------------------------------------- */
 
-/* Local SearXNG endpoint the web_search tool queries. NULL/"" = the
- * built-in default (http://127.0.0.1:8888). main.c sets it from
- * nm_config's `searxng` key; chat_app re-resolves it on /config reset.
- * Pointing it at a different URL clears the cached reachability
- * state, so the new endpoint gets a fresh probe. */
-void nm_tool_web_search_set_base_url(const char *url);
+/* Built-in SearXNG endpoint (the store's `searxng` default). The macro
+ * lives here (the tool owns the value) and nm_config's key table
+ * references it, so there is one spelling. */
+#define NM_WEBSEARCH_DEFAULT_URL "http://127.0.0.1:8888"
 
 /* Per-request timeout in ms (0 = default 10000). Test seam and the
  * anchor for a future `searxng_timeout` knob. */
 void nm_tool_web_search_set_timeout_ms(int ms);
 
-/* Forget the cached reachability state (unknown again). Test seam;
- * set_base_url calls it when the URL changes. */
-void nm_tool_web_search_reset_health(void);
+/* The effective SearXNG endpoint and enable flag, resolved from the
+ * store (nm_config) at the point of use — the tool keeps no copy. With
+ * no store installed, the URL default and enabled=on apply. The
+ * `searxng_enabled` RUNTIME layer is written `off` by the tool when a
+ * probe fails, so /config can show and reset a self-disabled search. */
+const char *nm_tool_web_search_base_url(void);
+int nm_tool_web_search_enabled(void);
 
 /* ---------------------------------------------------------------- */
 /* run_command inactivity budget (process-global, like the above)    */

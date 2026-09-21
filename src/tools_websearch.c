@@ -16,13 +16,15 @@
  * carries an interest callback; run_command's pipe only ever reads.
  *
  * Reachability (quoth's gating): the first request is the probe. An
- * unreachable instance or a timeout caches `unreachable` for the
- * session, so later calls short-circuit with no HTTP request — a dead
- * server must not be hammered on every tool round. A success caches
- * `healthy` and every later call re-probes (the server may have died).
- * Both live in process globals (the toolset carries no per-session
- * state), with a reset seam for tests; set_base_url drops the cache so
- * a newly pointed endpoint gets a fresh probe.
+ * unreachable instance or a timeout sets the store's `searxng_enabled`
+ * RUNTIME value to `off`, so later calls short-circuit with no HTTP
+ * request — a dead server must not be hammered on every tool round,
+ * and /config shows (and resets) the self-disabling. A success leaves
+ * it on; a changed endpoint (the store's `searxng` value differs from
+ * the one last probed) clears the latch for a fresh probe. The tool
+ * keeps NO endpoint/health copy: the URL and the enabled bool are
+ * resolved from the config store at the point of use (no store = the
+ * built-in default URL, enabled).
  *
  * Memory: one connection + one growing body buffer per call, reused
  * across steps; the parsed JSON is freed at the end. No per-token
@@ -43,6 +45,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "nm_config.h" /* the store the tool reads (no proxies) */
 #include "tools.h"
 #include "tools_internal.h"
 #include "transport.h"
@@ -56,42 +59,62 @@
 #define NM_WEBSEARCH_BODY_MAX            (4u * 1024u * 1024u)
 #define NM_WEBSEARCH_URL_MAX             1024
 
-/* Reachability cache. */
-enum
-{
-    WS_UNKNOWN = 0,
-    WS_HEALTHY,
-    WS_UNREACHABLE
-};
-
-static char g_base_url[NM_WEBSEARCH_URL_MAX];
 static int g_timeout_ms; /* 0 = default */
-static int g_health = WS_UNKNOWN;
+
+/* The endpoint we last probed. The latch we keep is a "when", not a
+ * "what": the URL itself is resolved from the store, but we remember
+ * which one the current `searxng_enabled=off` latch belongs to, so a
+ * newly pointed endpoint gets a fresh probe (the latch is dropped). */
+static char g_probed_url[NM_WEBSEARCH_URL_MAX];
 
 /* ---------------------------------------------------------------- */
-/* Runtime knobs                                                     */
+/* Runtime knobs (resolved from the store, never copied)             */
 /* ---------------------------------------------------------------- */
-
-void nm_tool_web_search_set_base_url(const char *url)
-{
-    char buf[NM_WEBSEARCH_URL_MAX];
-    snprintf(buf, sizeof(buf), "%s", url && *url ? url : "");
-    if (strcmp(buf, g_base_url) != 0) {
-        snprintf(g_base_url, sizeof(g_base_url), "%s", buf);
-        g_health = WS_UNKNOWN; /* a new endpoint deserves a fresh probe */
-    }
-}
 
 void nm_tool_web_search_set_timeout_ms(int ms)
 {
     g_timeout_ms = ms > 0 ? ms : 0;
 }
 
-void nm_tool_web_search_reset_health(void) { g_health = WS_UNKNOWN; }
-
-static const char *base_url(void)
+/* The effective endpoint: the store's `searxng` value, else the
+ * built-in default. */
+const char *nm_tool_web_search_base_url(void)
 {
-    return g_base_url[0] ? g_base_url : NM_WEBSEARCH_DEFAULT_URL;
+    NmConfig *c = nm_config_store();
+    const char *v = c ? nm_config_resolve(c, NM_CFG_KEY_SEARXNG, NULL)
+                      : NULL;
+    return (v && *v) ? v : NM_WEBSEARCH_DEFAULT_URL;
+}
+
+/* May web_search run? The store's `searxng_enabled` bool, default on. */
+int nm_tool_web_search_enabled(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_SEARXNG_ENABLED, 1) : 1;
+}
+
+/* Record that the instance did not answer: latch `searxng_enabled=off`
+ * on the store's RUNTIME layer (visible to /config, resettable, never
+ * persisted). No store = nothing to latch (headless/test with no
+ * config). */
+static void ws_mark_unreachable(void)
+{
+    NmConfig *c = nm_config_store();
+    if (c)
+        nm_config_runtime_set(c, NM_CFG_KEY_SEARXNG_ENABLED, "off");
+}
+
+/* A new endpoint deserves a fresh probe: if the configured URL differs
+ * from the one the latch belongs to, drop the self-disabling and
+ * remember the new one. */
+static void ws_note_endpoint(const char *url)
+{
+    if (strcmp(url, g_probed_url) == 0)
+        return;
+    snprintf(g_probed_url, sizeof(g_probed_url), "%s", url);
+    NmConfig *c = nm_config_store();
+    if (c)
+        nm_config_runtime_clear(c, NM_CFG_KEY_SEARXNG_ENABLED);
 }
 
 static double timeout_seconds(void)
@@ -520,19 +543,19 @@ static void ws_finalize(NmToolExec *e)
                  "enabled in search.formats?)",
                  status);
         ws_fail(e, msg);
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         return;
     }
     if (e->len == 0) {
         ws_fail(e, "web_search: SearXNG returned an empty response");
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         return;
     }
     const char *jerr = NULL;
     NmJson *doc = nm_json_parse(e->buf, e->len, &jerr);
     if (!doc) {
         ws_fail(e, "web_search: SearXNG returned malformed JSON");
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         return;
     }
     Buf out = { 0 };
@@ -541,7 +564,7 @@ static void ws_finalize(NmToolExec *e)
     e->result = nm_tool_format_result(out.p, 0);
     free(out.p);
     e->done = 1;
-    g_health = WS_HEALTHY;
+    /* A success leaves `searxng_enabled` on (it was on to get here). */
 }
 
 /* Hand the terminal result to the caller exactly once. */
@@ -563,7 +586,7 @@ static NmToolStatus ws_step(NmToolExec *e, NmToolResult *out)
 
     if (nm_monotonic_seconds() >= e->deadline) {
         ws_fail(e, "web_search: SearXNG request timed out");
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         return ws_take(e, out);
     }
 
@@ -576,14 +599,14 @@ static NmToolStatus ws_step(NmToolExec *e, NmToolResult *out)
         snprintf(msg, sizeof(msg), "web_search: SearXNG unreachable: %s",
                  err && *err ? err : "connection failed");
         ws_fail(e, msg);
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         return ws_take(e, out);
     }
 
     for (;;) {
         if (e->len >= NM_WEBSEARCH_BODY_MAX) {
             ws_fail(e, "web_search: SearXNG response exceeded the size cap");
-            g_health = WS_UNREACHABLE;
+            ws_mark_unreachable();
             return ws_take(e, out);
         }
         if (ws_reserve(e, 4096) != 0) {
@@ -600,7 +623,7 @@ static NmToolStatus ws_step(NmToolExec *e, NmToolResult *out)
             snprintf(msg, sizeof(msg), "web_search: SearXNG unreachable: %s",
                      err && *err ? err : "read failed");
             ws_fail(e, msg);
-            g_health = WS_UNREACHABLE;
+            ws_mark_unreachable();
             return ws_take(e, out);
         }
         if (n == 0)
@@ -647,12 +670,17 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     (void)tool;
     (void)userdata;
 
-    /* Cached-unreachable short-circuit: no HTTP request (quoth's "do
-     * not hammer a dead server"). */
-    if (g_health == WS_UNREACHABLE)
+    /* Disabled short-circuit: no HTTP request (quoth's "do not hammer
+     * a dead server"). The store's `searxng_enabled` is off either
+     * because a previous probe failed (the tool latched it) or because
+     * the user turned it off — both mean "do not dial". */
+    if (!nm_tool_web_search_enabled())
         return fail_exec(nm_tool_result_error(
             "web_search: SearXNG is unreachable (cached for this session); "
-            "start the local server or set the searxng base URL"));
+            "start the local server or reset searxng_enabled"));
+
+    /* A newly pointed endpoint re-enables the probe. */
+    ws_note_endpoint(nm_tool_web_search_base_url());
 
     const char *jerr = NULL;
     NmJson *args = args_json && *args_json
@@ -680,7 +708,8 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     const char *categories = nm_json_str(nm_json_get(args, "categories"));
     const char *engines = nm_json_str(nm_json_get(args, "engines"));
 
-    char *url = build_url(base_url(), query, categories, engines);
+    char *url = build_url(nm_tool_web_search_base_url(), query, categories,
+                          engines);
     nm_json_free(args);
     if (!url)
         return fail_exec(nm_tool_result_error("web_search: out of memory"));
@@ -692,7 +721,7 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
         free(url);
         char msg[NM_WEBSEARCH_URL_MAX + 64];
         snprintf(msg, sizeof(msg), "web_search: invalid SearXNG URL: %s",
-                 base_url());
+                 nm_tool_web_search_base_url());
         return fail_exec(nm_tool_result_error(msg));
     }
     free(url);
@@ -715,7 +744,7 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
         char msg[256];
         snprintf(msg, sizeof(msg), "web_search: SearXNG unreachable: %s",
                  ci.detail[0] ? ci.detail : "connect failed");
-        g_health = WS_UNREACHABLE;
+        ws_mark_unreachable();
         free(path);
         ws_fail(e, msg);
         return e;

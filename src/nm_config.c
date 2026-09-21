@@ -21,6 +21,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* The built-in defaults come from the modules that own the values
+ * (the agent's round cap, the transport's connect budget, the tool's
+ * SearXNG endpoint), so there is exactly one spelling of each. A drift
+ * test pins the two sides. */
+#include "agent.h"     /* NM_AGENT_DEFAULT_MAX_ROUNDS */
+#include "tools.h"     /* NM_WEBSEARCH_DEFAULT_URL */
+#include "transport.h" /* NM_CONNECT_ATTEMPT_MS */
+
+#define NM_STR_(x) #x
+#define NM_STR(x)  NM_STR_(x)
+
 #ifdef _WIN32
 #include <windows.h>
 #else
@@ -37,16 +48,18 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 7
+#define NM_CFG_NKEYS 9
 
 typedef struct
 {
     const char *name;
     const char *env;
+    const char *def; /* built-in default text, NULL = none */
     char user[NM_CONFIG_VAL];
     char shadow[NM_CONFIG_VAL];
     char env_v[NM_CONFIG_VAL];
     char cli[NM_CONFIG_VAL];
+    char runtime[NM_CONFIG_VAL];
 } CfgKey;
 
 struct NmConfig
@@ -66,30 +79,49 @@ struct NmConfig
 static char g_user_override[NM_CONFIG_PATH];
 static char g_shadow_override[NM_CONFIG_PATH];
 
+/* The process-global store the machinery reads (see nm_config.h).
+ * main.c installs it; tests install a scratch one (or leave it NULL
+ * for built-in defaults). */
+static NmConfig *g_store;
+
+void nm_config_set_store(NmConfig *c) { g_store = c; }
+NmConfig *nm_config_store(void) { return g_store; }
+
 /* ---------------------------------------------------------------- */
 /* Key table / validation                                            */
 /* ---------------------------------------------------------------- */
 
+/* The key vocabulary with its environment spelling and built-in
+ * default — the ONE declaration init_keys, nm_config_default,
+ * nm_config_key_at and nm_config_env_name all read. The default text
+ * is a stringized macro where a module owns the value. */
+static const struct
+{
+    const char *name;
+    const char *env;
+    const char *def; /* NULL = no built-in default */
+} KEYS[NM_CFG_NKEYS] = {
+    { NM_CFG_KEY_PROVIDER, "NEVERMORE_PROVIDER", NULL },
+    { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL", NULL },
+    { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
+      NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
+    { NM_CFG_KEY_REASONING, "NEVERMORE_ECHO_REASONING", "off" },
+    { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
+      NM_STR(NM_CONNECT_ATTEMPT_MS) },
+    { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP", "off" },
+    { NM_CFG_KEY_SKIP_FAMILIES, "NEVERMORE_CONNECT_SKIP_FAMILIES", "none" },
+    { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL", NM_WEBSEARCH_DEFAULT_URL },
+    { NM_CFG_KEY_SEARXNG_ENABLED, "NEVERMORE_SEARXNG_ENABLED", "on" },
+};
+
 static void init_keys(NmConfig *c)
 {
-    static const struct
-    {
-        const char *name;
-        const char *env;
-    } defs[NM_CFG_NKEYS] = {
-        { NM_CFG_KEY_PROVIDER, "NEVERMORE_PROVIDER" },
-        { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL" },
-        { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS" },
-        { NM_CFG_KEY_REASONING, "NEVERMORE_ECHO_REASONING" },
-        { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS" },
-        { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP" },
-        { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL" },
-    };
     for (int i = 0; i < NM_CFG_NKEYS; i++) {
         CfgKey *k = &c->keys[i];
         memset(k, 0, sizeof(*k));
-        k->name = defs[i].name;
-        k->env = defs[i].env;
+        k->name = KEYS[i].name;
+        k->env = KEYS[i].env;
+        k->def = KEYS[i].def;
     }
 }
 
@@ -164,14 +196,98 @@ int nm_config_valid_reasoning(const char *value)
 }
 
 /* Normalize a validated truthy spelling to "on"/"off", so the shadow
- * file, /config's view and the env layer all read the same. */
+ * file, /config's view and the env layer all read the same. The 'o'
+ * prefix is ambiguous ("on" and "off" both start with it), so it is
+ * disambiguated on the second character — the bug the `reasoning =
+ * off` file layer sat on. */
 static const char *normalize_bool(const char *value)
 {
-    return (value[0] == '1' || value[0] == 't' || value[0] == 'T' ||
-            value[0] == 'y' || value[0] == 'Y' || value[0] == 'o' ||
-            value[0] == 'O')
-               ? "on"
-               : "off";
+    if (value[0] == '1' || value[0] == 't' || value[0] == 'T' ||
+        value[0] == 'y' || value[0] == 'Y')
+        return "on";
+    if (value[0] == 'o' || value[0] == 'O')
+        return (value[1] == 'n' || value[1] == 'N') ? "on" : "off";
+    return "off";
+}
+
+/* Case-insensitive compare of a token [s, s+n) against a literal. */
+static int fam_token_eq(const char *s, size_t n, const char *lit)
+{
+    if (strlen(lit) != n)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        char a = s[i], b = lit[i];
+        if (a >= 'A' && a <= 'Z')
+            a = (char)(a - 'A' + 'a');
+        if (b >= 'A' && b <= 'Z')
+            b = (char)(b - 'A' + 'a');
+        if (a != b)
+            return 0;
+    }
+    return 1;
+}
+
+/* Family set -> canonical spelling. Accepts `none`, `IPv4`, `IPv6`,
+ * `IPv4+IPv6` (case-insensitive, optional spaces); canonical order is
+ * IPv4 before IPv6. Returns 1 on success. The tokens ARE the
+ * nm_family_name vocabulary (transport.h) — spelled here as literals
+ * because this TU links nothing but itself; a drift test pins them. */
+int nm_config_family_set_canon(const char *value, char *out, size_t cap)
+{
+    if (!value || !*value)
+        return 0;
+    int v4 = 0, v6 = 0, none = 0, ntokens = 0;
+    const char *p = value;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        const char *s = p;
+        while (*p && *p != '+' && *p != ' ' && *p != '\t')
+            p++;
+        size_t n = (size_t)(p - s);
+        if (n == 0)
+            return 0;
+        if (fam_token_eq(s, n, "none"))
+            none = 1;
+        else if (fam_token_eq(s, n, "ipv4"))
+            v4 = 1;
+        else if (fam_token_eq(s, n, "ipv6"))
+            v6 = 1;
+        else
+            return 0;
+        ntokens++;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '+') {
+            p++;
+            if (!*p)
+                return 0; /* trailing '+' with no token after it */
+            continue;
+        }
+        if (*p)
+            return 0; /* trailing junk */
+    }
+    if (none) {
+        if (ntokens != 1 || v4 || v6)
+            return 0;
+        snprintf(out, cap, "none");
+        return 1;
+    }
+    if (!v4 && !v6)
+        return 0;
+    if (v4 && v6)
+        snprintf(out, cap, "IPv4+IPv6");
+    else if (v4)
+        snprintf(out, cap, "IPv4");
+    else
+        snprintf(out, cap, "IPv6");
+    return 1;
+}
+
+int nm_config_valid_family_set(const char *value)
+{
+    char tmp[32];
+    return nm_config_family_set_canon(value, tmp, sizeof(tmp));
 }
 
 /* Validate + normalize ONE key's raw value into `out` (capped at
@@ -190,11 +306,14 @@ static int normalize_value(const char *key, const char *raw, char *out,
         if (!nm_config_valid_positive_int(raw))
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_REASONING) == 0 ||
-               strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0) {
+               strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
+               strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0) {
         if (!nm_config_valid_reasoning(raw))
             return 0;
         snprintf(out, cap, "%s", normalize_bool(raw));
         return 1;
+    } else if (strcmp(key, NM_CFG_KEY_SKIP_FAMILIES) == 0) {
+        return nm_config_family_set_canon(raw, out, cap);
     }
     /* model: any non-empty id (a local daemon may serve private ids
      * the static catalog does not know); searxng: any non-empty URL
@@ -205,25 +324,24 @@ static int normalize_value(const char *key, const char *raw, char *out,
 
 const char *nm_config_key_at(size_t i)
 {
-    static const char *const names[NM_CFG_NKEYS] = {
-        NM_CFG_KEY_PROVIDER, NM_CFG_KEY_MODEL, NM_CFG_KEY_ROUNDS,
-        NM_CFG_KEY_REASONING, NM_CFG_KEY_CONNECT_TIMEOUT,
-        NM_CFG_KEY_FAMILY_SKIP, NM_CFG_KEY_SEARXNG
-    };
-    return i < NM_CFG_NKEYS ? names[i] : NULL;
+    return i < NM_CFG_NKEYS ? KEYS[i].name : NULL;
 }
 
 const char *nm_config_env_name(const char *key)
 {
-    static const char *const envs[NM_CFG_NKEYS] = {
-        "NEVERMORE_PROVIDER", "NEVERMORE_MODEL", "NEVERMORE_MAX_ROUNDS",
-        "NEVERMORE_ECHO_REASONING", "NEVERMORE_CONNECT_TIMEOUT_MS",
-        "NEVERMORE_CONNECT_FAMILY_SKIP", "NEVERMORE_SEARXNG_URL"
-    };
-    for (size_t i = 0; i < NM_CFG_NKEYS; i++) {
-        if (key && strcmp(key, nm_config_key_at(i)) == 0)
-            return envs[i];
-    }
+    for (size_t i = 0; i < NM_CFG_NKEYS; i++)
+        if (key && strcmp(key, KEYS[i].name) == 0)
+            return KEYS[i].env;
+    return NULL;
+}
+
+const char *nm_config_default(const char *key)
+{
+    if (!key || !*key)
+        return NULL;
+    for (size_t i = 0; i < NM_CFG_NKEYS; i++)
+        if (strcmp(key, KEYS[i].name) == 0)
+            return KEYS[i].def;
     return NULL;
 }
 
@@ -429,7 +547,8 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
             fprintf(stderr,
                     "nevermore: %s: unknown key '%s' (keys: provider, "
                     "model, rounds, reasoning, connect_timeout, "
-                    "family_skip, searxng): ignored\n",
+                    "family_skip, skip_families, searxng, "
+                    "searxng_enabled): ignored\n",
                     which, key);
             continue;
         }
@@ -451,12 +570,20 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
 /* Load / free                                                       */
 /* ---------------------------------------------------------------- */
 
-NmConfig *nm_config_load(void)
+NmConfig *nm_config_new(void)
 {
     NmConfig *c = calloc(1, sizeof(*c));
     if (!c)
         return NULL;
     init_keys(c);
+    return c;
+}
+
+NmConfig *nm_config_load(void)
+{
+    NmConfig *c = nm_config_new();
+    if (!c)
+        return NULL;
     snprintf(c->user_path, sizeof(c->user_path), "%s", nm_config_user_path());
     snprintf(c->shadow_path, sizeof(c->shadow_path), "%s",
              nm_config_shadow_path());
@@ -479,48 +606,93 @@ void nm_config_free(NmConfig *c)
 /* Resolution                                                        */
 /* ---------------------------------------------------------------- */
 
-static const char *slot_for(NmCfgSource s, const CfgKey *k)
+/* The winning layer for a key, highest first. `*src` is the layer that
+ * dictates; NM_CFG_DEFAULT when only the built-in default applies.
+ * Returns the winning value (borrowed), or the key's built-in default
+ * text when no layer sets it (may be NULL for provider/model). */
+static const char *resolve_slot(const NmConfig *c, const char *key,
+                                NmCfgSource *src)
 {
-    switch (s) {
-    case NM_CFG_CLI:
-        return k->cli;
-    case NM_CFG_ENV:
-        return k->env_v;
-    case NM_CFG_SHADOW:
-        return k->shadow;
-    case NM_CFG_USER:
-        return k->user;
-    default:
-        return "";
+    CfgKey *k = key_by_name((NmConfig *)c, key);
+    if (!k) {
+        if (src)
+            *src = NM_CFG_DEFAULT;
+        return NULL;
     }
+    if (k->runtime[0]) {
+        if (src)
+            *src = NM_CFG_RUNTIME;
+        return k->runtime;
+    }
+    if (k->cli[0]) {
+        if (src)
+            *src = NM_CFG_CLI;
+        return k->cli;
+    }
+    if (k->env_v[0]) {
+        if (src)
+            *src = NM_CFG_ENV;
+        return k->env_v;
+    }
+    if (k->shadow[0]) {
+        if (src)
+            *src = NM_CFG_SHADOW;
+        return k->shadow;
+    }
+    if (k->user[0]) {
+        if (src)
+            *src = NM_CFG_USER;
+        return k->user;
+    }
+    if (src)
+        *src = NM_CFG_DEFAULT;
+    return k->def;
 }
 
 NmCfgSource nm_config_source(const NmConfig *c, const char *key)
 {
-    CfgKey *k = key_by_name((NmConfig *)c, key);
-    if (!k)
-        return NM_CFG_DEFAULT;
-    if (k->cli[0])
-        return NM_CFG_CLI;
-    if (k->env_v[0])
-        return NM_CFG_ENV;
-    if (k->shadow[0])
-        return NM_CFG_SHADOW;
-    if (k->user[0])
-        return NM_CFG_USER;
-    return NM_CFG_DEFAULT;
+    NmCfgSource s = NM_CFG_DEFAULT;
+    resolve_slot(c, key, &s);
+    return s;
 }
 
 const char *nm_config_get(const NmConfig *c, const char *key)
 {
-    CfgKey *k = key_by_name((NmConfig *)c, key);
-    if (!k)
-        return NULL;
-    NmCfgSource s = nm_config_source(c, key);
-    if (s == NM_CFG_DEFAULT)
-        return NULL;
-    const char *v = slot_for(s, k);
-    return *v ? v : NULL;
+    NmCfgSource s = NM_CFG_DEFAULT;
+    const char *v = resolve_slot(c, key, &s);
+    /* Explicit-layer semantics: NULL when only the default applies. */
+    return s == NM_CFG_DEFAULT ? NULL : v;
+}
+
+const char *nm_config_resolve(const NmConfig *c, const char *key,
+                              NmCfgSource *src)
+{
+    return resolve_slot(c, key, src);
+}
+
+/* Parse a validated positive decimal; `fallback` when unparseable. */
+static int parse_int(const char *v, int fallback)
+{
+    if (!v || !*v || !nm_config_valid_rounds(v))
+        return fallback;
+    int n = 0;
+    for (const char *p = v; *p; p++)
+        n = n * 10 + (*p - '0');
+    return n > 100000 ? 100000 : n;
+}
+
+int nm_config_resolve_int(const NmConfig *c, const char *key, int fallback)
+{
+    return parse_int(nm_config_resolve(c, key, NULL), fallback);
+}
+
+int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)
+{
+    const char *v = nm_config_resolve(c, key, NULL);
+    if (!v || !*v)
+        return fallback;
+    return strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
+           strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
 }
 
 int nm_config_get_bool(const NmConfig *c, const char *key, int fallback)
@@ -534,18 +706,14 @@ int nm_config_get_bool(const NmConfig *c, const char *key, int fallback)
 
 int nm_config_get_int(const NmConfig *c, const char *key, int fallback)
 {
-    const char *v = nm_config_get(c, key);
-    if (!v || !*v || !nm_config_valid_rounds(v))
-        return fallback;
-    int n = 0;
-    for (const char *p = v; *p; p++)
-        n = n * 10 + (*p - '0');
-    return n > 100000 ? 100000 : n;
+    return parse_int(nm_config_get(c, key), fallback);
 }
 
 const char *nm_config_source_name(NmCfgSource s)
 {
     switch (s) {
+    case NM_CFG_RUNTIME:
+        return "runtime";
     case NM_CFG_CLI:
         return "command line";
     case NM_CFG_ENV:
@@ -759,4 +927,40 @@ int nm_config_shadow_reset(NmConfig *c, const char *key)
         c->shadow_count--;
     k->shadow[0] = '\0';
     return shadow_flush(c);
+}
+
+/* ---------------------------------------------------------------- */
+/* Runtime layer (never persisted)                                   */
+/* ---------------------------------------------------------------- */
+
+int nm_config_runtime_set(NmConfig *c, const char *key, const char *value)
+{
+    if (!c)
+        return -1;
+    CfgKey *k = key_by_name(c, key);
+    if (!k)
+        return -1;
+    if (!value || !*value) {
+        k->runtime[0] = '\0';
+        return 0;
+    }
+    char norm[NM_CONFIG_VAL];
+    if (!normalize_value(k->name, value, norm, sizeof(norm)))
+        return -1;
+    snprintf(k->runtime, NM_CONFIG_VAL, "%s", norm);
+    return 0;
+}
+
+void nm_config_runtime_clear(NmConfig *c, const char *key)
+{
+    if (!c)
+        return;
+    if (!key) {
+        for (int i = 0; i < NM_CFG_NKEYS; i++)
+            c->keys[i].runtime[0] = '\0';
+        return;
+    }
+    CfgKey *k = key_by_name(c, key);
+    if (k)
+        k->runtime[0] = '\0';
 }

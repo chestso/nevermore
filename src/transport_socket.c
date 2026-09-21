@@ -25,6 +25,8 @@
 
 #include "transport_internal.h"
 
+#include "nm_config.h" /* the store the machinery reads (no proxies) */
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -273,40 +275,26 @@ static const char *addr_family_name(const struct sockaddr_storage *a)
 /* The address-family skip latch (see transport.h)                    */
 /* ---------------------------------------------------------------- */
 
-/* Which families have burned an address budget in this process. A
- * bitmask (NM_FAMILY_*) because a host can advertise both. The latch
- * is the only thing the walk remembers across connects: "this family
- * does not work here" is a network fact, not a per-host one. */
-static int g_family_skipped;
-
-/* The `family_skip` setting, pushed across from the app (the
- * transport reads no config). 0 = never latch — the default the unit
- * tests and headless modes see. */
-static int g_family_skip;
-
-void nm_connection_set_family_skip(int on)
-{
-    g_family_skip = on ? 1 : 0;
-}
-
+/* The connect walk's family state lives in the config store
+ * (nm_config), NOT in transport globals: `family_skip` (bool) is the
+ * user's POLICY (may the walk latch at all) and `skip_families` (a
+ * family set) is the latch the walk writes on the store's RUNTIME
+ * layer. The transport resolves both at the point of use and keeps no
+ * copy; with no store installed (a unit test with no config) the
+ * policy is off and nothing is latched. */
 int nm_connection_family_skip(void)
 {
-    return g_family_skip;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_FAMILY_SKIP, 0) : 0;
 }
 
 int nm_connection_skipped_families(void)
 {
-    return g_family_skipped;
-}
-
-void nm_connection_reset_family_skips(void)
-{
-    g_family_skipped = 0;
-}
-
-void nm_connection_set_skipped_families(int mask)
-{
-    g_family_skipped = mask & (NM_FAMILY_V4 | NM_FAMILY_V6);
+    NmConfig *c = nm_config_store();
+    if (!c)
+        return 0;
+    return nm_family_mask(
+        nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, NULL));
 }
 
 static int family_bit(int af)
@@ -324,34 +312,40 @@ static int family_bit(int af)
  * combination is the only evidence worth latching on: the peer is
  * reachable, one family reaches it, another does not. A walk that
  * failed everywhere proves nothing (the host may be down), so it
- * latches nothing. The latch itself is silent: the app re-reads
+ * latches nothing. The latch is silent: the app re-reads
  * nm_connection_skipped_families and prints its own line, the same
- * way it re-reads the connect error. */
+ * way it re-reads the connect error. It is written to the store's
+ * RUNTIME layer, so /config shows and can reset it. */
 static void note_family_skips(NmConnection *conn, int winner_af)
 {
-    if (!conn->conn_abandoned_fams)
+    NmConfig *c = nm_config_store();
+    if (!c || !conn->conn_abandoned_fams)
         return;
     int wbit = family_bit(winner_af);
     if (!wbit)
         return; /* the winner is not one of the families we judge */
-    int new_skips = conn->conn_abandoned_fams & ~g_family_skipped & ~wbit;
+    int cur = nm_connection_skipped_families();
+    int new_skips = conn->conn_abandoned_fams & ~cur & ~wbit;
     if (!new_skips)
         return;
-    /* The setting decides: no `family_skip` (the unit-test default)
-     * leaves the latch alone. */
-    if (!g_family_skip)
+    /* The POLICY decides: `family_skip` off (the default) never
+     * latches. */
+    if (!nm_connection_family_skip())
         return;
-    g_family_skipped |= new_skips;
+    int mask = cur | new_skips;
+    char name[32];
+    snprintf(name, sizeof(name), "%s", nm_family_name(mask));
+    nm_config_runtime_set(c, NM_CFG_KEY_SKIP_FAMILIES, name);
 }
 
 /* Is this family's address dropped at resolve time? The latch IS the
- * decision, so this only reads it — the `family_skip` SETTING gates
- * the LATCH (note_family_skips), never the skip that follows from it.
- * An address of an unrecognized family is never skipped. */
+ * decision, so this only reads it — the `family_skip` POLICY gates the
+ * LATCH (note_family_skips), never the skip that follows from it. An
+ * address of an unrecognized family is never skipped. */
 static int family_skip_allowed(int af)
 {
     int bit = family_bit(af);
-    return bit && (g_family_skipped & bit) ? 1 : 0;
+    return bit && (nm_connection_skipped_families() & bit) ? 1 : 0;
 }
 
 /* Resolve host:port into conn->conn_addrs (first NM_CONNECT_MAX_ADDRS
@@ -401,10 +395,10 @@ int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
          * handed back none): name the reason, because "no usable
          * addresses" would read as a DNS failure when the real cause
          * is our own family skip. */
-        if (g_family_skipped)
-            conn_set_err_detail(conn, "DNS: %s: every address is in a "
-                                      "skipped family (%s)",
-                                host, nm_family_name(g_family_skipped));
+        if (nm_connection_skipped_families())
+            conn_set_err_detail(
+                conn, "DNS: %s: every address is in a skipped family (%s)",
+                host, nm_family_name(nm_connection_skipped_families()));
         else
             conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
         return -1;

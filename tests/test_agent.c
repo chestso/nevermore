@@ -27,12 +27,17 @@
 #include <string.h>
 
 #include "agent.h"
+#include "nm_config.h"
 #include "nm_process.h"
 #include "transport.h"
 #include "provider.h"
 #include "provider_internal.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
+
+/* The process config store the agent resolves `rounds` / `reasoning`
+ * from; installed in main(). */
+static NmConfig *g_cfg;
 
 /* A job that prints a token and then stays alive — the yield window's
  * silent-child case, in the shell each platform's spawn actually runs. */
@@ -1120,8 +1125,9 @@ static void test_agent_reasoning_collected_and_echoed(void)
     nm_agent_on_state(agent, cap_state);
 
     /* Opt in: the echo is OFF unless asked for (see
-     * test_agent_reasoning_not_echoed_by_default). */
-    nm_agent_set_echo_reasoning(agent, 1);
+     * test_agent_reasoning_not_echoed_by_default). The echo is the
+     * store's `reasoning` key now. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING, "on");
     ASSERT_EQ(nm_agent_echo_reasoning(agent), 1);
 
     int rc = nm_agent_turn(agent, "read the fixture");
@@ -1143,6 +1149,7 @@ static void test_agent_reasoning_collected_and_echoed(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING);
 }
 
 /* The echo is OFF by default: the trace is still received and
@@ -1582,11 +1589,12 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    /* Default before any setter. */
+    /* Default before any setting. */
     ASSERT_EQ(nm_agent_max_rounds(agent), NM_AGENT_DEFAULT_MAX_ROUNDS);
 
-    /* Cap to one round; the first tool round already exhausts it. */
-    nm_agent_set_max_rounds(agent, 1);
+    /* Cap to one round; the first tool round already exhausts it. The
+     * cap is the store's `rounds` key now. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROUNDS, "1");
     ASSERT_EQ(nm_agent_max_rounds(agent), 1);
 
     int rc = nm_agent_turn(agent, "keep calling tools");
@@ -1598,8 +1606,8 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
     /* Only the one scripted round hit the wire. */
     ASSERT_EQ(g_n_requests, 1);
 
-    /* A non-positive setter restores the default. */
-    nm_agent_set_max_rounds(agent, 0);
+    /* Clearing the key restores the default. */
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROUNDS);
     ASSERT_EQ(nm_agent_max_rounds(agent), NM_AGENT_DEFAULT_MAX_ROUNDS);
 
     nm_agent_free(agent);
@@ -1817,6 +1825,15 @@ int main(void)
         return 1;
     }
     printf("test_agent:\n");
+    /* The agent resolves the tool-round cap and the reasoning echo from
+     * the config store at the point of use, so the tests install a
+     * scratch store (no file I/O) exactly as the app does. */
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_plain_answer_no_tools);
     RUN_TEST(test_agent_system_message_carries_agents_md);

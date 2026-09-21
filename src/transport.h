@@ -107,12 +107,10 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
  * 750 ms: the budget bounds SYN-ACK, and a healthy peer answers a
  * loopback/co-LAN/anycast endpoint far inside it, while a black hole
  * surfaces in time for a human to still connect the dots with the
- * notice line. The knob is the `connect_timeout` config key
- * (NEVERMORE_CONNECT_TIMEOUT_MS / the user+shadow files, resolved
- * once by main.c). Setter values < 0 restore the default; 0 is not
- * used (a zero budget would fail every connect). */
+ * notice line. The value lives in the config store's `connect_timeout`
+ * key (NEVERMORE_CONNECT_TIMEOUT_MS / the user+shadow files); the
+ * transport resolves it at the point of use and keeps no copy. */
 #define NM_CONNECT_ATTEMPT_MS 750
-void nm_connection_set_connect_timeout_ms(int ms);
 int nm_connection_connect_timeout_ms(void);
 
 /* Address-family skip: the answer to "that address went silent — so
@@ -125,38 +123,31 @@ int nm_connection_connect_timeout_ms(void);
  * before anything is dialled. IPv6 is the case that matters: a host
  * whose advertised IPv6 path is unroutable (an IPv4-only network, a
  * broken tunnel) otherwise pays the budget on EVERY connect, while
- * IPv4 answers instantly. The latch is per family and one-way,
- * cleared by nm_connection_reset_family_skips (a test clears it to
- * stay deterministic).
+ * IPv4 answers instantly.
  *
- * The setting belongs to the app, not the transport: `family_skip`
- * lives in config, and the transport reads no config. chat_app/main.c
- * push the resolved bool across with nm_connection_set_family_skip
- * (the same shape as the budget above); OFF — the default the unit
- * tests and headless modes see — means the walk never latches. */
-void nm_connection_set_family_skip(int on);
+ * The state is a VALUE in the config store — the `skip_families` key
+ * (a family set: none/IPv4/IPv6/IPv4+IPv6), written by the walk on the
+ * store's RUNTIME layer, never persisted, shown and reset by /config.
+ * The `family_skip` bool (also a store key) is the user's POLICY: may
+ * the walk latch at all. The transport keeps no globals for either;
+ * these two getters resolve the store at the point of use (no store =
+ * policy off, no latch). */
 int nm_connection_family_skip(void);
 
 /* Which families the walk has actually skipped (a bitmask of
- * NM_FAMILY_*), and the latch reset. The bit is set the moment a
- * family is skipped, so a UI can say so. */
+ * NM_FAMILY_*), resolved from the store's `skip_families` value. */
 #define NM_FAMILY_V4 1 /* AF_INET */
 #define NM_FAMILY_V6 2 /* AF_INET6 */
 int nm_connection_skipped_families(void);
-void nm_connection_reset_family_skips(void);
-
-/* Set the latch directly (NM_FAMILY_* mask). The walk earns it, so
- * this is the TEST seam for the skip path (resolving without an
- * address of that family) — the same shape as
- * nm_connection_set_connect_timeout_ms. It is also the hook an
- * explicit "never dial IPv6" override would use. */
-void nm_connection_set_skipped_families(int mask);
 
 /* Address-family vocabulary: the ONE spelling per family ("IPv4",
- * "IPv6"), shared by the walk's diagnostics, the agent's notice line
- * and the app's skip notice — so a family can never be named two
- * ways. 0 (no family) is "none". Defined in transport.c. */
+ * "IPv6"), shared by the walk's diagnostics, the agent's notice line,
+ * the app's skip notice AND the store's `skip_families` value — so a
+ * family can never be named two ways. 0 (no family) is "none".
+ * nm_family_name takes a NM_FAMILY_* mask; nm_family_mask parses a
+ * canonical set string back to the mask. Defined in transport.c. */
 const char *nm_family_name(int family);
+int nm_family_mask(const char *set);
 
 /* The family of the connect walk's attempt `idx` on the last
  * connection the process connected (NM_FAMILY_*; 0 when the index is

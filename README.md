@@ -82,7 +82,8 @@ Settings resolve once, lowest to highest:
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`,
    `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
-   `NEVERMORE_SEARXNG_URL`
+   `NEVERMORE_CONNECT_SKIP_FAMILIES`, `NEVERMORE_SEARXNG_URL`,
+   `NEVERMORE_SEARXNG_ENABLED`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -90,11 +91,11 @@ The environment deliberately outranks both files: a scripted
 you last typed in a chat. When a change is inert for that reason, the
 chat says so.
 
-A change made in the chat (`/model`, `/provider`, `/rounds`,
-`/reasoning`, `/connect`) never edits your config file. It is written
-to the shadow file, which holds only the keys you changed at the
-prompt — so `rm ~/.local/state/nevermore/config` (or `/config reset
-all`) puts the user config back in charge, with nothing else to unwind.
+A change made in the chat (`/config set`, `/model`, `/provider`)
+never edits your config file. It is written to the shadow file, which
+holds only the keys you changed at the prompt — so `rm
+~/.local/state/nevermore/config` (or `/config reset all`) puts the user
+config back in charge, with nothing else to unwind.
 
 ```
 # ~/.config/nevermore/config — '#' comment, blank lines ignored
@@ -104,10 +105,12 @@ rounds           = 40
 reasoning        = on
 connect_timeout  = 1500
 family_skip      = on
+skip_families    = none
 searxng          = http://127.0.0.1:8888
+searxng_enabled  = on
 ```
 
-Seven keys, one spelling each. The value is the rest of the line,
+Nine keys, one spelling each. The value is the rest of the line,
 trimmed and taken verbatim — no quoting, no inline comments. Unknown
 keys and invalid values warn and are skipped, so a stale file can never
 break startup. No secrets: API keys stay in the environment or
@@ -115,9 +118,12 @@ break startup. No secrets: API keys stay in the environment or
 
 `searxng` is the local [SearXNG](https://searxng.org) endpoint behind
 the `web_search` tool (default `http://127.0.0.1:8888`); the model
-queries it when it needs live web results. If the instance is
-unreachable, `web_search` says so once and short-circuits for the rest
-of the session rather than hammering a dead server.
+queries it when it needs live web results. `searxng_enabled` (a bool)
+is the tool's gate: when the instance is unreachable, `web_search`
+says so once and the tool writes `searxng_enabled = off` on the
+**runtime** layer, so later calls short-circuit instead of hammering a
+dead server — `/config` shows the value and its `(runtime)` layer, and
+`/config reset searxng_enabled` (or fixing the endpoint) re-arms it.
 
 `connect_timeout` is the per-address budget in milliseconds for the
 bounded connect walk (default 750): a hostname resolves to several
@@ -128,16 +134,20 @@ is abandoned after the budget instead of the OS's ~130 s. `family_skip`
 budget and an address of _another_ family then answers, that family is
 not dialled again for the rest of the session, so later connects pay no
 budget at all. It only fires on that evidence — a walk that failed
-everywhere latches nothing. `/connect` reports and sets both
-(`/connect 1500`, `/connect on`, `/connect reset`).
+everywhere latches nothing. The latched set is the `skip_families` key
+(`none`, `ipv4`, `ipv6`, `ipv4+ipv6`), which the walk writes on the
+runtime layer and `/config` shows like any other value.
 
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
 endpoint for one run — a testing knob, deliberately not a config key.
 
-In the chat: `/config` shows where each setting comes from,
-`/config reset [key|all]` clears shadow lines, and `/rounds reset` /
-`/reasoning reset` / `/connect reset` do the same for one key.
+In the chat: `/config` shows every key's effective value and where it
+comes from (including machinery-written runtime values), `/config set
+<key> <value>` writes one key to the shadow, and `/config reset
+[key|all]` drops both the shadow line and any runtime value for the
+key. The shortcuts `/rounds`, `/reasoning` and `/connect` are sugar
+over the same store.
 
 ## Long-running commands
 

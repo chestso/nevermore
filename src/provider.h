@@ -86,9 +86,10 @@ typedef struct NmMessage
      * wire shape). Whether a trace is ever attached is the caller's
      * decision — nevermore's agent attaches one only when its
      * echo-back is enabled, which is OFF by default
-     * (nm_agent_set_echo_reasoning); the echo itself rests on
+     * (nm_agent_echo_reasoning / the store's `reasoning` key); the
+     * echo itself rests on
      * docs/HYPER-API.md's (unverified) claim that hyper needs the
-     * field back — see that setter. NULL/"" = the field is omitted. */
+     * field back — see that accessor. NULL/"" = the field is omitted. */
     const char *reasoning;
 } NmMessage;
 

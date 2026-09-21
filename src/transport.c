@@ -17,6 +17,7 @@
 
 #include "transport.h"
 
+#include "nm_config.h" /* the store the machinery reads (no proxies) */
 #include "transport_internal.h"
 
 #ifdef _WIN32
@@ -161,28 +162,28 @@ void nm_wire_tap_connect_retry(const struct NmConnection *conn,
 /* Connect budget + last connect failure                             */
 /* ---------------------------------------------------------------- */
 
-/* Per-address connect budget in ms (see nm_connection_set_connect_
- * timeout_ms). One process-global: the walk is a transport-wide
- * policy, not a per-connection tuning knob, and every connect uses
- * it. 0 means "use the default" so a zeroed BSS reads correctly. */
-static int g_connect_ms;
+/* Per-address connect budget in ms (see nm_connection_connect_timeout_
+ * ms). The VALUE lives in the config store's `connect_timeout` key —
+ * the transport keeps no copy, it resolves the store at the point of
+ * use (AGENTS.md: the transport reads no config FILES; it reads the
+ * one shared value store main.c installs). With no store (a unit test
+ * with no config) the built-in default applies. */
+int nm_connection_connect_timeout_ms(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONNECT_TIMEOUT,
+                                     NM_CONNECT_ATTEMPT_MS)
+             : NM_CONNECT_ATTEMPT_MS;
+}
 
 /* The last walk's per-attempt families (NM_FAMILY_*), so the notice
  * tap — which only carries the attempt index — can be translated to
  * a family name for the UI. Process-global and overwritten per
  * connect: it describes the walk that is currently running (or the
- * last one that ran), never history. */
+ * last one that ran), never history. This is walk bookkeeping, not a
+ * config value: the store owns the *set* (skip_families), this holds
+ * the per-attempt index list. */
 static int g_attempt_families[NM_CONNECT_MAX_ADDRS];
-
-void nm_connection_set_connect_timeout_ms(int ms)
-{
-    g_connect_ms = ms < 0 ? 0 : ms;
-}
-
-int nm_connection_connect_timeout_ms(void)
-{
-    return g_connect_ms > 0 ? g_connect_ms : NM_CONNECT_ATTEMPT_MS;
-}
 
 /* Record one attempt's family for the notice translation (called by
  * the walk as each address is stored). Out-of-range indexes are
@@ -214,6 +215,38 @@ const char *nm_family_name(int family)
     if (family & NM_FAMILY_V4)
         return "IPv4";
     return "none";
+}
+
+/* The inverse: a canonical family-set string (nm_family_name's output
+ * vocabulary, the `skip_families` store value) -> a NM_FAMILY_* mask.
+ * A small character scan, no regex; unknown text yields 0. This is the
+ * one translation between the store's family-set value and the walk's
+ * bitmask, so the tokens can never drift from nm_family_name. */
+int nm_family_mask(const char *set)
+{
+    int mask = 0;
+    if (!set)
+        return 0;
+    const char *p = set;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        const char *s = p;
+        while (*p && *p != '+')
+            p++;
+        size_t n = (size_t)(p - s);
+        if (n == 4 && strncmp(s, "IPv4", 4) == 0)
+            mask |= NM_FAMILY_V4;
+        else if (n == 4 && strncmp(s, "IPv6", 4) == 0)
+            mask |= NM_FAMILY_V6;
+        else if (n == 4 && strncmp(s, "none", 4) == 0)
+            ;
+        else
+            return 0;
+        if (*p == '+')
+            p++;
+    }
+    return mask;
 }
 
 /* Last connect failure detail (process-global, borrow-until-next-

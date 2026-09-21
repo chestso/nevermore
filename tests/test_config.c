@@ -24,6 +24,8 @@
 #endif
 
 #include "nm_config.h"
+#include "agent.h"     /* NM_AGENT_DEFAULT_MAX_ROUNDS */
+#include "transport.h" /* NM_CONNECT_ATTEMPT_MS */
 #include "test_helpers.h"
 
 /* MinGW has no setenv (POSIX); the tests only ever set/replace. */
@@ -497,19 +499,26 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING);
     ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_CONNECT_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_FAMILY_SKIP);
-    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SEARXNG);
-    ASSERT_NULL(nm_config_key_at(7));
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SKIP_FAMILIES);
+    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_NULL(nm_config_key_at(9));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
                   "NEVERMORE_CONNECT_FAMILY_SKIP");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SKIP_FAMILIES),
+                  "NEVERMORE_CONNECT_SKIP_FAMILIES");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG),
                   "NEVERMORE_SEARXNG_URL");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG_ENABLED),
+                  "NEVERMORE_SEARXNG_ENABLED");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
+    ASSERT_STR_EQ(nm_config_source_name(NM_CFG_RUNTIME), "runtime");
 }
 
 /* The connect knobs (bounded walk budget + family skip) are durable
@@ -554,6 +563,134 @@ static void test_connect_knobs(void)
     nm_config_free(c2);
 }
 
+/* The built-in defaults are store values, so resolution never yields
+ * "-": every known key resolves to a value, and the source says the
+ * default dictates. provider/model have no store default (the app
+ * picks), so resolve returns NULL there. */
+static void test_defaults_and_resolve(void)
+{
+    pin_paths("defaults");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    NmCfgSource s = NM_CFG_CLI;
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING, &s), "off");
+    ASSERT_EQ(s, NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_FAMILY_SKIP, &s), "off");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, &s), "none");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SEARXNG_ENABLED, &s), "on");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SEARXNG, &s),
+                  "http://127.0.0.1:8888");
+    ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_PROVIDER, &s));
+    ASSERT_NULL(nm_config_resolve(c, "bogus", &s));
+
+    /* Typed reads come off the same default. */
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_ROUNDS, -1),
+              NM_AGENT_DEFAULT_MAX_ROUNDS);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_CONNECT_TIMEOUT, -1),
+              NM_CONNECT_ATTEMPT_MS);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SEARXNG_ENABLED, 0));
+    ASSERT_FALSE(nm_config_resolve_bool(c, NM_CFG_KEY_FAMILY_SKIP, 1));
+
+    /* The default table is queryable without a config handle. */
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_CONNECT_TIMEOUT), "750");
+    ASSERT_NULL(nm_config_default(NM_CFG_KEY_PROVIDER));
+    nm_config_free(c);
+}
+
+/* The runtime layer: written by the machinery, above every persisted
+ * layer, never written to the shadow file. */
+static void test_runtime_layer(void)
+{
+    pin_paths("runtime");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* Runtime outranks even the CLI layer. */
+    nm_config_set_cli(c, NM_CFG_KEY_REASONING, "on");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_CLI);
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_REASONING, "off"), 0);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_RUNTIME);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING, NULL), "off");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING), "off");
+
+    /* It is normalized + validated like any layer. */
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_SKIP_FAMILIES,
+                                    "ipv6+ipv4"),
+              0);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, NULL),
+                  "IPv4+IPv6");
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_SKIP_FAMILIES, "bogus"),
+              -1);
+    ASSERT_EQ(nm_config_runtime_set(c, "bogus", "x"), -1);
+
+    /* Nothing was persisted. */
+    ASSERT_STR_EQ(read_file_at(g_shadow), "");
+
+    /* Clearing reveals the layer below (here the CLI value). */
+    nm_config_runtime_clear(c, NM_CFG_KEY_REASONING);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_CLI);
+    nm_config_runtime_clear(c, NULL);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, NULL),
+                  "none");
+    nm_config_free(c);
+}
+
+/* The store handle: install, read back, clear. */
+static void test_store_handle(void)
+{
+    ASSERT_NULL(nm_config_store());
+    pin_paths("store");
+    NmConfig *c = nm_config_load();
+    nm_config_set_store(c);
+    ASSERT_TRUE(nm_config_store() == c);
+    nm_config_runtime_set(c, NM_CFG_KEY_SEARXNG_ENABLED, "off");
+    ASSERT_FALSE(nm_config_resolve_bool(nm_config_store(),
+                                        NM_CFG_KEY_SEARXNG_ENABLED, 1));
+    nm_config_set_store(NULL);
+    ASSERT_NULL(nm_config_store());
+    nm_config_free(c);
+}
+
+/* The family-set value shape. */
+static void test_family_set_validation(void)
+{
+    ASSERT_TRUE(nm_config_valid_family_set("none"));
+    ASSERT_TRUE(nm_config_valid_family_set("IPv4"));
+    ASSERT_TRUE(nm_config_valid_family_set("IPv6"));
+    ASSERT_TRUE(nm_config_valid_family_set("IPv4+IPv6"));
+    ASSERT_TRUE(nm_config_valid_family_set("ipv6+ipv4"));
+    ASSERT_FALSE(nm_config_valid_family_set(""));
+    ASSERT_FALSE(nm_config_valid_family_set("none+IPv4"));
+    ASSERT_FALSE(nm_config_valid_family_set("IPv7"));
+    ASSERT_FALSE(nm_config_valid_family_set("IPv4+"));
+
+    char out[32];
+    ASSERT_TRUE(nm_config_family_set_canon(" ipv6 + ipv4 ", out,
+                                           sizeof(out)));
+    ASSERT_STR_EQ(out, "IPv4+IPv6");
+    ASSERT_TRUE(nm_config_family_set_canon("NONE", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "none");
+}
+
+/* The two new keys load, validate and persist like the rest. */
+static void test_new_keys(void)
+{
+    pin_paths("newkeys");
+    write_file_at(g_user,
+                  "skip_families = IPv6\nsearxng_enabled = off\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SKIP_FAMILIES), "IPv6");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG_ENABLED), "off");
+    ASSERT_EQ(nm_config_get_bool(c, NM_CFG_KEY_SEARXNG_ENABLED, 1), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SKIP_FAMILIES, "IPv4+IPv6"),
+              0);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "skip_families = IPv4+IPv6\n");
+    nm_config_free(c);
+}
+
 int main(void)
 {
     /* A dev box or CI runner may export any of these; the matrix tests
@@ -565,8 +702,10 @@ int main(void)
     test_unsetenv("NEVERMORE_CONFIG");
     test_unsetenv("NEVERMORE_SHADOW_CONFIG");
     test_unsetenv("NEVERMORE_SEARXNG_URL");
+    test_unsetenv("NEVERMORE_SEARXNG_ENABLED");
     test_unsetenv("NEVERMORE_CONNECT_TIMEOUT_MS");
     test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
+    test_unsetenv("NEVERMORE_CONNECT_SKIP_FAMILIES");
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
@@ -592,5 +731,10 @@ int main(void)
     RUN_TEST(test_provider_validator_hook);
     RUN_TEST(test_key_vocabulary);
     RUN_TEST(test_connect_knobs);
+    RUN_TEST(test_defaults_and_resolve);
+    RUN_TEST(test_runtime_layer);
+    RUN_TEST(test_store_handle);
+    RUN_TEST(test_family_set_validation);
+    RUN_TEST(test_new_keys);
     TEST_SUMMARY();
 }

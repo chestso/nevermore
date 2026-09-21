@@ -398,21 +398,62 @@ static const char *cfg_user_bytes(void)
 }
 
 /* Load a config for `h` and wire it exactly like main.c does: install
- * it on the app, then apply the resolved rounds/echo values. */
+ * it on the app (which publishes it as the process store, so the
+ * machinery — agent, connect walk, web_search — resolves every setting
+ * from it at the point of use). Nothing is pushed. */
 static NmConfig *cfg_for(AppHarness *h)
 {
     NmConfig *cfg = nm_config_load();
     nm_config_set_env(cfg);
     nm_chat_app_set_config(h->app, cfg);
-    nm_chat_app_set_max_rounds(h->app,
-                               nm_config_get_int(cfg, NM_CFG_KEY_ROUNDS, 0));
-    nm_chat_app_set_echo_reasoning(
-        h->app, nm_config_get_bool(cfg, NM_CFG_KEY_REASONING, 0));
-    nm_chat_app_set_connect_timeout_ms(
-        h->app, nm_config_get_int(cfg, NM_CFG_KEY_CONNECT_TIMEOUT, 0));
-    nm_chat_app_set_family_skip(
-        h->app, nm_config_get_bool(cfg, NM_CFG_KEY_FAMILY_SKIP, 0));
     return cfg;
+}
+
+/* The connect knobs and the family latch live in the config store; the
+ * tests drive them on the runtime layer, the same way /config and the
+ * walk's own latch do. A scratch store (no file I/O) is used when a
+ * test has no config of its own — begin/end around the test so one
+ * test's store never leaks into the next. */
+static NmConfig *g_scratch_cfg;
+
+static void scratch_store_begin(void)
+{
+    g_scratch_cfg = nm_config_new();
+    nm_config_set_store(g_scratch_cfg);
+}
+
+static void scratch_store_end(void)
+{
+    if (nm_config_store() == g_scratch_cfg)
+        nm_config_set_store(NULL);
+    nm_config_free(g_scratch_cfg);
+    g_scratch_cfg = NULL;
+}
+
+static void store_set(const char *key, const char *value)
+{
+    NmConfig *c = nm_config_store();
+    if (c)
+        nm_config_runtime_set(c, key, value);
+}
+
+static void store_clear(const char *key)
+{
+    NmConfig *c = nm_config_store();
+    if (c)
+        nm_config_runtime_clear(c, key);
+}
+
+static void knobs_set_timeout(int ms)
+{
+    char b[32];
+    snprintf(b, sizeof(b), "%d", ms);
+    store_set(NM_CFG_KEY_CONNECT_TIMEOUT, b);
+}
+
+static void knobs_set_skip_families(int mask)
+{
+    store_set(NM_CFG_KEY_SKIP_FAMILIES, nm_family_name(mask));
 }
 
 static void harness_enter(AppHarness *h)
@@ -1083,12 +1124,16 @@ static void test_help_command_lists_commands(void)
     harness_free(h);
 }
 
-/* /rounds shows and sets the tool-round cap on the live agent;
- * "reset" drops the shadow line and reveals the layer below. */
+/* /rounds shows and sets the tool-round cap on the live agent; the cap
+ * is the store's `rounds` key, resolved by the agent at the point of
+ * use, so a config must be installed (as main.c does). "reset" drops
+ * the shadow line and reveals the layer below. */
 static void test_rounds_command_shows_and_sets_cap(void)
 {
+    pin_cfg_paths("roundscmd");
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
 
     /* Bare: the active cap and the built-in default. */
     harness_type(h, "/rounds");
@@ -1120,6 +1165,7 @@ static void test_rounds_command_shows_and_sets_cap(void)
     ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)),
               NM_AGENT_DEFAULT_MAX_ROUNDS);
 
+    nm_config_free(cfg);
     harness_free(h);
 }
 
@@ -1257,7 +1303,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
  * the live one is dialled. */
 static void test_connect_walk_notice_is_printed(void)
 {
-    nm_connection_reset_family_skips();
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
     int port = 0;
     int lfd = test_bind_last_localhost_addr(&port);
     if (lfd < 0) {
@@ -1311,8 +1357,9 @@ static void test_connect_walk_notice_is_printed(void)
  * budget instead of hanging for the 300 s inactivity default. */
 static void test_black_hole_connect_is_bounded_by_the_tick(void)
 {
-    nm_connection_reset_family_skips();
-    nm_connection_set_connect_timeout_ms(250);
+    scratch_store_begin();
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    knobs_set_timeout(250);
 
     AppHarness *h = harness_new("openai", "test-model",
                                 "http://[2001:db8:dead::1]:9/v1");
@@ -1372,8 +1419,9 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     ASSERT_TRUE(strstr(harness_read(h), "nevermore") != NULL);
 
     harness_free(h);
-    nm_connection_set_connect_timeout_ms(-1);
-    nm_connection_reset_family_skips();
+    store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    scratch_store_end();
 }
 
 /* Raw responder thread: drain the request, write bytes verbatim (no
@@ -2021,12 +2069,13 @@ static void test_reasoning_not_echoed_by_default(void)
  * the request carrying the turn (the shape hyper requires). */
 static void test_reasoning_echo_opt_in(void)
 {
+    scratch_store_begin();
     struct ServerScript sc;
     pthread_t th;
     AppHarness *h = run_reasoning_tool_turn(&sc, &th);
     ASSERT_NOT_NULL(h);
 
-    nm_chat_app_set_echo_reasoning(h->app, 1);
+    store_set(NM_CFG_KEY_REASONING, "on");
 
     harness_type(h, "read it");
     harness_enter(h);
@@ -2041,6 +2090,7 @@ static void test_reasoning_echo_opt_in(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE_PATH);
+    scratch_store_end();
 }
 
 /* Parallel tool calls arrive in ONE assistant message (several entries
@@ -2821,8 +2871,9 @@ static void test_config_env_pin_is_reported(void)
     ASSERT_TRUE(strstr(out, "NEVERMORE_MAX_ROUNDS pins this run") != NULL);
     /* Persisted anyway: the shadow is what the user typed. */
     ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 3\n");
-    /* The live agent still honors the environment. */
-    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 3);
+    /* The live agent still honors the environment (the env layer is
+     * above the shadow, so the command's value is inert this run). */
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 9);
 
     nm_config_free(cfg);
     harness_free(h);
@@ -2866,6 +2917,57 @@ static void test_config_command_reports_and_resets(void)
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "config: all keys reset") != NULL);
     ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* /config set: one plain key — validated, normalized, persisted — and
+ * the machinery reads it back from the store at the point of use (no
+ * proxied copy). /config shows a runtime (machinery-written) value's
+ * layer, and reset clears that runtime value too. */
+static void test_config_set_and_runtime_layer(void)
+{
+    pin_cfg_paths("cfgset");
+    AppHarness *h = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config set rounds 4");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: rounds = 4") != NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 4\n");
+    /* The agent resolves the store: the cap applies with no push. */
+    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 4);
+
+    /* An invalid value is refused and leaves the shadow untouched. */
+    harness_type(h, "/config set rounds nope");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "invalid value") != NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 4\n");
+
+    /* provider/model go through their own commands, never here. */
+    harness_type(h, "/config set model from-user");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "use /provider or /model") != NULL);
+
+    /* A machinery-written runtime value shows its own layer. */
+    nm_config_runtime_set(nm_config_store(), NM_CFG_KEY_SEARXNG_ENABLED,
+                          "off");
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "searxng_enabled") != NULL);
+    ASSERT_TRUE(strstr(out, "(runtime)") != NULL);
+
+    /* reset clears the runtime layer as well as the shadow line. */
+    harness_type(h, "/config reset searxng_enabled");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: searxng_enabled reset") !=
+                NULL);
+    ASSERT_EQ(nm_config_resolve_bool(nm_config_store(),
+                                     NM_CFG_KEY_SEARXNG_ENABLED, 1),
+              1);
 
     nm_config_free(cfg);
     harness_free(h);
@@ -2949,7 +3051,7 @@ static void test_connect_command_sets_and_persists(void)
 
     /* Turning the skip off clears the walk's latch, so the decision is
      * re-earned next time. */
-    nm_connection_set_skipped_families(NM_FAMILY_V6);
+    knobs_set_skip_families(NM_FAMILY_V6);
     ASSERT_TRUE(nm_connection_skipped_families() != 0);
     harness_type(h, "/connect off");
     harness_enter(h);
@@ -2959,8 +3061,8 @@ static void test_connect_command_sets_and_persists(void)
 
     nm_config_free(cfg);
     harness_free(h);
-    nm_connection_reset_family_skips();
-    nm_connection_set_connect_timeout_ms(-1);
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
 }
 
 /* A config file's connect knobs reach the transport when main.c's
@@ -2980,18 +3082,21 @@ static void test_connect_knobs_from_config_reach_transport(void)
     ASSERT_EQ(nm_chat_app_family_skip(h->app), 1);
     ASSERT_EQ(nm_connection_family_skip(), 1);
 
-    /* Off on the app pushes off to the transport — the walk's latch
-     * never fires again (and any live latch is cleared). */
-    nm_connection_set_skipped_families(NM_FAMILY_V6);
-    nm_chat_app_set_family_skip(h->app, 0);
+    /* family_skip is its own key: turning the POLICY off stops future
+     * latching, but the latched family (skip_families) is a separate
+     * value, cleared by /connect off or /config reset. */
+    knobs_set_skip_families(NM_FAMILY_V6);
+    store_set(NM_CFG_KEY_FAMILY_SKIP, "off");
     ASSERT_EQ(nm_connection_family_skip(), 0);
+    ASSERT_TRUE(nm_connection_skipped_families() != 0);
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
     ASSERT_EQ(nm_connection_skipped_families(), 0);
 
     nm_config_free(cfg);
     harness_free(h);
-    nm_connection_reset_family_skips();
-    nm_connection_set_connect_timeout_ms(-1);
-    nm_connection_set_family_skip(0);
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
+    store_clear(NM_CFG_KEY_FAMILY_SKIP);
 }
 
 /* Count non-overlapping occurrences of `needle` in `hay` (no regex —
@@ -3020,7 +3125,7 @@ static void test_family_skip_notice_prints_once(void)
 
     /* Drive the app's step: the latch lands at connect completion, and
      * the step is where the app reports a fresh one. */
-    nm_connection_set_skipped_families(NM_FAMILY_V6);
+    knobs_set_skip_families(NM_FAMILY_V6);
     nm_chat_app_step(h->app);
     tui_runtime_flush(h->rt);
     const char *out = harness_read(h);
@@ -3035,8 +3140,8 @@ static void test_family_skip_notice_prints_once(void)
 
     nm_config_free(cfg);
     harness_free(h);
-    nm_connection_reset_family_skips();
-    nm_connection_set_family_skip(0);
+    store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    store_clear(NM_CFG_KEY_FAMILY_SKIP);
 }
 
 /* ---------------------------------------------------------------- */
@@ -3689,6 +3794,7 @@ int main(void)
     RUN_TEST(test_config_runtime_change_writes_shadow);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
+    RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_connect_command_sets_and_persists);
     RUN_TEST(test_connect_knobs_from_config_reach_transport);

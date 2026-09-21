@@ -105,7 +105,8 @@ test_config_CFLAGS = $(TEST_CFLAGS)
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
-test_provider_SOURCES = test_provider.c ../src/nevermore.c \
+test_provider_SOURCES = test_provider.c ../src/nm_config.c \
+    ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
@@ -121,7 +122,8 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
-test_source_SOURCES = test_source.c ../src/source.c ../src/nevermore.c \
+test_source_SOURCES = test_source.c ../src/source.c ../src/nm_config.c \
+    ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
@@ -138,6 +140,7 @@ test_source_LDADD = $(TEST_TLS_LIBS)
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
 test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c \
+    ../src/nm_config.c \
     ../src/wire_recorder.c ../src/json.c $(TEST_TLS_SOURCE)
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -149,6 +152,7 @@ test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 # real network.
 test_wire_recorder_SOURCES = test_wire_recorder.c ../src/wire_recorder.c \
     ../src/json.c ../src/transport.c ../src/transport_socket.c \
+    ../src/nm_config.c \
     $(TEST_TLS_SOURCE)
 test_wire_recorder_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_recorder_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -158,7 +162,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 # chat/completions SSE server (request validation + delta assembly).
 test_openai_client_SOURCES = test_openai_client.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
     ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
@@ -173,6 +177,7 @@ test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
 # cert (system trust must reject it). Live probe is manual
 # (NM_LIVE_TLS=1), never in make check.
 test_tls_SOURCES = test_tls.c ../src/transport.c ../src/transport_socket.c \
+    ../src/nm_config.c \
     $(TEST_TLS_SOURCE)
 test_tls_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tls_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -203,7 +208,8 @@ test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
     ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
+    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
+    ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -216,7 +222,8 @@ test_web_search_SOURCES = test_web_search.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c \
+    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
+    ../src/wire_recorder.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -236,7 +243,7 @@ test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
