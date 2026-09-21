@@ -146,8 +146,7 @@ In the chat: `/config` shows every key's effective value and where it
 comes from (including machinery-written runtime values), `/config set
 <key> <value>` writes one key to the shadow, and `/config reset
 [key|all]` drops both the shadow line and any runtime value for the
-key. The shortcuts `/rounds`, `/reasoning` and `/connect` are sugar
-over the same store.
+key.
 
 ## Long-running commands
 

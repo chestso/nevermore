@@ -9,7 +9,7 @@
  *   5 explicit CLI flags     -p / -m                          (this run)
  *
  * The app NEVER edits the user's config file. An in-app change
- * (/model, /provider, /rounds, /reasoning) is written to the shadow
+ * (/model, /provider, /config) is written to the shadow
  * file, which is read at higher precedence than the user config and is
  * disposable by design: it holds ONLY the keys the user changed at
  * runtime, so deleting it (or /config reset all) reveals the user

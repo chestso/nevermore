@@ -1015,21 +1015,6 @@ static void test_provider_popup_query_pre_filters(void)
     harness_free(h);
 }
 
-static void test_providers_alias_is_unknown_command(void)
-{
-    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
-    ASSERT_NOT_NULL(h);
-
-    /* /providers is retired: one command per noun. It is now an
-     * unknown command, naming the survivor. */
-    harness_type(h, "/providers");
-    harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
-    ASSERT_TRUE(strstr(harness_read(h), "unknown command 'providers'") != NULL);
-
-    harness_free(h);
-}
-
 static void test_model_validation_refuses_unknown_id(void)
 {
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
@@ -1113,59 +1098,11 @@ static void test_help_command_lists_commands(void)
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "/model") != NULL);
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
-    ASSERT_TRUE(strstr(out, "/rounds") != NULL);
+    ASSERT_TRUE(strstr(out, "/config") != NULL);
     ASSERT_TRUE(strstr(out, "/ps") != NULL);
     ASSERT_TRUE(strstr(out, "/kill") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
-    /* The retired plurals are no longer advertised. */
-    ASSERT_TRUE(strstr(out, "/models") == NULL);
-    ASSERT_TRUE(strstr(out, "/providers") == NULL);
 
-    harness_free(h);
-}
-
-/* /rounds shows and sets the tool-round cap on the live agent; the cap
- * is the store's `rounds` key, resolved by the agent at the point of
- * use, so a config must be installed (as main.c does). "reset" drops
- * the shadow line and reveals the layer below. */
-static void test_rounds_command_shows_and_sets_cap(void)
-{
-    pin_cfg_paths("roundscmd");
-    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
-    ASSERT_NOT_NULL(h);
-    NmConfig *cfg = cfg_for(h);
-
-    /* Bare: the active cap and the built-in default. */
-    harness_type(h, "/rounds");
-    harness_enter(h);
-    const char *out = harness_read(h);
-    char want[64];
-    snprintf(want, sizeof(want), "tool rounds: %d",
-             NM_AGENT_DEFAULT_MAX_ROUNDS);
-    ASSERT_TRUE(strstr(out, want) != NULL);
-
-    /* Set a small cap; it lands on the live agent. */
-    harness_type(h, "/rounds 3");
-    harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "tool rounds: 3") != NULL);
-
-    /* Garbage is refused; the cap is untouched. */
-    harness_type(h, "/rounds nope");
-    harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "expected a positive count") != NULL);
-    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 3);
-
-    /* "reset" drops the shadow line and reveals the layer below (no
-     * config here: the built-in default). */
-    harness_type(h, "/rounds reset");
-    harness_enter(h);
-    snprintf(want, sizeof(want), "tool rounds: %d (shadow reset)",
-             NM_AGENT_DEFAULT_MAX_ROUNDS);
-    ASSERT_TRUE(strstr(harness_read(h), want) != NULL);
-    ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)),
-              NM_AGENT_DEFAULT_MAX_ROUNDS);
-
-    nm_config_free(cfg);
     harness_free(h);
 }
 
@@ -2833,15 +2770,15 @@ static void test_config_runtime_change_writes_shadow(void)
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
-    harness_type(h, "/rounds 7");
+    harness_type(h, "/config set rounds 7");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "tool rounds: 7") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "config: rounds = 7") != NULL);
     ASSERT_TRUE(strstr(harness_read(h), "saved to the session shadow") !=
                 NULL);
 
-    harness_type(h, "/reasoning on");
+    harness_type(h, "/config set reasoning on");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "reasoning echo: on") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "config: reasoning = on") != NULL);
 
     /* The shadow holds exactly what the user typed. */
     ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning = on\n");
@@ -2865,7 +2802,7 @@ static void test_config_env_pin_is_reported(void)
     NmConfig *cfg = cfg_for(h);
     ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 9);
 
-    harness_type(h, "/rounds 3");
+    harness_type(h, "/config set rounds 3");
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "NEVERMORE_MAX_ROUNDS pins this run") != NULL);
@@ -2981,11 +2918,10 @@ static void test_config_absent_is_no_persistence(void)
     AppHarness *h = harness_new("openai", "m", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/rounds 5");
+    harness_type(h, "/config set rounds 5");
     harness_enter(h);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "tool rounds: 5") != NULL);
-    ASSERT_FALSE(strstr(out, "shadow") != NULL);
+    ASSERT_TRUE(strstr(out, "no config") != NULL);
     ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
 
     harness_type(h, "/config");
@@ -3001,62 +2937,62 @@ static void test_config_absent_is_no_persistence(void)
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 
 /* ---------------------------------------------------------------- */
-/* The connect knobs: /connect + their config plumbing            */
+/* The connect knobs through /config                              */
 /* ---------------------------------------------------------------- */
 
-/* /connect sets both knobs and persists them to the shadow; a bare
- * /connect reports. The transport sees the budget (process-global),
- * and family_skip crosses the same seam. */
-static void test_connect_command_sets_and_persists(void)
+/* /config set writes both knobs to the shadow; the transport resolves
+ * them from the store at the point of use (no push, no app-side copy). */
+static void test_connect_knobs_via_config_command(void)
 {
     pin_cfg_paths("connectcmd");
     AppHarness *h = harness_new("openai", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
-    harness_type(h, "/connect 1200");
+    harness_type(h, "/config set connect_timeout 1200");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h),
-                       "connect: 1200 ms per address") != NULL);
+                       "config: connect_timeout = 1200") != NULL);
     ASSERT_EQ(nm_connection_connect_timeout_ms(), 1200);
-    ASSERT_EQ(nm_chat_app_connect_timeout_ms(h->app), 1200);
 
-    harness_type(h, "/connect family_skip on");
+    harness_type(h, "/config set family_skip on");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "connect: family_skip on") != NULL);
-    ASSERT_EQ(nm_chat_app_family_skip(h->app), 1);
+    ASSERT_TRUE(strstr(harness_read(h), "config: family_skip = on") != NULL);
     ASSERT_STR_EQ(cfg_read_shadow(),
                   "connect_timeout = 1200\nfamily_skip = on\n");
 
-    /* A bare /connect reports both. */
-    harness_type(h, "/connect");
+    /* The table view reports both effective values. */
+    harness_type(h, "/config");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "1200 ms per address") != NULL);
-    ASSERT_TRUE(strstr(harness_read(h), "family_skip on") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "1200") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "family_skip") != NULL);
 
     /* Garbage is refused; the current value stands. */
-    harness_type(h, "/connect nope");
+    harness_type(h, "/config set connect_timeout nope");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "expected a positive ms budget") !=
-                NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "invalid value") != NULL);
     ASSERT_EQ(nm_connection_connect_timeout_ms(), 1200);
 
     /* reset clears the shadow line and the live value (budget back to
      * the transport's default). */
-    harness_type(h, "/connect reset connect_timeout");
+    harness_type(h, "/config reset connect_timeout");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "connect_timeout reset") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "config: connect_timeout reset") !=
+                NULL);
     ASSERT_EQ(nm_connection_connect_timeout_ms(), NM_CONNECT_ATTEMPT_MS);
     ASSERT_STR_EQ(cfg_read_shadow(), "family_skip = on\n");
 
-    /* Turning the skip off clears the walk's latch, so the decision is
-     * re-earned next time. */
+    /* The latch (skip_families) is its own key: turning the POLICY off
+     * stops future latching but leaves the latched family, which
+     * /config reset clears. */
     knobs_set_skip_families(NM_FAMILY_V6);
     ASSERT_TRUE(nm_connection_skipped_families() != 0);
-    harness_type(h, "/connect off");
+    harness_type(h, "/config set family_skip off");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "connect: family_skip off") != NULL);
-    ASSERT_EQ(nm_chat_app_family_skip(h->app), 0);
+    ASSERT_TRUE(strstr(harness_read(h), "config: family_skip = off") != NULL);
+    ASSERT_TRUE(nm_connection_skipped_families() != 0);
+    harness_type(h, "/config reset skip_families");
+    harness_enter(h);
     ASSERT_EQ(nm_connection_skipped_families(), 0);
 
     nm_config_free(cfg);
@@ -3078,13 +3014,11 @@ static void test_connect_knobs_from_config_reach_transport(void)
     NmConfig *cfg = cfg_for(h);
 
     ASSERT_EQ(nm_connection_connect_timeout_ms(), 850);
-    ASSERT_EQ(nm_chat_app_connect_timeout_ms(h->app), 850);
-    ASSERT_EQ(nm_chat_app_family_skip(h->app), 1);
     ASSERT_EQ(nm_connection_family_skip(), 1);
 
     /* family_skip is its own key: turning the POLICY off stops future
      * latching, but the latched family (skip_families) is a separate
-     * value, cleared by /connect off or /config reset. */
+     * value, cleared by /config reset. */
     knobs_set_skip_families(NM_FAMILY_V6);
     store_set(NM_CFG_KEY_FAMILY_SKIP, "off");
     ASSERT_EQ(nm_connection_family_skip(), 0);
@@ -3120,7 +3054,7 @@ static void test_family_skip_notice_prints_once(void)
     AppHarness *h = harness_new("openai", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
-    harness_type(h, "/connect on");
+    harness_type(h, "/config set family_skip on");
     harness_enter(h);
 
     /* Drive the app's step: the latch lands at connect completion, and
@@ -3786,17 +3720,15 @@ int main(void)
     RUN_TEST(test_provider_command_switches_provider);
     RUN_TEST(test_provider_popup_composes_into_input);
     RUN_TEST(test_provider_popup_query_pre_filters);
-    RUN_TEST(test_providers_alias_is_unknown_command);
     RUN_TEST(test_model_validation_refuses_unknown_id);
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
-    RUN_TEST(test_rounds_command_shows_and_sets_cap);
     RUN_TEST(test_config_runtime_change_writes_shadow);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_config_absent_is_no_persistence);
-    RUN_TEST(test_connect_command_sets_and_persists);
+    RUN_TEST(test_connect_knobs_via_config_command);
     RUN_TEST(test_connect_knobs_from_config_reach_transport);
     RUN_TEST(test_family_skip_notice_prints_once);
     RUN_TEST(test_tab_on_slash_prefix_opens_commands_popup);

@@ -519,7 +519,7 @@ static int begin_round(NmAgent *a)
         char msg[128];
         snprintf(msg, sizeof(msg),
                  "too many tool rounds without a final answer "
-                 "(cap %d; set NEVERMORE_MAX_ROUNDS or /rounds)",
+                 "(cap %d; set NEVERMORE_MAX_ROUNDS or /config rounds)",
                  cap);
         set_error(a, msg);
         return -1;

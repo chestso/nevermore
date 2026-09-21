@@ -78,8 +78,8 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
  * are config values (the store's `rounds` and `reasoning` keys) that
  * the agent resolves at the point of use (nm_agent_max_rounds /
  * nm_agent_echo_reasoning). Setting them goes through the store
- * (/config set, /rounds, /reasoning), which main.c installs as the
- * process store via nm_chat_app_set_config. */
+ * (/config set rounds …, /config set reasoning …), which main.c
+ * installs as the process store via nm_chat_app_set_config. */
 
 /* Stream-inactivity timeout for the agent this app builds and the live
  * agent (0 = agent default NM_AGENT_DEFAULT_TIMEOUT_MS, <0 = disable).
@@ -93,18 +93,6 @@ void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms);
  * means no persistence and no store: the commands still work in-process
  * and print plain lines, and the machinery uses built-in defaults. */
 void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
-
-/* The bounded connect walk's knobs (see transport.h), resolved from the
- * store at the point of use — the app keeps no copy. The transport
- * reads the store too (neither reads config FILES):
- *   connect_timeout: per-address budget in ms (default
- *     NM_CONNECT_ATTEMPT_MS).
- *   family_skip: 1 = after a family's address burns the budget and
- *     another family answers, stop dialling the burned family for the
- *     rest of the session; the LATCH itself is the store's
- *     `skip_families` value (runtime layer). */
-int nm_chat_app_connect_timeout_ms(const NmChatApp *app);
-int nm_chat_app_family_skip(const NmChatApp *app);
 
 /* boba event-loop integration — main.c wires these into
  * TuiRuntimeConfig (event_data = the app):

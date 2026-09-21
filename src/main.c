@@ -10,7 +10,7 @@
  * Configuration (nm_config.h) resolves once, lowest to highest:
  *   built-in default < user config ~/.config/nevermore/config
  *   < runtime shadow ~/.local/state/nevermore/config (written by the
- *   chat's /model /provider /rounds /reasoning) < environment < -p/-m.
+ *   chat's /model /provider /config) < environment < -p/-m.
  * Provider keys come from the environment (HYPER_API_KEY,
  * OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
  * OPENCODE_API_KEY) or, when unset, from ~/.authinfo

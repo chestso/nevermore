@@ -855,22 +855,6 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-/* The knobs, from the app's side (see chat_app.h): resolved from the
- * store at the point of use, never copied. */
-int nm_chat_app_connect_timeout_ms(const NmChatApp *app)
-{
-    NmConfig *c = app && app->cfg ? app->cfg : nm_config_store();
-    return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONNECT_TIMEOUT,
-                                     NM_CONNECT_ATTEMPT_MS)
-             : NM_CONNECT_ATTEMPT_MS;
-}
-
-int nm_chat_app_family_skip(const NmChatApp *app)
-{
-    NmConfig *c = app && app->cfg ? app->cfg : nm_config_store();
-    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_FAMILY_SKIP, 0) : 0;
-}
-
 int nm_chat_app_fd(NmChatApp *app)
 {
     return (int)nm_chat_app_source(app).handle;
@@ -1067,10 +1051,6 @@ static void print_help(NmChatApp *app)
                   "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
-                  "  /rounds [n|reset]  show or set the tool-round cap\n"
-                  "  /reasoning [on|off|reset]  echo reasoning traces back\n"
-                  "  /connect [ms|on|off|reset]\n"
-                  "                     per-address connect budget + family skip\n"
                   "  /config            every setting, its value + source\n"
                   "  /config set <k> <v>  write one key to the session shadow\n"
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
@@ -1612,190 +1592,6 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         open_providers_popup(app, arg);
         return;
     }
-    if (NAME_IS("rounds")) {
-        if (!*arg) {
-            sys_line(app, "tool rounds: %d (built-in default %d)",
-                     nm_agent_max_rounds(app->agent),
-                     NM_AGENT_DEFAULT_MAX_ROUNDS);
-            return;
-        }
-        /* "0" / "reset" drop the shadow line and reveal the layer
-         * below (the user config, or the built-in default) — "default"
-         * was a lie under shadow semantics. Otherwise a positive
-         * decimal, character-level scanned. The agent resolves the
-         * store, so nothing needs pushing. */
-        if (strcmp(arg, "reset") == 0) {
-            if (app->cfg) {
-                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_ROUNDS);
-                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_ROUNDS);
-            }
-            sys_line(app, "tool rounds: %d (shadow reset)",
-                     nm_agent_max_rounds(app->agent));
-            return;
-        }
-        int v = 0;
-        for (const char *p = arg; *p; p++) {
-            if (*p < '0' || *p > '9' || v > 100000) {
-                v = -1;
-                break;
-            }
-            v = v * 10 + (*p - '0');
-        }
-        if (v <= 0) {
-            sys_line(app, NM_SGR_ERROR "rounds: expected a positive count "
-                                       "or 'reset'" NM_SGR_RESET);
-            return;
-        }
-        char line[128];
-        snprintf(line, sizeof(line), "tool rounds: %d", v);
-        persist_and_report(app, NM_CFG_KEY_ROUNDS, arg, line);
-        return;
-    }
-    if (NAME_IS("reasoning")) {
-        if (!*arg) {
-            sys_line(app, "reasoning echo: %s (built-in default off)",
-                     nm_agent_echo_reasoning(app->agent) ? "on" : "off");
-            return;
-        }
-        if (strcmp(arg, "reset") == 0) {
-            if (app->cfg) {
-                nm_config_shadow_reset(app->cfg, NM_CFG_KEY_REASONING);
-                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_REASONING);
-            }
-            sys_line(app, "reasoning echo: %s (shadow reset)",
-                     nm_agent_echo_reasoning(app->agent) ? "on" : "off");
-            return;
-        }
-        if (!nm_config_valid_reasoning(arg)) {
-            sys_line(app, NM_SGR_ERROR
-                     "reasoning: expected on, off or reset" NM_SGR_RESET);
-            return;
-        }
-        /* The whole spelling decides, never the first letter: "on" and
-         * "off" share one. */
-        char v[8];
-        size_t vn = 0;
-        for (; arg[vn] && vn < sizeof(v) - 1; vn++) {
-            char ch = arg[vn];
-            v[vn] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
-        }
-        v[vn] = '\0';
-        int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
-                 strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
-        char line[128];
-        snprintf(line, sizeof(line), "reasoning echo: %s", on ? "on" : "off");
-        persist_and_report(app, NM_CFG_KEY_REASONING, on ? "on" : "off", line);
-        return;
-    }
-    if (NAME_IS("connect")) {
-        if (!*arg) {
-            sys_line(app, "connect: %d ms per address (built-in default %d), "
-                          "family_skip %s%s",
-                     nm_connection_connect_timeout_ms(),
-                     NM_CONNECT_ATTEMPT_MS,
-                     nm_connection_family_skip() ? "on" : "off",
-                     nm_connection_skipped_families() ? " (a family is "
-                                                        "skipped now)"
-                                                      : "");
-            return;
-        }
-        /* Two shapes: a positive per-address budget in ms, or the
-         * family-skip bool. `reset` applies to whichever follows, and
-         * a bare `reset` drops both. All of it is store state; nothing
-         * is pushed. */
-        const char *what = arg;
-        while (*what == ' ' || *what == '\t')
-            what++;
-        static const char *const KNOWN[] = { NM_CFG_KEY_CONNECT_TIMEOUT,
-                                             NM_CFG_KEY_FAMILY_SKIP, NULL };
-        int is_reset = strncmp(what, "reset", 5) == 0 &&
-                       (what[5] == '\0' || what[5] == ' ' ||
-                        what[5] == '\t');
-        if (is_reset) {
-            const char *which = what + 5;
-            while (*which == ' ' || *which == '\t')
-                which++;
-            if (!*which) {
-                if (app->cfg) {
-                    nm_config_shadow_reset(app->cfg,
-                                           NM_CFG_KEY_CONNECT_TIMEOUT);
-                    nm_config_shadow_reset(app->cfg, NM_CFG_KEY_FAMILY_SKIP);
-                    nm_config_runtime_clear(app->cfg,
-                                            NM_CFG_KEY_CONNECT_TIMEOUT);
-                    nm_config_runtime_clear(app->cfg,
-                                            NM_CFG_KEY_FAMILY_SKIP);
-                }
-                app->skipped_families = 0;
-                sys_line(app, "connect: timeout and family_skip reset "
-                              "(shadow reset)");
-                return;
-            }
-            for (int i = 0; KNOWN[i]; i++) {
-                if (strcmp(which, KNOWN[i]) != 0)
-                    continue;
-                config_apply_reset(app, which);
-                sys_line(app, "connect: %s reset (shadow reset)", which);
-                return;
-            }
-            sys_line(app, NM_SGR_ERROR "connect: reset expects "
-                                       "connect_timeout or family_skip" NM_SGR_RESET);
-            return;
-        }
-        /* Family skip: "family_skip <bool>" or a bare bool. */
-        const char *boolarg = what;
-        if (strncmp(boolarg, NM_CFG_KEY_FAMILY_SKIP, 11) == 0 &&
-            (boolarg[11] == '\0' || boolarg[11] == ' ' ||
-             boolarg[11] == '\t')) {
-            boolarg += 11;
-            while (*boolarg == ' ' || *boolarg == '\t')
-                boolarg++;
-        }
-        if (nm_config_valid_reasoning(boolarg)) {
-            char v[8];
-            size_t vn = 0;
-            for (; boolarg[vn] && vn < sizeof(v) - 1; vn++) {
-                char ch = boolarg[vn];
-                v[vn] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a')
-                                                 : ch;
-            }
-            v[vn] = '\0';
-            int on = strcmp(v, "on") == 0 || strcmp(v, "1") == 0 ||
-                     strcmp(v, "true") == 0 || strcmp(v, "yes") == 0;
-            char line[128];
-            snprintf(line, sizeof(line), "connect: family_skip %s",
-                     on ? "on" : "off");
-            persist_and_report(app, NM_CFG_KEY_FAMILY_SKIP,
-                               on ? "on" : "off", line);
-            /* Off is "never skip", so it also clears the walk's latch:
-             * the decision must be re-earned if the user turns it back
-             * on. */
-            if (!on && app->cfg) {
-                nm_config_runtime_clear(app->cfg, NM_CFG_KEY_SKIP_FAMILIES);
-                app->skipped_families = 0;
-            }
-            return;
-        }
-        /* Otherwise a per-address budget in ms. */
-        int v = 0;
-        int ok = *what != '\0';
-        for (const char *p = what; *p; p++) {
-            if (*p < '0' || *p > '9' || v > 100000) {
-                ok = 0;
-                break;
-            }
-            v = v * 10 + (*p - '0');
-        }
-        if (!ok || v <= 0) {
-            sys_line(app, NM_SGR_ERROR
-                     "connect: expected a positive ms budget, on|off, or "
-                     "reset" NM_SGR_RESET);
-            return;
-        }
-        char line[128];
-        snprintf(line, sizeof(line), "connect: %d ms per address", v);
-        persist_and_report(app, NM_CFG_KEY_CONNECT_TIMEOUT, what, line);
-        return;
-    }
     if (NAME_IS("config")) {
         if (!*arg) {
             print_config(app);
@@ -1913,8 +1709,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/rounds", "/reasoning", "/connect",
-        "/config", "/ps", "/kill", "/quit", NULL
+        "/help", "/model", "/provider", "/config", "/ps", "/kill", "/quit",
+        NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
