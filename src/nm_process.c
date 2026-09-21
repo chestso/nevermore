@@ -54,7 +54,8 @@ struct NmProc
     size_t len;
     size_t cap;
     size_t report_pos;
-    size_t dropped; /* unreported bytes the bounded buffer evicted */
+    size_t dropped;   /* unreported bytes the bounded buffer evicted */
+    size_t total_out; /* monotonic: every byte the child ever produced */
     /* Last take_output (borrowed out; rewritten in place next take). */
     char *report;
     size_t report_cap;
@@ -300,6 +301,17 @@ size_t nm_proc_buffered(const NmProc *p)
     return n;
 }
 
+size_t nm_proc_total_output(const NmProc *p)
+{
+    if (!p)
+        return 0;
+    NmProc *m = (NmProc *)p;
+    PROC_LOCK(&m->lock);
+    size_t n = m->total_out;
+    PROC_UNLOCK(&m->lock);
+    return n;
+}
+
 int nm_proc_live(NmProc *p)
 {
     if (!p)
@@ -362,6 +374,7 @@ static void buf_append(NmProc *p, const char *data, size_t n)
 {
     if (n == 0 || g_buf_max == 0)
         return;
+    p->total_out += n;   /* progress is monotonic, independent of eviction */
     if (n > g_buf_max) { /* a single huge chunk: keep its tail */
         size_t lose = n - g_buf_max;
         data += lose;

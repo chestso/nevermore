@@ -107,6 +107,12 @@ const char *nm_proc_take_output(NmProc *p);
 /* Bytes currently held in the job's buffer (for `/ps`). */
 size_t nm_proc_buffered(const NmProc *p);
 
+/* Every byte the child has produced over its lifetime, monotonic and
+ * independent of take_output/buffer eviction.  run_command's
+ * inactivity deadline reads it to tell "the child is still printing"
+ * from "the child has gone silent". */
+size_t nm_proc_total_output(const NmProc *p);
+
 /* Kill the job's process group, unregister it, and free it.  Never
  * blocks the loop waiting for the child: the reap is best-effort, and a
  * child the OS still reports as exiting is finished off by a later

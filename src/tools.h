@@ -175,6 +175,31 @@ void nm_tool_web_search_set_timeout_ms(int ms);
  * set_base_url calls it when the URL changes. */
 void nm_tool_web_search_reset_health(void);
 
+/* ---------------------------------------------------------------- */
+/* run_command inactivity budget (process-global, like the above)    */
+/* ---------------------------------------------------------------- */
+
+/* run_command has no job to hand back and no stdin, so a child that
+ * goes silent (a wedged `make`, a command that waited on a tty that is
+ * /dev/null) has nothing to wake the loop: without a deadline the turn
+ * waits forever — Ctrl+C is the only escape in the TUI, and ask mode
+ * (`nevermore -P ...`) has none. The tool therefore declares an
+ * INACTIVITY deadline on the NmTool.deadline_ms seam: silence for this
+ * long stops the child (group-kill) and reports the partial output,
+ * while a child that keeps printing is never cut off. Same shape as
+ * the agent's stream-inactivity budget — "no progress for N ms =
+ * stop" — but its own knob, because a wedged shell command and a slow
+ * model deserve different patience. */
+#define NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT 300000
+
+/* Inactivity budget in ms: 0/absent = NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT,
+ * a positive value = that many ms, a negative value disables the
+ * deadline (an unbounded wait, for a caller that has its own bound).
+ * main.c sets it from $NEVERMORE_RUN_COMMAND_TIMEOUT_MS; the getter is
+ * the tool's own read. */
+void nm_tool_run_command_set_timeout_ms(int ms);
+int nm_tool_run_command_timeout_ms(void);
+
 /* Portable process spawn: run a command, capture stdout+stderr, report
  * exit status. Used by tests too. (Long-lived process jobs live in
  * nm_process.h.) */

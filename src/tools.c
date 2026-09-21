@@ -244,6 +244,26 @@ char *nm_tool_result_body(const char *status, const char *clamped)
     return out;
 }
 
+/* ---------------------------------------------------------------- */
+/* run_command inactivity budget (process-global; tools.h)           */
+/* ---------------------------------------------------------------- */
+
+/* 0 = the built-in default; <0 = disabled. Lives here, not in the
+ * platform spawn file, because tools_spawn_posix.c and
+ * tools_spawn_win.c are mutually exclusive — this TU is the one both
+ * link (the tool's own read is nm_tool_run_command_timeout_ms). */
+static int g_run_command_timeout_ms = 0;
+
+void nm_tool_run_command_set_timeout_ms(int ms)
+{
+    g_run_command_timeout_ms = ms;
+}
+
+int nm_tool_run_command_timeout_ms(void)
+{
+    return g_run_command_timeout_ms;
+}
+
 NmToolset *nm_toolset_new_defaults(void)
 {
     NmToolset *ts = nm_toolset_new();

@@ -75,6 +75,9 @@ static void usage(FILE *out)
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
             "  NEVERMORE_TIMEOUT_MS    stream-inactivity timeout in ms\n"
             "                          (default 300000; negative disables)\n"
+            "  NEVERMORE_RUN_COMMAND_TIMEOUT_MS\n"
+            "                          run_command silence budget in ms\n"
+            "                          (default 300000; negative disables)\n"
             "  NEVERMORE_ECHO_REASONING=1\n"
             "                          re-send reasoning traces to the\n"
             "                          provider (off by default)\n"
@@ -88,18 +91,31 @@ static void usage(FILE *out)
  * non-numeric value leaves the agent default. (A `timeout` config key,
  * so /config and the shadow file can carry it too, is a follow-up —
  * see docs/PROCESS-PLAN.md §3.4.) */
-static int resolved_timeout_ms(void)
+static int resolved_ms_env(const char *name)
 {
-    const char *v = getenv("NEVERMORE_TIMEOUT_MS");
+    const char *v = getenv(name);
     if (!v || !*v)
         return 0;
     char *end = NULL;
     long ms = strtol(v, &end, 10);
     if (end == v || (end && *end != '\0'))
-        return 0; /* not a plain integer: keep the agent default */
+        return 0; /* not a plain integer: keep the built-in default */
     if (ms > 2147483647L || ms < -2147483647L)
-        return 0; /* out of int range: keep the agent default */
+        return 0; /* out of int range: keep the built-in default */
     return (int)ms;
+}
+
+static int resolved_timeout_ms(void)
+{
+    return resolved_ms_env("NEVERMORE_TIMEOUT_MS");
+}
+
+/* run_command's inactivity budget, same shape (see tools.h): 0/absent
+ * = the tool's built-in default, positive = that many ms, negative =
+ * disabled. */
+static int resolved_run_command_timeout_ms(void)
+{
+    return resolved_ms_env("NEVERMORE_RUN_COMMAND_TIMEOUT_MS");
 }
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
@@ -385,6 +401,11 @@ int main(int argc, char *argv[])
      * (env NEVERMORE_SEARXNG_URL, else the built-in localhost default)
      * before either the ask or the TUI path builds its toolset. */
     nm_tool_web_search_set_base_url(nm_config_get(cfg, NM_CFG_KEY_SEARXNG));
+
+    /* run_command's inactivity budget: process-global too, and read at
+     * each tool call, so push it once here for BOTH paths (see tools.h).
+     * 0/absent = the tool's built-in default. */
+    nm_tool_run_command_set_timeout_ms(resolved_run_command_timeout_ms());
 
     const char *provider_name =
         nm_config_get(cfg, NM_CFG_KEY_PROVIDER);

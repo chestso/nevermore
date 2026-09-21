@@ -26,6 +26,8 @@
 
 #include "tools_internal.h"
 
+#include "nm_clock.h" /* nm_monotonic_seconds (the inactivity deadline) */
+
 #define SPAWN_CAPTURE_MAX (256 * 1024) /* hard cap; clamped result body */
 
 /* UTF-8 -> UTF-16 (heap-owned; caller LocalFrees). */
@@ -302,7 +304,20 @@ struct NmToolExec
     int job_id; /* -1 once the job was reported and closed */
     int done;
     NmToolResult result; /* terminal result, handed out once */
+    /* Inactivity deadline (see tools.h): the monotonic instant after
+     * which a child that has produced nothing is stopped (0 = none). */
+    double deadline;
+    int budget_ms;
+    size_t last_total; /* nm_proc_total_output at the previous step */
 };
+
+/* The inactivity budget in ms: 0/absent = the built-in default, a
+ * negative value = disabled. */
+static int run_command_budget_ms(void)
+{
+    int ms = nm_tool_run_command_timeout_ms();
+    return ms == 0 ? NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT : ms;
+}
 
 /* Hand the terminal result to the caller exactly once. */
 static NmToolStatus take(NmToolExec *e, NmToolResult *out)
@@ -343,6 +358,11 @@ static NmToolExec *run_command_begin(const NmTool *tool,
         return NULL;
     }
     e->job_id = id;
+    /* Arm the inactivity deadline (a no-op when disabled). */
+    e->budget_ms = run_command_budget_ms();
+    if (e->budget_ms > 0)
+        e->deadline = nm_monotonic_seconds() +
+                      (double)e->budget_ms / 1000.0;
     return e;
 }
 
@@ -363,15 +383,46 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     }
 
     nm_proc_drain(p); /* reaps + retires the readiness handle on exit */
-    if (nm_proc_live(p))
-        return NM_TOOL_RUNNING;
 
-    /* Exited: report the exit status and the captured body, then close
-     * the job (nothing is left to poll, and the model never saw an id). */
-    int code = nm_proc_exit(p);
+    /* Progress: any byte the child has produced since the last step
+     * pushes the inactivity deadline out (see tools.h). */
+    size_t total = nm_proc_total_output(p);
+    int timed_out = 0;
+    if (nm_proc_live(p)) {
+        if (total != e->last_total) {
+            e->last_total = total;
+            if (e->budget_ms > 0)
+                e->deadline = nm_monotonic_seconds() +
+                              (double)e->budget_ms / 1000.0;
+            return NM_TOOL_RUNNING;
+        }
+        if (e->budget_ms > 0 &&
+            nm_monotonic_seconds() >= e->deadline) {
+            timed_out = 1; /* fall through: close below kills the group */
+        } else {
+            return NM_TOOL_RUNNING;
+        }
+    }
+
+    /* Terminal: either the child exited, or the inactivity deadline
+     * stopped it. Report the exit status and the captured body with an
+     * explanatory note on the timeout, then close the job (nothing is
+     * left to poll, and the model never saw an id). */
+    char note[128];
+    const char *timeout_note = NULL;
+    if (timed_out) {
+        snprintf(note, sizeof(note),
+                 "Command timed out after %d ms of no output (use "
+                 "exec_command for long-lived or interactive commands)",
+                 e->budget_ms);
+        timeout_note = note;
+    }
+    int code = timed_out ? -1 : nm_proc_exit(p);
     const char *body = nm_proc_take_output(p);
     size_t n = body ? strlen(body) : 0;
-    char *raw = malloc(n + 32);
+    size_t note_len = timeout_note ? strlen(timeout_note) : 0;
+    size_t cap = note_len + n + 64;
+    char *raw = malloc(cap);
     if (!raw) {
         nm_proc_close(p);
         e->job_id = -1;
@@ -379,10 +430,16 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         e->done = 1;
         return take(e, out);
     }
+    size_t off = 0;
+    if (note_len) {
+        memcpy(raw, timeout_note, note_len);
+        raw[note_len] = '\n';
+        off = note_len + 1;
+    }
     if (n)
-        snprintf(raw, n + 32, "Output:\n%s", body);
+        snprintf(raw + off, cap - off, "Output:\n%s", body);
     else
-        snprintf(raw, n + 32, "Output: (empty)\n");
+        snprintf(raw + off, cap - off, "Output: (empty)\n");
     char *clamped = nm_clamp_output(raw);
     free(raw);
     nm_proc_close(p);
@@ -390,7 +447,7 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     if (!clamped)
         e->result = nm_tool_result_error("out of memory");
     else
-        e->result = (NmToolResult){ code == 0, clamped };
+        e->result = (NmToolResult){ code == 0 && !timed_out, clamped };
     e->done = 1;
     return take(e, out);
 }
@@ -409,6 +466,22 @@ static int run_command_source(NmToolExec *e, NmSource *out)
     out->flags = NM_INTEREST_READ;
     out->kind = nm_proc_source_kind();
     return 1;
+}
+
+/* The inactivity deadline on the NmTool.deadline_ms seam (see tools.h):
+ * a silent job's readiness event never fires, so without this the loop
+ * would never re-step the tool. -1 when there is no deadline or the
+ * call is done. */
+static int run_command_deadline_ms(const NmToolExec *e)
+{
+    if (!e || e->done || e->budget_ms <= 0)
+        return -1;
+    double left = (e->deadline - nm_monotonic_seconds()) * 1000.0;
+    if (left <= 0.0)
+        return 0; /* due now: the step stops the child */
+    if (left >= 2147483000.0)
+        return 2147483000;
+    return (int)left;
 }
 
 /* Cancel / teardown: the job is a live child, so closing it kills the
@@ -445,13 +518,15 @@ const NmTool nm_tool_run_command = {
     .name = "run_command",
     .description = "Run a short, non-interactive shell command and capture "
                    "its combined output and exit status (no terminal, no "
-                   "stdin). Use exec_command instead for anything long-lived "
-                   "or interactive",
+                   "stdin). A command that produces no output for a while is "
+                   "stopped and its partial output returned; use "
+                   "exec_command for anything long-lived or interactive",
     .emoji = "🖥️",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
     .begin = run_command_begin,
     .step = run_command_step,
     .source = run_command_source,
+    .deadline_ms = run_command_deadline_ms,
     .end = run_command_end,
 };

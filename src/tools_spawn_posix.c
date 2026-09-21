@@ -23,6 +23,8 @@
 
 #include "tools_internal.h"
 
+#include "nm_clock.h" /* nm_monotonic_seconds (the inactivity deadline) */
+
 #define SPAWN_CAPTURE_MAX (256 * 1024) /* hard cap; clamped result body */
 
 /* Resolve a bare argv[0] through PATH (posix_spawn's own search is not
@@ -174,25 +176,44 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 /* run_command tool                                                  */
 /* ---------------------------------------------------------------- */
 
-/* quoth's format-result convention: the captured body + exit status. */
+/* quoth's format-result convention: the captured body + exit status.
+ * `note` (optional) is a status line prepended before the Output:
+ * section — the timeout path's explanation. */
 static NmToolResult run_command_result(const char *output, size_t len,
-                                       int code)
+                                       int code, const char *note)
 {
-    char *raw = malloc(len + 64);
+    size_t note_len = note ? strlen(note) : 0;
+    size_t cap = note_len + len + 64;
+    char *raw = malloc(cap);
     if (!raw)
         return nm_tool_result_error("out of memory");
+    size_t off = 0;
+    if (note_len) {
+        memcpy(raw, note, note_len);
+        raw[note_len] = '\n';
+        off = note_len + 1;
+    }
     if (len)
-        snprintf(raw, len + 64, "Output:\n%s", output);
+        snprintf(raw + off, cap - off, "Output:\n%s", output);
     else
-        snprintf(raw, 64, "Output: (empty)\n");
+        snprintf(raw + off, cap - off, "Output: (empty)\n");
     /* Shared head-only clamp: the captured body rides the same budget
      * as every other tool result (rendered + session history alike). */
     char *body = nm_clamp_output(raw);
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    NmToolResult r = { code == 0, body };
+    NmToolResult r = { code == 0 && note == NULL, body };
     return r;
+}
+
+/* The inactivity budget in ms: 0/absent = the built-in default, a
+ * negative value = disabled (returned as such; the caller treats any
+ * non-positive value as "no deadline"). */
+static int run_command_budget_ms(void)
+{
+    int ms = nm_tool_run_command_timeout_ms();
+    return ms == 0 ? NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT : ms;
 }
 
 /* Parse the args and build the /bin/sh -c argv. Returns the heap cmd
@@ -238,7 +259,7 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     free(cmd); /* argv[] borrowed it only until the spawn consumed it */
 
     NmToolResult r = run_command_result(output, output ? strlen(output) : 0,
-                                        code);
+                                        code, NULL);
     free(output);
     return r;
 }
@@ -256,6 +277,11 @@ struct NmToolExec
     int eof;  /* the read side saw EOF (or the cap closed it) */
     int code; /* exit status once reaped */
     int reaped;
+    /* Inactivity deadline: the monotonic instant after which a child
+     * that has produced nothing is stopped (0 = no deadline). Reset on
+     * every read, so a slow-but-printing command is never cut off. */
+    double deadline;
+    int budget_ms; /* the budget the deadline was armed with (report text) */
 };
 
 static int exec_reserve(NmToolExec *e, size_t extra)
@@ -351,7 +377,14 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     const char *argv[] = { prog, "-c", cmd, NULL };
     NmToolExec *e = spawn_begin(argv);
     free(cmd); /* posix_spawn copied argv before returning */
-    return e;  /* NULL falls back to the synchronous execute */
+    if (e) {
+        /* Arm the inactivity deadline (a no-op when disabled). */
+        e->budget_ms = run_command_budget_ms();
+        if (e->budget_ms > 0)
+            e->deadline = nm_monotonic_seconds() +
+                          (double)e->budget_ms / 1000.0;
+    }
+    return e; /* NULL falls back to the synchronous execute */
 }
 
 /* Stop the child — and, when it leads its own group (the spawn sets
@@ -405,6 +438,10 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         if (n > 0) {
             e->len += (size_t)n;
             e->buf[e->len] = '\0';
+            /* Progress: push the inactivity deadline out from here. */
+            if (e->budget_ms > 0)
+                e->deadline = nm_monotonic_seconds() +
+                              (double)e->budget_ms / 1000.0;
             if (e->len >= SPAWN_CAPTURE_MAX) {
                 /* Cap: stop reading and let the child die on EPIPE
                  * (matches the synchronous capture; a runaway producer
@@ -431,20 +468,42 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         break;
     }
 
+    /* Inactivity deadline: the child has produced nothing for the whole
+     * budget. Stop it (the eof path below kills + reaps) and report
+     * what we have with an explanatory note — a wedged command must not
+     * hold the turn, and ask mode has no Ctrl+C to escape it. */
+    char note[128];
+    const char *timeout_note = NULL;
+    if (!e->eof && e->budget_ms > 0 &&
+        nm_monotonic_seconds() >= e->deadline) {
+        e->eof = 1;
+        if (e->fd >= 0) {
+            close(e->fd);
+            e->fd = -1;
+        }
+        snprintf(note, sizeof(note),
+                 "Command timed out after %d ms of no output (use "
+                 "exec_command for long-lived or interactive commands)",
+                 e->budget_ms);
+        timeout_note = note;
+    }
+
     if (!e->eof)
         return NM_TOOL_RUNNING;
 
     if (!e->reaped) {
-        /* Output is finished (EOF, the capture cap, or OOM stopped the
-         * read), but the child need not be gone: it can close stdout
-         * and keep working (`exec 1>&-; sleep 300`) or ignore EPIPE
-         * after the cap. There is no fd left to wait on and no timer to
-         * poll from, so a blocking wait here would wedge the event
-         * loop. Stop it, then reap what we stopped. */
+        /* Output is finished (EOF, the capture cap, OOM stopped the
+         * read, or the inactivity deadline closed it), but the child
+         * need not be gone: it can close stdout and keep working
+         * (`exec 1>&-; sleep 300`) or ignore EPIPE after the cap. There
+         * is no fd left to wait on and no timer to poll from, so a
+         * blocking wait here would wedge the event loop. Stop it, then
+         * reap what we stopped. */
         kill_child(e);
         reap_child(e);
     }
-    *out = run_command_result(e->buf ? e->buf : "", e->len, e->code);
+    *out = run_command_result(e->buf ? e->buf : "", e->len, e->code,
+                              timeout_note);
     return NM_TOOL_DONE;
 }
 
@@ -458,6 +517,22 @@ static int run_command_source(NmToolExec *e, NmSource *out)
     out->flags = NM_INTEREST_READ;
     out->kind = NM_SRC_FD;
     return 1;
+}
+
+/* The inactivity deadline on the NmTool.deadline_ms seam: with no
+ * output the socket is never readable, so without this the loop would
+ * never re-step the tool (see tools.h's budget note). -1 when there is
+ * no deadline (disabled) or nothing left to wait for. */
+static int run_command_deadline_ms(const NmToolExec *e)
+{
+    if (!e || e->fd < 0 || e->budget_ms <= 0)
+        return -1;
+    double left = (e->deadline - nm_monotonic_seconds()) * 1000.0;
+    if (left <= 0.0)
+        return 0; /* due now: the step stops the child */
+    if (left >= 2147483000.0)
+        return 2147483000;
+    return (int)left;
 }
 
 static void run_command_end(NmToolExec *e)
@@ -491,13 +566,15 @@ const NmTool nm_tool_run_command = {
     .name = "run_command",
     .description = "Run a short, non-interactive shell command and capture "
                    "its combined output and exit status (no terminal, no "
-                   "stdin). Use exec_command instead for anything long-lived "
-                   "or interactive",
+                   "stdin). A command that produces no output for a while is "
+                   "stopped and its partial output returned; use "
+                   "exec_command for anything long-lived or interactive",
     .emoji = "🖥️",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
     .begin = run_command_begin,
     .step = run_command_step,
     .source = run_command_source,
+    .deadline_ms = run_command_deadline_ms,
     .end = run_command_end,
 };
