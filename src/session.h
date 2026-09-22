@@ -70,11 +70,24 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
 
-/* Context-window management. Returns a view of the messages that fit
- * in `budget_tokens` (rough 4-chars-per-token estimate): the system
- * prompt, the most recent turns, and never a dangling tool-result
- * without its matching tool call. The view is valid until the next
- * session mutation. */
+/* Context-window management. Returns a view of the messages the agent
+ * should send.
+ *
+ *   budget_tokens <= 0  NO TRIM: the whole transcript (system prompt +
+ *                       every message). This is the default — the
+ *                       agent sends everything and lets the provider
+ *                       report "too large", rather than silently
+ *                       capping. A window that slid every turn would
+ *                       also defeat the provider's prefix cache (cached
+ *                       input bills far cheaper), so trimming is
+ *                       opt-in.
+ *   budget_tokens  > 0  the newest tail that fits `budget_tokens`
+ *                       (rough 4-chars-per-token estimate): the system
+ *                       prompt, the most recent turns, and never a
+ *                       dangling tool-result without its matching tool
+ *                       call.
+ *
+ * The view is valid until the next session mutation. */
 typedef struct NmContextView
 {
     const NmSessionMessage *const *messages;

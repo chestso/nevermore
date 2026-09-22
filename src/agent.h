@@ -35,6 +35,12 @@ typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
  * the store's `rounds` key (see nm_agent_max_rounds). */
 #define NM_AGENT_DEFAULT_MAX_ROUNDS 25
 
+/* Default context-window budget in tokens (the 4-chars-per-token
+ * estimate): the built-in default for the store's `context_budget`
+ * key, read ONLY when the rolling window is enabled (it is off by
+ * default — see nm_agent_rolling_window). */
+#define NM_AGENT_DEFAULT_CONTEXT_BUDGET 100000
+
 /* Default stream-inactivity timeout (ms): while a round is streaming,
  * if no answer/reasoning delta arrives for this long the turn fails
  * with "timed out" instead of hanging. Matches Codex's 300 s stream
@@ -63,6 +69,25 @@ void nm_agent_set_model(NmAgent *a, const char *model);
  * use with NM_AGENT_DEFAULT_MAX_ROUNDS as the default; the agent keeps
  * no copy. Takes effect on the next round. */
 int nm_agent_max_rounds(const NmAgent *a);
+
+/* Rolling context window: whether the agent trims the stored
+ * conversation to a token budget before each request. The value is the
+ * config store's `rolling_window` key, resolved at the point of use
+ * with a default of OFF; the agent keeps no copy. OFF (the default)
+ * means the WHOLE transcript is sent and the provider reports "too
+ * large" rather than nevermore silently capping it — and a window that
+ * slides every turn would defeat the provider's prefix cache, so
+ * trimming is opt-in. */
+int nm_agent_rolling_window(const NmAgent *a);
+
+/* The rolling window's token budget: the config store's
+ * `context_budget` key resolved at the point of use, default
+ * NM_AGENT_DEFAULT_CONTEXT_BUDGET. Read only when
+ * nm_agent_rolling_window() is on; a non-positive result (impossible
+ * via the store, which validates positive) means the same "no trim".
+ * The budget is a rough 4-chars-per-token estimate (quoth convention),
+ * not real tokenization. */
+long nm_agent_context_budget(const NmAgent *a);
 
 /* Stream-inactivity timeout (ms). While a round streams, if no delta
  * arrives for this long the step errors the turn ("timed out") instead

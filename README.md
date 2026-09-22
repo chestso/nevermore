@@ -83,7 +83,8 @@ Settings resolve once, lowest to highest:
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`,
    `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
    `NEVERMORE_CONNECT_SKIP_FAMILIES`, `NEVERMORE_SEARXNG_URL`,
-   `NEVERMORE_SEARXNG_ENABLED`
+   `NEVERMORE_SEARXNG_ENABLED`, `NEVERMORE_ROLLING_WINDOW`,
+   `NEVERMORE_CONTEXT_BUDGET`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -108,13 +109,22 @@ family_skip      = on
 skip_families    = none
 searxng          = http://127.0.0.1:8888
 searxng_enabled  = on
+rolling_window   = off
+context_budget   = 100000
 ```
 
-Nine keys, one spelling each. The value is the rest of the line,
-trimmed and taken verbatim — no quoting, no inline comments. Unknown
-keys and invalid values warn and are skipped, so a stale file can never
-break startup. No secrets: API keys stay in the environment or
-`~/.authinfo`.
+The value is the rest of the line, trimmed and taken verbatim — no
+quoting, no inline comments. Unknown keys and invalid values warn and
+are skipped, so a stale file can never break startup. No secrets: API
+keys stay in the environment or `~/.authinfo`.
+
+`rolling_window` (default `off`) is whether the agent trims the stored
+conversation to `context_budget` tokens (a 4-chars-per-token estimate)
+before each request. Off — the default — sends the whole transcript and
+lets the provider report "too large", which also keeps the request
+prefix stable so providers can serve it from their prompt cache
+(cached input bills far cheaper). Turn it on only if you want
+nevermore to silently cap the context instead.
 
 `searxng` is the local [SearXNG](https://searxng.org) endpoint behind
 the `web_search` tool (default `http://127.0.0.1:8888`); the model

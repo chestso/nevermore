@@ -1444,6 +1444,47 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
     close(sc.fd);
 }
 
+/* One-shot oversize responder: accept once, capture the request,
+ * answer 400 with a context-length error body (the provider's "too
+ * large"), close. This is the default path with the rolling window
+ * off — nevermore sends everything and the provider reports the
+ * overflow, rather than silently capping. */
+static void *context_400_server_thread(void *arg)
+{
+    struct ServerScript *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    req[got] = '\0';
+    if (got == 0) {
+        close(cfd);
+        return NULL;
+    }
+    snprintf(g_requests[0], REQ_CAP, "%s", req);
+    if (g_n_requests < 1)
+        g_n_requests = 1;
+    static const char resp[] =
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"This model's maximum context length "
+        "is 128000 tokens, however your messages resulted in 999999 "
+        "tokens\",\"type\":\"invalid_request_error\"}}";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
 /* The user-facing failure string (what the TUI prints): the agent
  * must surface the result's always-set message — "transport/parse
  * error" guess strings are gone. A 401 also hints the env var. */
@@ -1481,6 +1522,86 @@ static void test_agent_error_message_is_informative(void)
     ASSERT_TRUE(strstr(err, "invalid api key") != NULL);
     /* Key was set (bad), so no env-var hint. */
     ASSERT_TRUE(strstr(err, "export") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The rolling window is OFF by default and the agent sends the whole
+ * transcript; the provider reports an oversize context verbatim rather
+ * than nevermore silently capping it. */
+static void test_agent_rolling_window_default_off(void)
+{
+    reset_capture();
+
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+
+    /* Default: OFF, built-in budget. */
+    ASSERT_FALSE(nm_agent_rolling_window(agent));
+    ASSERT_EQ(nm_agent_context_budget(agent), NM_AGENT_DEFAULT_CONTEXT_BUDGET);
+
+    /* The store drives both, resolved at the point of use. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROLLING_WINDOW, "on");
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET, "4000");
+    ASSERT_TRUE(nm_agent_rolling_window(agent));
+    ASSERT_EQ(nm_agent_context_budget(agent), 4000);
+
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROLLING_WINDOW);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_FALSE(nm_agent_rolling_window(agent));
+    ASSERT_EQ(nm_agent_context_budget(agent), NM_AGENT_DEFAULT_CONTEXT_BUDGET);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+}
+
+/* A context overflow is the provider's HTTP error (400), surfaced
+ * verbatim: the request carries the user's message (nothing was
+ * dropped to fit) and the agent reports the provider's own words. */
+static void test_agent_context_overflow_reports_provider_error(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = NULL; /* no SSE: the server answers 400 */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, context_400_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_state(agent, cap_state);
+
+    int rc = nm_agent_turn(agent, "a very long conversation");
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+
+    /* The provider's oversize message reaches the user verbatim. */
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "chat failed: HTTP 400") != NULL);
+    ASSERT_TRUE(strstr(err, "maximum context length") != NULL);
+
+    /* Nothing was silently dropped to fit: the user's message rode the
+     * request that overflowed. */
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "a very long conversation") != NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -1855,6 +1976,8 @@ int main(void)
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
+    RUN_TEST(test_agent_rolling_window_default_off);
+    RUN_TEST(test_agent_context_overflow_reports_provider_error);
     RUN_TEST(test_agent_set_model_changes_wire_model);
     RUN_TEST(test_agent_max_rounds_caps_tool_rounds);
     RUN_TEST(test_agent_stream_stall_times_out);

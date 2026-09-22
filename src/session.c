@@ -160,6 +160,14 @@ NmContextView nm_session_context(const NmSession *s, long budget_tokens)
     if (!s || s->n == 0)
         return v;
 
+    /* A non-positive budget is "no trim": the whole transcript, system
+     * prompt included. This is the default the agent uses (rolling
+     * window off) — nevermore sends everything and lets the provider
+     * report "too large", instead of silently capping. A window that
+     * slid per turn would also defeat the provider's prefix cache
+     * (cached input bills far cheaper), so trimming is opt-in. */
+    int untrimmed = budget_tokens <= 0;
+
     /* The system prompt (message 0, when present) always leads and is
      * always in; the rest is the most recent tail that fits. */
     size_t start = (s->msgs[0].role == NM_ROLE_SYSTEM) ? 1 : 0;
@@ -174,7 +182,7 @@ NmContextView nm_session_context(const NmSession *s, long budget_tokens)
     long tail = 0;
     size_t i = s->n;
     size_t newest_group = s->n; /* degenerate-fallback group start */
-    while (i > start) {
+    while (!untrimmed && i > start) {
         size_t j = i;
         /* Extend backwards over any run of tool results (plus their
          * call message) as one unbreakable group. */
@@ -199,7 +207,9 @@ NmContextView nm_session_context(const NmSession *s, long budget_tokens)
         tail += group_tokens;
         i = j;
     }
-    if (i == s->n)
+    if (untrimmed)
+        i = start; /* keep everything: system + all messages */
+    else if (i == s->n)
         i = newest_group; /* degenerate: budget too small for even
                              the newest group; keep it whole so a
                              tool result never dangles alone */

@@ -89,6 +89,19 @@ extern "C" {
  * probe fails, so a self-disabling search is visible to /config and
  * resettable. Env spelling: NEVERMORE_SEARXNG_ENABLED. */
 #define NM_CFG_KEY_SEARXNG_ENABLED "searxng_enabled"
+/* Rolling context window: whether the agent trims the stored
+ * conversation to a token budget before each request. `on`/`off` (a
+ * bool, default OFF). OFF — the default — sends the whole transcript
+ * and lets the provider report "too large", instead of silently
+ * capping. A window that slides every turn also defeats the
+ * provider's prefix cache (cached input bills far cheaper), so
+ * trimming is opt-in. Env spelling: NEVERMORE_ROLLING_WINDOW. */
+#define NM_CFG_KEY_ROLLING_WINDOW "rolling_window"
+/* The token budget for the rolling window, read only when
+ * `rolling_window` is on. A positive decimal, default
+ * NM_AGENT_DEFAULT_CONTEXT_BUDGET; the 4-chars-per-token estimate
+ * (quoth convention). Env spelling: NEVERMORE_CONTEXT_BUDGET. */
+#define NM_CFG_KEY_CONTEXT_BUDGET "context_budget"
 
 typedef enum
 {

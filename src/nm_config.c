@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 9
+#define NM_CFG_NKEYS 11
 
 typedef struct
 {
@@ -112,6 +112,9 @@ static const struct
     { NM_CFG_KEY_SKIP_FAMILIES, "NEVERMORE_CONNECT_SKIP_FAMILIES", "none" },
     { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL", NM_WEBSEARCH_DEFAULT_URL },
     { NM_CFG_KEY_SEARXNG_ENABLED, "NEVERMORE_SEARXNG_ENABLED", "on" },
+    { NM_CFG_KEY_ROLLING_WINDOW, "NEVERMORE_ROLLING_WINDOW", "off" },
+    { NM_CFG_KEY_CONTEXT_BUDGET, "NEVERMORE_CONTEXT_BUDGET",
+      NM_STR(NM_AGENT_DEFAULT_CONTEXT_BUDGET) },
 };
 
 static void init_keys(NmConfig *c)
@@ -302,12 +305,14 @@ static int normalize_value(const char *key, const char *raw, char *out,
         if (!nm_config_valid_provider(raw))
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_ROUNDS) == 0 ||
-               strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0) {
+               strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0 ||
+               strcmp(key, NM_CFG_KEY_CONTEXT_BUDGET) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_REASONING) == 0 ||
                strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
-               strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0) {
+               strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
+               strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {
         if (!nm_config_valid_reasoning(raw))
             return 0;
         snprintf(out, cap, "%s", normalize_bool(raw));

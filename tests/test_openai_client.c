@@ -1105,6 +1105,73 @@ static void test_chat_long_error_body_is_clipped(void)
     close(lfd);
 }
 
+/* Mid-stream provider error event: a 200 SSE head, then an
+ * {"error":{...}} event instead of deltas. The client flags it fatal
+ * (NM_CHAT_ERR_HTTP) with the server's message carried through — the
+ * shape a provider uses to report a context/limit failure that only
+ * surfaces once streaming begins. */
+static void *stream_error_event_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    const char sse[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "56\r\ndata: {\"error\":{\"message\":\"context length exceeded\","
+        "\"type\":\"invalid_request_error\"}}\n\n\r\n"
+        "0\r\n\r\n";
+    size_t off = 0;
+    while (off < sizeof(sse) - 1) {
+        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    return NULL;
+}
+
+static void test_chat_midstream_error_event_is_fatal(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, stream_error_event_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
+                            NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_ERR_HTTP);
+    /* HTTP 0: the failure arrived inside the stream, not as a status. */
+    ASSERT_EQ(r.http_status, 0);
+    ASSERT_TRUE(strstr(r.message, "context length exceeded") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* The failure-path recorder round trip: a marked auth header's value
  * never reaches the file even through the real client path. */
 static void *wiretap_401_thread(void *arg)
@@ -1740,6 +1807,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_no_done_after_finish_reason_is_complete);
     RUN_TEST(test_chat_no_done_and_no_finish_reason_is_truncated);
     RUN_TEST(test_chat_long_error_body_is_clipped);
+    RUN_TEST(test_chat_midstream_error_event_is_fatal);
     RUN_TEST(test_wiretap_401_records_error_with_status);
     RUN_TEST(test_wiretap_stream_records_events);
     RUN_TEST(test_extra_headers_ordered_between_auth_and_ua);

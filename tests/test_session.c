@@ -102,6 +102,42 @@ static void test_context_view_basic(void)
     nm_session_free(s);
 }
 
+/* A non-positive budget is "no trim" (the agent's default with the
+ * rolling window off): the WHOLE transcript, regardless of size. The
+ * provider reports an oversize context rather than nevermore silently
+ * capping it. */
+static void test_context_view_no_trim(void)
+{
+    NmSession *s = nm_session_new("system prompt");
+    for (int i = 0; i < 50; i++) {
+        char buf[96];
+        snprintf(buf, sizeof(buf),
+                 "message %d with plenty of padding to matter", i);
+        nm_session_append(s, NM_ROLE_USER, buf);
+    }
+    /* A tiny budget would trim; zero and negative send everything. */
+    NmContextView trimmed = nm_session_context(s, 50);
+    ASSERT_TRUE(trimmed.n < nm_session_len(s));
+
+    NmContextView all = nm_session_context(s, 0);
+    ASSERT_EQ(all.n, nm_session_len(s)); /* 1 system + 50 */
+    ASSERT_EQ(all.messages[0]->role, NM_ROLE_SYSTEM);
+    ASSERT_STR_EQ(all.messages[all.n - 1]->content,
+                  "message 49 with plenty of padding to matter");
+
+    NmContextView neg = nm_session_context(s, -1);
+    ASSERT_EQ(neg.n, nm_session_len(s));
+
+    /* A session with no system prompt is still whole, no off-by-one. */
+    NmSession *e = nm_session_new(NULL);
+    nm_session_append(e, NM_ROLE_USER, "only one");
+    NmContextView ev = nm_session_context(e, 0);
+    ASSERT_EQ(ev.n, 1);
+    ASSERT_STR_EQ(ev.messages[0]->content, "only one");
+    nm_session_free(e);
+    nm_session_free(s);
+}
+
 static void test_context_view_budget_trims_oldest(void)
 {
     NmSession *s = nm_session_new("system prompt");
@@ -185,6 +221,7 @@ int main(void)
     RUN_TEST(test_session_tool_roundtrip);
     RUN_TEST(test_session_reasoning_roundtrip);
     RUN_TEST(test_context_view_basic);
+    RUN_TEST(test_context_view_no_trim);
     RUN_TEST(test_context_view_budget_trims_oldest);
     RUN_TEST(test_context_view_keeps_tool_pair);
     RUN_TEST(test_session_save);

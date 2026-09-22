@@ -247,6 +247,22 @@ int nm_agent_max_rounds(const NmAgent *a)
              : NM_AGENT_DEFAULT_MAX_ROUNDS;
 }
 
+int nm_agent_rolling_window(const NmAgent *a)
+{
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 0) : 0;
+}
+
+long nm_agent_context_budget(const NmAgent *a)
+{
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONTEXT_BUDGET,
+                                     NM_AGENT_DEFAULT_CONTEXT_BUDGET)
+             : NM_AGENT_DEFAULT_CONTEXT_BUDGET;
+}
+
 void nm_agent_set_timeout_ms(NmAgent *a, int ms)
 {
     if (!a)
@@ -529,8 +545,13 @@ static int begin_round(NmAgent *a)
     const char *tools_json =
         a->tools ? nm_toolset_to_json(a->tools) : NULL;
 
-    /* Build the request from the session's context view. */
-    NmContextView view = nm_session_context(a->session, 100000);
+    /* Build the request from the session's context view. Rolling
+     * window OFF (the default) means no trim: the whole transcript is
+     * sent and the provider reports "too large", never a silent cap
+     * (and a per-turn slide would defeat the provider's prefix
+     * cache). ON means the store's budget. */
+    long budget = nm_agent_rolling_window(a) ? nm_agent_context_budget(a) : 0;
+    NmContextView view = nm_session_context(a->session, budget);
     NmMessage *msgs = malloc((view.n + 1) * sizeof(*msgs));
     if (!msgs) {
         set_error(a, "out of memory");

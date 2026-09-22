@@ -24,7 +24,8 @@
 #endif
 
 #include "nm_config.h"
-#include "agent.h"     /* NM_AGENT_DEFAULT_MAX_ROUNDS */
+#include "agent.h"     /* NM_AGENT_DEFAULT_MAX_ROUNDS,
+                        * NM_AGENT_DEFAULT_CONTEXT_BUDGET */
 #include "transport.h" /* NM_CONNECT_ATTEMPT_MS */
 #include "test_helpers.h"
 
@@ -502,7 +503,9 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SKIP_FAMILIES);
     ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SEARXNG);
     ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_NULL(nm_config_key_at(9));
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(11));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
@@ -515,6 +518,10 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_SEARXNG_URL");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG_ENABLED),
                   "NEVERMORE_SEARXNG_ENABLED");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROLLING_WINDOW),
+                  "NEVERMORE_ROLLING_WINDOW");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONTEXT_BUDGET),
+                  "NEVERMORE_CONTEXT_BUDGET");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
@@ -590,6 +597,11 @@ static void test_defaults_and_resolve(void)
               NM_CONNECT_ATTEMPT_MS);
     ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SEARXNG_ENABLED, 0));
     ASSERT_FALSE(nm_config_resolve_bool(c, NM_CFG_KEY_FAMILY_SKIP, 1));
+    /* The rolling window is OFF by default (no trim; provider reports
+     * "too large"); its budget resolves to the built-in default. */
+    ASSERT_FALSE(nm_config_resolve_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 1));
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_CONTEXT_BUDGET, -1),
+              NM_AGENT_DEFAULT_CONTEXT_BUDGET);
 
     /* The default table is queryable without a config handle. */
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
@@ -691,6 +703,45 @@ static void test_new_keys(void)
     nm_config_free(c);
 }
 
+/* The rolling-window knobs are durable keys like the rest: file/env/
+ * shadow precedence, and a garbage value is dropped. The window is OFF
+ * by default, and OFF is what the agent sends "everything" from. */
+static void test_rolling_window_keys(void)
+{
+    pin_paths("rolling");
+    write_file_at(g_user, "rolling_window = on\ncontext_budget = 4000\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(nm_config_get_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 0));
+    ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_CONTEXT_BUDGET, 0), 4000);
+
+    test_setenv("NEVERMORE_ROLLING_WINDOW", "NO");
+    test_setenv("NEVERMORE_CONTEXT_BUDGET", "8000");
+    nm_config_set_env(c);
+    ASSERT_FALSE(nm_config_get_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 1));
+    /* Normalized to the file vocabulary, like every bool key. */
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROLLING_WINDOW), "off");
+    ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_CONTEXT_BUDGET, 0), 8000);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_ROLLING_WINDOW");
+    test_unsetenv("NEVERMORE_CONTEXT_BUDGET");
+
+    /* A zero budget (meaningless: it is not the off switch) and an
+     * unparseable bool are both refused. */
+    pin_paths("rolling-bad");
+    write_file_at(g_user, "rolling_window = maybe\ncontext_budget = 0\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_NULL(nm_config_get(c2, NM_CFG_KEY_ROLLING_WINDOW));
+    ASSERT_NULL(nm_config_get(c2, NM_CFG_KEY_CONTEXT_BUDGET));
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_CONTEXT_BUDGET, "abc"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_ROLLING_WINDOW, "maybe"),
+              -1);
+    ASSERT_EQ(nm_config_shadow_set(c2, NM_CFG_KEY_ROLLING_WINDOW, "on"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "rolling_window = on\n");
+    nm_config_free(c2);
+}
+
 int main(void)
 {
     /* A dev box or CI runner may export any of these; the matrix tests
@@ -706,6 +757,8 @@ int main(void)
     test_unsetenv("NEVERMORE_CONNECT_TIMEOUT_MS");
     test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
     test_unsetenv("NEVERMORE_CONNECT_SKIP_FAMILIES");
+    test_unsetenv("NEVERMORE_ROLLING_WINDOW");
+    test_unsetenv("NEVERMORE_CONTEXT_BUDGET");
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
@@ -736,5 +789,6 @@ int main(void)
     RUN_TEST(test_store_handle);
     RUN_TEST(test_family_set_validation);
     RUN_TEST(test_new_keys);
+    RUN_TEST(test_rolling_window_keys);
     TEST_SUMMARY();
 }
