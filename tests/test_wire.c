@@ -59,6 +59,18 @@ static void knobs_clear_skip_families(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SKIP_FAMILIES);
 }
 
+/* The family_skip POLICY — the one switch (off means the latch is
+ * neither earned nor honoured). */
+static void knobs_set_family_policy(int on)
+{
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_FAMILY_SKIP, on ? "on" : "off");
+}
+
+static void knobs_clear_family_policy(void)
+{
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_FAMILY_SKIP);
+}
+
 /* ---------------------------------------------------------------- */
 /* Dummy server                                                      */
 /* ---------------------------------------------------------------- */
@@ -885,44 +897,11 @@ static void test_connect_budget_bounds_a_black_hole(void)
 static int g_notice_count;
 static int g_notice_last_idx;
 static int g_notice_last_n;
+static int g_notice_last_family;
 static char g_notice_host[2];
 
-/* The notice's family translation: the tap carries only the attempt
- * index, and the UI names the family (this is the pair the agent's
- * notice callback uses). */
-static void test_connect_walk_notice_reports_the_family(void)
-{
-    int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; walk family not exercised\n");
-        return;
-    }
-
-    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
-    sc.len = strlen(sc.response);
-    pthread_t th;
-    pthread_create(&th, NULL, one_shot_server, &sc);
-
-    NmConnectInfo ci = { 0 };
-    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
-    ASSERT_NOT_NULL(c);
-
-    /* The abandoned attempt names its family; the winner's family is
-     * NOT the abandoned one (the walk moved to a different family). */
-    int fam = nm_connection_attempt_family(0);
-    ASSERT_TRUE(fam == NM_FAMILY_V4 || fam == NM_FAMILY_V6);
-    ASSERT_TRUE(nm_connection_attempt_family(-1) == 0);
-    ASSERT_TRUE(nm_connection_attempt_family(999) == 0);
-
-    nm_connection_close(c);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
 static void test_notice_cb(void *ud, const char *host, int port, int idx,
-                           int n_addrs)
+                           int n_addrs, int family)
 {
     (void)ud;
     (void)port;
@@ -931,6 +910,7 @@ static void test_notice_cb(void *ud, const char *host, int port, int idx,
     g_notice_count++;
     g_notice_last_idx = idx;
     g_notice_last_n = n_addrs;
+    g_notice_last_family = family;
 }
 
 static void test_connect_walk_notice_reports_the_next_address(void)
@@ -954,6 +934,7 @@ static void test_connect_walk_notice_reports_the_next_address(void)
     g_notice_count = 0;
     g_notice_host[0] = '\0';
     g_notice_last_n = 0;
+    g_notice_last_family = 0;
     nm_transport_set_connect_notice(test_notice_cb, NULL);
 
     /* Blocking connect: the walk runs inline, the notice fires from
@@ -972,6 +953,11 @@ static void test_connect_walk_notice_reports_the_next_address(void)
      * attempt number, so idx must still be short of the last one. */
     ASSERT_TRUE(g_notice_count >= 1);
     ASSERT_TRUE(g_notice_host[0] != '\0');
+    /* The abandoned attempt's family rides ON the event (the tap used
+     * to make the UI look it up in walk state): it is one of the two we
+     * judge, so the agent can name it. */
+    ASSERT_TRUE(g_notice_last_family == NM_FAMILY_V4 ||
+                g_notice_last_family == NM_FAMILY_V6);
     ASSERT_TRUE(g_notice_last_idx >= 0);
     ASSERT_TRUE(g_notice_last_n >= 2);
     ASSERT_TRUE(g_notice_last_idx < g_notice_last_n - 1);
@@ -1042,51 +1028,235 @@ static void test_async_black_hole_reports_a_deadline(void)
     knobs_clear_timeout();
 }
 
-/* The family skip: a latched family's addresses are dropped at resolve
- * time, before the walk dials anything (that is what makes it free),
- * and dropping every family is reported as OUR reason — "no usable
- * addresses" would read as a DNS failure, which it is not. */
-static void test_family_skip_drops_addresses(void)
+/* ---------------------------------------------------------------- */
+/* The family latch: a hint, never a veto                            */
+/* ---------------------------------------------------------------- */
+
+/* The family of `localhost`'s FIRST resolved address — resolved the way
+ * the walk resolves (same hints, same order), so it is the address the
+ * resolver would dial first. 0 when the box hands back a single
+ * address (there is then no alternative family to prefer). */
+static int first_localhost_family(void)
+{
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo("localhost", "0", &hints, &res) != 0 || !res)
+        return 0;
+    int fam = res->ai_family == AF_INET6
+                  ? NM_FAMILY_V6
+                  : (res->ai_family == AF_INET ? NM_FAMILY_V4 : 0);
+    int n = 0;
+    for (ai = res; ai; ai = ai->ai_next)
+        n++;
+    freeaddrinfo(res);
+    return n >= 2 ? fam : 0;
+}
+
+/* The family of the address a bound listener sits on (0 = nothing
+ * bound). */
+static int listener_family(int lfd)
+{
+    struct sockaddr_storage a;
+    socklen_t len = sizeof(a);
+    if (lfd < 0 || getsockname(lfd, (struct sockaddr *)&a, &len) != 0)
+        return 0;
+    if (a.ss_family == AF_INET6)
+        return NM_FAMILY_V6;
+    if (a.ss_family == AF_INET)
+        return NM_FAMILY_V4;
+    return 0;
+}
+
+/* A localhost port with nothing listening on it: bind a listener, then
+ * close it (a listening socket that never accepted releases its port at
+ * once). */
+static int closed_localhost_port(void)
+{
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (lfd < 0)
+        return 0;
+    close(lfd);
+    return port;
+}
+
+/* The walk PREFERS the un-latched family: with the FIRST localhost
+ * address's family latched and the listener on the LAST address, the
+ * latched address is never dialled — the connect lands on attempt 0, so
+ * the notice (fired only when an address is abandoned) stays silent.
+ * That is the latch's whole point: the budget is not paid on the family
+ * the network has proven dead. */
+static void test_family_skip_prefers_the_unlatched_family(void)
 {
     knobs_clear_skip_families();
-    ASSERT_EQ(nm_connection_skipped_families(), 0);
+    knobs_clear_family_policy();
+    int first = first_localhost_family();
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (!first || lfd < 0 || listener_family(lfd) == first) {
+        fprintf(stderr, "  note: 'localhost' has no second address "
+                        "family; latch preference not exercised\n");
+        return;
+    }
 
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    knobs_set_family_policy(1);
+    knobs_set_skip_families(first);
+    g_notice_count = 0;
+    nm_transport_set_connect_notice(test_notice_cb, NULL);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    nm_transport_set_connect_notice(NULL, NULL);
+    ASSERT_NOT_NULL(c);
+    /* Nothing was abandoned: attempt 0 was the un-latched (listener's)
+     * family, dialled because the latch moved the other one behind it. */
+    ASSERT_EQ(g_notice_count, 0);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(lfd);
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+}
+
+/* The latch can NOT make a name unreachable: with the LISTENER's family
+ * latched, that address moves to the walk's tail and is still dialled
+ * once the preferred ones fail, so the connect succeeds. The
+ * drop-the-addresses code returned NULL here — which is how evidence
+ * about some OTHER host (one address, one family, process-wide) could
+ * veto a 127.0.0.1 literal or an IPv6-only service outright. */
+static void test_family_skip_never_makes_a_name_unreachable(void)
+{
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    int latched = listener_family(lfd);
+    if (!latched) {
+        fprintf(stderr, "  note: 'localhost' has no second address to "
+                        "walk to; latch fallback not exercised\n");
+        return;
+    }
+
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    knobs_set_family_policy(1);
+    knobs_set_skip_families(latched);
+    g_notice_count = 0;
+    g_notice_last_family = 0;
+    nm_transport_set_connect_notice(test_notice_cb, NULL);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    nm_transport_set_connect_notice(NULL, NULL);
+    ASSERT_NOT_NULL(c);
+    /* The fallback: the PREFERRED (un-latched) address was dialled first
+     * and failed — refused, nothing listens on it — so exactly one
+     * attempt was abandoned, and it named the other family. The latched
+     * address, last in the walk, is what answered. */
+    ASSERT_EQ(g_notice_count, 1);
+    ASSERT_EQ(g_notice_last_idx, 0);
+    ASSERT_EQ(g_notice_last_n, 2);
+    ASSERT_TRUE(g_notice_last_family != 0 && g_notice_last_family != latched);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(lfd);
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+}
+
+/* `family_skip` is the ONE switch: with the policy off the same latch
+ * value has no effect at all — the walk keeps the resolver's order, so
+ * the first address IS dialled (and abandoned) before the listener's
+ * answers. The value stays readable, though: /config shows it (marked
+ * inert) and /config reset is what clears it. */
+static void test_family_skip_policy_off_is_inert(void)
+{
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+    int first = first_localhost_family();
+    int port = 0;
+    int lfd = test_bind_last_localhost_addr(&port);
+    if (!first || lfd < 0 || listener_family(lfd) == first) {
+        fprintf(stderr, "  note: 'localhost' has no second address "
+                        "family; latch inertness not exercised\n");
+        return;
+    }
+
+    struct ServerCase sc = { CANNED_OK, 0, port, lfd };
+    sc.len = strlen(sc.response);
+    pthread_t th;
+    pthread_create(&th, NULL, one_shot_server, &sc);
+
+    knobs_set_family_policy(0);
+    knobs_set_skip_families(first);
+    g_notice_count = 0;
+    nm_transport_set_connect_notice(test_notice_cb, NULL);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    nm_transport_set_connect_notice(NULL, NULL);
+    ASSERT_NOT_NULL(c);
+    /* The policy is off, so the latch did not move anything: the
+     * resolver's first address was dialled first and abandoned. */
+    ASSERT_EQ(g_notice_count, 1);
+    ASSERT_EQ(nm_connection_skipped_families(), first); /* still stored */
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(lfd);
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+}
+
+/* With the latch covering EVERY family the walk still dials them all
+ * (they are all tail) — so a single-family name stays reachable — and
+ * when they all fail the summary says why the user is looking at a dead
+ * host: the latch they set, and not a DNS failure (which is what "no
+ * usable addresses" read as). */
+static void test_family_skip_names_itself_in_the_failure(void)
+{
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
+    knobs_set_family_policy(1);
     knobs_set_skip_families(NM_FAMILY_V4 | NM_FAMILY_V6);
     ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4 | NM_FAMILY_V6);
 
+    int dead = closed_localhost_port();
+    if (!dead) {
+        fprintf(stderr, "  note: no localhost listener to close; failure "
+                        "summary not exercised\n");
+        return;
+    }
     NmConnectInfo ci = { 0 };
-    NmConnection *c = nm_connect("localhost", 80, NM_TRANSPORT_PLAIN, &ci);
+    NmConnection *c = nm_connect("localhost", dead, NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NULL(c);
     ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
     ASSERT_TRUE(strstr(ci.detail, "skipped family") != NULL);
+    ASSERT_TRUE(strstr(ci.detail, "IPv4+IPv6") != NULL);
     ASSERT_NOT_NULL(nm_connection_connect_error());
     ASSERT_TRUE(strstr(nm_connection_connect_error(), "IPv4") != NULL);
 
-    /* The vocabulary the notice and the app both print. */
+    /* The one vocabulary the notice line, the app's notice and the
+     * store's value all spell. */
     ASSERT_STR_EQ(nm_family_name(NM_FAMILY_V6), "IPv6");
     ASSERT_STR_EQ(nm_family_name(NM_FAMILY_V4 | NM_FAMILY_V6), "IPv4+IPv6");
     ASSERT_STR_EQ(nm_family_name(0), "none");
 
-    /* Cleared: resolution is whole again, and connect works. */
     knobs_clear_skip_families();
-    ASSERT_EQ(nm_connection_skipped_families(), 0);
-    knobs_set_skip_families(NM_FAMILY_V4);
-    ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V4);
-    knobs_clear_skip_families();
-
-    int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd >= 0) {
-        struct ServerCase sc = { CANNED_OK, 0, port, lfd };
-        sc.len = strlen(sc.response);
-        pthread_t th;
-        pthread_create(&th, NULL, one_shot_server, &sc);
-        c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);
-        ASSERT_NOT_NULL(c);
-        nm_connection_close(c);
-        pthread_join(th, NULL);
-        close(sc.fd);
-    }
+    knobs_clear_family_policy();
 }
 
 int main(int argc, char *argv[])
@@ -1121,8 +1291,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_async_connect_walks_to_reachable_address);
     RUN_TEST(test_connect_budget_bounds_a_black_hole);
     RUN_TEST(test_connect_walk_notice_reports_the_next_address);
-    RUN_TEST(test_connect_walk_notice_reports_the_family);
     RUN_TEST(test_async_black_hole_reports_a_deadline);
-    RUN_TEST(test_family_skip_drops_addresses);
+    RUN_TEST(test_family_skip_prefers_the_unlatched_family);
+    RUN_TEST(test_family_skip_never_makes_a_name_unreachable);
+    RUN_TEST(test_family_skip_policy_off_is_inert);
+    RUN_TEST(test_family_skip_names_itself_in_the_failure);
     TEST_SUMMARY();
 }

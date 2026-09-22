@@ -84,13 +84,20 @@ struct NmConnection
     struct sockaddr_storage conn_addrs[NM_CONNECT_MAX_ADDRS];
     unsigned conn_addr_lens[NM_CONNECT_MAX_ADDRS];
     int conn_n_addrs;
-    int conn_addr_idx;      /* current attempt index */
+    int conn_addr_idx; /* current attempt index */
+    /* How many of conn_addrs are the SKIPPED-family tail (the latch's
+     * addresses, moved to the end of the walk — a hint, never a veto:
+     * see the family-skip note in transport.h). The un-skipped
+     * addresses are conn_addrs[0 .. conn_n_addrs - conn_deferred_addrs). */
+    int conn_deferred_addrs;
     unsigned addr_len;      /* current attempt's sockaddr length; 0 = none */
     double conn_attempt_t0; /* monotonic start of the current attempt */
     /* Families whose address burned the budget in THIS walk
      * (NM_FAMILY_*). Latched process-wide only when another family
      * answers the same host — see note_family_skips in
-     * transport_socket.c. */
+     * transport_socket.c. Reset with the rest of the walk state at
+     * resolve time (the invariant is "this walk", not "this
+     * connection"). */
     unsigned conn_abandoned_fams;
 
     /* Owned request buffer (memory-reuse principle: one allocation

@@ -114,28 +114,42 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
 int nm_connection_connect_timeout_ms(void);
 
 /* Address-family skip: the answer to "that address went silent — so
- * don't dial that FAMILY again". Not an OS knob (no portable socket
- * option exists) and not a getaddrinfo knob (AI_ADDRCONFIG is
+ * don't dial that FAMILY first again". Not an OS knob (no portable
+ * socket option exists) and not a getaddrinfo knob (AI_ADDRCONFIG is
  * documented-unreliable: a static interface enumeration, not a route
  * probe); instead the walk itself remembers, once per process, which
- * families have burned an address budget, and
- * nm_socket_resolve_addrs leaves those addresses out of the list
- * before anything is dialled. IPv6 is the case that matters: a host
- * whose advertised IPv6 path is unroutable (an IPv4-only network, a
- * broken tunnel) otherwise pays the budget on EVERY connect, while
- * IPv4 answers instantly.
+ * families have burned an address budget, and nm_socket_resolve_addrs
+ * moves those addresses to the TAIL of the walk. IPv6 is the case that
+ * matters: a host whose advertised IPv6 path is unroutable (an
+ * IPv4-only network, a broken tunnel) otherwise pays the budget on
+ * EVERY connect, while IPv4 answers instantly.
+ *
+ * THE LATCH IS A HINT, NEVER A VETO. The evidence behind it is one
+ * address of one host going silent (a firewall DROP on a single A
+ * record, a lost SYN — the budget sits below TCP's 1 s first
+ * retransmit), so it is deliberately not allowed to make anything
+ * unreachable: a skipped family's addresses stay in the list, after
+ * the un-skipped ones, and are dialled when those fail. Wrong evidence
+ * therefore costs a budget; it can never cost a host. That is what
+ * makes a process-wide, family-keyed latch defensible at all: keying
+ * it per host would scope the evidence properly, but the fallback
+ * already bounds the harm.
  *
  * The state is a VALUE in the config store — the `skip_families` key
  * (a family set: none/IPv4/IPv6/IPv4+IPv6), written by the walk on the
  * store's RUNTIME layer, never persisted, shown and reset by /config.
- * The `family_skip` bool (also a store key) is the user's POLICY: may
- * the walk latch at all. The transport keeps no globals for either;
- * these two getters resolve the store at the point of use (no store =
- * policy off, no latch). */
+ * The `family_skip` bool (also a store key) is the user's POLICY and
+ * the ONE switch: off (the default) means the walk neither EARNS a
+ * latch nor HONOURS one, so a `skip_families` value left in a config
+ * file is inert. (The value stays readable — /config shows it and
+ * marks it inert — because that is what /config reset clears.) The
+ * transport keeps no globals for either; these two getters resolve the
+ * store at the point of use (no store = policy off, no latch). */
 int nm_connection_family_skip(void);
 
 /* Which families the walk has actually skipped (a bitmask of
- * NM_FAMILY_*), resolved from the store's `skip_families` value. */
+ * NM_FAMILY_*), resolved from the store's `skip_families` value. The
+ * walk's PREFERENCE, not a veto, and inert while `family_skip` is off. */
 #define NM_FAMILY_V4 1 /* AF_INET */
 #define NM_FAMILY_V6 2 /* AF_INET6 */
 int nm_connection_skipped_families(void);
@@ -148,15 +162,6 @@ int nm_connection_skipped_families(void);
  * canonical set string back to the mask. Defined in transport.c. */
 const char *nm_family_name(int family);
 int nm_family_mask(const char *set);
-
-/* The family of the connect walk's attempt `idx` on the last
- * connection the process connected (NM_FAMILY_*; 0 when the index is
- * out of range or no walk ran). The notice tap receives only the
- * index (the walk's own vocabulary), and the UI wants the family
- * name: the transport keeps the last walk's list so the agent can
- * translate without a second resolve. Process-global, borrowed —
- * exactly the nm_connection_connect_error() shape. */
-int nm_connection_attempt_family(int idx);
 
 /* Human-readable detail of the LAST connect failure, for a UI that
  * wants to say something even when the transport status is the only
@@ -410,9 +415,12 @@ typedef struct NmWireTap
      * instant (refused) or the per-address budget running out on a
      * black-holed address. Pre-connection (no xchg), but the
      * connection exists by then (the walk lives on it), so conn_id
-     * correlates the retry with the eventual connect/error line. */
+     * correlates the retry with the eventual connect/error line.
+     * `family` is the abandoned attempt's NM_FAMILY_* bit (0 when the
+     * address is of no family we judge) — the event carries it, so no
+     * reader has to look the index up in walk state. */
     void (*on_connect_retry)(const struct NmConnection *conn, const char *host,
-                             int port, int idx, int n_addrs);
+                             int port, int idx, int n_addrs, int family);
 } NmWireTap;
 
 /* Install (or clear with NULL) the process-global tap. */
@@ -450,20 +458,24 @@ void nm_wire_tap_error_status(const struct NmConnection *conn,
 
 /* Connect-walk notice (see NmWireTap.on_connect_retry): the attempt at
  * index `idx` of `n_addrs` went silent for the per-address budget and
- * the walk is moving on. No-op when no tap is installed. */
+ * the walk is moving on. `family` is that attempt's NM_FAMILY_* bit.
+ * No-op when no tap is installed. */
 void nm_wire_tap_connect_retry(const struct NmConnection *conn,
                                const char *host, int port, int idx,
-                               int n_addrs);
+                               int n_addrs, int family);
 
 /* Connect-walk notice channel for the UI (separate from the wire tap:
  * the recorder and the agent both want this event, and a tap is a
  * single process-global slot that only one of them can own). The agent
  * installs its thunk around each round; the walk fires it right before
  * re-arming the next address. idx is 0-based; n_addrs is the walk
- * length. One process-global slot (one chat app per process). fn NULL
- * clears it. */
+ * length; `family` is the abandoned attempt's NM_FAMILY_* bit (0 when
+ * the address is of no family we judge), carried ON the event so the
+ * UI needs no walk state of its own — nm_family_name is the one
+ * spelling. One process-global slot (one chat app per process). fn
+ * NULL clears it. */
 typedef void (*NmConnectNoticeFn)(void *ud, const char *host, int port,
-                                  int idx, int n_addrs);
+                                  int idx, int n_addrs, int family);
 void nm_transport_set_connect_notice(NmConnectNoticeFn fn, void *ud);
 
 #ifdef __cplusplus

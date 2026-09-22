@@ -90,20 +90,26 @@ extern "C" {
 #define NM_CFG_KEY_CONNECT_TIMEOUT "connect_timeout"
 /* Address-family skip: after an address of a family burns the
  * connect budget (a black hole — the classic unroutable IPv6 on a
- * v4-only network), stop dialling that family for the rest of the
- * session. `on`/`off` (a bool, normalized like every bool key); unset =
- * off, so the walk keeps trying every address. The families to skip
- * are the ones that actually time out, never a fixed list: the walk
- * latches per family as the network proves itself. Env spelling:
+ * v4-only network), dial that family LAST for the rest of the session.
+ * `on`/`off` (a bool, normalized like every bool key); unset = off, so
+ * the walk keeps trying every address in the resolver's order. This is
+ * the ONE switch: off means the walk neither earns a latch nor honours
+ * one, so a `skip_families` value below cannot outvote it. The
+ * families to skip are the ones that actually time out, never a fixed
+ * list: the walk latches per family as the network proves itself, and
+ * the latch defers addresses rather than dropping them (a name whose
+ * only address is of the latched family stays reachable — see the
+ * family-skip note in transport.h). Env spelling:
  * NEVERMORE_CONNECT_FAMILY_SKIP. */
 #define NM_CFG_KEY_FAMILY_SKIP "family_skip"
-/* Which families the connect walk is NOT dialling — the walk's own
- * latch, kept as a value in this store (never a private transport
- * global) so /config shows it and can reset it. A family-set value:
- * `none` / `IPv4` / `IPv6` / `IPv4+IPv6` (the nm_family_name
- * vocabulary). Default `none`; the machinery writes it (runtime
- * layer) when a family black-holes a connect, and a user may set it
- * directly to pin a family off. Env spelling:
+/* Which families the connect walk defers — the walk's own latch, kept
+ * as a value in this store (never a private transport global) so
+ * /config shows it and can reset it. A family-set value: `none` /
+ * `IPv4` / `IPv6` / `IPv4+IPv6` (the nm_family_name vocabulary).
+ * Default `none`; the machinery writes it (runtime layer) when a family
+ * black-holes a connect, and a user may set it directly to prefer a
+ * family off. INERT while `family_skip` is off (which /config marks),
+ * so it is a preference, never a veto. Env spelling:
  * NEVERMORE_CONNECT_SKIP_FAMILIES. */
 #define NM_CFG_KEY_SKIP_FAMILIES "skip_families"
 /* Local SearXNG endpoint for the web_search tool; the env spelling is

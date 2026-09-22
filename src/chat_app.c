@@ -1383,6 +1383,13 @@ static void print_config(NmChatApp *app)
             v = nm_config_reasoning_echo_name(nm_agent_reasoning_echo(app->agent));
             layer = "frozen this chat";
         }
+        /* A latched family is INERT while the policy is off: the walk
+         * neither earns nor honours it (family_skip is the one switch
+         * the user owns). The value stays visible — /config reset is
+         * what clears it — so say what it is doing: nothing. */
+        if (strcmp(k, NM_CFG_KEY_SKIP_FAMILIES) == 0 &&
+            !nm_connection_family_skip() && v && strcmp(v, "none") != 0)
+            layer = "inert: family_skip off";
         sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-", layer);
     }
 }

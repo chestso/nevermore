@@ -370,6 +370,9 @@ static void test_connect_retry_line_shape(void)
     ASSERT_TRUE(strstr(log, "\"host\":\"localhost\"") != NULL);
     ASSERT_TRUE(strstr(log, "\"address\":1") != NULL);
     ASSERT_TRUE(strstr(log, "\"addresses\":") != NULL);
+    /* The abandoned attempt's family rides ON the event (the tap's own
+     * vocabulary), so the log names IPv4/IPv6 instead of an index. */
+    ASSERT_TRUE(strstr(log, "\"family\":\"IPv") != NULL);
     /* Pre-request: the retry line itself carries no xchg (the
      * successful connect that follows does — it is a separate line). */
     char *line = strstr(log, "connect-retry");

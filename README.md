@@ -151,11 +151,19 @@ classic unroutable IPv6 on a v4-only network, no RST and no SYN-ACK —
 is abandoned after the budget instead of the OS's ~130 s. `family_skip`
 (a bool) goes one step further: once an address of a family burns the
 budget and an address of _another_ family then answers, that family is
-not dialled again for the rest of the session, so later connects pay no
-budget at all. It only fires on that evidence — a walk that failed
-everywhere latches nothing. The latched set is the `skip_families` key
-(`none`, `ipv4`, `ipv6`, `ipv4+ipv6`), which the walk writes on the
-runtime layer and `/config` shows like any other value.
+dialled _last_ for the rest of the session, so later connects pay no
+budget at all whenever the other family answers. The latch is a
+preference, never a veto: the deferred family's addresses stay in the
+walk, so a name whose only address is of that family (a `127.0.0.1`
+literal, an IPv6-only service) stays reachable — wrong evidence costs a
+budget, never a host. It only fires on that evidence (a walk that
+failed everywhere latches nothing), and it is the one switch: with
+`family_skip` off a latched value has no effect at all, so a
+`skip_families` line left in a config file cannot outvote it. The
+latched set is the `skip_families` key (`none`, `ipv4`, `ipv6`,
+`ipv4+ipv6`), which the walk writes on the runtime layer and `/config`
+shows like any other value — marked `inert: family_skip off` when the
+policy is off.
 
 `reasoning_echo` (`$NEVERMORE_REASONING_ECHO`) decides whether a round's
 thinking trace is re-sent to the

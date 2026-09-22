@@ -150,12 +150,12 @@ void nm_transport_set_connect_notice(NmConnectNoticeFn fn, void *ud)
 
 void nm_wire_tap_connect_retry(const struct NmConnection *conn,
                                const char *host, int port, int idx,
-                               int n_addrs)
+                               int n_addrs, int family)
 {
     if (g_wire_tap && g_wire_tap->on_connect_retry)
-        g_wire_tap->on_connect_retry(conn, host, port, idx, n_addrs);
+        g_wire_tap->on_connect_retry(conn, host, port, idx, n_addrs, family);
     if (g_connect_notice)
-        g_connect_notice(g_connect_notice_ud, host, port, idx, n_addrs);
+        g_connect_notice(g_connect_notice_ud, host, port, idx, n_addrs, family);
 }
 
 /* ---------------------------------------------------------------- */
@@ -174,31 +174,6 @@ int nm_connection_connect_timeout_ms(void)
     return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONNECT_TIMEOUT,
                                      NM_CONNECT_ATTEMPT_MS)
              : NM_CONNECT_ATTEMPT_MS;
-}
-
-/* The last walk's per-attempt families (NM_FAMILY_*), so the notice
- * tap — which only carries the attempt index — can be translated to
- * a family name for the UI. Process-global and overwritten per
- * connect: it describes the walk that is currently running (or the
- * last one that ran), never history. This is walk bookkeeping, not a
- * config value: the store owns the *set* (skip_families), this holds
- * the per-attempt index list. */
-static int g_attempt_families[NM_CONNECT_MAX_ADDRS];
-
-/* Record one attempt's family for the notice translation (called by
- * the walk as each address is stored). Out-of-range indexes are
- * ignored — a walk longer than the cap does not exist. */
-void nm_connection_set_attempt_family(int idx, int family)
-{
-    if (idx >= 0 && idx < NM_CONNECT_MAX_ADDRS)
-        g_attempt_families[idx] = family;
-}
-
-int nm_connection_attempt_family(int idx)
-{
-    if (idx >= 0 && idx < NM_CONNECT_MAX_ADDRS)
-        return g_attempt_families[idx];
-    return 0;
 }
 
 /* Address-family vocabulary: the ONE spelling per family (see

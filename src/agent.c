@@ -200,7 +200,7 @@ void nm_agent_free(NmAgent *a)
 static NmAgent *g_notice_agent;
 
 static void agent_notice_tap(void *ud, const char *host, int port, int idx,
-                             int n_addrs)
+                             int n_addrs, int family)
 {
     (void)ud;
     (void)port;
@@ -208,14 +208,14 @@ static void agent_notice_tap(void *ud, const char *host, int port, int idx,
     if (!a || !a->on_notice)
         return;
     char msg[256];
-    /* The family of the abandoned attempt: the transport publishes the
-     * last walk's families by attempt index, and nm_family_name is the
-     * one spelling (the walk's diagnostics and the app's skip notice
-     * read it too), so the line names IPv4/IPv6, not an opaque index. */
+    /* The family rides ON the event (the walk's NM_FAMILY_* bit), and
+     * nm_family_name is the one spelling — the walk's diagnostics and
+     * the app's skip notice read it too, so the line names IPv4/IPv6,
+     * not an opaque index. */
     snprintf(msg, sizeof(msg),
              "connect: %s %d/%d (%s) did not answer — trying the next address",
              host && *host ? host : "host", idx + 1, n_addrs,
-             nm_family_name(nm_connection_attempt_family(idx)));
+             nm_family_name(family));
     a->on_notice(msg, a->userdata);
 }
 

@@ -277,11 +277,11 @@ static const char *addr_family_name(const struct sockaddr_storage *a)
 
 /* The connect walk's family state lives in the config store
  * (nm_config), NOT in transport globals: `family_skip` (bool) is the
- * user's POLICY (may the walk latch at all) and `skip_families` (a
- * family set) is the latch the walk writes on the store's RUNTIME
- * layer. The transport resolves both at the point of use and keeps no
- * copy; with no store installed (a unit test with no config) the
- * policy is off and nothing is latched. */
+ * user's POLICY — the ONE switch, gating both earning and honouring
+ * the latch — and `skip_families` (a family set) is the latch the walk
+ * writes on the store's RUNTIME layer. The transport resolves both at
+ * the point of use and keeps no copy; with no store installed (a unit
+ * test with no config) the policy is off and nothing is latched. */
 int nm_connection_family_skip(void)
 {
     NmConfig *c = nm_config_store();
@@ -315,7 +315,11 @@ static int family_bit(int af)
  * latches nothing. The latch is silent: the app re-reads
  * nm_connection_skipped_families and prints its own line, the same
  * way it re-reads the connect error. It is written to the store's
- * RUNTIME layer, so /config shows and can reset it. */
+ * RUNTIME layer, so /config shows and can reset it.
+ *
+ * A fallback-tail address (one already in the latch) burning its
+ * budget re-records a family that is already there — `~cur` drops it —
+ * so walking the tail never re-earns anything. */
 static void note_family_skips(NmConnection *conn, int winner_af)
 {
     NmConfig *c = nm_config_store();
@@ -338,34 +342,41 @@ static void note_family_skips(NmConnection *conn, int winner_af)
     nm_config_runtime_set(c, NM_CFG_KEY_SKIP_FAMILIES, name);
 }
 
-/* Is this family's address dropped at resolve time? The latch IS the
- * decision, so this only reads it — the `family_skip` POLICY gates the
- * LATCH (note_family_skips), never the skip that follows from it. An
- * address of an unrecognized family is never skipped. */
+/* Is this family's address DEFERRED to the walk's tail? The latch IS
+ * the decision, but the `family_skip` POLICY is the one switch: off
+ * (the default) means a latched family is inert — neither earned (see
+ * note_family_skips) nor honoured here, so a `skip_families` value
+ * left in a config file cannot outvote the policy. An address of an
+ * unrecognized family is never deferred. */
 static int family_skip_allowed(int af)
 {
     int bit = family_bit(af);
-    return bit && (nm_connection_skipped_families() & bit) ? 1 : 0;
+    if (!bit || !nm_connection_family_skip())
+        return 0;
+    return (nm_connection_skipped_families() & bit) ? 1 : 0;
 }
 
-/* Resolve host:port into conn->conn_addrs (first NM_CONNECT_MAX_ADDRS
- * of getaddrinfo's order — see the header on why the order is the
- * only sane policy). Addresses whose family the walk has been told to
- * skip are dropped here, BEFORE anything is dialled: that is what
- * turns "IPv6 is unroutable on this network" into no delay at all
- * rather than a budget per connect. Returns 0 on success, -1 on
- * failure (err_detail stamped). */
+/* Resolve host:port into conn->conn_addrs (the first
+ * NM_CONNECT_MAX_ADDRS of getaddrinfo's order — see the header on why
+ * the order is the only sane policy). Addresses whose family the walk
+ * has been told to skip do NOT disappear: they move to the TAIL, after
+ * the un-skipped ones, and are dialled when those fail. That is the
+ * latch's "hint, never a veto" rule (transport.h) — wrong evidence (one
+ * address of some other host going silent) costs a budget, never a
+ * host, and a name whose only address is of the latched family (a
+ * 127.0.0.1 literal, an IPv6-only service) stays reachable. Returns 0
+ * on success, -1 on failure (err_detail stamped). */
 int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
 {
     char portstr[8];
     snprintf(portstr, sizeof(portstr), "%d", port);
     struct addrinfo hints, *res = NULL, *ai;
-    /* Drop the previous walk's families FIRST: the published list is
-     * indexed by attempt, and a stale entry beyond this walk's length
-     * would answer the notice's translation for an index that no
-     * longer exists (a DNS failure must leave it empty too). */
-    for (int i = 0; i < NM_CONNECT_MAX_ADDRS; i++)
-        nm_connection_set_attempt_family(i, 0);
+    /* The walk starts HERE: drop the previous walk's state (the
+     * abandoned-family set included — the header's invariant is "in
+     * THIS walk", which only the one-walk-per-connection allocation
+     * discipline enforced before). */
+    conn->conn_abandoned_fams = 0;
+    conn->conn_deferred_addrs = 0;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
@@ -376,33 +387,37 @@ int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
                             grc != 0 ? gai_strerror(grc) : "no addresses");
         return -1;
     }
+    /* Two passes over the resolver's order: the kept addresses first
+     * (pass 0), the latched family's addresses as the fallback tail
+     * (pass 1). The cap bounds the whole walk, so a name that resolves
+     * to more than NM_CONNECT_MAX_ADDRS addresses keeps the kept ones
+     * first — the tail is the part that overflows, which is the right
+     * side to lose. */
     int n = 0;
-    for (ai = res; ai && n < NM_CONNECT_MAX_ADDRS; ai = ai->ai_next) {
-        if ((size_t)ai->ai_addrlen > sizeof(struct sockaddr_storage))
-            continue;
-        if (family_skip_allowed(ai->ai_family))
-            continue;
-        memcpy(&conn->conn_addrs[n], ai->ai_addr, ai->ai_addrlen);
-        conn->conn_addr_lens[n] = (unsigned)ai->ai_addrlen;
-        /* The notice tap carries the attempt index, not the family:
-         * publish the family alongside the index it will be named by. */
-        nm_connection_set_attempt_family(n, family_bit(ai->ai_family));
-        n++;
+    int kept = 0;
+    for (int deferred = 0; deferred <= 1; deferred++) {
+        for (ai = res; ai && n < NM_CONNECT_MAX_ADDRS; ai = ai->ai_next) {
+            if ((size_t)ai->ai_addrlen > sizeof(struct sockaddr_storage))
+                continue;
+            if (family_skip_allowed(ai->ai_family) != deferred)
+                continue; /* pass 0 keeps, pass 1 defers */
+            memcpy(&conn->conn_addrs[n], ai->ai_addr, ai->ai_addrlen);
+            conn->conn_addr_lens[n] = (unsigned)ai->ai_addrlen;
+            n++;
+        }
+        if (!deferred)
+            kept = n;
     }
+    conn->conn_deferred_addrs = n - kept;
     freeaddrinfo(res);
     if (n == 0) {
-        /* Every address was skipped by the latch (or the resolver
-         * handed back none): name the reason, because "no usable
-         * addresses" would read as a DNS failure when the real cause
-         * is our own family skip. */
-        if (nm_connection_skipped_families())
-            conn_set_err_detail(
-                conn, "DNS: %s: every address is in a skipped family (%s)",
-                host, nm_family_name(nm_connection_skipped_families()));
-        else
-            conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
+        conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
         return -1;
     }
+    /* The un-skipped addresses come first; if the latch covered every
+     * one of them the walk starts on the fallback tail, which
+     * conn_deferred_addrs = n reports (the walk's failure summary
+     * names the latch as the explanation — see walk_fail). */
     conn->conn_n_addrs = n;
     conn->conn_addr_idx = 0;
     return 0;
@@ -450,10 +465,24 @@ static void target_text(const NmConnection *conn, char *out, size_t cap)
     }
 }
 
+/* The NM_FAMILY_* bit of attempt `idx` (0 when the index is out of the
+ * walk or the address is of no family we judge) — the walk's own
+ * vocabulary for the notice event. */
+static int attempt_family_bit(const NmConnection *conn, int idx)
+{
+    if (idx < 0 || idx >= conn->conn_n_addrs)
+        return 0;
+    return family_bit(conn->conn_addrs[idx].ss_family);
+}
+
 /* Exhaustion report: every address in the walk failed or went
  * silent. The detail names the host and the number of attempts (the
  * per-attempt reason was already reported by the walk's notice /
- * err_detail as it happened; this is the summary the UI prints). */
+ * err_detail as it happened; this is the summary the UI prints). A
+ * walk that consisted ENTIRELY of the latch's fallback tail says so:
+ * "the host is down" and "the host is reachable only over the family
+ * you told me to skip" are different stories, and the second one is
+ * the user's own setting talking. */
 static void walk_fail(NmConnection *conn)
 {
     char target[300];
@@ -466,19 +495,26 @@ static void walk_fail(NmConnection *conn)
      * attempt failed — … 0 ms" that hid the real reason entirely). */
     char last[NM_ERR_DETAIL_MAX];
     snprintf(last, sizeof(last), "%s", conn->err_detail);
+    /* The latch's own tail, named when it was the whole walk. */
+    char note[96];
+    note[0] = '\0';
+    if (conn->conn_deferred_addrs == conn->conn_n_addrs)
+        snprintf(note, sizeof(note),
+                 " (skipped family %s — all of them dialled anyway)",
+                 nm_family_name(nm_connection_skipped_families()));
     /* Compose through the capped store helper: a long host or reason is
      * expected to overrun NM_ERR_DETAIL_MAX, and conn_set_err_detail's
      * vsnprintf truncates the tail by contract (a diagnostic, not data).
      * Spelling the append as an explicit snprintf here is what made gcc
      * read the deliberate cap as a -Wformat-truncation bug. */
     if (last[0])
-        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed — %s",
+        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed — %s%s",
                             target, conn->conn_n_addrs,
-                            conn->conn_n_addrs == 1 ? "" : "s", last);
+                            conn->conn_n_addrs == 1 ? "" : "s", last, note);
     else
-        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed",
+        conn_set_err_detail(conn, "connect %s: all %d attempt%s failed%s",
                             target, conn->conn_n_addrs,
-                            conn->conn_n_addrs == 1 ? "" : "s");
+                            conn->conn_n_addrs == 1 ? "" : "s", note);
     conn->addr_len = 0;
     nm_connection_set_connect_error(conn->err_detail);
 }
@@ -512,14 +548,16 @@ int nm_socket_wait_ms(const NmConnection *conn)
 /* Advance from the attempt at conn_addr_idx to the next address.
  * Fires the connect-walk notice (the UI's "trying the next address"
  * line) exactly once per re-arm, naming the attempt that was
- * abandoned (0-based — walk_next is called before the index moves
- * on). Returns 0 if a new attempt is in flight, -1 when the walk is
- * exhausted. */
+ * abandoned (0-based — walk_next is called before the index moves on)
+ * AND its family, which the event carries so no reader has to look it
+ * up in walk state. Returns 0 if a new attempt is in flight, -1 when
+ * the walk is exhausted. */
 static int walk_next(NmConnection *conn)
 {
     if (conn->conn_addr_idx + 1 < conn->conn_n_addrs)
         nm_wire_tap_connect_retry(conn, conn->tls_host, conn->port,
-                                  conn->conn_addr_idx, conn->conn_n_addrs);
+                                  conn->conn_addr_idx, conn->conn_n_addrs,
+                                  attempt_family_bit(conn, conn->conn_addr_idx));
     conn->conn_addr_idx++;
     if (conn->conn_addr_idx >= conn->conn_n_addrs)
         return -1;
@@ -576,10 +614,8 @@ int nm_socket_connect_walk(NmConnection *conn)
          * but not evidence yet — the host may simply be down. The
          * latch fires when another family answers (below). */
         if (attempt_budget_spent(conn)) {
-            int af = conn->conn_addr_idx < conn->conn_n_addrs
-                         ? conn->conn_addrs[conn->conn_addr_idx].ss_family
-                         : 0;
-            conn->conn_abandoned_fams |= (unsigned)family_bit(af);
+            conn->conn_abandoned_fams |=
+                (unsigned)attempt_family_bit(conn, conn->conn_addr_idx);
             char target[300];
             target_text(conn, target, sizeof(target));
             conn_set_err_detail(conn, "connect %s: timed out after %d ms",

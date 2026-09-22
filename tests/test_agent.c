@@ -526,6 +526,97 @@ static void test_agent_plain_answer_no_tools(void)
     close(sc.fd);
 }
 
+/* The connect-walk notice reaches the agent's callback and names the
+ * abandoned attempt's FAMILY — the user-visible line the app turns into
+ * a system-stream notice, and the end of the "one family vocabulary"
+ * claim (the family rides on the transport event; nothing looks an
+ * index up in walk state). The canned server holds 127.0.0.1, so a
+ * round to `localhost` walks past its first address. */
+static char g_notice_text[256];
+static int g_notice_calls;
+
+static void cap_notice(const char *msg, void *userdata)
+{
+    (void)userdata;
+    g_notice_calls++;
+    if (msg)
+        snprintf(g_notice_text, sizeof(g_notice_text), "%s", msg);
+}
+
+/* `localhost`'s first resolved family (AF_INET / AF_INET6); 0 when the
+ * name resolves to a single address (no walk to exercise). */
+static int localhost_first_family(void)
+{
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    if (getaddrinfo("localhost", "0", &hints, &res) != 0 || !res)
+        return 0;
+    int fam = res->ai_family;
+    int n = 0;
+    for (ai = res; ai; ai = ai->ai_next)
+        n++;
+    freeaddrinfo(res);
+    return n >= 2 ? fam : 0;
+}
+
+static void test_agent_connect_notice_names_the_family(void)
+{
+    /* The server is on IPv4: the walk only has an address to abandon
+     * when localhost hands back the other family first. On a v4-only (or
+     * v4-first) resolver this is a healthy box with nothing to walk, not
+     * a failure. */
+    if (localhost_first_family() != AF_INET6) {
+        fprintf(stderr, "  note: 'localhost' is not IPv6-first here; the "
+                        "walk notice is not exercised\n");
+        return;
+    }
+
+    reset_capture();
+    g_notice_calls = 0;
+    g_notice_text[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"walked\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://localhost:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_notice(agent, cap_notice);
+
+    int rc = nm_agent_turn(agent, "say something");
+    ASSERT_EQ(rc, 0);
+    ASSERT_STR_EQ(g_text, "walked");
+
+    /* The line names the attempt (1-based, of the walk length) and the
+     * family it abandoned. */
+    ASSERT_TRUE(g_notice_calls >= 1);
+    ASSERT_TRUE(strstr(g_notice_text, "did not answer") != NULL);
+    ASSERT_TRUE(strstr(g_notice_text, "IPv6") != NULL);
+    ASSERT_TRUE(strstr(g_notice_text, "1/") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The system message on the wire carries the AGENTS.md context: a
  * scratch project with an AGENTS.md, a .git marker at its root, and
  * the agent built from that working directory. The system role must
@@ -2340,6 +2431,7 @@ int main(void)
     nm_config_set_store(g_cfg);
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_plain_answer_no_tools);
+    RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);

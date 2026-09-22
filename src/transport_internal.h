@@ -63,13 +63,6 @@ int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port);
 void nm_socket_arm_attempt(NmConnection *conn, int idx);
 double nm_socket_now(void);
 
-/* Publish/recover the family (NM_FAMILY_*) of attempt `idx` in the
- * last walk: the notice tap carries only the index, and the agent
- * names the family through nm_connection_attempt_family. Defined in
- * transport.c (the pure-naming TU), read by transport_socket.c as it
- * fills the address list. */
-void nm_connection_set_attempt_family(int idx, int family);
-
 /* Blocking connect with the bounded address walk: resolve + arm the
  * first attempt, then pump nm_socket_connect_walk (the same walk the
  * async phase machine drives) until a verdict. Returns 0 when

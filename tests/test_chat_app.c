@@ -3316,15 +3316,19 @@ static void test_connect_knobs_via_config_command(void)
     ASSERT_EQ(nm_connection_connect_timeout_ms(), NM_CONNECT_ATTEMPT_MS);
     ASSERT_STR_EQ(cfg_read_shadow(), "family_skip = on\n");
 
-    /* The latch (skip_families) is its own key: turning the POLICY off
-     * stops future latching but leaves the latched family, which
-     * /config reset clears. */
+    /* The latch (skip_families) is its own key, and the POLICY gates the
+     * EFFECT, not the stored value: with family_skip off the value is
+     * still there (and /config says what it is doing — nothing), which
+     * is what /config reset clears. */
     knobs_set_skip_families(NM_FAMILY_V6);
     ASSERT_TRUE(nm_connection_skipped_families() != 0);
     harness_type(h, "/config set family_skip off");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "config: family_skip = off") != NULL);
     ASSERT_TRUE(nm_connection_skipped_families() != 0);
+    harness_type(h, "/config");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "inert: family_skip off") != NULL);
     harness_type(h, "/config reset skip_families");
     harness_enter(h);
     ASSERT_EQ(nm_connection_skipped_families(), 0);
@@ -3350,9 +3354,9 @@ static void test_connect_knobs_from_config_reach_transport(void)
     ASSERT_EQ(nm_connection_connect_timeout_ms(), 850);
     ASSERT_EQ(nm_connection_family_skip(), 1);
 
-    /* family_skip is its own key: turning the POLICY off stops future
-     * latching, but the latched family (skip_families) is a separate
-     * value, cleared by /config reset. */
+    /* family_skip is the ONE switch: with the POLICY off the latch
+     * (skip_families) is INERT — the walk neither earns nor honours it
+     * — so the value is a preference the user clears, not a veto. */
     knobs_set_skip_families(NM_FAMILY_V6);
     store_set(NM_CFG_KEY_FAMILY_SKIP, "off");
     ASSERT_EQ(nm_connection_family_skip(), 0);

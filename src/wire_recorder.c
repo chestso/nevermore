@@ -250,9 +250,12 @@ static void tap_error(const NmConnection *conn, const char *stage,
  * budget (or failed instantly) and the walk moved on to the next.
  * Pre-connection (no xchg), but the connection exists by then (the
  * walk lives on it), so conn_id correlates the retry with the
- * eventual connect/error line. `idx` is 0-based, as in the tap. */
+ * eventual connect/error line. `idx` is 0-based, as in the tap; the
+ * family comes off the event and `skipped` marks the attempt as one of
+ * the family latch's fallback tail (the address the latch would rather
+ * not dial, tried because the preferred ones failed). */
 static void tap_connect_retry(const NmConnection *conn, const char *host,
-                              int port, int idx, int n_addrs)
+                              int port, int idx, int n_addrs, int family)
 {
     if (!g_rec.f)
         return;
@@ -267,6 +270,10 @@ static void tap_connect_retry(const NmConnection *conn, const char *host,
     nm_json_set(o, "port", nm_json_new_number(port));
     nm_json_set(o, "address", nm_json_new_number(idx + 1));
     nm_json_set(o, "addresses", nm_json_new_number(n_addrs));
+    nm_json_set(o, "family", nm_json_new_string(nm_family_name(family)));
+    if (conn && conn->conn_deferred_addrs > 0 &&
+        idx >= conn->conn_n_addrs - conn->conn_deferred_addrs)
+        nm_json_set(o, "skipped", nm_json_new_bool(1));
     write_line(o);
 }
 
