@@ -165,7 +165,8 @@ static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
 {
     NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
     NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
-                            NM_USER_AGENT, &sess, 1 };
+                            NM_USER_AGENT, &sess, 1,
+                            0 /* include_usage: a catalog GET has no stream */ };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)

@@ -224,7 +224,8 @@ static void hyper_fetch_catalog(const char *base_url)
         hyper_derive_crush_id();
     NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
     NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
-                            NM_USER_AGENT, &crush, 1 };
+                            NM_USER_AGENT, &crush, 1,
+                            0 /* include_usage: a catalog GET has no stream */ };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)

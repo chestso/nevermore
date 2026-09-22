@@ -98,7 +98,8 @@ static void openrouter_fetch_catalog(const char *base_url)
 {
     NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
                             NM_USER_AGENT,
-                            NULL, 0 };
+                            NULL, 0,
+                            0 /* include_usage: a catalog GET has no stream */ };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)
