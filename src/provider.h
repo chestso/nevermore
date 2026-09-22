@@ -134,6 +134,28 @@ typedef void (*NmStreamCallback)(NmStreamChannel channel,
 
 void nm_tool_calls_free(NmToolCall *calls, size_t n);
 
+/* Provider-reported token usage for a round (the OpenAI `usage`
+ * object). Every field is -1 when the provider did not report it:
+ * the provider never invents a number. prompt_tokens is the context
+ * sent this round — the number a context gauge shows. cached_tokens
+ * is the prefix-cache read count (absent on providers that do not
+ * report a breakdown). cost/credits are a later tier on this same
+ * object (Hyper's cost.usd; OpenRouter's cost). */
+typedef struct NmUsage
+{
+    long prompt_tokens;     /* context sent this round; -1 unknown */
+    long completion_tokens; /* -1 unknown */
+    long total_tokens;      /* -1 unknown */
+    long cached_tokens;     /* prefix-cache read; -1 unknown */
+} NmUsage;
+
+/* Fired whenever a streamed event carries a usage object. May fire more
+ * than once per round — OpenCode rides usage on two chunks; Hyper on the
+ * finish_reason chunk or, with stream_options, a standalone choices: []
+ * chunk — so the receiver keeps the LAST report. Absent fields are -1.
+ * The usage pointer is borrowed, valid for the call. */
+typedef void (*NmUsageFn)(const NmUsage *usage, void *userdata);
+
 typedef enum
 {
     NM_CHAT_OK = 0,
@@ -180,6 +202,9 @@ typedef struct NmChatRequest
      * ignore it; opencode points an extra header at it. */
     const char *conversation_id;
     NmStreamCallback on_delta;
+    /* Optional usage receiver: fires whenever a streamed event carries a
+     * usage object (see NmUsageFn). NULL = the caller does not want it. */
+    NmUsageFn on_usage;
     void *userdata;
 } NmChatRequest;
 

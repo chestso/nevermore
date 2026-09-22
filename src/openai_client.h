@@ -58,6 +58,11 @@ typedef struct NmOpenaiEndpoint
     const char *user_agent;             /* never NULL */
     const NmExtraHeader *extra_headers; /* may be NULL */
     size_t n_extra_headers;             /* capped at NM_EXTRA_HEADERS_MAX */
+    /* Send "stream_options":{"include_usage":true} in the request body so
+     * the provider emits a usage chunk while streaming. Off = no
+     * stream_options field is sent. The composer decides nothing: this is
+     * the provider's wire fact, set where the endpoint is built. */
+    int include_usage;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

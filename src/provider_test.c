@@ -56,6 +56,7 @@ static void test_replay_endpoint(const char *base_url, const char *api_key,
     ep->user_agent = "nevermore (nevermore agent)";
     ep->extra_headers = NULL;
     ep->n_extra_headers = 0;
+    ep->include_usage = 0; /* replay fixtures are hand-written; no flag */
 }
 
 static NmChatResult test_replay_chat(const NmProvider *p,

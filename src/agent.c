@@ -112,6 +112,15 @@ struct NmAgent
     int tool_announced; /* this call's plan already emitted */
     NmToolExec *exec;
     const NmTool *exec_tool;
+
+    /* Provider-reported token usage: the LAST usage object seen this
+     * round (sentinels -1 when a field was not reported). has_usage is
+     * the gate — a real prompt_tokens (>= 0) has arrived at least once.
+     * context_limit is the active model's window, pushed by the UI (the
+     * agent has no catalog); -1 = unknown. */
+    NmUsage last_usage;
+    int has_usage;
+    long context_limit;
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -139,6 +148,13 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->tools = tools;
     a->userdata = userdata;
     a->state = NM_AGENT_IDLE;
+    /* Usage gauge starts unknown: sentinels until the provider reports
+     * (and the limit until the UI pushes it). */
+    a->last_usage.prompt_tokens = -1;
+    a->last_usage.completion_tokens = -1;
+    a->last_usage.total_tokens = -1;
+    a->last_usage.cached_tokens = -1;
+    a->context_limit = -1;
     /* Context assembly is construction-time I/O (one walk + a couple
      * of bounded reads). Failure degrades to the base prompt, never
      * to a failed agent. */
@@ -261,6 +277,34 @@ long nm_agent_context_budget(const NmAgent *a)
     return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONTEXT_BUDGET,
                                      NM_AGENT_DEFAULT_CONTEXT_BUDGET)
              : NM_AGENT_DEFAULT_CONTEXT_BUDGET;
+}
+
+/* ---- context-usage gauge (provider-reported) ---- */
+
+int nm_agent_context_has_usage(const NmAgent *a)
+{
+    return a ? a->has_usage : 0;
+}
+
+long nm_agent_context_used_tokens(const NmAgent *a)
+{
+    return a ? a->last_usage.prompt_tokens : -1;
+}
+
+long nm_agent_context_cached_tokens(const NmAgent *a)
+{
+    return a ? a->last_usage.cached_tokens : -1;
+}
+
+long nm_agent_context_limit(const NmAgent *a)
+{
+    return a ? a->context_limit : -1;
+}
+
+void nm_agent_set_context_limit(NmAgent *a, long limit)
+{
+    if (a)
+        a->context_limit = limit;
 }
 
 void nm_agent_set_timeout_ms(NmAgent *a, int ms)
@@ -451,6 +495,19 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
     }
 }
 
+/* Agent-internal usage receiver: records the LAST usage object seen this
+ * round (multiple fires possible — see NmUsageFn) and flips the gate on
+ * the first real prompt_tokens. */
+static void round_on_usage(const NmUsage *usage, void *userdata)
+{
+    NmAgent *a = userdata;
+    if (!usage)
+        return;
+    a->last_usage = *usage;
+    if (usage->prompt_tokens >= 0)
+        a->has_usage = 1;
+}
+
 /* Serialize the round's tool calls as the wire tool_calls array
  * (OpenAI shape), for the session's assistant message. */
 static char *calls_to_json(const NmToolCall *calls, size_t n)
@@ -583,6 +640,7 @@ static int begin_round(NmAgent *a)
         -1,
         a->conversation_id, /* borrowed; outlives compose+queue */
         round_on_delta,
+        round_on_usage,
         a
     };
 

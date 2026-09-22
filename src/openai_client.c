@@ -149,7 +149,7 @@ static const char *url_path_prefix(const char *url)
 /* Build the chat/completions JSON body. One heap document, freed at
  * the end of nm_openai_chat — the request body is per-call by
  * nature, but it is ONE allocation tree, not per-message churn. */
-static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
+static char *compose_body(const NmOpenaiEndpoint *ep,
                           const NmChatRequest *req)
 {
     NmJson *body = nm_json_new_object();
@@ -201,6 +201,16 @@ static char *compose_body(const NmOpenaiEndpoint *ep NM_UNUSED,
     nm_json_set(body, "model", nm_json_new_string(req->model));
     nm_json_set(body, "messages", messages);
     nm_json_set(body, "stream", nm_json_new_bool(1));
+    /* stream_options.include_usage asks the provider to emit a usage
+     * chunk while streaming (OpenAI/Ollama/Hyper; OpenRouter/OpenCode
+     * always send usage, the flag is harmless). Kept off unless the
+     * endpoint opted in, so a provider that rejects unknown fields is
+     * never handed one. */
+    if (ep->include_usage) {
+        NmJson *so = nm_json_new_object();
+        nm_json_set(so, "include_usage", nm_json_new_bool(1));
+        nm_json_set(body, "stream_options", so);
+    }
     if (req->temperature >= 0)
         nm_json_set(body, "temperature", nm_json_new_number(req->temperature));
     if (req->max_tokens >= 0)
@@ -243,6 +253,7 @@ struct NmChatStream
      * only valid during chat_begin (compose reads it); the stream's
      * lifetime outlives the caller's request object. */
     NmStreamCallback on_delta;
+    NmUsageFn on_usage;
     void *userdata;
     int done;            /* [DONE] seen or fatal error */
     int finished;        /* a non-empty choices[0].finish_reason was
@@ -318,6 +329,36 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
         st->error_len = strlen(st->error_body);
         nm_json_free(obj);
         return;
+    }
+
+    /* Token usage: an independent carrier (not tied to `choices`). It may
+     * ride the finish_reason chunk (Hyper without stream_options), a
+     * standalone choices:[] chunk (most providers), or more than one
+     * chunk (OpenCode Zen) — so fire on any event that has it; the
+     * receiver keeps the last. Absent fields are -1. */
+    NmJson *uobj = nm_json_get(obj, "usage");
+    if (uobj && st->on_usage) {
+        NmUsage u;
+        u.prompt_tokens = (long)nm_json_num(nm_json_get(uobj, "prompt_tokens"));
+        u.completion_tokens =
+            (long)nm_json_num(nm_json_get(uobj, "completion_tokens"));
+        u.total_tokens = (long)nm_json_num(nm_json_get(uobj, "total_tokens"));
+        NmJson *details = nm_json_get(uobj, "prompt_tokens_details");
+        u.cached_tokens = details
+                              ? (long)nm_json_num(
+                                    nm_json_get(details, "cached_tokens"))
+                              : -1;
+        /* nm_json_num returns 0 for an absent key; normalize "absent" to
+         * -1 so the receiver can tell "not reported" from a real 0. */
+        if (!nm_json_get(uobj, "prompt_tokens"))
+            u.prompt_tokens = -1;
+        if (!nm_json_get(uobj, "completion_tokens"))
+            u.completion_tokens = -1;
+        if (!nm_json_get(uobj, "total_tokens"))
+            u.total_tokens = -1;
+        if (!details || !nm_json_get(details, "cached_tokens"))
+            u.cached_tokens = -1;
+        st->on_usage(&u, st->userdata);
     }
 
     NmJson *choices = nm_json_get(obj, "choices");
@@ -793,6 +834,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     }
     st->conn = conn;
     st->on_delta = req->on_delta;
+    st->on_usage = req->on_usage;
     st->userdata = req->userdata;
     st->status = NM_CHAT_OK;
 

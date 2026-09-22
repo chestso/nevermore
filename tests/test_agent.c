@@ -1532,6 +1532,56 @@ static void test_agent_error_message_is_informative(void)
 /* The rolling window is OFF by default and the agent sends the whole
  * transcript; the provider reports an oversize context verbatim rather
  * than nevermore silently capping it. */
+/* Context-usage gauge: a round carrying a usage object populates the
+ * agent's accessors; a round without one leaves has_usage false. The
+ * limit is UI-pushed and round-trips. */
+static void test_agent_context_usage_accessors(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1234,"
+        "\"completion_tokens\":5,\"total_tokens\":1239,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":900}}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    /* Before any round: no usage, unknown limit. */
+    ASSERT_FALSE(nm_agent_context_has_usage(agent));
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_context_limit(agent), -1);
+
+    /* The UI pushes the model's window (the agent has no catalog). */
+    nm_agent_set_context_limit(agent, 128000);
+    ASSERT_EQ(nm_agent_context_limit(agent), 128000);
+
+    int rc = nm_agent_turn(agent, "hi");
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(nm_agent_context_has_usage(agent));
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
+    ASSERT_EQ(nm_agent_context_cached_tokens(agent), 900);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_agent_rolling_window_default_off(void)
 {
     reset_capture();
@@ -1976,6 +2026,7 @@ int main(void)
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
+    RUN_TEST(test_agent_context_usage_accessors);
     RUN_TEST(test_agent_rolling_window_default_off);
     RUN_TEST(test_agent_context_overflow_reports_provider_error);
     RUN_TEST(test_agent_set_model_changes_wire_model);

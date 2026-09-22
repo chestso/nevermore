@@ -51,7 +51,8 @@ static NmChatResult openrouter_chat(const NmProvider *p,
         "Bearer %s",
         api_key,
         NEVERMORE_UA,
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage: harmless; OpenRouter always sends usage */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -68,7 +69,8 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
         "Bearer %s",
         api_key,
         NEVERMORE_UA,
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }

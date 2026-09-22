@@ -89,6 +89,24 @@ int nm_agent_rolling_window(const NmAgent *a);
  * not real tokenization. */
 long nm_agent_context_budget(const NmAgent *a);
 
+/* Context-usage gauge (provider-reported, P2). Every number comes from
+ * the provider's `usage` object — never an estimate.
+ *
+ *   nm_agent_context_has_usage    a real prompt_tokens has arrived yet?
+ *   nm_agent_context_used_tokens  last round's prompt_tokens; -1 unknown
+ *   nm_agent_context_cached_tokens  prefix-cache read; -1 unknown
+ *   nm_agent_context_limit        active model's window; -1 unknown
+ *
+ * The limit is NOT provider usage: the agent has no catalog, so the UI
+ * resolves the active model's context_length and pushes it with
+ * nm_agent_set_context_limit (beside set_endpoint/set_timeout_ms). -1
+ * means unknown (an ids-only live catalog), and the display degrades. */
+int nm_agent_context_has_usage(const NmAgent *a);
+long nm_agent_context_used_tokens(const NmAgent *a);
+long nm_agent_context_cached_tokens(const NmAgent *a);
+long nm_agent_context_limit(const NmAgent *a);
+void nm_agent_set_context_limit(NmAgent *a, long limit);
+
 /* Stream-inactivity timeout (ms). While a round streams, if no delta
  * arrives for this long the step errors the turn ("timed out") instead
  * of waiting forever — a model that connects but never answers, or

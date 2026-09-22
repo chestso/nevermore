@@ -49,7 +49,8 @@ static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
         "Bearer %s",
         api_key,
         "nevermore (nevermore agent)",
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -66,7 +67,8 @@ static NmChatStream *openai_chat_begin(const NmProvider *p,
         "Bearer %s",
         api_key,
         "nevermore (nevermore agent)",
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }

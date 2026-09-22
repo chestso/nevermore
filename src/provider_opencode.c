@@ -116,6 +116,9 @@ static void opencode_endpoint(const NmProvider *p, const NmChatRequest *req,
     ep->user_agent = NEVERMORE_UA;
     ep->extra_headers = sess;
     ep->n_extra_headers = 1;
+    /* Usage rides the wire with or without the flag here (OPENCODE-API.md
+     * §3); request it explicitly for uniformity. */
+    ep->include_usage = 1;
 }
 
 NmChatResult nm_opencode_chat(const NmProvider *p, const NmChatRequest *req,

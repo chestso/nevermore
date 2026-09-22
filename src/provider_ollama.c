@@ -78,7 +78,8 @@ NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
         NEVERMORE_UA,
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage: ask for the streaming usage chunk */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -94,7 +95,8 @@ NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
         NEVERMORE_UA,
-        NULL, 0
+        NULL, 0,
+        1 /* include_usage */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }

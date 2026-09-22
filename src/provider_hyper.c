@@ -182,6 +182,10 @@ static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
     ep->user_agent = NEVERMORE_UA;
     ep->extra_headers = hdrs;
     ep->n_extra_headers = hyper_affinity_headers(req, hdrs);
+    /* Ask for a streaming usage chunk (context gauge). Verified live: with
+     * the flag Hyper emits a standalone choices:[] usage chunk; without it
+     * usage still rides the finish_reason chunk. */
+    ep->include_usage = 1;
 }
 
 static NmChatResult hyper_chat(const NmProvider *p, const NmChatRequest *req,

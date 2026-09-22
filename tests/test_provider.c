@@ -581,7 +581,7 @@ static void test_hyper_chat_end_to_end(void)
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, "you are terse", NULL, -1, -1,
         NULL, /* conversation_id */
-        capture_delta, &cap
+        capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -616,7 +616,7 @@ static void test_hyper_chat_begin_step(void)
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
         NULL, /* conversation_id */
-        capture_delta, &cap
+        capture_delta, NULL, &cap
     };
     NmChatResult err = { 0 };
     NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
@@ -717,7 +717,7 @@ static void test_hyper_chat_carries_affinity_headers(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        conv, capture_delta, &cap
+        conv, capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -756,7 +756,7 @@ static void test_hyper_chat_null_conversation_id_falls_back(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        NULL, capture_delta, &cap
+        NULL, capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -792,7 +792,7 @@ static void test_hyper_session_cache_opt_out(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        "nm-0123456789abcdef0123456789abcdef", capture_delta, &cap
+        "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -825,7 +825,7 @@ static void test_hyper_affinity_stable_across_paths(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        conv, capture_delta, &cap
+        conv, capture_delta, NULL, &cap
     };
     NmChatResult err = { 0 };
     NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
@@ -1065,7 +1065,7 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
         NULL, /* conversation_id */
-        capture_delta, &cap
+        capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-or-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1203,7 +1203,7 @@ static void test_opencode_chat_carries_session_header(void)
     NmChatRequest req = {
         "glm-5.3", &msg, 1, NULL, NULL, -1, -1,
         "nm-0123456789abcdef0123456789abcdef", /* conversation id */
-        capture_delta, &cap
+        capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1276,7 +1276,7 @@ static void test_opencode_chat_without_done_is_complete(void)
     Capture cap = { 0 };
     NmChatRequest req = {
         "minimax-m3", &msg, 1, NULL, NULL, -1, -1,
-        "nm-0123456789abcdef0123456789abcdef", capture_delta, &cap
+        "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
@@ -1309,7 +1309,7 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
     NmChatRequest req = {
         "mimo-v2.5-free", &msg, 1, NULL, NULL, -1, -1,
         NULL, /* no conversation id (direct caller) */
-        capture_delta, &cap
+        capture_delta, NULL, &cap
     };
     NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
