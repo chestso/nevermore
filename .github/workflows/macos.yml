@@ -26,13 +26,15 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the I/O-source subscription seam —
-          # runtime.h's TUI_SRC_*/fill_io_sources/on_io_ready, which
-          # replaced the fd-only fill_external_fds/on_external_ready).
+          # new boba API (currently the input-row gutter —
+          # components/textinput.h's TuiSpan + tui_textinput_set_gutter,
+          # nevermore's spinner/context gauge — and the display-column
+          # metrics fix that lands the cursor on the right cell when a
+          # gutter span or prompt is two cells wide).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 9c49c40c157e6e09a62f14ab6a7a38f2acda2c49
+          ref: 85c895444600e37658312bd0e5d001eaf5a3d34d
           path: boba
           fetch-depth: 0
 
