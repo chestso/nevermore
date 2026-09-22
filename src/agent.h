@@ -11,6 +11,7 @@
 #ifndef NM_AGENT_H
 #define NM_AGENT_H
 
+#include "nm_config.h"
 #include "provider.h"
 #include "tools.h"
 
@@ -137,28 +138,41 @@ int nm_agent_timeout_ms(const NmAgent *a);
  * single nearest deadline, not a fixed tick. */
 int nm_agent_next_timeout_ms(const NmAgent *a);
 
-/* Reasoning echo-back. OFF by default: every round's trace stays in
- * the session (it is displayed, and turning the echo on later still
- * sends the history's traces), but it is NOT re-sent to the provider
- * unless the config store's `reasoning` key is on. Enabled, each
- * assistant message riding a later request carries its trace as
- * "reasoning_content". The agent keeps no copy: it resolves the store
- * at the point of use.
+/* Reasoning echo-back: which assistant messages riding a later request
+ * carry their trace as "reasoning_content" — the store's
+ * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / ALL (see
+ * nm_config.h for what each mode means). The agent keeps no copy: it
+ * resolves the store at the point of use. The trace is received,
+ * displayed and kept in the session in every mode — the mode decides
+ * only what goes back on the wire.
  *
- * NOTE: the reason to offer this at all is docs/HYPER-API.md's claim
- * that a trace "must be echoed back" on any request carrying the turn
- * (including tool-call rounds). That is an inherited, hand-written doc
- * claim — NOT something nevermore has observed: the taxonomy above it
- * only counts which models STREAM a trace, Crush's hyper provider
- * handles no reasoning_content round trip, and no fixture in either
- * repo shows a hyper request failing with the field omitted. Treat it
- * as an open question, not a requirement; a live hyper probe is the
- * only thing that settles it. The other providers either ignore the
- * field or never stream a trace to begin with.
+ * FROZEN ONCE SENT. The mode may change freely while no request has
+ * carried a trace yet (there is nothing on the wire to invalidate).
+ * The first request that actually carries one latches the mode for the
+ * rest of the conversation: a request prefix that gains or loses a
+ * `reasoning_content` field is a different prefix, so a mid-
+ * conversation change would throw the provider's prefix cache away and
+ * can re-trip DeepSeek's thinking-mode replay check — the very failure
+ * the echo exists to avoid (docs/OPENCODE-API.md §3). A change after
+ * the latch applies to the next chat (a fresh agent).
+ * nm_agent_reasoning_echo reports the mode in force (store or latch);
+ * nm_agent_reasoning_echo_frozen says which it was.
  *
- * Takes effect when the next round is composed (a turn already in
- * flight honours it from its next round). */
-int nm_agent_echo_reasoning(const NmAgent *a);
+ * NOTE (why the mode exists at all): the echo was offered for
+ * docs/HYPER-API.md's claim that a trace "must be echoed back" on any
+ * request carrying the turn — an inherited, hand-written doc claim,
+ * not something nevermore had observed. It is now OBSERVED elsewhere:
+ * opencode:go load-balances one model id across upstreams and one of
+ * them 400s a tool-call turn replayed without its trace, which is what
+ * `tools` answers. Whether hyper itself needs the field is still open
+ * (a live hyper probe is what would settle it); `all` stays available
+ * as the faithful-if-expensive mode. */
+NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a);
+
+/* Is the echo mode frozen for this conversation (has a request already
+ * carried a trace)? A UI that shows or changes the setting needs this
+ * to say "the change applies to the next chat". */
+int nm_agent_reasoning_echo_frozen(const NmAgent *a);
 
 /* Register UI callbacks. */
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */

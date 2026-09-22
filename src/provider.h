@@ -84,12 +84,14 @@ typedef struct NmMessage
     /* Assistant reasoning trace. When present, the client serializes
      * it as "reasoning_content" on the message (the OpenAI-compatible
      * wire shape). Whether a trace is ever attached is the caller's
-     * decision — nevermore's agent attaches one only when its
-     * echo-back is enabled, which is OFF by default
-     * (nm_agent_echo_reasoning / the store's `reasoning` key); the
-     * echo itself rests on
-     * docs/HYPER-API.md's (unverified) claim that hyper needs the
-     * field back — see that accessor. NULL/"" = the field is omitted. */
+     * decision — nevermore's agent attaches one only when its echo
+     * mode says so (`tools` on tool-call messages, `all` on every
+     * assistant message with a trace; OFF by default —
+     * nm_agent_reasoning_echo / the store's `reasoning_echo` key). The
+     * field is required by DeepSeek's thinking-mode replay check on
+     * tool-call rounds (observed on opencode:go, docs/OPENCODE-API.md
+     * §3) and claimed for hyper by docs/HYPER-API.md's inherited,
+     * unverified note. NULL/"" = the field is omitted. */
     const char *reasoning;
 } NmMessage;
 

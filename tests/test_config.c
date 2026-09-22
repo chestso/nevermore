@@ -139,7 +139,7 @@ static void test_defaults_without_files(void)
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_MODEL));
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_DEFAULT);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 25);
-    ASSERT_EQ(nm_config_get_bool(c, NM_CFG_KEY_REASONING, 0), 0);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_OFF);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     ASSERT_EQ(nm_config_user_present(c), 0);
     nm_config_free(c);
@@ -154,16 +154,16 @@ static void test_user_file_parses(void)
                   "provider  = openai\n"
                   "model     = glm-5.3\n"
                   "rounds    = 40\n"
-                  "reasoning = on\n");
+                  "reasoning_echo = on\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openai");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "glm-5.3");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "40");
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING), "on");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_USER);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 40);
-    ASSERT_EQ(nm_config_get_bool(c, NM_CFG_KEY_REASONING, 0), 1);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_config_user_present(c), 1);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     nm_config_free(c);
@@ -220,13 +220,13 @@ static void test_bad_lines_are_skipped(void)
                   "bogus = 1\n"
                   "provider = not-a-provider\n"
                   "rounds = abc\n"
-                  "reasoning = maybe\n"
+                  "reasoning_echo = maybe\n"
                   "model = good-id\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_PROVIDER));
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_ROUNDS));
-    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_REASONING));
+    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO));
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "good-id");
     nm_config_free(c);
 }
@@ -290,34 +290,105 @@ static void test_env_garbage_is_ignored(void)
 {
     pin_paths("env-garbage");
     test_setenv("NEVERMORE_MAX_ROUNDS", "abc");
-    test_setenv("NEVERMORE_ECHO_REASONING", "maybe");
+    test_setenv("NEVERMORE_REASONING_ECHO", "maybe");
     test_setenv("NEVERMORE_PROVIDER", "not-a-provider");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_ROUNDS));
-    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_REASONING));
+    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO));
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_PROVIDER));
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MAX_ROUNDS");
-    test_unsetenv("NEVERMORE_ECHO_REASONING");
+    test_unsetenv("NEVERMORE_REASONING_ECHO");
     test_unsetenv("NEVERMORE_PROVIDER");
 }
 
 /* Truthy spellings normalize to on/off in every layer, so the file, the
- * view and the resolved value agree. */
+ * view and the resolved value agree. (The `reasoning_echo` key is no longer
+ * a bool: its three modes get their own test below.) */
 static void test_boolean_normalization(void)
 {
     pin_paths("bool");
-    write_file_at(g_user, "reasoning = YES\n");
+    write_file_at(g_user, "family_skip = YES\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING), "on");
-    test_setenv("NEVERMORE_ECHO_REASONING", "False");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_FAMILY_SKIP), "on");
+    test_setenv("NEVERMORE_CONNECT_FAMILY_SKIP", "False");
     nm_config_set_env(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING), "off");
-    ASSERT_EQ(nm_config_get_bool(c, NM_CFG_KEY_REASONING, 0), 0);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_FAMILY_SKIP), "off");
+    ASSERT_EQ(nm_config_get_bool(c, NM_CFG_KEY_FAMILY_SKIP, 1), 0);
     nm_config_free(c);
-    test_unsetenv("NEVERMORE_ECHO_REASONING");
+    test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
+}
+
+/* The `reasoning_echo` mode: three values, one vocabulary. The old bool
+ * spellings still parse (`on` means `all`, the pre-granularity
+ * meaning), every layer normalizes to the canonical spelling, and the
+ * mode resolver agrees with it — this is the one place the value space
+ * lives (nm_config_reasoning_echo_canon), so /config and the agent cannot
+ * drift apart. */
+static void test_reasoning_mode_vocabulary(void)
+{
+    char out[16];
+    /* off */
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("off", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("NO", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("0", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    /* tools — the mode the opencode:go replay check demands */
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("tools", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "tools");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("TOOL-CALLS", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "tools");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("tool_calls", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "tools");
+    /* all — every assistant message with a trace */
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("all", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "all");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("YES", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "all");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("1", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "all");
+    /* nothing else */
+    ASSERT_FALSE(nm_config_reasoning_echo_canon("maybe", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_reasoning_echo_canon("", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_reasoning_echo_canon("on off", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_valid_reasoning_echo("Tools ")); /* no trimming */
+
+    ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_OFF), "off");
+    ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_TOOLS), "tools");
+    ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_ALL), "all");
+
+    pin_paths("reasoning-echo-modes");
+    write_file_at(g_user, "reasoning_echo = tool-calls\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "tools");
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TOOLS);
+
+    /* Env above it, normalized and resolved the same way. */
+    test_setenv("NEVERMORE_REASONING_ECHO", "ON");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
+
+    /* Garbage in the env is dropped, never applied (the layer below
+     * stands), and the shadow write-back refuses it too. */
+    test_setenv("NEVERMORE_REASONING_ECHO", "sometimes");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING_ECHO), NM_CFG_USER);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "sometimes"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "reasoning_echo = off\n");
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_OFF);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_REASONING_ECHO");
+
+    /* No config at all: the mode is off, never a stale value. */
+    ASSERT_EQ(nm_config_reasoning_echo_mode(NULL), NM_REASONING_ECHO_OFF);
 }
 
 /* ---------------------------------------------------------------- */
@@ -331,10 +402,10 @@ static void test_shadow_write_and_reload(void)
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "openai"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "7"), 0);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING, "TRUE"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "TRUE"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 3);
     ASSERT_STR_EQ(read_file_at(g_shadow),
-                  "provider = openai\nrounds = 7\nreasoning = on\n");
+                  "provider = openai\nrounds = 7\nreasoning_echo = all\n");
     nm_config_free(c);
 
     /* A fresh load reads the shadow as the shadow layer. */
@@ -343,7 +414,7 @@ static void test_shadow_write_and_reload(void)
     ASSERT_EQ(nm_config_source(c2, NM_CFG_KEY_PROVIDER), NM_CFG_SHADOW);
     ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PROVIDER), "openai");
     ASSERT_EQ(nm_config_get_int(c2, NM_CFG_KEY_ROUNDS, 25), 7);
-    ASSERT_EQ(nm_config_get_bool(c2, NM_CFG_KEY_REASONING, 0), 1);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c2), NM_REASONING_ECHO_ALL);
     nm_config_free(c2);
 }
 
@@ -392,7 +463,7 @@ static void test_shadow_set_validates(void)
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "0"), -1);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "nope"), -1);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "bogus"), -1);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "maybe"), -1);
     ASSERT_EQ(nm_config_shadow_set(c, "nosuchkey", "1"), -1);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     ASSERT_FALSE(file_present(g_shadow));
@@ -497,7 +568,7 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(0), NM_CFG_KEY_PROVIDER);
     ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
     ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
-    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING);
+    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING_ECHO);
     ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_CONNECT_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_FAMILY_SKIP);
     ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SKIP_FAMILIES);
@@ -508,6 +579,10 @@ static void test_key_vocabulary(void)
     ASSERT_NULL(nm_config_key_at(11));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
+    /* The env spelling follows the key: reasoning_echo, not the old
+     * bare `reasoning` (or a reversed ECHO_REASONING). */
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_REASONING_ECHO),
+                  "NEVERMORE_REASONING_ECHO");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
@@ -580,7 +655,7 @@ static void test_defaults_and_resolve(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     NmCfgSource s = NM_CFG_CLI;
-    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING, &s), "off");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, &s), "off");
     ASSERT_EQ(s, NM_CFG_DEFAULT);
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_FAMILY_SKIP, &s), "off");
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, &s), "none");
@@ -619,12 +694,19 @@ static void test_runtime_layer(void)
     ASSERT_NOT_NULL(c);
 
     /* Runtime outranks even the CLI layer. */
-    nm_config_set_cli(c, NM_CFG_KEY_REASONING, "on");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_CLI);
-    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_REASONING, "off"), 0);
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_RUNTIME);
-    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING, NULL), "off");
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING), "off");
+    nm_config_set_cli(c, NM_CFG_KEY_REASONING_ECHO, "on");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING_ECHO), NM_CFG_CLI);
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_REASONING_ECHO, "off"), 0);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING_ECHO), NM_CFG_RUNTIME);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, NULL), "off");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "off");
+
+    /* The runtime layer speaks the mode vocabulary and refuses anything
+     * outside it (an invalid write leaves the value standing). */
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_REASONING_ECHO, "tools"), 0);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_REASONING_ECHO, "maybe"), -1);
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TOOLS);
 
     /* It is normalized + validated like any layer. */
     ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_SKIP_FAMILIES,
@@ -640,8 +722,8 @@ static void test_runtime_layer(void)
     ASSERT_STR_EQ(read_file_at(g_shadow), "");
 
     /* Clearing reveals the layer below (here the CLI value). */
-    nm_config_runtime_clear(c, NM_CFG_KEY_REASONING);
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING), NM_CFG_CLI);
+    nm_config_runtime_clear(c, NM_CFG_KEY_REASONING_ECHO);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_REASONING_ECHO), NM_CFG_CLI);
     nm_config_runtime_clear(c, NULL);
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, NULL),
                   "none");
@@ -749,7 +831,7 @@ int main(void)
     test_unsetenv("NEVERMORE_PROVIDER");
     test_unsetenv("NEVERMORE_MODEL");
     test_unsetenv("NEVERMORE_MAX_ROUNDS");
-    test_unsetenv("NEVERMORE_ECHO_REASONING");
+    test_unsetenv("NEVERMORE_REASONING_ECHO");
     test_unsetenv("NEVERMORE_CONFIG");
     test_unsetenv("NEVERMORE_SHADOW_CONFIG");
     test_unsetenv("NEVERMORE_SEARXNG_URL");
@@ -774,6 +856,7 @@ int main(void)
     RUN_TEST(test_cli_overrides_env);
     RUN_TEST(test_env_garbage_is_ignored);
     RUN_TEST(test_boolean_normalization);
+    RUN_TEST(test_reasoning_mode_vocabulary);
     RUN_TEST(test_shadow_write_and_reload);
     RUN_TEST(test_shadow_write_leaves_user_file_alone);
     RUN_TEST(test_shadow_reset_key_and_all);

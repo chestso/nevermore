@@ -39,11 +39,13 @@ typedef struct NmSessionMessage
     char *tool_call_id;    /* NM_ROLE_TOOL: answered call id, or NULL */
     char *tool_name;       /* NM_ROLE_TOOL: tool that produced this result */
     /* NM_ROLE_ASSISTANT: the round's reasoning trace. Kept for
-     * display; re-sent as reasoning_content only when the agent's
-     * echo-back is enabled (nm_agent_echo_reasoning / the store's
-     * `reasoning` key). The echo is a question at all only because the
-     * echo rests on docs/HYPER-API.md's unverified claim, not an
-     * observed hyper failure). NULL/"" when none. */
+     * display; re-sent as reasoning_content only when the agent's echo
+     * mode says so (`tools` on tool-call messages, `all` on every
+     * assistant message with a trace — nm_agent_reasoning_echo / the
+     * store's `reasoning_echo` key). What the echo is for: DeepSeek's
+     * thinking-mode replay check, observed on opencode:go
+     * (docs/OPENCODE-API.md §3), plus docs/HYPER-API.md's inherited,
+     * unverified claim for hyper. NULL/"" when none. */
     char *reasoning;
 } NmSessionMessage;
 

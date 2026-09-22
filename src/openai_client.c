@@ -186,12 +186,14 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         /* Reasoning echo-back: an assistant message may carry its
          * round's trace as reasoning_content. The composer decides
          * whether it does — nevermore's agent attaches a trace only
-         * when its echo-back is on (off by default; see
-         * nm_agent_echo_reasoning). The client serializes what it
-         * was handed, nothing more: hyper is the provider that
-         * prompts the echo, and only on docs/HYPER-API.md's
-         * inherited, unverified claim that the field is required on
-         * requests carrying the turn; for the rest it is inert
+         * when its echo mode says so (`tools`: on the messages
+         * carrying tool_calls; `all`: on every assistant message with
+         * a trace; off by default — see nm_agent_reasoning_echo). The
+         * client serializes what it was handed, nothing more. The
+         * field is required by DeepSeek's thinking-mode replay check
+         * on tool-call rounds (observed on opencode:go —
+         * docs/OPENCODE-API.md §3) and claimed by docs/HYPER-API.md
+         * for hyper (inherited, unverified); elsewhere it is inert
          * documentation of the thinking (and empty is tolerated). */
         if (req->messages[i].reasoning && *req->messages[i].reasoning)
             nm_json_set(m, "reasoning_content",

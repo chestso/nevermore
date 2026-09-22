@@ -35,8 +35,8 @@
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 
-/* The process config store the agent resolves `rounds` / `reasoning`
- * from; installed in main(). */
+/* The process config store the agent resolves `rounds` /
+ * `reasoning_echo` from; installed in main(). */
 static NmConfig *g_cfg;
 
 /* A job that prints a token and then stays alive — the yield window's
@@ -1131,10 +1131,12 @@ static void test_agent_reasoning_collected_and_echoed(void)
     nm_agent_on_state(agent, cap_state);
 
     /* Opt in: the echo is OFF unless asked for (see
-     * test_agent_reasoning_not_echoed_by_default). The echo is the
-     * store's `reasoning` key now. */
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING, "on");
-    ASSERT_EQ(nm_agent_echo_reasoning(agent), 1);
+     * test_agent_reasoning_not_echoed_by_default). The echo mode is
+     * the store's `reasoning` key now; `all` is the widest mode (the
+     * pre-granularity "on"). */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
 
     int rc = nm_agent_turn(agent, "read the fixture");
     ASSERT_EQ(rc, 0);
@@ -1150,12 +1152,17 @@ static void test_agent_reasoning_collected_and_echoed(void)
     ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "let me think about the edit") != NULL);
 
+    /* That request carried a trace, so the mode is now FROZEN for the
+     * conversation (see the freeze tests below). */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+
     nm_agent_free(agent);
     nm_toolset_free(tools);
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
 /* The echo is OFF by default: the trace is still received and
@@ -1200,7 +1207,8 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
-    ASSERT_EQ(nm_agent_echo_reasoning(agent), 0); /* the default */
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF); /* default */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
     int rc = nm_agent_turn(agent, "read the fixture");
     ASSERT_EQ(rc, 0);
@@ -1226,6 +1234,244 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE);
+}
+
+/* The mode's SCOPE: `tools` re-sends only the traces riding messages
+ * that carry tool_calls — the case the upstream replay check actually
+ * bites (docs/OPENCODE-API.md §3) — never a plain answer's. Scripted:
+ * turn 1 is a plain answer with a trace, turn 2 is a tool round (with
+ * a trace) whose final round answers. */
+static void test_agent_reasoning_echo_tools_scope(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"first think\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"let me think \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"about the edit\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first question"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    ASSERT_EQ(g_n_requests, 3);
+    /* Request 2 replays the plain answer: `tools` leaves its trace off
+     * the wire (the trace is still in the session and on screen). */
+    ASSERT_TRUE(strstr(g_requests[1], "first answer") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "first think") == NULL);
+    /* Request 3 replays the tool-call round: that message's trace rides
+     * back, and the answer's still does not. */
+    ASSERT_TRUE(strstr(g_requests[2], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "\"reasoning_content\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "about the edit") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "first think") == NULL);
+    /* The tool round is what froze the mode. */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* Nothing has ridden the wire yet, so nothing is frozen: the mode
+ * follows the store between turns. Three plain-answer turns (the mode
+ * is `tools` for the last one, which has no tool-call message in the
+ * history to attach anything to — so still no trace on the wire). */
+static void test_agent_reasoning_mode_change_before_send_applies(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace two\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace three\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer three\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
+    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    /* Request 1 had no history to replay, so no trace went out. */
+    ASSERT_TRUE(strstr(g_requests[0], "reasoning_content") == NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    /* Off now — and it applies: nothing on the wire is pinned yet. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_TRUE(strstr(g_requests[1], "answer one") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "trace one") == NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    /* And so does `tools` — still no trace has been sent, so the mode
+     * is not latched; `tools` simply has no eligible message yet. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_TRUE(strstr(g_requests[2], "answer two") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "trace two") == NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* Once a request HAS carried a trace, the mode is FROZEN: the store's
+ * new value is inert for this conversation, because a prefix that
+ * gains or loses a reasoning_content field is a different prefix
+ * (prompt cache — and the replay check the echo answers). Scripted:
+ * `all` for two turns (the second replays the first's trace and freezes
+ * the mode), then the key is switched off; the third request must still
+ * carry the traces. */
+static void test_agent_reasoning_echo_freezes_once_sent(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace two\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace three\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer three\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
+    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
+
+    /* Turn 2 replays turn 1's trace: the mode freezes here. */
+    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "trace one") != NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+
+    /* Switching the key off does NOT reshape this conversation's
+     * prefix — the frozen mode is what the next request uses. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"), 0);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_TRUE(strstr(g_requests[2], "trace one") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "trace two") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "\"reasoning_content\"") != NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
 static void test_agent_cancel_then_next_turn_works(void)
@@ -2035,6 +2281,9 @@ int main(void)
     RUN_TEST(test_agent_next_timeout_ms_reports_tool_deadline);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_reasoning_not_echoed_by_default);
+    RUN_TEST(test_agent_reasoning_echo_tools_scope);
+    RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
+    RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);
     TEST_SUMMARY();

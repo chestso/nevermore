@@ -26,7 +26,7 @@
  *   provider  = openai
  *   model     = glm-5.3
  *   rounds    = 40
- *   reasoning = on
+ *   reasoning_echo = tools
  *
  * The value is the rest of the line, trimmed, taken verbatim. Unknown
  * keys warn once and are ignored; an invalid value warns and falls
@@ -52,10 +52,34 @@ extern "C" {
 
 /* The knobs. One spelling each — no aliases, no NEVERMORE_ prefix in
  * the file. */
-#define NM_CFG_KEY_PROVIDER  "provider"
-#define NM_CFG_KEY_MODEL     "model"
-#define NM_CFG_KEY_ROUNDS    "rounds"
-#define NM_CFG_KEY_REASONING "reasoning"
+#define NM_CFG_KEY_PROVIDER "provider"
+#define NM_CFG_KEY_MODEL    "model"
+#define NM_CFG_KEY_ROUNDS   "rounds"
+/* Reasoning echo-back: which assistant messages re-send their thinking
+ * trace to the provider as `reasoning_content`. Three modes:
+ *
+ *   `off`   (default) — none. The trace is still received, displayed
+ *                       and kept in the session; it just never rides
+ *                       back.
+ *   `tools` — only on assistant messages carrying `tool_calls`. This is
+ *             the mode DeepSeek's thinking-mode replay check demands
+ *             (docs/OPENCODE-API.md §3): the upstream 400s a tool-call
+ *             turn replayed without its trace.
+ *   `all` — every assistant message that has a trace.
+ *
+ * The old bool spelling still parses: `on`/`true`/`1`/`yes` mean `all`,
+ * `off`/`false`/`0`/`no` mean `off`. A mode is normalized on write, so
+ * the file, the shadow, the env layer and /config all read the same.
+ * Env spelling: NEVERMORE_REASONING_ECHO.
+ *
+ * Once a request has actually carried a trace, the mode is FROZEN for
+ * that conversation (the agent latches it — see
+ * nm_agent_reasoning_echo_frozen): a request prefix that gains or loses
+ * a `reasoning_content` field is a different prefix, so changing the
+ * mode mid-conversation would throw the provider's prompt cache away
+ * and can re-trip the replay check the echo exists for. A change
+ * applies to the next chat. */
+#define NM_CFG_KEY_REASONING_ECHO "reasoning_echo"
 /* Per-address connect budget in ms (the bounded connect walk). A
  * positive decimal; unset = the transport's built-in default
  * (NM_CONNECT_ATTEMPT_MS). A durable profile value: a slow network
@@ -65,7 +89,7 @@ extern "C" {
 /* Address-family skip: after an address of a family burns the
  * connect budget (a black hole — the classic unroutable IPv6 on a
  * v4-only network), stop dialling that family for the rest of the
- * session. `on`/`off` (a bool, normalized like `reasoning`); unset =
+ * session. `on`/`off` (a bool, normalized like every bool key); unset =
  * off, so the walk keeps trying every address. The families to skip
  * are the ones that actually time out, never a fixed list: the walk
  * latches per family as the network proves itself. Env spelling:
@@ -113,6 +137,15 @@ typedef enum
     NM_CFG_RUNTIME      /* transient machinery value (never persisted) */
 } NmCfgSource;
 
+/* The `reasoning_echo` key's value space: which assistant messages re-send
+ * their trace (the key comment above says what each mode is for). */
+typedef enum
+{
+    NM_REASONING_ECHO_OFF = 0, /* never attach a trace (the default) */
+    NM_REASONING_ECHO_TOOLS,   /* only on messages carrying tool_calls */
+    NM_REASONING_ECHO_ALL      /* every assistant message with a trace */
+} NmReasoningEcho;
+
 typedef struct NmConfig NmConfig;
 
 /* Load the user config, then the shadow over it. Never fails on a
@@ -132,9 +165,11 @@ void nm_config_free(NmConfig *c);
 const char *nm_config_get(const NmConfig *c, const char *key);
 NmCfgSource nm_config_source(const NmConfig *c, const char *key);
 
-/* Truthiness for a bool key (`reasoning`, `family_skip`):
- * 1/true/on/yes, case-insensitive. Unset or unparseable yields
- * `fallback` (set_env already dropped garbage). */
+/* Truthiness for a bool key (`family_skip`, `searxng_enabled`,
+ * `rolling_window`): 1/true/on/yes, case-insensitive. Unset or
+ * unparseable yields `fallback` (set_env already dropped garbage). NOT
+ * the reader for `reasoning_echo`, whose value space is the three modes —
+ * use nm_config_reasoning_echo_mode. */
 int nm_config_get_bool(const NmConfig *c, const char *key, int fallback);
 
 /* Positive decimal, clamped to 100000; `fallback` when unset. */
@@ -171,7 +206,7 @@ const char *nm_config_env_name(const char *key);
 const char *nm_config_key_at(size_t i);
 
 /* Apply the environment layer (validated: a non-positive/garbage
- * rounds value and an unparseable reasoning value are ignored, so a
+ * rounds value and an unparseable reasoning_echo value are ignored, so a
  * typo can never silently flip provider-facing behavior). Called by
  * main.c after load. */
 void nm_config_set_env(NmConfig *c);
@@ -204,7 +239,7 @@ NmConfig *nm_config_store(void);
  * file atomically (tmp + rename), so the file always holds exactly the
  * keys the user changed at the prompt. `value` NULL or "" removes the
  * key (same as nm_config_shadow_reset). Values are validated and
- * normalized here (reasoning -> "on"/"off").
+ * normalized here (reasoning_echo -> "off"/"tools"/"all").
  *
  * Returns 0 on success, -1 when the key is unknown, the value is
  * invalid, or the file could not be written (the in-memory layer still
@@ -254,7 +289,26 @@ void nm_config_set_provider_validator(int (*fn)(const char *name));
  * `rounds` name is this shape under its own key's spelling. */
 int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
-int nm_config_valid_reasoning(const char *value);
+/* Is `value` a bool spelling (1/true/on/yes, 0/false/off/no,
+ * case-insensitive)? The shape the bool keys (family_skip,
+ * searxng_enabled, rolling_window) share, read back by
+ * nm_config_get_bool. */
+int nm_config_valid_bool(const char *value);
+/* Is `value` a reasoning echo mode — `off`, `tools` or `all`
+ * (case-insensitive), plus the bool spellings the key comment lists? */
+int nm_config_valid_reasoning_echo(const char *value);
+/* Canonicalize a validated reasoning mode into `out` ("off" / "tools" /
+ * "all"): the ONE place the vocabulary lives, so every layer and the
+ * /config view agree. Returns 1 on success, 0 when `value` is not a
+ * mode. */
+int nm_config_reasoning_echo_canon(const char *value, char *out, size_t cap);
+/* A mode's canonical spelling, for messages and /config. */
+const char *nm_config_reasoning_echo_name(NmReasoningEcho mode);
+/* The `reasoning_echo` key resolved and parsed: the winning layer's value as
+ * a mode. NM_REASONING_ECHO_OFF when the key is unset, and for a NULL
+ * config. This is what the agent reads at the point of use (before its
+ * own freeze latches — see agent.h). */
+NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
 
 /* Is `value` a family set: `none`, or one or both families joined by
  * '+' (`IPv4`, `IPv6`, `IPv4+IPv6`)? The tokens are the nm_family_name

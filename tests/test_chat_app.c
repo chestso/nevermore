@@ -2011,7 +2011,9 @@ static void test_reasoning_not_echoed_by_default(void)
 }
 
 /* Opted in, the same turn re-sends the trace as reasoning_content on
- * the request carrying the turn (the shape hyper requires). */
+ * the request carrying the turn. `all` is the widest mode (every
+ * assistant message with a trace); `tools` would cover this request
+ * too, since the assistant message carries the tool calls. */
 static void test_reasoning_echo_opt_in(void)
 {
     scratch_store_begin();
@@ -2020,7 +2022,7 @@ static void test_reasoning_echo_opt_in(void)
     AppHarness *h = run_reasoning_tool_turn(&sc, &th);
     ASSERT_NOT_NULL(h);
 
-    store_set(NM_CFG_KEY_REASONING, "on");
+    store_set(NM_CFG_KEY_REASONING_ECHO, "all");
 
     harness_type(h, "read it");
     harness_enter(h);
@@ -2036,6 +2038,54 @@ static void test_reasoning_echo_opt_in(void)
     close(sc.fd);
     remove(FIXTURE_PATH);
     scratch_store_end();
+}
+
+/* The mode is FROZEN once a request has carried a trace: /config reports
+ * the mode the NEXT request will use (the frozen one, not the store's),
+ * and a change to the key says out loud that it applies to the next
+ * chat — the prefix cannot change shape mid-conversation (prompt cache,
+ * and the replay check the echo answers). */
+static void test_config_reasoning_echo_freezes_for_the_chat(void)
+{
+    pin_cfg_paths("frozen-echo");
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    store_set(NM_CFG_KEY_REASONING_ECHO, "tools");
+    harness_type(h, "read it");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    /* The tool round's trace rode back, which is what freezes it. */
+    ASSERT_TRUE(strstr(g_request, "\"reasoning_content\"") != NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(nm_chat_app_agent(h->app)), 1);
+
+    /* The view answers "what will the next request send", not "what
+     * does the store say". */
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "reasoning_echo") != NULL);
+    ASSERT_TRUE(strstr(out, "frozen this chat") != NULL);
+
+    /* The change is still accepted and persisted (it is the next
+     * chat's setting), and the app says so instead of looking inert. */
+    harness_type(h, "/config set reasoning_echo off");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "config: reasoning_echo = off") != NULL);
+    ASSERT_TRUE(strstr(out, "the reasoning echo is frozen at 'tools'") !=
+                NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(), "reasoning_echo = off\n");
+
+    nm_config_free(cfg);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE_PATH);
 }
 
 /* Parallel tool calls arrive in ONE assistant message (several entries
@@ -2784,12 +2834,15 @@ static void test_config_runtime_change_writes_shadow(void)
     ASSERT_TRUE(strstr(harness_read(h), "saved to the session shadow") !=
                 NULL);
 
-    harness_type(h, "/config set reasoning on");
+    harness_type(h, "/config set reasoning_echo on");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "config: reasoning = on") != NULL);
+    /* `on` is the pre-granularity spelling of `all`, and the value is
+     * reported (and persisted) canonically. */
+    ASSERT_TRUE(strstr(harness_read(h), "config: reasoning_echo = all") != NULL);
 
-    /* The shadow holds exactly what the user typed. */
-    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning = on\n");
+    /* The shadow holds the normalized value (one canonical spelling per
+     * key: `on` -> `all` here, `TRUE` -> `on` for a bool key). */
+    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning_echo = all\n");
     /* The user file is byte-identical: the app wrote exactly one file. */
     ASSERT_TRUE(cfg_file_present(g_cfg_user));
     ASSERT_STR_EQ(cfg_user_bytes(), "model = from-user\n");
@@ -3732,6 +3785,7 @@ int main(void)
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
     RUN_TEST(test_config_runtime_change_writes_shadow);
+    RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_set_and_runtime_layer);

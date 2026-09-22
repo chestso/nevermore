@@ -80,7 +80,7 @@ Settings resolve once, lowest to highest:
 3. **runtime shadow** — `~/.local/state/nevermore/config`, written by
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
-   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_ECHO_REASONING`,
+   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
    `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
    `NEVERMORE_CONNECT_SKIP_FAMILIES`, `NEVERMORE_SEARXNG_URL`,
    `NEVERMORE_SEARXNG_ENABLED`, `NEVERMORE_ROLLING_WINDOW`,
@@ -103,7 +103,7 @@ config back in charge, with nothing else to unwind.
 provider         = openai
 model            = glm-5.3
 rounds           = 40
-reasoning        = on
+reasoning_echo   = tools
 connect_timeout  = 1500
 family_skip      = on
 skip_families    = none
@@ -147,6 +147,21 @@ budget at all. It only fires on that evidence — a walk that failed
 everywhere latches nothing. The latched set is the `skip_families` key
 (`none`, `ipv4`, `ipv6`, `ipv4+ipv6`), which the walk writes on the
 runtime layer and `/config` shows like any other value.
+
+`reasoning_echo` (`$NEVERMORE_REASONING_ECHO`) decides whether a round's
+thinking trace is re-sent to the
+provider as `reasoning_content` on the assistant messages of later
+requests. The trace is always received, shown (dimmed) and kept in the
+session; only the wire changes. `off` (default) sends none, `tools`
+sends the ones on messages that carry `tool_calls` — what DeepSeek's
+thinking-mode replay check demands, so a `deepseek` model on
+`opencode:go` stops returning an intermittent 400 on tool rounds —
+and `all` sends every trace. (`on`/`true`/`1` are accepted for `all`.)
+Once a request has actually carried a trace the mode is **frozen for
+that chat**: a prefix that gains or loses the field is a different
+prefix, so changing the key mid-conversation would throw the provider's
+prompt cache away; the change applies to the next chat, and `/config`
+says so.
 
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the

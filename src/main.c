@@ -78,9 +78,13 @@ static void usage(FILE *out)
             "  NEVERMORE_RUN_COMMAND_TIMEOUT_MS\n"
             "                          run_command silence budget in ms\n"
             "                          (default 300000; negative disables)\n"
-            "  NEVERMORE_ECHO_REASONING=1\n"
+            "  NEVERMORE_REASONING_ECHO=off|tools|all\n"
             "                          re-send reasoning traces to the\n"
-            "                          provider (off by default)\n"
+            "                          provider: never (default) / on\n"
+            "                          tool-call messages (what DeepSeek's\n"
+            "                          replay check wants) / on every\n"
+            "                          message. Frozen once a trace has\n"
+            "                          been sent in a chat\n"
             "  NEVERMORE_DEBUG_WIRE=1  record the wire to\n"
             "                          ~/.local/state/nevermore/wire/\n");
 }
@@ -262,7 +266,7 @@ static int run_interactive(const char *provider_name, const char *model,
     /* The resolved config: the app installs it as the process-wide
      * store (nm_chat_app_set_config → nm_config_set_store), so the
      * machinery resolves every setting from it at the point of use.
-     * Nothing is pushed — the agent reads `rounds`/`reasoning`, the
+     * Nothing is pushed — the agent reads `rounds`/`reasoning_echo`, the
      * connect walk reads `connect_timeout`/`family_skip`/
      * `skip_families`, the web_search tool reads `searxng`/
      * `searxng_enabled`. */

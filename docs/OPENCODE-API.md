@@ -1,4 +1,4 @@
-# OpenCode Zen + Go API Reference (live-probed 2026-09-15)
+# OpenCode Zen + Go API Reference (live-probed 2026-09-15, extended 2026-09-22)
 
 > Status: verified against the live wire on 2026-09-15 with the
 > box's real key (`machine opencode.ai` in `~/.authinfo`). Every
@@ -8,6 +8,11 @@
 > OpenRouter (docs/OPENROUTER-API.md). This file supersedes the
 > pre-work guesses in TODO.md's "OpenCode Zen truth" section —
 > several of those were wrong (see §8).
+>
+> The 2026-09-22 extension probed a failure nevermore hit live: the
+> routing headers that name the upstream behind a Go request, and the
+> thinking-mode `reasoning_content` replay rule one of those upstreams
+> enforces (§3, "Thinking-mode tool-call replay").
 
 ## 1. Overview
 
@@ -145,7 +150,9 @@ format,index}]`. The non-streaming body also carries a
   fragment-assembly contract `openai_client.c` already implements.
 - Tool-result round-trip (assistant `tool_calls` + `role:"tool"` +
   `tool_call_id`) echoed back verbatim and produced a normal
-  answer — the common-subset message shape is accepted.
+  answer — the common-subset message shape is accepted. (That probe
+  landed on a tolerant endpoint: the _validation_ of the round trip
+  is endpoint-dependent, see "Thinking-mode tool-call replay" below.)
 - Usage/cost: `prompt_tokens`, `completion_tokens`, `total_tokens`,
   `prompt_tokens_details.{cached_tokens,cache_write_tokens}`,
   `completion_tokens_details.{audio_tokens,reasoning_tokens}`,
@@ -157,6 +164,101 @@ emits (`model`, `messages` with `tool_calls`/`tool_call_id`,
 `stream:true`, `tools`+`tool_choice`, `stream_options` is optional)
 is accepted by both tiers. No Anthropic-shaped field is needed for
 the chat-completions route.
+
+### Thinking-mode tool-call replay: `reasoning_content` (live-probed 2026-09-22)
+
+**One Go model id is fronted by several upstream endpoints, and the
+gateway picks one per request.** Every reply names the one that served
+it: `x-opencode-endpoint-id`, `x-opencode-upstream-model-id`,
+`x-opencode-log-id`. Observed on Go, same key, minutes apart:
+
+| Model id              | `x-opencode-endpoint-id` (upstream model id)       |
+| --------------------- | -------------------------------------------------- |
+| `deepseek-v4.1-flash` | `novita-deepseek` (`deepseek/deepseek-v4.1-flash`) |
+|                       | `deepseek` (`deepseek-flash`)                      |
+|                       | `deepinfra-dsv4.1flash`                            |
+|                       | `orcarouter`                                       |
+| `deepseek-v4-flash`   | `radixark-deepseek-v4-flash`                       |
+| `glm-5.3`             | `fireworks` (`accounts/fireworks/models/glm-5p3`)  |
+
+The endpoints do **not** agree on validation, so the same conversation
+with the same body can 200 or 400 depending on where the request lands
+— a retry is a coin flip, not a fix, and the same model looks flaky
+rather than broken. Triaging a Go failure: the error body alone does
+not say which host refused; the `x-opencode-endpoint-id` header does.
+
+**The `deepseek` endpoint enforces DeepSeek's thinking-mode replay
+rule.** An assistant message in the request that carries `tool_calls`
+must include `reasoning_content` — the assistant turn the client is
+replaying is the one that streamed a thinking trace — otherwise the
+gateway relays the upstream refusal:
+
+```
+HTTP/1.1 400
+{"error":{"param":null,"type":"invalid_request_error","code":"invalid_request_error","message":"Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API."}}
+```
+
+Probed shapes (Go, `stream:true` + `tools`, fresh random
+`x-opencode-session`; a cell shows the verdict and how many requests
+landed on that endpoint):
+
+| assistant message in the request                      | `deepseek`                   | other endpoints |
+| ----------------------------------------------------- | ---------------------------- | --------------- |
+| `tool_calls`, `reasoning_content` **omitted**         | **400** (7/7, 8/8, 6/6, 9/9) | 200             |
+| `tool_calls`, `"reasoning_content": ""`               | 200 (6/6, 5/5)               | 200             |
+| `tool_calls`, `"reasoning_content": "<the trace>"`    | 200 (8/8, 12/12)             | 200             |
+| `tool_calls`, `content: null`, omitted                | **400** (6/6)                | 200             |
+| `tool_calls`, `content: null`, `""`                   | 200 (5/5)                    | 200             |
+| `tool_calls`, id `call_00_ET_…`, omitted              | 200 (9/9, 3/3)               | 200             |
+| `tool_calls`, id `call_00_ZZ_…` (fabricated), omitted | **400** (9/9)                | 200             |
+| no `tool_calls` (plain answer), omitted               | 200 (5/5)                    | 200             |
+| plain answer, `reasoning_content` present             | 200 (6/6)                    | 200             |
+| two tool-call rounds, one round omits                 | **400** (7/7, 9/9)           | 200             |
+
+So what is checked is the **presence** of the field, not its content:
+`""` is as good as the real trace, a `null` `content` is irrelevant,
+plain (non-`tool_calls`) assistant messages are exempt, and _every_
+tool-call-carrying assistant message in the request is checked, not
+just the newest one (a two-round loop whose first round omits the
+field 400s even when the second carries it, and vice versa).
+
+The model sweep behaved the same way for the other DeepSeek ids —
+`deepseek-v4-flash` (5/5), `deepseek-v4-pro` (6/6) and `deepseek-flash`
+(6/6) all 400'd on `deepseek` with the field omitted — with one
+exception, `deepseek-v4-flash-vision-exp` (6/6 × 200 on `deepseek`),
+i.e. the rule is per-endpoint, not per-model-id.
+
+The one bypass the probes found is keyed to the tool-call id's shape:
+ids shaped `call_00_ET_…` pass this endpoint with the field omitted
+(fabricated ones included, 12/12 across two runs), while a fabricated
+3-group id (`call_00_<lowercase>`, 8/8) and the same 4-group shape
+under another tag (`call_00_ZZ_…`, 9/9) are refused. Which shape a real
+round carries is the issuing upstream's choice (one `novita-deepseek`
+stream produced an `ET` id, the next a 3-group one), so a client cannot
+lean on this; see §7.
+
+**What a client must do about it.** Stream a thinking trace and replay
+the turn in a tool loop? Then put `reasoning_content` back on every
+tool-call-carrying assistant message, or the request 400s whenever it
+lands on `deepseek` (roughly half the attempts during this probe).
+Echoing is validation-safe everywhere probed: the tolerant endpoints
+and this one accept the field wherever it is present, including on
+plain assistant messages, and an empty string is enough for a round
+whose trace the client did not keep. Nevermore's echo-back is **off by
+default**, and it is granular — `off` / `tools` (only the messages
+carrying `tool_calls`: the smallest setting this route accepts) /
+`all` (every assistant message with a trace) — via the store's
+`reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
+`/config set reasoning_echo tools`. That is the exact shape of the bug this
+section was probed for: a nevermore tool round on `opencode:go` +
+`deepseek-v4.1-flash` fails with that 400, the next attempt succeeds,
+and the failure returns a few rounds later; `reasoning_echo = tools` ends
+it. One client-side caveat that follows from prefix caching: once a
+request has actually carried a trace, the mode must not change
+mid-conversation (a prefix that gains or loses the field is a
+different prefix) — nevermore freezes it for the chat
+(`nm_agent_reasoning_echo_frozen`), and a key change applies to the next
+one.
 
 ### Endpoint variants (Zen, per the docs' endpoint table)
 
@@ -200,21 +302,26 @@ real request:
 All errors are `{"type":"error","error":{"type":…,"message":…}}`
 with an HTTP status:
 
-| Case                               | HTTP | `error.type`                                                      |
-| ---------------------------------- | ---- | ----------------------------------------------------------------- |
-| Missing / invalid key              | 401  | `AuthError` (`"Missing API key."` / `"Invalid API key."`)         |
-| No Go subscription, Go chat        | 401  | `AuthError` (probed: bad key on the Go path)                      |
-| Unknown model (Go and Zen both)    | 401  | `ModelError` (`"Model nope-1 is not supported"`) — _401, not 400_ |
-| Empty Zen credit balance           | 401  | `CreditsError`                                                    |
-| Missing `x-opencode-session`       | 400  | `MissingSessionID`                                                |
-| Free model via third-party session | 400  | `MissingSessionID`                                                |
+| Case                                                                             | HTTP | `error.type`                                                                                      |
+| -------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------- |
+| Missing / invalid key                                                            | 401  | `AuthError` (`"Missing API key."` / `"Invalid API key."`)                                         |
+| No Go subscription, Go chat                                                      | 401  | `AuthError` (probed: bad key on the Go path)                                                      |
+| Unknown model (Go and Zen both)                                                  | 401  | `ModelError` (`"Model nope-1 is not supported"`) — _401, not 400_                                 |
+| Empty Zen credit balance                                                         | 401  | `CreditsError`                                                                                    |
+| Missing `x-opencode-session`                                                     | 400  | `MissingSessionID`                                                                                |
+| Free model via third-party session                                               | 400  | `MissingSessionID`                                                                                |
+| Tool-call turn replayed without `reasoning_content` (on the `deepseek` endpoint) | 400  | `invalid_request_error` (`"Upstream request failed: … must be passed back to the API."` — see §3) |
 
 nevermore maps 401/403 → `NM_CHAT_ERR_AUTH` generically; the
 specific `error.type` is inside the body, which the existing
 error-body drain already carries, so the banner text is
 informative without new parsing. (`ModelError` arriving as 401 and
 `MissingSessionID` as 400 are worth remembering when reading a
-failure: "auth rejected" may mean "bad model id".)
+failure: "auth rejected" may mean "bad model id".) The
+`reasoning_content` row is different in kind from the others: it is
+the _upstream's_ refusal relayed by the gateway, it depends on which
+endpoint took the request (§3), and only `x-opencode-endpoint-id`
+says which one that was — the same conversation retried may 200.
 
 ## 5. Model catalogs (probed 2026-09-15)
 
@@ -270,6 +377,15 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
 - **`x-opencode-session: <stable conversation id>` on every
   request** (Go hard-requires it; Zen free ids require it and
   charge nothing);
+- **`reasoning_content` on every assistant message that carries
+  `tool_calls`** when the client streams/replays thinking traces
+  (empty string is accepted when the trace was not kept) — without
+  it the `deepseek` endpoint refuses the round (§3). Nevermore's
+  agent attaches the trace only when its echo mode says so
+  (`reasoning_echo = tools` is exactly this, and the smallest such
+  setting; `all` also covers answer rounds), so the key must be
+  `tools` or `all` for `opencode:go` DeepSeek routes — off by
+  default, and frozen for a chat once a trace has been sent;
 - catalog `GET {base}/models`, tokenless, mapped id-only with a
   static fallback (a canned-wire test must assert the header set
   and the mapping, per the project's test conventions).
@@ -292,6 +408,16 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
 - `x-opencode-session` uniqueness expectations (per turn? per
   process?) are not specified beyond "stable session ID"; the
   docs' "each conversation" is the only guidance.
+- **What exempts a `call_00_ET_…` tool-call id from the replay
+  check on the `deepseek` endpoint** (real and fabricated ids both
+  passed, 3-group ids and another tag both failed — §3). The shape
+  is the issuing upstream's choice, so no client can lean on it,
+  but the predicate is unexplained.
+- Which upstreams serve which Go model id in general (only
+  `deepseek-v4.1-flash`, `deepseek-v4-flash` and `glm-5.3` were
+  sampled), and whether the routing mix is stable over time — if
+  `deepseek` is ever the _only_ upstream, the echo stops being a
+  coin-flip workaround and becomes mandatory.
 
 ## 8. Corrections to the pre-work notes (TODO.md "OpenCode Zen truth")
 
@@ -312,3 +438,12 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   tolerated by `sse.c` but worth asserting in the canned-wire test.
   The completion check must therefore rest on a non-empty
   `choices[0].finish_reason`, not on the `[DONE]` marker.
+- **A Go model id is not one upstream** (§3, 2026-09-22): the
+  gateway load-balances a single id across several endpoints
+  (`novita-deepseek`, `deepseek`, `deepinfra-dsv4.1flash`,
+  `orcarouter`… for `deepseek-v4.1-flash`) and they do not validate
+  alike — so "the same request sometimes 400s" is a real property
+  of the route, not a client bug, and `x-opencode-endpoint-id` is
+  the only way to tell which host refused. Corollary: the Go tier's
+  DeepSeek thinking-mode replay rule (§3) cannot be modelled as a
+  per-model id property; it is per-endpoint.

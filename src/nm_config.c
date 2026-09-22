@@ -105,7 +105,7 @@ static const struct
     { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL", NULL },
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
-    { NM_CFG_KEY_REASONING, "NEVERMORE_ECHO_REASONING", "off" },
+    { NM_CFG_KEY_REASONING_ECHO, "NEVERMORE_REASONING_ECHO", "off" },
     { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
       NM_STR(NM_CONNECT_ATTEMPT_MS) },
     { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP", "off" },
@@ -181,7 +181,9 @@ int nm_config_valid_rounds(const char *value)
     return nm_config_valid_positive_int(value);
 }
 
-int nm_config_valid_reasoning(const char *value)
+/* A bool spelling: 1/true/on/yes, 0/false/off/no (case-insensitive) —
+ * the shape family_skip / searxng_enabled / rolling_window share. */
+int nm_config_valid_bool(const char *value)
 {
     if (!value || !*value)
         return 0;
@@ -201,8 +203,9 @@ int nm_config_valid_reasoning(const char *value)
 /* Normalize a validated truthy spelling to "on"/"off", so the shadow
  * file, /config's view and the env layer all read the same. The 'o'
  * prefix is ambiguous ("on" and "off" both start with it), so it is
- * disambiguated on the second character — the bug the `reasoning =
- * off` file layer sat on. */
+ * disambiguated on the second character — the bug the old bool-valued
+ * `reasoning` key sat on (renamed `reasoning_echo` when its value space
+ * grew to three modes). */
 static const char *normalize_bool(const char *value)
 {
     if (value[0] == '1' || value[0] == 't' || value[0] == 'T' ||
@@ -293,6 +296,76 @@ int nm_config_valid_family_set(const char *value)
     return nm_config_family_set_canon(value, tmp, sizeof(tmp));
 }
 
+/* ---------------------------------------------------------------- */
+/* The `reasoning_echo` value space                                  */
+/* ---------------------------------------------------------------- */
+
+/* Case-insensitive membership of `value` in a NULL-terminated token
+ * list (the vocabulary tables below are read off it). */
+static int token_in(const char *value, const char *const *tokens)
+{
+    for (int i = 0; tokens[i]; i++)
+        if (fam_token_eq(value, strlen(value), tokens[i]))
+            return 1;
+    return 0;
+}
+
+/* Three modes, with the old bool spellings folded in: `on` means `all`
+ * (the pre-granularity behavior), so an existing config / env value
+ * keeps meaning what it always meant. */
+static const char *const REASONING_OFF[] = { "off", "no", "false", "0",
+                                             NULL };
+static const char *const REASONING_TOOLS[] = { "tools", "tool", "calls",
+                                               "tool-calls", "tool_calls",
+                                               NULL };
+static const char *const REASONING_ALL[] = { "all", "on", "true", "yes", "1",
+                                             NULL };
+
+int nm_config_reasoning_echo_canon(const char *value, char *out, size_t cap)
+{
+    if (!value || !*value)
+        return 0;
+    const char *canon = token_in(value, REASONING_OFF)     ? "off"
+                        : token_in(value, REASONING_TOOLS) ? "tools"
+                        : token_in(value, REASONING_ALL)   ? "all"
+                                                           : NULL;
+    if (!canon)
+        return 0;
+    snprintf(out, cap, "%s", canon);
+    return 1;
+}
+
+int nm_config_valid_reasoning_echo(const char *value)
+{
+    char tmp[16];
+    return nm_config_reasoning_echo_canon(value, tmp, sizeof(tmp));
+}
+
+const char *nm_config_reasoning_echo_name(NmReasoningEcho mode)
+{
+    switch (mode) {
+    case NM_REASONING_ECHO_TOOLS:
+        return "tools";
+    case NM_REASONING_ECHO_ALL:
+        return "all";
+    case NM_REASONING_ECHO_OFF:
+        break;
+    }
+    return "off";
+}
+
+NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c)
+{
+    const char *v =
+        c ? nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, NULL) : NULL;
+    char canon[16];
+    if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
+        return NM_REASONING_ECHO_OFF;
+    return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
+           : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
+                                       : NM_REASONING_ECHO_OFF;
+}
+
 /* Validate + normalize ONE key's raw value into `out` (capped at
  * NM_CONFIG_VAL): 1 = accepted, 0 = rejected. The single place the
  * file layer, the environment layer and the shadow write-back all
@@ -309,11 +382,14 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_CONTEXT_BUDGET) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
-    } else if (strcmp(key, NM_CFG_KEY_REASONING) == 0 ||
-               strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
+    } else if (strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0) {
+        /* The one key whose value space is not a bool: off/tools/all
+         * (with the old bool spellings folded in). */
+        return nm_config_reasoning_echo_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {
-        if (!nm_config_valid_reasoning(raw))
+        if (!nm_config_valid_bool(raw))
             return 0;
         snprintf(out, cap, "%s", normalize_bool(raw));
         return 1;
@@ -549,12 +625,14 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
 
         CfgKey *k = key_by_name(c, key);
         if (!k) {
-            fprintf(stderr,
-                    "nevermore: %s: unknown key '%s' (keys: provider, "
-                    "model, rounds, reasoning, connect_timeout, "
-                    "family_skip, skip_families, searxng, "
-                    "searxng_enabled): ignored\n",
+            /* The key list is read off the one table, so it can never
+             * drift out of the hint (it did: reasoning, rolling_window
+             * and context_budget were missing). */
+            fprintf(stderr, "nevermore: %s: unknown key '%s' (keys: ",
                     which, key);
+            for (int i = 0; i < NM_CFG_NKEYS; i++)
+                fprintf(stderr, "%s%s", i ? ", " : "", KEYS[i].name);
+            fprintf(stderr, "): ignored\n");
             continue;
         }
         char norm[NM_CONFIG_VAL];

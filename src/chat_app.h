@@ -74,12 +74,14 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 
-/* Tool-call round cap and reasoning echo-back are NOT app state: they
- * are config values (the store's `rounds` and `reasoning` keys) that
+/* Tool-call round cap and reasoning echo mode are NOT app state: they
+ * are config values (the store's `rounds` and `reasoning_echo` keys) that
  * the agent resolves at the point of use (nm_agent_max_rounds /
- * nm_agent_echo_reasoning). Setting them goes through the store
- * (/config set rounds …, /config set reasoning …), which main.c
- * installs as the process store via nm_chat_app_set_config. */
+ * nm_agent_reasoning_echo). Setting them goes through the store
+ * (/config set rounds …, /config set reasoning_echo off|tools|all), which
+ * main.c installs as the process store via nm_chat_app_set_config. The
+ * echo mode, unlike the cap, is frozen for the conversation once a
+ * request has carried a trace — see nm_agent_reasoning_echo_frozen. */
 
 /* Stream-inactivity timeout for the agent this app builds and the live
  * agent (0 = agent default NM_AGENT_DEFAULT_TIMEOUT_MS, <0 = disable).

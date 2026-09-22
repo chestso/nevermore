@@ -450,6 +450,13 @@ When reasoning is enabled, the trace must be echoed back — as
 carries that turn (including tool-call rounds); some providers require it
 present (or empty) on assistant tool-call messages in the history.
 
+> nevermore note: this paragraph is inherited (unverified for hyper), but
+> the rule itself is now **observed** on another route — OpenCode Go's
+> `deepseek` endpoint 400s a tool-call round replayed without the field
+> (probed 2026-09-22, `docs/OPENCODE-API.md` §3). nevermore's echo is
+> granular (`off` / `tools` / `all`) and frozen for a chat once a request
+> has carried a trace.
+
 **Tool-call round trip:** the assistant turn with `tool_calls` and
 `finish_reason: "tool_calls"` is persisted and re-sent on the next request,
 immediately followed by `tool` role messages carrying each result. This whole

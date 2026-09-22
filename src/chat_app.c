@@ -594,7 +594,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     /* The tool-round cap and the reasoning echo are NOT pushed: the
      * agent resolves them from the config store at the point of use
-     * (nm_agent_max_rounds / nm_agent_echo_reasoning). Only the
+     * (nm_agent_max_rounds / nm_agent_reasoning_echo). Only the
      * stream-inactivity timeout, which has no config key yet, is a
      * per-agent value. */
     nm_agent_set_timeout_ms(a, app->timeout_ms);
@@ -1241,9 +1241,42 @@ static void print_config(NmChatApp *app)
         const char *k = nm_config_key_at(i);
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = nm_config_resolve(app->cfg, k, &src);
-        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-",
-                 nm_config_source_name(src));
+        const char *layer = nm_config_source_name(src);
+        /* The reasoning echo can be FROZEN for this conversation: once
+         * a request has carried a trace, the mode sent then holds (a
+         * prefix that gains or loses the field is a different prefix —
+         * prompt cache). Show what the NEXT request will use, not what
+         * the store says. */
+        if (strcmp(k, NM_CFG_KEY_REASONING_ECHO) == 0 && app->agent &&
+            nm_agent_reasoning_echo_frozen(app->agent)) {
+            v = nm_config_reasoning_echo_name(nm_agent_reasoning_echo(app->agent));
+            layer = "frozen this chat";
+        }
+        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-", layer);
     }
+}
+
+/* One line of truth when a reasoning-echo change cannot take effect
+ * yet: the mode is frozen for this conversation, because a request has
+ * already carried a trace (the prefix — and with it the provider's
+ * cached prefix and DeepSeek's replay check — must not change shape
+ * mid-conversation; see nm_agent_reasoning_echo_frozen). Silence when the
+ * change matches the frozen mode: nothing is being overridden. */
+static void note_frozen_echo(NmChatApp *app, const char *key)
+{
+    if (!app->agent || !app->cfg ||
+        (key && strcmp(key, NM_CFG_KEY_REASONING_ECHO) != 0) ||
+        !nm_agent_reasoning_echo_frozen(app->agent))
+        return;
+    NmReasoningEcho frozen = nm_agent_reasoning_echo(app->agent);
+    const char *eff = nm_config_resolve(app->cfg, NM_CFG_KEY_REASONING_ECHO, NULL);
+    char canon[16] = "";
+    nm_config_reasoning_echo_canon(eff ? eff : "", canon, sizeof(canon));
+    if (strcmp(canon, nm_config_reasoning_echo_name(frozen)) != 0)
+        sys_line(app, "config: the reasoning echo is frozen at '%s' for "
+                      "this conversation (a request already carried a "
+                      "trace) — the change applies to the next chat",
+                 nm_config_reasoning_echo_name(frozen));
 }
 
 /* Apply one key from the store: clears the machinery's runtime layer
@@ -1285,6 +1318,7 @@ static void config_reset(NmChatApp *app, const char *key)
         sys_line(app, "config: %s reset", key);
     else
         sys_line(app, "config: all keys reset");
+    note_frozen_echo(app, key);
 }
 
 /* /config set <key> <value>: validate + normalize + persist one plain
@@ -1340,6 +1374,7 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
     } else {
         sys_line(app, "%s — saved to the session shadow", line);
     }
+    note_frozen_echo(app, key);
 }
 
 /* ---------------------------------------------------------------- */

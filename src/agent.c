@@ -82,12 +82,21 @@ struct NmAgent
      * NM_AGENT_DEFAULT_TIMEOUT_MS, >0 = this value, <0 = disabled.
      * last_activity is the monotonic timestamp of the last streaming
      * delta (or the round's start); the deadline seam compares it
-     * against the effective timeout. (The tool-round cap and the
-     * reasoning echo are NOT fields: they are config values the agent
-     * resolves from the store at the point of use — see
-     * nm_agent_max_rounds / nm_agent_echo_reasoning.) */
+     * against the effective timeout. (The tool-round cap is NOT a
+     * field: it is a config value the agent resolves from the store at
+     * the point of use — nm_agent_max_rounds. The reasoning echo IS a
+     * field, by necessity: the store is read until a request actually
+     * carries a trace, and the mode that was sent is then frozen for
+     * the conversation — reasoning_echo_frozen / reasoning_echo_mode below.) */
     int timeout_ms;
     double last_activity;
+    /* Reasoning echo mode (the store's `reasoning_echo` key until the first
+     * request that carries a trace; the sent mode thereafter). A
+     * prefix that gains or loses a reasoning_content field is a
+     * different prefix, so the mode must not drift mid-conversation —
+     * see nm_agent_reasoning_echo. */
+    int reasoning_echo_frozen;
+    NmReasoningEcho reasoning_echo_mode;
     char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
@@ -403,17 +412,25 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     return best;
 }
 
-/* Reasoning echo-back is the config store's `reasoning` key, resolved
- * at the point of use (OFF by default — the trace is received and
- * displayed either way). The agent keeps no copy; the store is the
- * source. See docs/HYPER-API.md on why the echo is a question at all
- * (an unverified hand-written claim, not an observed hyper
- * requirement). */
-int nm_agent_echo_reasoning(const NmAgent *a)
+/* The echo mode in force. Before anything has been sent this is the
+ * store's `reasoning_echo` key, resolved at the point of use (OFF by
+ * default — the trace is received and displayed either way); from the
+ * first request that actually carried a trace it is the mode frozen at
+ * that moment, whatever the store says now. See agent.h for why the
+ * freeze is not optional (a prefix that gains or loses the field is a
+ * different prefix: prompt cache + the replay check the echo answers)
+ * and docs/OPENCODE-API.md §3 for the observed failure behind `tools`. */
+NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a)
 {
-    (void)a;
+    if (a && a->reasoning_echo_frozen)
+        return a->reasoning_echo_mode;
     NmConfig *c = nm_config_store();
-    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_REASONING, 0) : 0;
+    return c ? nm_config_reasoning_echo_mode(c) : NM_REASONING_ECHO_OFF;
+}
+
+int nm_agent_reasoning_echo_frozen(const NmAgent *a)
+{
+    return a ? a->reasoning_echo_frozen : 0;
 }
 
 NmAgentState nm_agent_state(const NmAgent *a)
@@ -614,6 +631,12 @@ static int begin_round(NmAgent *a)
         set_error(a, "out of memory");
         return -1;
     }
+    /* The echo mode this request will use — the store's value, or the
+     * mode frozen by an earlier request (nm_agent_reasoning_echo). Each
+     * message attaches its trace only when the mode says so; whether
+     * any actually did is what freezes the mode below. */
+    NmReasoningEcho echo = nm_agent_reasoning_echo(a);
+    int echoed = 0;
     for (size_t i = 0; i < view.n; i++) {
         const NmSessionMessage *sm = view.messages[i];
         msgs[i].role = (sm->role == NM_ROLE_USER)        ? "user"
@@ -623,11 +646,21 @@ static int begin_round(NmAgent *a)
         msgs[i].content = sm->content;
         msgs[i].tool_calls_json = sm->tool_calls_json;
         msgs[i].tool_call_id = sm->tool_call_id;
-        /* Reasoning echo-back is the store's `reasoning` value: the
-         * session keeps every trace for display either way, but only an
-         * enabled store hands it to the wire. */
-        msgs[i].reasoning =
-            nm_agent_echo_reasoning(a) ? sm->reasoning : NULL;
+        /* Reasoning echo-back: the session keeps every trace for
+         * display either way — the mode decides which ones ride back.
+         * A tool-call round is where the upstream replay check
+         * actually bites (docs/OPENCODE-API.md §3), which is what
+         * `tools` covers; `all` re-sends the answer rounds' traces
+         * too. */
+        const char *trace = NULL;
+        if (sm->reasoning && *sm->reasoning &&
+            (echo == NM_REASONING_ECHO_ALL ||
+             (echo == NM_REASONING_ECHO_TOOLS && sm->tool_calls_json &&
+              *sm->tool_calls_json)))
+            trace = sm->reasoning;
+        msgs[i].reasoning = trace;
+        if (trace)
+            echoed = 1;
     }
 
     NmChatRequest req = {
@@ -656,6 +689,17 @@ static int begin_round(NmAgent *a)
         return -1;
     }
     a->round++;
+    /* A request that carried a trace is on its way: freeze the mode for
+     * the rest of the conversation. A prefix that gains or loses a
+     * reasoning_content field is a different prefix, so what a later
+     * key change would really do is throw the provider's cached prefix
+     * away and re-open the replay check this echo answers; the change
+     * belongs to the next chat. (A composition whose send never got
+     * accepted above froze nothing — nothing rode the wire.) */
+    if (echoed && !a->reasoning_echo_frozen) {
+        a->reasoning_echo_frozen = 1;
+        a->reasoning_echo_mode = echo;
+    }
     /* Arm the inactivity deadline at the moment the stream opens: an
      * accepted connection that never sends a delta must still time out
      * even though nothing is readable. */
@@ -678,8 +722,8 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
 
     /* Record what the model said, with the round's reasoning trace
      * kept alongside it. The trace is display/history material: the
-     * wire sees it again only when the agent's echo-back is enabled
-     * (nm_agent_echo_reasoning / the store's `reasoning` key). */
+     * wire sees it again only when the echo mode says so
+     * (nm_agent_reasoning_echo / the store's `reasoning_echo` key). */
     if (a->n_calls == 0) {
         if (a->text && *a->text)
             nm_session_append_reasoning(a->session, a->reasoning, a->text);
