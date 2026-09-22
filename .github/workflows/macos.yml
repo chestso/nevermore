@@ -28,13 +28,14 @@ jobs:
           # Pinned: bump alongside the nevermore commit that consumes a
           # new boba API (currently the input-row gutter —
           # components/textinput.h's TuiSpan + tui_textinput_set_gutter,
-          # nevermore's spinner/context gauge — and the display-column
+          # nevermore's spinner/context gauge — plus the display-column
           # metrics fix that lands the cursor on the right cell when a
-          # gutter span or prompt is two cells wide).
+          # gutter span or prompt is two cells wide, and the Windows
+          # stdin-reader teardown fix this repo's Windows loop inherits).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 85c895444600e37658312bd0e5d001eaf5a3d34d
+          ref: d88169bb8fa9381e1896bf56bf98ddbf1603f3b4
           path: boba
           fetch-depth: 0
 
