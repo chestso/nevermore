@@ -411,10 +411,12 @@ Probed live against `POST /v1/chat/completions` (DeepSeek V4.1 Flash,
 Client rule (mirrors `docs/OPENCODE-API.md` §3): do not assume "second-to-last
 event" or that `[DONE]` is the last event. A usage object may ride the
 `finish_reason` chunk, a standalone `choices:[]` chunk, or — on other
-providers — more than one chunk. Fire on any event carrying `usage`, last
-write wins. `prompt_tokens` is the context-sent count; `cached_tokens` may be
-absent (see §6). nevermore sends `include_usage: true` for uniformity, but
-tolerates its absence.
+providers — more than one chunk. Fire on any event carrying a `usage`
+**object**, last write wins (a `"usage":null` member is a placeholder, not a
+report — the DeepSeek endpoint behind opencode:go stamps one on every chunk;
+see `docs/OPENCODE-API.md` §3). `prompt_tokens` is the context-sent count;
+`cached_tokens` may be absent (see §6). nevermore sends `include_usage: true`
+for uniformity, but tolerates its absence.
 
 **Reasoning content:** models with `can_reason` may return a `reasoning_content`
 field on the assistant message. This field carries the model's chain-of-thought

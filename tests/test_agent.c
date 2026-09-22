@@ -2000,6 +2000,59 @@ static void test_agent_context_usage_accessors(void)
     close(sc.fd);
 }
 
+/* The gauge never regresses to "unknown" mid-conversation: a round whose
+ * chunks carry the `"usage":null` placeholder (the DeepSeek endpoint
+ * behind opencode:go stamps one on every chunk — wire dump 2026-09-22)
+ * is not a report and must not wipe the last real one. Turn 1 reports
+ * usage; turn 2 is all-null chunks; the accessors still answer turn 1's
+ * numbers. */
+static void test_agent_context_usage_survives_null_usage_round(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1234,"
+        "\"completion_tokens\":5,\"total_tokens\":1239,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":900}}}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"},"
+        "\"finish_reason\":null}],\"usage\":null}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":null}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
+
+    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    /* Still turn 1's report: a placeholder is not a report. */
+    ASSERT_TRUE(nm_agent_context_has_usage(agent));
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
+    ASSERT_EQ(nm_agent_context_cached_tokens(agent), 900);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_agent_rolling_window_default_off(void)
 {
     reset_capture();
@@ -2446,6 +2499,7 @@ int main(void)
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_context_usage_accessors);
+    RUN_TEST(test_agent_context_usage_survives_null_usage_round);
     RUN_TEST(test_agent_rolling_window_default_off);
     RUN_TEST(test_agent_context_overflow_reports_provider_error);
     RUN_TEST(test_agent_set_model_changes_wire_model);

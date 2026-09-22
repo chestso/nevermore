@@ -160,6 +160,9 @@ typedef struct NmUsage
  * than once per round — OpenCode rides usage on two chunks; Hyper on the
  * finish_reason chunk or, with stream_options, a standalone choices: []
  * chunk — so the receiver keeps the LAST report. Absent fields are -1.
+ * A `"usage":null` member is a placeholder, not a report (the DeepSeek
+ * endpoint behind opencode:go stamps one on every chunk; docs/
+ * OPENCODE-API.md §3), so the client fires only for a real OBJECT.
  * The usage pointer is borrowed, valid for the call. */
 typedef void (*NmUsageFn)(const NmUsage *usage, void *userdata);
 

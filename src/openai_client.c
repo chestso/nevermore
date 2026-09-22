@@ -340,9 +340,16 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
      * ride the finish_reason chunk (Hyper without stream_options), a
      * standalone choices:[] chunk (most providers), or more than one
      * chunk (OpenCode Zen) — so fire on any event that has it; the
-     * receiver keeps the last. Absent fields are -1. */
+     * receiver keeps the last. Absent fields are -1.
+     *
+     * Only an OBJECT is a report: some upstreams stamp a `"usage":null`
+     * placeholder on every chunk of a round (the DeepSeek endpoint
+     * behind opencode:go does — wire dump 2026-09-22), and firing on it
+     * would hand the receiver an all-unknown report, wiping a known
+     * gauge mid-round. JSON null parses to a real node, so the type
+     * check is what tells "not reported" from "reported empty". */
     NmJson *uobj = nm_json_get(obj, "usage");
-    if (uobj && st->on_usage) {
+    if (nm_json_type(uobj) == NM_JSON_OBJECT && st->on_usage) {
         NmUsage u;
         u.prompt_tokens = (long)nm_json_num(nm_json_get(uobj, "prompt_tokens"));
         u.completion_tokens =

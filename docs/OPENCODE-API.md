@@ -83,7 +83,7 @@ Notes:
 ## 3. Chat streaming (live, authenticated)
 
 SSE framing is OpenAI `chat.completion.chunk`, but Zen/Go is **not
-byte-identical** to OpenAI — three deltas from real responses:
+byte-identical** to OpenAI — four deltas from real responses:
 
 1. **`[DONE]` is NOT guaranteed, and when present it is not the
    last event.** Two observed terminations, per upstream model:
@@ -116,6 +116,17 @@ byte-identical** to OpenAI — three deltas from real responses:
    `finish_reason:"stop"` chunk **and** on a later choices-empty
    chunk (the `[DONE]`-adjacent one). Never assume the
    second-to-last event is the usage carrier.
+4. **The DeepSeek endpoint stamps `"usage":null` on every chunk**
+   (probed from a nevermore wire dump, 2026-09-22): the load-balanced
+   upstream that reports DeepSeek-shaped usage
+   (`prompt_cache_hit_tokens` / `prompt_cache_miss_tokens` alongside
+   `prompt_tokens_details.cached_tokens`) carries a `"usage":null`
+   member on _each_ reasoning/content chunk, with the real object only
+   at the end of the round. A client that reads the member's presence
+   as "usage reported" hands its receiver an all-unknown report
+   mid-round — nevermore's context gauge blanked to `ctx -/-` while the
+   model thought, then snapped back at the round's end. Fire on a
+   usage **object** (JSON type), never on the key's mere presence.
 
 Delta shape (Go, `glm-5.3-flash`, probed):
 

@@ -343,6 +343,53 @@ static void test_usage_absent_fires_nothing(void)
     close(lfd);
 }
 
+/* A `"usage":null` chunk is a PLACEHOLDER, not a report: the DeepSeek
+ * upstream behind opencode:go stamps it on every chunk of a round
+ * (wire dump 2026-09-22), while the round's real usage object arrives
+ * last. Firing the callback on the placeholder hands the receiver an
+ * all-unknown report and wipes a known gauge mid-round; the callback
+ * fires only for a real usage OBJECT. */
+static void test_usage_null_chunk_fires_nothing(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"},"
+        "\"finish_reason\":null}],\"usage\":null}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
+        "\"completion_tokens\":32,\"total_tokens\":67}}\n\n"
+        "data: {\"choices\":[],\"usage\":null}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 1 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, capture_usage, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    /* The one real object, never the two nulls around it. */
+    ASSERT_EQ(cap.n_usage, 1);
+    ASSERT_EQ(cap.last_usage.prompt_tokens, 35);
+    ASSERT_EQ(cap.last_usage.total_tokens, 67);
+    ASSERT_EQ(cap.last_usage.cached_tokens, -1);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void test_chat_stream_end_to_end(void)
 {
     int port;
@@ -2020,6 +2067,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_usage_rides_finish_reason_chunk);
     RUN_TEST(test_usage_standalone_chunk);
     RUN_TEST(test_usage_absent_fires_nothing);
+    RUN_TEST(test_usage_null_chunk_fires_nothing);
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_step_pending_between_events);
     RUN_TEST(test_chat_step_drains_everything_available);
