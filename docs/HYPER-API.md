@@ -358,9 +358,63 @@ Non-streamed response (`choices[0].message`, OpenAI shape):
     "message": { "role": "assistant", "content": "...", "tool_calls": [ ... ] },
     "finish_reason": "stop"
   }],
-  "usage": { "prompt_tokens": 1521, "completion_tokens": 38, "total_tokens": 1559 }
+  "usage": {
+    "prompt_tokens": 1521,
+    "completion_tokens": 38,
+    "total_tokens": 1559,
+    "cost": { "usd": 0.0001, "hypercredits": 0.002 },
+    "remaining": { "hypercredits": 88 }
+  }
 }
 ```
+
+**Custom usage fields.** Hyper extends the standard `usage` object with cost
+and balance information:
+
+| Field                          | Meaning                                                 |
+| ------------------------------ | ------------------------------------------------------- |
+| `usage.cost.usd`               | Cost of this request in USD                             |
+| `usage.cost.hypercredits`      | Cost of this request in Hypercredits                    |
+| `usage.remaining.hypercredits` | Team's remaining Hypercredit balance after this request |
+
+These fields are included in both regular and streaming responses.
+
+#### 3.5.1 Streaming usage (`stream_options.include_usage`)
+
+Probed live against `POST /v1/chat/completions` (DeepSeek V4.1 Flash,
+2026-09-21). Two delivery modes, both observed:
+
+- **Without `stream_options`** — Hyper still reports usage. It rides the
+  final `finish_reason` chunk itself (the last `choices`-bearing event):
+
+  ```jsonc
+  data: {"...","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+         "usage":{"prompt_tokens":35,"completion_tokens":32,"total_tokens":67,
+                  "completion_tokens_details":{"reasoning_tokens":29},
+                  "cost":{"usd":0.0001,"hypercredits":0.002}}}
+  data: [DONE]
+  ```
+
+- **With `"stream_options": {"include_usage": true}`** — usage arrives on a
+  trailing event whose `choices` array is **empty** (`"choices":[]`), before
+  `data: [DONE]` (the OpenAI-compatible convention, matching Ollama cloud and
+  OpenCode):
+
+  ```jsonc
+  data: {"...","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+  data: {"...","choices":[],"usage":{"prompt_tokens":35,"completion_tokens":24,
+         "total_tokens":59,"completion_tokens_details":{"reasoning_tokens":21},
+         "cost":{"usd":0.0001,"hypercredits":0.002}}}
+  data: [DONE]
+  ```
+
+Client rule (mirrors `docs/OPENCODE-API.md` §3): do not assume "second-to-last
+event" or that `[DONE]` is the last event. A usage object may ride the
+`finish_reason` chunk, a standalone `choices:[]` chunk, or — on other
+providers — more than one chunk. Fire on any event carrying `usage`, last
+write wins. `prompt_tokens` is the context-sent count; `cached_tokens` may be
+absent (see §6). nevermore sends `include_usage: true` for uniformity, but
+tolerates its absence.
 
 **Reasoning content:** models with `can_reason` may return a `reasoning_content`
 field on the assistant message. This field carries the model's chain-of-thought
