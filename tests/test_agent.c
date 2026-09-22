@@ -1317,6 +1317,87 @@ static void test_agent_reasoning_echo_tools_scope(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
+/* A tool-call round that streamed NO trace still rides back the FIELD
+ * (as an empty string). The upstream replay check tests presence, not
+ * content (docs/OPENCODE-API.md §3), so `tools` must not treat "no
+ * trace this round" as "omit the field" — the 2026-09-22 wire dump is
+ * exactly this shape: round 1 streams a trace, round 2 answers
+ * straight to a tool call, and the next request 400s unless the second
+ * message carries `"reasoning_content":""`. Scripted: two tool rounds
+ * (first with a trace, second without) and a final answer. */
+static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 2: no reasoning channel at all — straight to the call. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture twice"), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "all done");
+
+    ASSERT_EQ(g_n_requests, 3);
+    /* Round 2's request replays round 1 with its real trace. */
+    ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "trace one") != NULL);
+    /* Round 3's request replays BOTH tool rounds: round 1's trace rides
+     * back as before, and round 2 — which streamed none — still carries
+     * the field, empty. */
+    ASSERT_TRUE(strstr(g_requests[2], "\"reasoning_content\":\"\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "trace one") != NULL);
+    /* The trace-less round is a tool-call message like any other: the
+     * field's presence on the wire froze the mode. */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
 /* Nothing has ridden the wire yet, so nothing is frozen: the mode
  * follows the store between turns. Three plain-answer turns (the mode
  * is `tools` for the last one, which has no tool-call message in the
@@ -2282,6 +2363,7 @@ int main(void)
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_reasoning_not_echoed_by_default);
     RUN_TEST(test_agent_reasoning_echo_tools_scope);
+    RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);

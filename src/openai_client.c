@@ -185,17 +185,20 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
                         nm_json_new_string(req->messages[i].tool_call_id));
         /* Reasoning echo-back: an assistant message may carry its
          * round's trace as reasoning_content. The composer decides
-         * whether it does — nevermore's agent attaches a trace only
-         * when its echo mode says so (`tools`: on the messages
-         * carrying tool_calls; `all`: on every assistant message with
-         * a trace; off by default — see nm_agent_reasoning_echo). The
-         * client serializes what it was handed, nothing more. The
-         * field is required by DeepSeek's thinking-mode replay check
-         * on tool-call rounds (observed on opencode:go —
-         * docs/OPENCODE-API.md §3) and claimed by docs/HYPER-API.md
-         * for hyper (inherited, unverified); elsewhere it is inert
-         * documentation of the thinking (and empty is tolerated). */
-        if (req->messages[i].reasoning && *req->messages[i].reasoning)
+         * whether it does — nevermore's agent attaches the field to
+         * the messages its echo mode says so (`tools`: on every
+         * message carrying tool_calls; `all`: that plus every
+         * assistant message with a trace; off by default — see
+         * nm_agent_reasoning_echo). The client serializes what it was
+         * handed, nothing more. NULL omits the field; a non-NULL
+         * string emits it, and "" is a deliberate empty string (the
+         * presence is what DeepSeek's thinking-mode replay check
+         * demands on a tool-call round whose trace was never
+         * streamed — observed on opencode:go, docs/OPENCODE-API.md
+         * §3). The field is claimed for hyper by docs/HYPER-API.md's
+         * inherited, unverified note; elsewhere it is inert
+         * documentation of the thinking. */
+        if (req->messages[i].reasoning)
             nm_json_set(m, "reasoning_content",
                         nm_json_new_string(req->messages[i].reasoning));
         nm_json_push(messages, m);

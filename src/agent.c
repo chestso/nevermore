@@ -651,12 +651,23 @@ static int begin_round(NmAgent *a)
          * A tool-call round is where the upstream replay check
          * actually bites (docs/OPENCODE-API.md §3), which is what
          * `tools` covers; `all` re-sends the answer rounds' traces
-         * too. */
+         * too.
+         *
+         * The check demands the FIELD, not a real trace: it 400s a
+         * tool_calls message that omits reasoning_content even when
+         * the round streamed no trace at all (the model may answer
+         * straight to a tool call, as the 2026-09-22 wire dump shows),
+         * and `""` satisfies it. So every tool_calls message under
+         * `tools`/`all` carries the field — the round's trace, or ""
+         * when there was none (NmMessage.reasoning: NULL omits, ""
+         * emits an empty string). */
+        int carries_calls = sm->tool_calls_json && *sm->tool_calls_json;
+        int mode_tools = echo == NM_REASONING_ECHO_TOOLS;
+        int mode_all = echo == NM_REASONING_ECHO_ALL;
         const char *trace = NULL;
-        if (sm->reasoning && *sm->reasoning &&
-            (echo == NM_REASONING_ECHO_ALL ||
-             (echo == NM_REASONING_ECHO_TOOLS && sm->tool_calls_json &&
-              *sm->tool_calls_json)))
+        if (carries_calls && (mode_tools || mode_all))
+            trace = (sm->reasoning && *sm->reasoning) ? sm->reasoning : "";
+        else if (mode_all && sm->reasoning && *sm->reasoning)
             trace = sm->reasoning;
         msgs[i].reasoning = trace;
         if (trace)

@@ -81,17 +81,22 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
-    /* Assistant reasoning trace. When present, the client serializes
+    /* Assistant reasoning trace. When attached, the client serializes
      * it as "reasoning_content" on the message (the OpenAI-compatible
-     * wire shape). Whether a trace is ever attached is the caller's
-     * decision — nevermore's agent attaches one only when its echo
-     * mode says so (`tools` on tool-call messages, `all` on every
+     * wire shape). Whether one is attached is the caller's decision —
+     * nevermore's agent attaches it only when its echo mode says so
+     * (`tools` on every tool-call message, `all` on those plus every
      * assistant message with a trace; OFF by default —
-     * nm_agent_reasoning_echo / the store's `reasoning_echo` key). The
-     * field is required by DeepSeek's thinking-mode replay check on
-     * tool-call rounds (observed on opencode:go, docs/OPENCODE-API.md
+     * nm_agent_reasoning_echo / the store's `reasoning_echo` key).
+     * The field is required by DeepSeek's thinking-mode replay check
+     * on tool-call rounds (observed on opencode:go, docs/OPENCODE-API.md
      * §3) and claimed for hyper by docs/HYPER-API.md's inherited,
-     * unverified note. NULL/"" = the field is omitted. */
+     * unverified note.
+     *
+     * NULL = omit the field; a non-NULL string = emit it. "" is a
+     * deliberate empty string, not "omit": the replay check tests the
+     * field's PRESENCE, so a tool-call round whose trace was never
+     * streamed must still carry `"reasoning_content":""`. */
     const char *reasoning;
 } NmMessage;
 

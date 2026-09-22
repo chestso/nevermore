@@ -61,11 +61,13 @@ extern "C" {
  *   `off`   (default) — none. The trace is still received, displayed
  *                       and kept in the session; it just never rides
  *                       back.
- *   `tools` — only on assistant messages carrying `tool_calls`. This is
- *             the mode DeepSeek's thinking-mode replay check demands
- *             (docs/OPENCODE-API.md §3): the upstream 400s a tool-call
- *             turn replayed without its trace.
- *   `all` — every assistant message that has a trace.
+ *   `tools` — every assistant message carrying `tool_calls`: the
+ *             round's trace, or an empty string when the round streamed
+ *             none. This is the mode DeepSeek's thinking-mode replay
+ *             check demands (docs/OPENCODE-API.md §3): the upstream
+ *             400s a tool-call turn replayed without the FIELD, and
+ *             `""` satisfies it as well as a real trace.
+ *   `all` — that, plus every other assistant message that has a trace.
  *
  * The old bool spelling still parses: `on`/`true`/`1`/`yes` mean `all`,
  * `off`/`false`/`0`/`no` mean `off`. A mode is normalized on write, so

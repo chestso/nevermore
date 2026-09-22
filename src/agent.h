@@ -144,7 +144,11 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * nm_config.h for what each mode means). The agent keeps no copy: it
  * resolves the store at the point of use. The trace is received,
  * displayed and kept in the session in every mode — the mode decides
- * only what goes back on the wire.
+ * only what goes back on the wire. `tools`/`all` attach the field to
+ * EVERY tool-call message, the round's trace or "" when the round
+ * streamed none: the replay check tests the field's presence, so a
+ * trace-less tool round must still ride back an empty
+ * `reasoning_content` (docs/OPENCODE-API.md §3).
  *
  * FROZEN ONCE SENT. The mode may change freely while no request has
  * carried a trace yet (there is nothing on the wire to invalidate).

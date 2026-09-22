@@ -1927,6 +1927,45 @@ static void test_reasoning_content_omitted_when_absent(void)
     close(lfd);
 }
 
+/* An EMPTY trace is not "absent": the composer hands the client ""
+ * precisely when a tool-call round streamed no trace but the field
+ * must still ride the wire (DeepSeek's thinking-mode replay check
+ * tests presence — docs/OPENCODE-API.md §3), so the client emits
+ * `"reasoning_content":""` rather than dropping it. */
+static void test_reasoning_content_empty_string_emits_field(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0 };
+    NmMessage msg = {
+        "assistant", NULL,
+        "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{}\"}}]",
+        NULL, ""
+    };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"reasoning_content\":\"\"") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* base_url split: a bracketed IPv6 literal must survive, because
  * "http://[::1]:8080/v1" is the only way to point an endpoint at a v6
  * host (and the only way a test can drive one address). The old
@@ -2005,6 +2044,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_affinity_headers_logged_verbatim);
     RUN_TEST(test_reasoning_content_serialized_when_attached);
     RUN_TEST(test_reasoning_content_omitted_when_absent);
+    RUN_TEST(test_reasoning_content_empty_string_emits_field);
     RUN_TEST(test_split_base_url_accepts_bracketed_ipv6);
     TEST_SUMMARY();
 }
