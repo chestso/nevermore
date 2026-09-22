@@ -23,6 +23,13 @@
 extern "C" {
 #endif
 
+/* The User-Agent nevermore identifies as, on every wire surface:
+ * chat requests (via NmOpenaiEndpoint.user_agent) and one-shot
+ * catalog fetches alike. One definition so they cannot drift — a
+ * hardcoded copy in a provider's catalog fetch is the same header
+ * with a second source of truth. */
+#define NM_USER_AGENT "nevermore (nevermore agent)"
+
 /* Provider-supplied extra request headers on top of the fixed set
  * (Content-Type, auth, User-Agent). Two tiers of one gateway that
  * differ only in a routing header are the motivating case

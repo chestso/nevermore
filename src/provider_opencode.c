@@ -37,7 +37,6 @@
 
 #define OPENCODE_GO_DEFAULT  "https://opencode.ai/zen/go/v1"
 #define OPENCODE_ZEN_DEFAULT "https://opencode.ai/zen/v1"
-#define NEVERMORE_UA         "nevermore (nevermore agent)"
 
 /* Static fallback catalog: a curated subset of
  * data/nm-opencode-models.json (Go). The live /models list is the
@@ -113,7 +112,7 @@ static void opencode_endpoint(const NmProvider *p, const NmChatRequest *req,
     ep->base_url = opencode_base(p, base_url);
     ep->auth_header = "Bearer %s";
     ep->api_key = api_key;
-    ep->user_agent = NEVERMORE_UA;
+    ep->user_agent = NM_USER_AGENT;
     ep->extra_headers = sess;
     ep->n_extra_headers = 1;
     /* Usage rides the wire with or without the flag here (OPENCODE-API.md
@@ -164,7 +163,7 @@ static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
 {
     NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
     NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
-                            NEVERMORE_UA, &sess, 1 };
+                            NM_USER_AGENT, &sess, 1 };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)

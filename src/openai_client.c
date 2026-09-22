@@ -815,7 +815,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     }
     append_extra_headers(hdrs, &nh, ep->extra_headers, ep->n_extra_headers);
     hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = ep->user_agent ? ep->user_agent : "nevermore";
+    hdrs[nh].value = ep->user_agent ? ep->user_agent : NM_USER_AGENT;
     hdrs[nh].secret = 0;
     nh++;
 
@@ -1217,7 +1217,7 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
     }
     append_extra_headers(hdrs, &nh, extra, n_extra);
     hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = "nevermore (nevermore agent)";
+    hdrs[nh].value = NM_USER_AGENT;
     hdrs[nh].secret = 0;
     nh++;
 

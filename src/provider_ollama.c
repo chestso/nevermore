@@ -27,7 +27,6 @@
 
 #define OLLAMA_LOCAL_DEFAULT "http://localhost:11434/v1"
 #define OLLAMA_CLOUD_DEFAULT "https://ollama.com/v1"
-#define NEVERMORE_UA         "nevermore (nevermore agent)"
 
 /* Static fallback catalog (subset of data/nm-ollama-models.json;
  * used when the daemon/cloud is unreachable). */
@@ -77,7 +76,7 @@ NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
         ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
-        NEVERMORE_UA,
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage: ask for the streaming usage chunk */
     };
@@ -94,7 +93,7 @@ NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
         ollama_base(p, base_url, api_key),
         "Bearer %s", /* ignored for local: no key, no header */
         api_key,
-        NEVERMORE_UA,
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage */
     };

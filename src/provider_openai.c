@@ -48,7 +48,7 @@ static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
         (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE,
         "Bearer %s",
         api_key,
-        "nevermore (nevermore agent)",
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage */
     };
@@ -66,7 +66,7 @@ static NmChatStream *openai_chat_begin(const NmProvider *p,
         (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE,
         "Bearer %s",
         api_key,
-        "nevermore (nevermore agent)",
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage */
     };
@@ -105,7 +105,7 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
         nh++;
     }
     hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = "nevermore (nevermore agent)";
+    hdrs[nh].value = NM_USER_AGENT;
     hdrs[nh].secret = 0;
     nh++;
 

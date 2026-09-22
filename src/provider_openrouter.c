@@ -26,7 +26,6 @@
 #include "json.h"
 
 #define OPENROUTER_DEFAULT_BASE "https://openrouter.ai/api/v1"
-#define NEVERMORE_UA            "nevermore (nevermore agent)"
 
 /* Static fallback catalog (subset of data/nm-openrouter-models.json). */
 static const NmModel openrouter_static_models[] = {
@@ -50,7 +49,7 @@ static NmChatResult openrouter_chat(const NmProvider *p,
         openrouter_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA,
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage: harmless; OpenRouter always sends usage */
     };
@@ -68,7 +67,7 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
         openrouter_base(base_url),
         "Bearer %s",
         api_key,
-        NEVERMORE_UA,
+        NM_USER_AGENT,
         NULL, 0,
         1 /* include_usage */
     };
@@ -98,7 +97,7 @@ static int modalities_have_image(NmJson *arch)
 static void openrouter_fetch_catalog(const char *base_url)
 {
     NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
-                            NEVERMORE_UA,
+                            NM_USER_AGENT,
                             NULL, 0 };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);

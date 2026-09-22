@@ -57,7 +57,6 @@
 #include "xxh3.h"
 
 #define HYPER_DEFAULT_BASE "https://hyper.charm.land/v1"
-#define NEVERMORE_UA       "nevermore (nevermore agent)"
 
 /* Static fallback catalog (subset of data/nm-hyper-models.json,
  * which regenerates from the live /v1/models payload). */
@@ -179,7 +178,7 @@ static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
     ep->base_url = hyper_base(base_url);
     ep->auth_header = "Bearer %s";
     ep->api_key = api_key;
-    ep->user_agent = NEVERMORE_UA;
+    ep->user_agent = NM_USER_AGENT;
     ep->extra_headers = hdrs;
     ep->n_extra_headers = hyper_affinity_headers(req, hdrs);
     /* Ask for a streaming usage chunk (context gauge). Verified live: with
@@ -225,7 +224,7 @@ static void hyper_fetch_catalog(const char *base_url)
         hyper_derive_crush_id();
     NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
     NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
-                            NEVERMORE_UA, &crush, 1 };
+                            NM_USER_AGENT, &crush, 1 };
     const char *err = NULL;
     NmJson *doc = nm_openai_models(&ep, &err);
     if (!doc)
