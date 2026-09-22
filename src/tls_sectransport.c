@@ -29,14 +29,14 @@
 #include <Security/SecureTransport.h>
 
 /* Secure Transport is deprecated since macOS 10.15 in favor of
- * Network.framework — that is a known, accepted cost of the
- * OS-native-only TLS policy (see the header comment): Secure
- * Transport remains the broadly available C surface on the OSes we
- * target, and the deprecation is informational, not a removal.
- * Silence it file-locally so real warnings stay visible in the build
- * log; revisit if/when the backend moves to Network.framework. */
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+ * Network.framework — a known, accepted cost of the OS-native-only TLS
+ * policy (see the header comment): it remains the broadly available C
+ * surface on the OSes we target, and the deprecation is informational,
+ * not a removal. The -Wdeprecated-declarations notes it raises on
+ * every API here are therefore accepted noise, not something to
+ * silence: a pragma outlives the reason it was added (and this build
+ * has no -Werror to appease). Revisit if/when the backend moves to
+ * Network.framework. */
 
 #include "transport_internal.h"
 
@@ -198,7 +198,5 @@ const NmTlsBackend *nm_tls_backend_sectransport(void)
     };
     return &backend;
 }
-
-#pragma clang diagnostic pop
 
 #endif /* NM_TLS_SECTRANSPORT */
