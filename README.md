@@ -70,6 +70,15 @@ Environment variables win over the file. Point elsewhere with
 `NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
 default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
+The input row is always on screen, busy or not: it gathers the next
+prompt while a turn runs (keys edit it; Enter is a no-op until the turn
+ends; Ctrl+C interrupts). Left of the prompt its gutter carries the
+context gauge, `ctx <used>/<limit>`, built only from what the provider
+last reported against the active model's catalog window — with a `⚡`
+marker when the prefix cache was read — plus `thinking…` /
+`executing <tool>…` while a turn is in flight. `/context` prints the
+exact breakdown; an unknown number reads as `-`, never an estimate.
+
 ## Configuration
 
 Settings resolve once, lowest to highest:

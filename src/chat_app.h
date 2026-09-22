@@ -2,9 +2,9 @@
  *
  * Inline mode in the primary terminal buffer: the conversation
  * transcript goes to the terminal's own scrollback, a textinput
- * collects the prompt, and a spinner occupies a live status line
- * while the agent streams. No alt-screen — nevermore behaves like a
- * chat in your shell, not like an editor.
+ * collects the prompt, and the spinner + context gauge live in the
+ * input row's gutter while the agent streams. No alt-screen —
+ * nevermore behaves like a chat in your shell, not like an editor.
  *
  * Transcript protocol (boba's streaming IR; docs/TRANSCRIPT-BLOCKS.md):
  *

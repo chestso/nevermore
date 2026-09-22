@@ -597,6 +597,18 @@ static void harness_step_once(AppHarness *h)
     tui_runtime_flush(h->rt);
 }
 
+/* The exact bytes boba's span path paints for one gutter span. The
+ * gutter is a TuiStyle span set (not an app byte writer), so a test
+ * derives the expected bytes from the same color role the app declares
+ * — that is what makes the assertion about the ROLE, not a literal.
+ * Caller frees. */
+static char *gutter_span_bytes(TuiColor color, const char *text)
+{
+    TuiStyle s = tui_style_foreground(tui_style_new(), color);
+    s.inline_ = 1;
+    return tui_style_render(&s, text);
+}
+
 /* ---------------------------------------------------------------- */
 /* Tests                                                            */
 /* ---------------------------------------------------------------- */
@@ -734,11 +746,32 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* The frame's first row is the spinner itself: no leading
      * line separator (the phantom row). */
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
-    /* A braille spinner glyph is on the frame, in its own Yellow role
-     * (the live "activity" pixel) - the muted Comment label follows. */
-    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
-    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b" NM_SGR_TOOL
-                                             " thinking…") != NULL);
+    /* The busy frame carries the INPUT ROW with its gutter: the braille
+     * glyph in the activity role, the context gauge (no usage, no known
+     * limit yet) and the busy label, then the accent prompt — the input
+     * is always where the next prompt is gathered (R1). */
+    char *glyph = gutter_span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
+    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *label = gutter_span_bytes(nm_color_gutter(), "thinking… ");
+    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(glyph);
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_NOT_NULL(label);
+    ASSERT_NOT_NULL(prompt);
+    ASSERT_TRUE(strstr(frame, glyph) != NULL);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    ASSERT_TRUE(strstr(frame, label) != NULL);
+    ASSERT_TRUE(strstr(frame, prompt) != NULL);
+    /* The order is (b): [glyph][gauge][label] then the prompt, with
+     * nothing between (no fixed-width slots) — the gauge is the row's
+     * fixed landmark, the label rides to its right. */
+    char joined[512];
+    snprintf(joined, sizeof(joined), "%s%s%s%s", glyph, gauge, label, prompt);
+    ASSERT_TRUE(strstr(frame, joined) != NULL);
+    free(glyph);
+    free(gauge);
+    free(label);
+    free(prompt);
     /* And once the tail grows, the tail row is frame row 0 too —
      * the first tail row renders where the spinner was, and the
      * spinner moves below it (no blank row in between). */
@@ -781,12 +814,21 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     tui_runtime_flush(h->rt);
 
     /* Mid-stream: state STREAMING, the tail is LIVE-REGION content
-     * (frame), the input prompt is not rendered. */
+     * (frame) and the INPUT ROW is rendered too — the submitted text is
+     * cleared, but the gutter + prompt are always there (R1). */
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
-    ASSERT_TRUE(strstr(frame, "go") == NULL); /* input hidden */
+    ASSERT_TRUE(strstr(frame, "go") == NULL); /* submitted text cleared */
+    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    ASSERT_NOT_NULL(prompt);
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, prompt) != NULL); /* the input row is here */
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(prompt);
+    free(gauge);
     /* A braille spinner glyph is on the frame, painted in its own
      * (Yellow) role. */
     ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
@@ -807,8 +849,207 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Context gauge (P2): provider-reported usage in the input gutter   */
+/* ---------------------------------------------------------------- */
+
+/* The idle frame carries the gauge alone (Q4) and it says "unknown"
+ * honestly: no usage reported yet, and the catalog carries no window for
+ * this model. */
+static void test_context_gauge_unknown_reads_as_dash(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_NOT_NULL(prompt);
+    /* The idle gutter is the gauge alone: the prompt follows it
+     * immediately, with no slot and no busy chrome between (Q4). */
+    char joined[256];
+    snprintf(joined, sizeof(joined), "%s%s", gauge, prompt);
+    ASSERT_TRUE(strstr(frame, joined) != NULL);
+    free(gauge);
+    free(prompt);
+
+    /* /context spells the same state out. */
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: limit unknown") != NULL);
+    ASSERT_TRUE(strstr(out, "context: no usage reported by the provider "
+                            "yet") != NULL);
+
+    harness_free(h);
+}
+
+/* A usage-carrying round fills the gauge from the provider's numbers —
+ * used from the wire, limit from the catalog, cached from the
+ * prompt_tokens_details breakdown — and colors it by how full the
+ * window is. */
+static void test_context_gauge_reports_usage_and_limit(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    /* Hyper rides usage on the finish_reason chunk or a standalone
+     * choices:[] chunk; either way the agent keeps the LAST report. */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12400,"
+        "\"completion_tokens\":5,\"total_tokens\":12405,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":8100}}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    /* hyper's static catalog carries gpt-oss-120b's window (131072), so
+     * the denominator is real catalog metadata, not an estimate. */
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    /* The idle frame's gauge: 12.4k of 131k, with the cached marker. */
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge =
+        gutter_span_bytes(nm_color_gutter(), "ctx 12.4k/131k \xe2\x9a\xa1"
+                                             "8.1k ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+
+    /* /context is the spelled-out breakdown. */
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: limit 131,072 tokens (model "
+                            "gpt-oss-120b)") != NULL);
+    ASSERT_TRUE(strstr(out, "context: 12,400 / 131,072 tokens used "
+                            "(9.5%)") != NULL);
+    ASSERT_TRUE(strstr(out, "context: 8,100 tokens cached (65.3% of the "
+                            "prompt)") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The gauge's tier tracks how full the window is: Orange past ~85 % of a
+ * KNOWN limit, Red past ~95 % (Comment at rest). */
+static void test_context_gauge_warns_near_the_limit(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":860,"
+        "\"completion_tokens\":1,\"total_tokens\":861}}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":960,"
+        "\"completion_tokens\":1,\"total_tokens\":961}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    /* A known window to measure against (the UI's own push seam). */
+    nm_agent_set_context_limit(nm_chat_app_agent(h->app), 1000);
+
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *warn = gutter_span_bytes(nm_color_gutter_warn(), "ctx 860/1k ");
+    ASSERT_NOT_NULL(warn);
+    ASSERT_TRUE(strstr(frame, warn) != NULL);
+    free(warn);
+
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *hot = gutter_span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ");
+    ASSERT_NOT_NULL(hot);
+    ASSERT_TRUE(strstr(frame, hot) != NULL);
+    free(hot);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* While a turn is in flight the input row is still there and still
+ * gathers input: keys edit the buffer (R1), Enter is a silent no-op
+ * (Q3), and Ctrl+C remains the interrupt. */
+static void test_busy_input_gathers_type_ahead(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = ""; /* stalling round: STREAMING with no payload */
+    sc.stall_at_end = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "first");
+    harness_enter(h);
+    harness_single_step(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* Keys edit the buffer mid-turn. */
+    harness_type(h, "next");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "next");
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, "next") != NULL); /* painted in the input row */
+
+    /* Enter is a silent no-op: no second turn starts, the text stays. */
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "next");
+
+    /* Ctrl+C stays the interrupt, and the typed-ahead text survives it. */
+    tui_runtime_send(h->rt, tui_msg_interrupt());
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "next");
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_quit_command_quits(void)
 {
+
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
@@ -1107,6 +1348,7 @@ static void test_help_command_lists_commands(void)
     ASSERT_TRUE(strstr(out, "/model") != NULL);
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
     ASSERT_TRUE(strstr(out, "/config") != NULL);
+    ASSERT_TRUE(strstr(out, "/context") != NULL);
     ASSERT_TRUE(strstr(out, "/ps") != NULL);
     ASSERT_TRUE(strstr(out, "/kill") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
@@ -1644,15 +1886,33 @@ static void test_separator_blank_line_after_answer(void)
 /* Strip CSI/OSC escape sequences and carriage returns, leaving the
  * logical text rows a user would see (used to assert commit ORDER
  * without live-region framing bytes in the way). Heap-owned. */
+/* Reduce a raw capture to what a terminal would leave in the
+ * SCROLLBACK: escape sequences and CRs go, and so does every LIVE
+ * FRAME — the runtime brackets each frame repaint with
+ * hide-cursor/show-cursor (the input always holds the cursor now), so
+ * the whole repaint (spinner, gutter, input row) is dropped. What
+ * remains is the committed transcript, which is what the transcript
+ * assertions are about; the live region's own content is asserted on
+ * the frame itself (tui_runtime_render). */
 static char *strip_frames(const char *in)
 {
     size_t n = strlen(in), o = 0;
     char *out = malloc(n + 1);
     if (!out)
         return NULL;
-    for (size_t i = 0; i < n; i++) {
+    for (size_t i = 0; i < n;) {
         unsigned char c = (unsigned char)in[i];
         if (c == 0x1b) {
+            /* Hide cursor: drop the frame up to its show-cursor, when
+             * the frame is bracketed before the next one begins. */
+            if (strncmp(in + i, "\x1b[?25l", 6) == 0) {
+                const char *show = strstr(in + i + 6, "\x1b[?25h");
+                const char *hide = strstr(in + i + 6, "\x1b[?25l");
+                if (show && (!hide || show < hide)) {
+                    i = (size_t)(show - in) + 6;
+                    continue;
+                }
+            }
             if (in[i + 1] == '[') {
                 i += 2;
                 while (in[i] && !(in[i] >= '@' && in[i] <= '~'))
@@ -1664,11 +1924,15 @@ static char *strip_frames(const char *in)
             } else if (in[i + 1]) {
                 i++;
             }
+            i++;
             continue;
         }
-        if (c == '\r')
+        if (c == '\r') {
+            i++;
             continue;
+        }
         out[o++] = (char)c;
+        i++;
     }
     out[o] = '\0';
     return out;
@@ -1741,15 +2005,22 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(app_fd(h->app) >= 0);
 
-    /* The spinner tier paints "executing" while the child runs: the
-     * charset-tier glyph in the Yellow activity role, the label muted
-     * Comment. */
+    /* The gutter paints "executing run_command…" while the child runs:
+     * the charset-tier glyph in the activity role, the gauge, then the
+     * label muted Comment — all in the input row's gutter. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") != NULL);
-    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xc2\xb7" NM_SGR_TOOL
-                                             " executing run_command…") != NULL);
+    char *glyph = gutter_span_bytes(nm_color_spinner(), "\xc2\xb7 ");
+    char *label =
+        gutter_span_bytes(nm_color_gutter(), "executing run_command… ");
+    ASSERT_NOT_NULL(glyph);
+    ASSERT_NOT_NULL(label);
+    ASSERT_TRUE(strstr(frame, glyph) != NULL);
+    ASSERT_TRUE(strstr(frame, label) != NULL);
+    free(glyph);
+    free(label);
 
     /* And the turn completes, with the command output committed. */
     ASSERT_EQ(harness_drive(h, 2000), 0);
@@ -2292,6 +2563,8 @@ static void test_tab_on_slash_prefix_opens_commands_popup(void)
     /* The process-job commands are in the completion set too. */
     ASSERT_TRUE(strstr(frame, "/ps") != NULL);
     ASSERT_TRUE(strstr(frame, "/kill") != NULL);
+    /* And the context gauge's on-demand breakdown. */
+    ASSERT_TRUE(strstr(frame, "/context") != NULL);
     /* The retired plurals are gone from the completion set. */
     ASSERT_TRUE(strstr(frame, "/models") == NULL);
     ASSERT_TRUE(strstr(frame, "/providers") == NULL);
@@ -3771,6 +4044,10 @@ int main(void)
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
+    RUN_TEST(test_context_gauge_unknown_reads_as_dash);
+    RUN_TEST(test_context_gauge_reports_usage_and_limit);
+    RUN_TEST(test_context_gauge_warns_near_the_limit);
+    RUN_TEST(test_busy_input_gathers_type_ahead);
     RUN_TEST(test_quit_command_quits);
     RUN_TEST(test_model_command_sets_model);
     RUN_TEST(test_model_picker_active_first);

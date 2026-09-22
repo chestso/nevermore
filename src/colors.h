@@ -12,8 +12,8 @@
  *     need byte-exact SGR strings: NM_SGR_*.
  *   - the markdown renderers (nm_markdown_render.c) write through a
  *     boba TuiRowSink, which wants a TuiAttr: nm_attr_*().
- *   - the chat frame (prompt, popup) draws through boba styles, which
- *     want a TuiColor: nm_color_*().
+ *   - the chat frame (prompt, popup, the input row's gutter) draws
+ *     through boba styles, which want a TuiColor: nm_color_*().
  *
  * Naming symmetry: every role has a TuiAttr constructor; only the
  * roles the byte writers actually use need an NM_SGR_* alias (a
@@ -90,7 +90,10 @@
 /* ------------------------------------------------------------------ */
 
 /* Dracula Comment - the tool plan header (its emoji lead), the
- * interrupted marker, the provider separator, the spinner label. */
+ * interrupted marker, the provider separator, the /ps state of an
+ * exited job. (The spinner label and the context gauge moved to the
+ * input row's gutter, painted through TuiStyle spans - see
+ * nm_color_gutter below.) */
 #define NM_SGR_TOOL "\033[38;2;98;114;164m"
 
 /* Dracula Foreground - the tool result body, secondary text. */
@@ -159,6 +162,36 @@ static inline TuiColor nm_color_popup_marker(void)
 static inline TuiColor nm_color_popup_item(void)
 {
     return tui_color_rgb(NM_DRACULA_FG_R, NM_DRACULA_FG_G, NM_DRACULA_FG_B);
+}
+
+/* The input row's gutter (P2): the status chrome left of the prompt —
+ * the spinner glyph and the context gauge. The gauge takes its tier from
+ * how full the window is: Comment at rest, Orange at ~85 %, Red at
+ * ~95 %. The spinner glyph keeps the activity role the SGR spinner
+ * alias uses (Yellow), so the live pixel reads the same painted through
+ * boba's span path as through a byte writer. */
+static inline TuiColor nm_color_gutter(void)
+{
+    return tui_color_rgb(NM_DRACULA_COMMENT_R, NM_DRACULA_COMMENT_G,
+                         NM_DRACULA_COMMENT_B);
+}
+
+static inline TuiColor nm_color_gutter_warn(void)
+{
+    return tui_color_rgb(NM_DRACULA_ORANGE_R, NM_DRACULA_ORANGE_G,
+                         NM_DRACULA_ORANGE_B);
+}
+
+static inline TuiColor nm_color_gutter_warn_hot(void)
+{
+    return tui_color_rgb(NM_DRACULA_RED_R, NM_DRACULA_RED_G,
+                         NM_DRACULA_RED_B);
+}
+
+static inline TuiColor nm_color_spinner(void)
+{
+    return tui_color_rgb(NM_DRACULA_YELLOW_R, NM_DRACULA_YELLOW_G,
+                         NM_DRACULA_YELLOW_B);
 }
 
 /* ------------------------------------------------------------------ */

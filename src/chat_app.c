@@ -1,10 +1,10 @@
 /* chat_app.c - inline chat TUI component (modeled on ditty/cli/repl_app.c)
  *
  * The Elm component: a multiline textinput collects the prompt, agent
- * callbacks print the transcript, a spinner occupies the live status
- * line while the agent works. Inline mode in the primary buffer — no
- * alt screen, no mouse; the terminal scrollback is the output
- * history.
+ * callbacks print the transcript, and the input row's gutter carries
+ * the spinner + context gauge while the agent works. Inline mode in
+ * the primary buffer — no alt screen, no mouse; the terminal
+ * scrollback is the output history.
  *
  * Transcript protocol (boba's streaming IR; see docs/TRANSCRIPT-BLOCKS.md):
  *
@@ -131,6 +131,14 @@ struct NmChatApp
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
     char *current_tool;        /* RUNNING_TOOL label hint */
+    /* The input row's gutter (P2): spinner glyph + context gauge + busy
+     * label, composed into ONE reused buffer. gutter_last is the
+     * change-detection copy — boba's setter re-copies every span
+     * string, so it runs only when the bytes actually changed
+     * (memory-reuse principle). Sized for the widest span set with
+     * room to spare: `⠋ ctx 999.9M/999.9M ⚡999.9M executing tool… `. */
+    char status_text[128];
+    char gutter_last[128];
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
@@ -578,6 +586,36 @@ static const char *endpoint_key(const NmChatApp *app, const NmProvider *p)
     return nm_provider_api_key(p);
 }
 
+/* The active model's context window, from the provider catalog (the
+ * one authority). NULL base_url/api_key on purpose: a base_url would
+ * make a wire-catalog provider (ollama, opencode) issue a BLOCKING
+ * fetch from the UI thread — the catalog lookup must resolve against
+ * whatever is cached/static. -1 = unknown (an ids-only live catalog,
+ * or a model the static table does not carry). */
+static long model_context_limit(const NmChatApp *app, const NmProvider *p)
+{
+    if (!p || !app->model)
+        return -1;
+    size_t n = 0;
+    const NmModel *models = p->models(p, NULL, NULL, &n);
+    if (!models)
+        return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, app->model) == 0)
+            return models[i].context_length;
+    }
+    return -1;
+}
+
+/* Resolve + push the active model's window (the agent has no catalog;
+ * the UI owns the lookup). -1 = unknown, and the gauge degrades. */
+static void refresh_context_limit(NmChatApp *app)
+{
+    if (app->agent)
+        nm_agent_set_context_limit(app->agent,
+                                   model_context_limit(app, app->provider));
+}
+
 /* Build (or rebuild) the agent over the given provider. Callbacks are
  * the app's own; userdata stays NULL so tools resolve paths against
  * the process cwd (the agent's userdata doubles as the tools'
@@ -598,6 +636,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
      * stream-inactivity timeout, which has no config key yet, is a
      * per-agent value. */
     nm_agent_set_timeout_ms(a, app->timeout_ms);
+    nm_agent_set_context_limit(a, model_context_limit(app, p));
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
@@ -1047,6 +1086,55 @@ size_t nm_chat_app_tail_len(const NmChatApp *app)
 }
 
 /* ---------------------------------------------------------------- */
+/* Context gauge (P2): provider-reported usage only                 */
+/* ---------------------------------------------------------------- */
+
+/* Compact token count for the input-row gutter: one decimal at k/M,
+ * TRUNCATED (a gauge must never claim more than the provider
+ * reported), with a zero fraction dropped ("128k", not "128.0k").
+ * -1 (unknown) prints "-". */
+static void format_tokens(long n, char *dst, size_t cap)
+{
+    if (n < 0) {
+        snprintf(dst, cap, "-");
+        return;
+    }
+    if (n < 1000) {
+        snprintf(dst, cap, "%ld", n);
+        return;
+    }
+    long div = n < 1000000 ? 100 : 100000;
+    const char *unit = n < 1000000 ? "k" : "M";
+    long tenths = n / div; /* truncation lives here, not in the format */
+    long whole = tenths / 10;
+    long frac = tenths % 10;
+    if (frac == 0)
+        snprintf(dst, cap, "%ld%s", whole, unit);
+    else
+        snprintf(dst, cap, "%ld.%ld%s", whole, frac, unit);
+}
+
+/* The /context breakdown's spelled-out form: the exact integer with
+ * thousands separators. -1 (unknown) prints "-". */
+static void format_tokens_exact(long n, char *dst, size_t cap)
+{
+    if (n < 0) {
+        snprintf(dst, cap, "-");
+        return;
+    }
+    char tmp[32];
+    snprintf(tmp, sizeof(tmp), "%ld", n);
+    size_t len = strlen(tmp);
+    size_t o = 0;
+    for (size_t i = 0; i < len && o + 2 < cap; i++) {
+        if (i > 0 && (len - i) % 3 == 0)
+            dst[o++] = ',';
+        dst[o++] = tmp[i];
+    }
+    dst[o] = '\0';
+}
+
+/* ---------------------------------------------------------------- */
 /* Commands (character-level scans, no regex)                       */
 /* ---------------------------------------------------------------- */
 
@@ -1060,9 +1148,52 @@ static void print_help(NmChatApp *app)
                   "  /config            every setting, its value + source\n"
                   "  /config set <k> <v>  write one key to the session shadow\n"
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
+                  "  /context           context-window usage (provider-reported)\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
+}
+
+/* /context: the authoritative window breakdown. Every number is
+ * provider-reported or catalog metadata — no estimates, and an unknown
+ * state says so plainly instead of inventing one. */
+static void print_context(NmChatApp *app)
+{
+    if (!app->agent) {
+        sys_line(app, "context: no agent");
+        return;
+    }
+    long limit = nm_agent_context_limit(app->agent);
+    long used = nm_agent_context_used_tokens(app->agent);
+    long cached = nm_agent_context_cached_tokens(app->agent);
+
+    char l[32];
+    format_tokens_exact(limit, l, sizeof(l));
+    if (limit > 0)
+        sys_line(app, "context: limit %s tokens (model %s)", l,
+                 app->model ? app->model : "?");
+    else
+        sys_line(app, "context: limit unknown (the catalog reports none "
+                      "for this model)");
+
+    if (!nm_agent_context_has_usage(app->agent) || used < 0) {
+        sys_line(app, "context: no usage reported by the provider yet");
+        return;
+    }
+
+    char u[32], c[32];
+    format_tokens_exact(used, u, sizeof(u));
+    if (limit > 0)
+        sys_line(app, "context: %s / %s tokens used (%.1f%%)", u, l,
+                 (double)used * 100.0 / (double)limit);
+    else
+        sys_line(app, "context: %s tokens used", u);
+
+    if (cached >= 0) {
+        format_tokens_exact(cached, c, sizeof(c));
+        sys_line(app, "context: %s tokens cached (%.1f%% of the prompt)", c,
+                 used > 0 ? (double)cached * 100.0 / (double)used : 0.0);
+    }
 }
 
 /* Show a picker whose first entry is the currently active one: the
@@ -1583,6 +1714,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             nm_agent_set_model(app->agent, id);
             free(app->model);
             app->model = strdup(id);
+            refresh_context_limit(app);
             char line[256];
             snprintf(line, sizeof(line), "model: %s (exact)", app->model);
             persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
@@ -1609,6 +1741,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         nm_agent_set_model(app->agent, arg);
         free(app->model);
         app->model = strdup(arg);
+        refresh_context_limit(app);
         char line[256];
         snprintf(line, sizeof(line), "model: %s", app->model);
         persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
@@ -1687,6 +1820,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                  "config: expected 'set <key> <value>' or 'reset [key|all]'" NM_SGR_RESET);
         return;
     }
+    if (NAME_IS("context")) {
+        print_context(app);
+        return;
+    }
     if (NAME_IS("ps")) {
         print_jobs(app);
         return;
@@ -1750,8 +1887,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/ps", "/kill", "/quit",
-        NULL
+        "/help", "/model", "/provider", "/config", "/context", "/ps", "/kill",
+        "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
@@ -1928,10 +2065,15 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
     }
 
     NmAgentState st = nm_agent_state(app->agent);
-    if (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL)
-        return; /* busy: the turn owns the floor (Ctrl+C is a message) */
+    int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
 
     if (key->key == TUI_KEY_ENTER && !(key->mods & TUI_MOD_SHIFT)) {
+        /* Enter submits when idle; while a turn is in flight it is a
+         * silent no-op — type ahead and the send happens when the turn
+         * ends (Q3). Every OTHER key still edits the buffer while busy,
+         * so the input row is a live prompt, not a dead one. */
+        if (busy)
+            return;
         submit(app, cmd_out);
         return;
     }
@@ -2040,6 +2182,129 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 }
 
 /* ---------------------------------------------------------------- */
+/* Input-row gutter (P2): spinner + context gauge + busy label       */
+/* ---------------------------------------------------------------- */
+
+/* One composed gutter span. */
+typedef struct GutterSpan
+{
+    size_t off; /* into the app's reused status_text buffer */
+    size_t len;
+    TuiColor color;
+} GutterSpan;
+
+/* Append one span's text (plus the separator space that follows it) to
+ * the reused composition buffer and record its position/color. Sizes
+ * here are far below the cap, so truncation is a formality. */
+static size_t gutter_add(char *buf, size_t cap, size_t o, GutterSpan *sp,
+                         size_t *n_sp, TuiColor color, const char *fmt, ...)
+{
+    if (o >= cap || *n_sp >= 3)
+        return o;
+    va_list ap;
+    va_start(ap, fmt);
+    int w = vsnprintf(buf + o, cap - o, fmt, ap);
+    va_end(ap);
+    if (w <= 0)
+        return o;
+    size_t add = (size_t)w >= cap - o ? cap - o - 1 : (size_t)w;
+    sp[*n_sp].off = o;
+    sp[*n_sp].len = add;
+    sp[*n_sp].color = color;
+    (*n_sp)++;
+    return o + add;
+}
+
+/* The gauge text: `ctx <used>/<limit>`, with a compact cached marker
+ * appended when the provider reports a prefix-cache read. Both numbers
+ * are provider-reported (used) / catalog metadata (limit); "-" is an
+ * honest unknown, never an estimate. */
+static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
+{
+    char u[16], l[16];
+    format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
+    format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
+    int n = snprintf(dst, cap, "ctx %s/%s", u, l);
+    long cached = nm_agent_context_cached_tokens(app->agent);
+    if (cached >= 0 && n > 0 && (size_t)n < cap) {
+        char c[16];
+        format_tokens(cached, c, sizeof(c));
+        snprintf(dst + n, cap - (size_t)n, " ⚡%s", c);
+    }
+}
+
+/* The gauge's tier: Comment at rest, Orange past ~85 % of a KNOWN
+ * limit, Red past ~95 %. */
+static TuiColor gauge_color(const NmChatApp *app)
+{
+    long used = nm_agent_context_used_tokens(app->agent);
+    long limit = nm_agent_context_limit(app->agent);
+    if (used >= 0 && limit > 0) {
+        double pct = (double)used * 100.0 / (double)limit;
+        if (pct >= 95.0)
+            return nm_color_gutter_warn_hot();
+        if (pct >= 85.0)
+            return nm_color_gutter_warn();
+    }
+    return nm_color_gutter();
+}
+
+/* Compose and install the input row's gutter from the app's current
+ * state, before every tui_textinput_view. Span order (Q1 = (b), no
+ * fixed-width slots): [spinner glyph] [context gauge] [busy label] —
+ * the gauge is the row's one fixed landmark (the label right of it
+ * varies in width several times per tool-heavy turn, and only the spans
+ * RIGHT of a change move). Idle: the gauge alone (Q4). Change-detected
+ * against the last composition so boba re-copies only on a real
+ * change. */
+static void refresh_gutter(NmChatApp *app)
+{
+    if (!app || !app->input || !app->agent)
+        return;
+
+    NmAgentState st = nm_agent_state(app->agent);
+    int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
+    const char *glyph = busy ? app->spinner_frame : NULL;
+
+    char gauge[48];
+    compose_gauge(app, gauge, sizeof(gauge));
+
+    char label[64] = "";
+    if (busy) {
+        if (st == NM_AGENT_RUNNING_TOOL)
+            snprintf(label, sizeof(label), "executing %s…",
+                     app->current_tool ? app->current_tool : "tool");
+        else
+            snprintf(label, sizeof(label), "thinking…");
+    }
+
+    char *buf = app->status_text;
+    GutterSpan sp[3];
+    size_t n_sp = 0, o = 0;
+    if (glyph && *glyph)
+        o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+                       nm_color_spinner(), "%s ", glyph);
+    o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+                   gauge_color(app), "%s ", gauge);
+    if (busy)
+        o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+                       nm_color_gutter(), "%s ", label);
+    buf[o] = '\0';
+
+    if (strcmp(buf, app->gutter_last) == 0)
+        return; /* unchanged: no re-copy, no re-alloc in boba */
+    snprintf(app->gutter_last, sizeof(app->gutter_last), "%s", buf);
+
+    TuiSpan spans[3];
+    for (size_t i = 0; i < n_sp; i++) {
+        spans[i].text = buf + sp[i].off;
+        spans[i].len = sp[i].len;
+        spans[i].style = tui_style_foreground(tui_style_new(), sp[i].color);
+    }
+    tui_textinput_set_gutter(app->input, spans, n_sp);
+}
+
+/* ---------------------------------------------------------------- */
 /* View (live region only — never the transcript)                   */
 /* ---------------------------------------------------------------- */
 
@@ -2061,28 +2326,29 @@ static int nm_chat_app_input_rows(const NmChatApp *app)
 
 static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
 {
-    const NmChatApp *app = (const NmChatApp *)model;
+    /* The view refreshes the input-row gutter from the app's live state
+     * before painting the input; boba's component API hands the model in
+     * const, so the cast is deliberate (the app is mutable frame state). */
+    NmChatApp *app = (NmChatApp *)model;
     if (!app || !out)
         return tui_view_default(out);
 
-    NmAgentState st = nm_agent_state(app->agent);
-    int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
-
     /* Live-region budget (D8): the transcript takes the terminal height
-     * minus the input rows, the status row (spinner while busy), and
-     * one slack row; floored at 1. The transcript's own planner clips
-     * to the tail, so passing the full budget is safe. */
+     * minus the input rows and one slack row; floored at 1. The
+     * transcript's own planner clips to the tail, so passing the full
+     * budget is safe. The input row is ALWAYS rendered (busy or not) —
+     * it is where the next prompt is gathered (R1) — so there is no
+     * separate status row to subtract. */
     int input_rows = nm_chat_app_input_rows(app);
-    int status_rows = busy ? 1 : 0;
-    int budget = app->term_h - input_rows - status_rows - 1;
+    int budget = app->term_h - input_rows - 1;
     if (budget < 1)
         budget = 1;
     int width = app->term_w > 0 ? app->term_w : 80;
 
     /* The transcript is always drawn (live blocks can outlive a busy
-     * state), then the spinner / input / popup. On an empty live region
-     * rows == 0 and this reduces to the old behavior (a bare \r + EL,
-     * no phantom row). */
+     * state), then the input row (gutter + prompt) and the popup. On an
+     * empty live region rows == 0 and this reduces to the old behavior
+     * (a bare \r + EL, no phantom row). */
     int rows = tui_transcript_live_rows(app->transcript, width, budget);
     tui_transcript_view(app->transcript, out, width, budget);
     if (rows > 0)
@@ -2091,42 +2357,21 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
     dynamic_buffer_append_str(out, EL_TO_END);
 
-    if (busy) {
-        const char *frame = app->spinner_frame;
-        if (frame) {
-            /* The animated glyph rides its own role (Yellow, the live
-             * "activity" pixel) while the trailing label stays muted
-             * Comment (the D5 chrome role). App-owned frame chrome, so
-             * an SGR prefix + reset around the whole row is legitimate;
-             * the reset is before the row's end (D8), and this row is
-             * the frame's last (the input returns next flush). */
-            dynamic_buffer_append_str(out, NM_SGR_SPINNER);
-            dynamic_buffer_append_str(out, frame);
-            if (st == NM_AGENT_RUNNING_TOOL)
-                dynamic_buffer_append_printf(
-                    out, NM_SGR_TOOL " executing %s…",
-                    app->current_tool ? app->current_tool : "tool");
-            else
-                dynamic_buffer_append_str(out, NM_SGR_TOOL " thinking…");
-            dynamic_buffer_append_str(out, NM_SGR_RESET);
-        }
-    } else {
-        tui_textinput_view(app->input, out);
-        if (tui_list_popup_is_visible(app->popup)) {
-            dynamic_buffer_append_str(out, "\r\n");
-            tui_list_popup_view(app->popup, out);
-        }
+    /* Spinner glyph + context gauge + busy label, in the gutter LEFT of
+     * the prompt (the input row is always painted: R1). */
+    refresh_gutter(app);
+    tui_textinput_view(app->input, out);
+    if (tui_list_popup_is_visible(app->popup)) {
+        dynamic_buffer_append_str(out, "\r\n");
+        tui_list_popup_view(app->popup, out);
     }
 
     TuiView v = tui_view_default(out);
     v.render_mode = TUI_RENDER_INLINE;
     v.bracketed_paste = 1;
-    if (busy) {
-        v.cursor = tui_cursor_hidden();
-    } else {
-        /* Offset the textinput cursor by the transcript's live rows. */
-        TuiCursor c = tui_textinput_cursor_pos(app->input);
-        v.cursor = tui_cursor_at(c.row + rows, c.col);
-    }
+    /* The cursor is the textinput's, offset by the transcript's live
+     * rows — never hidden (the input always gathers the next prompt). */
+    TuiCursor c = tui_textinput_cursor_pos(app->input);
+    v.cursor = tui_cursor_at(c.row + rows, c.col);
     return v;
 }
