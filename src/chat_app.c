@@ -2228,13 +2228,18 @@ static size_t gutter_add(char *buf, size_t cap, size_t o, GutterSpan *sp,
  * honest unknown, never an estimate. */
 static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
 {
-    char u[16], l[16];
+    /* Sized for the worst a long can print (19 digits + '.' +
+     * fraction + unit + NUL = 23), not the 16 it took before: a
+     * provider-reported count past ~10^14 was silently cut. The
+     * compact form is 6 glyphs for any count a real model reports, so
+     * the extra bytes cost nothing. */
+    char u[24], l[24];
     format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
     format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
     int n = snprintf(dst, cap, "ctx %s/%s", u, l);
     long cached = nm_agent_context_cached_tokens(app->agent);
     if (cached >= 0 && n > 0 && (size_t)n < cap) {
-        char c[16];
+        char c[24]; /* same worst case as u/l */
         format_tokens(cached, c, sizeof(c));
         snprintf(dst + n, cap - (size_t)n, " ⚡%s", c);
     }
