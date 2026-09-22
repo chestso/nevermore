@@ -1323,8 +1323,10 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
     ASSERT_TRUE(h[sizeof("x-opencode-session: ") - 1] != '\0');
 }
 
-/* Catalog: ids-only mapping ({"object":"list","data":[{"id"}]}),
- * non-empty session header on the request, tokenless. */
+/* Catalog: the wire is ids-only ({"object":"list","data":[{"id"}]}),
+ * so a live fetch takes membership from the wire and METADATA from the
+ * shipped models.dev table by id; non-empty session header on the
+ * request, tokenless. */
 static void *opencode_models_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -1336,7 +1338,7 @@ static void *opencode_models_server_thread(void *arg)
     const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
-        "{\"id\":\"omen-alpha\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
         "]}";
     char head[256];
     snprintf(head, sizeof(head),
@@ -1370,10 +1372,16 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_NOT_NULL(models);
     ASSERT_EQ(n, 2);
     ASSERT_STR_EQ(models[0].id, "glm-5.3");
-    ASSERT_STR_EQ(models[0].label, "glm-5.3"); /* id-only: label = id */
+    /* Enriched from the shipped models.dev table, NOT id-only: this is
+     * the whole point (the ids-only wire carries no context/vision). */
+    ASSERT_STR_EQ(models[0].label, "GLM-5.3");
     ASSERT_EQ(models[0].vision, 0);
-    ASSERT_EQ(models[0].context_length, -1);
-    ASSERT_STR_EQ(models[1].id, "omen-alpha"); /* absent from models.dev too */
+    ASSERT_EQ(models[0].context_length, 1000000);
+    /* An id models.dev does not know: id-only, unknown context. */
+    ASSERT_STR_EQ(models[1].id, "future-model-9");
+    ASSERT_STR_EQ(models[1].label, "future-model-9");
+    ASSERT_EQ(models[1].vision, 0);
+    ASSERT_EQ(models[1].context_length, -1);
     pthread_join(th, NULL);
     close(lfd);
 
@@ -1383,8 +1391,19 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
 }
 
-/* The static fallback is per-tier: Zen's differs from Go's (the
- * offline catalog pin makes default-base calls no-ops). */
+/* The static fallback is per-tier: Zen's differs from Go's, and both
+ * carry the generated models.dev metadata (the offline catalog pin
+ * makes default-base calls no-ops, so these are the shipped tables). */
+static long opencode_meta_context(const NmModel *models, size_t n,
+                                  const char *id)
+{
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, id) == 0)
+            return models[i].context_length;
+    }
+    return -2; /* not found (distinct from -1 "unknown") */
+}
+
 static void test_opencode_models_static_fallback_per_tier(void)
 {
     const NmProvider *go = nm_provider_by_name("opencode:go");
@@ -1398,6 +1417,11 @@ static void test_opencode_models_static_fallback_per_tier(void)
     ASSERT_TRUE(zn > 0);
     /* Different lists (tiers have different catalogs). */
     ASSERT_TRUE(strcmp(g[0].id, z[0].id) != 0);
+    /* Real metadata, not id-only rows: this is what the generated
+     * tables are for (context sizes and vision the wire omits). */
+    ASSERT_EQ(opencode_meta_context(g, gn, "glm-5.3"), 1000000);
+    ASSERT_EQ(opencode_meta_context(g, gn, "grok-4.5"), 500000);
+    ASSERT_EQ(opencode_meta_context(z, zn, "big-pickle"), 200000);
 }
 
 /* The offline-catalog tripwire: several tests here read a provider
@@ -1451,7 +1475,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_opencode_chat_carries_session_header);
     RUN_TEST(test_opencode_chat_without_done_is_complete);
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
-    RUN_TEST(test_opencode_models_fetch_maps_ids);
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
+    RUN_TEST(test_opencode_models_fetch_maps_ids);
     TEST_SUMMARY();
 }

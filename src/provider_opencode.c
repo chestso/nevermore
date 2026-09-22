@@ -16,11 +16,14 @@
  * catalog); the value is a stable per-conversation id, not a secret.
  *
  * Catalog: GET {base}/models is tokenless and ids-only ({"object":
- * "list"}), so the static fallback carries the real metadata,
- * generated offline from models.dev into data/nm-opencode-*.json and
- * mirrored in the arrays below. The models.dev mapping is inverted:
- * entry "opencode-go" is this file, entry "opencode" is the Zen file
- * (design §5) — see tools/generate-opencode-models.sh.
+ * "list"}), so the live list supplies MEMBERSHIP only and every id is
+ * enriched from the shipped metadata tables (opencode_models_data.h,
+ * generated offline from models.dev — the "generated" side of
+ * tools/generate-opencode-models.sh). Without that merge a live fetch
+ * would blank the label / context / vision the picker and the context
+ * gauge read (id-only, -1, 0), which is the ids-only trap. The
+ * models.dev mapping is inverted: entry "opencode-go" is this file,
+ * entry "opencode" is the Zen file (design §5).
  *
  * Identity: one env key (OPENCODE_API_KEY, no alias — nm_provider_api_key
  * supports exactly one), one authinfo machine (opencode.ai for both
@@ -35,35 +38,32 @@
 #include "openai_client.h"
 #include "json.h"
 
+/* The shipped catalogs (generated, committed): full models.dev
+ * metadata per tier. Included AFTER provider_internal.h so NmModel is
+ * in scope. */
+#include "opencode_models_data.h"
+
 #define OPENCODE_GO_DEFAULT  "https://opencode.ai/zen/go/v1"
 #define OPENCODE_ZEN_DEFAULT "https://opencode.ai/zen/v1"
 
-/* Static fallback catalog: a curated subset of
- * data/nm-opencode-models.json (Go). The live /models list is the
- * source of truth; this covers offline + the default-base gate. */
-static const NmModel opencode_go_static_models[] = {
-    { "glm-5.3", "GLM-5.3", 0, 1000000 },
-    { "glm-5.3-flash", "GLM-5.3-Flash", 1, 1000000 },
-    { "deepseek-v4-flash", "DeepSeek V4 Flash", 0, 1000000 },
-    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 1000000 },
-    { "grok-4.5", "Grok 4.5", 1, 500000 },
-    { 0 }
-};
-
-/* Zen fallback (data/nm-opencode-zen-models.json). Free ids first:
- * they prove the wire without credits. */
-static const NmModel opencode_zen_static_models[] = {
-    { "mimo-v2.5-free", "MiMo v2.5 (free)", 0, -1 },
-    { "deepseek-v4-flash-free", "DeepSeek V4 Flash (free)", 0, -1 },
-    { "laguna-s-2.1-free", "Laguna S 2.1 (free)", 0, -1 },
-    { "minimax-m3-free", "MiniMax M3 (free)", 0, 262144 },
-    { 0 }
-};
-
-static const NmModel *opencode_static_models(const NmProvider *p)
+/* The tier's metadata table: the offline catalog AND the enrichment
+ * source for the live ids-only list. */
+static const NmModel *opencode_meta_table(const NmProvider *p)
 {
-    return p->id == NM_PROVIDER_OPENCODE_ZEN ? opencode_zen_static_models
-                                             : opencode_go_static_models;
+    return p->id == NM_PROVIDER_OPENCODE_ZEN ? opencode_zen_models
+                                             : opencode_go_models;
+}
+
+/* Metadata row for a live id, or NULL for an id models.dev has not
+ * seen yet (a brand-new model). */
+static const NmModel *opencode_meta_find(const NmProvider *p, const char *id)
+{
+    const NmModel *t = opencode_meta_table(p);
+    for (size_t i = 0; t[i].id; i++) {
+        if (strcmp(t[i].id, id) == 0)
+            return &t[i];
+    }
+    return NULL;
 }
 
 static const char *opencode_base(const NmProvider *p, const char *base_url)
@@ -156,9 +156,11 @@ static size_t opencode_catalog_slot(const NmProvider *p)
     return p->id == NM_PROVIDER_OPENCODE_ZEN ? 1 : 0;
 }
 
-/* GET {base}/models -> data[] -> cache as NmModel[]. Ids only
- * (OPENCODE-API.md §5): label = id, vision 0, ctx -1. One-time per
- * process; static fallback on failure. */
+/* GET {base}/models -> data[] -> cache as NmModel[]. The wire is
+ * ids-only (OPENCODE-API.md §5), so membership comes from the live
+ * list and metadata from the shipped table by id (opencode_meta_find);
+ * an id models.dev has not seen yet falls back to id / -1 / 0. One-time
+ * per process; static fallback on failure. */
 static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
 {
     NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
@@ -189,9 +191,12 @@ static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
         /* Strings belong to the parsed document (freed below):
          * copy into the cache. One-time per process. */
         models[out].id = strdup(id);
-        models[out].label = strdup(id);
-        models[out].vision = 0;
-        models[out].context_length = -1;
+        /* Enrich the ids-only wire row from the shipped table: the
+         * live list is membership, the table is the metadata. */
+        const NmModel *meta = opencode_meta_find(p, id);
+        models[out].label = strdup(meta ? meta->label : id);
+        models[out].vision = meta ? meta->vision : 0;
+        models[out].context_length = meta ? meta->context_length : -1;
         if (!models[out].id || !models[out].label) {
             free((void *)models[out].id);
             free((void *)models[out].label);
@@ -222,7 +227,7 @@ const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
             *n_out = oc_catalogs[slot].n;
         return oc_catalogs[slot].models;
     }
-    const NmModel *statics = opencode_static_models(p);
+    const NmModel *statics = opencode_meta_table(p);
     if (n_out) {
         size_t n = 0;
         while (statics[n].id)

@@ -367,11 +367,19 @@ first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
   table and the model ids, and is the long-term authority if
   models.dev drifts.
 
-Practical shape for a static fallback: id + label (a
-title-cased id is fine) + vision/context from models.dev, exactly
-the four `NmModel` fields. Model ids are expected to drift
-quickly — the live fetch is the source of truth; the embedded list
-is the offline fallback.
+Practical shape for a static fallback: id + label (a title-cased id
+is fine) + vision/context from models.dev, exactly the four `NmModel`
+fields. nevermore ships that as a generated table
+(`src/opencode_models_data.h`, produced by
+`tools/generate-opencode-models.sh`; the JSON record beside it in
+`data/`), and a live fetch does **not** replace it with bare ids:
+the wire supplies **membership** and every id is **enriched from the
+table by id**, so the context window and vision the picker and the
+context gauge read survive the fetch. An id models.dev has not seen
+yet still lands id-only with `-1` context. Model
+ids are expected to drift quickly — the live fetch is the source of
+truth for membership; the embedded list is both the metadata source
+and the offline fallback.
 
 ## 6. What nevermore must send (summary)
 
@@ -442,7 +450,9 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   ids**, and empty is as bad as absent.
 - **The catalog carries ids only** — context/vision must come
   from a static fallback (models.dev-derived), not from a
-  metadata endpoint.
+  metadata endpoint; and the static fallback must **enrich** the
+  live fetch by id rather than being replaced by it (otherwise
+  every live model reads back with `-1` context).
 - **`[DONE]` is not the last SSE event** (a `cost` event trails it
   when it appears at all — `minimax-m3` sends no `[DONE]`, see §3)
   and **`: keep-alive` comments are common**, both already

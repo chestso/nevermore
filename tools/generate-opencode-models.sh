@@ -42,9 +42,16 @@ command -v curl >/dev/null 2>&1 || true
 
 stamp="$(date -u +%Y-%m-%d)"
 
-# emit <models.dev-entry> <nevermore-file> <tier-label>
+c_hdr="$root/src/opencode_models_data.h"
+
+# emit <models.dev-entry> <json-out> <array-name> <tier-label>
+# Writes the JSON (the human-readable regeneration record, shipped in
+# the dist) AND appends the C table to $c_hdr. The C table is the
+# SHIPPED catalog: the live GET {base}/models carries ids only
+# (docs/OPENCODE-API.md §5), so the provider enriches each live id
+# from this table by id and falls back to it offline.
 emit() {
-    entry="$1"; out="$2"; label="$3"
+    entry="$1"; out="$2"; arr="$3"; label="$4"
     jq -e --arg e "$entry" '.[$e].models | length > 0' "$src" >/dev/null || {
         echo "models.dev entry '$entry' missing or empty" >&2
         exit 1
@@ -70,9 +77,44 @@ emit() {
         printf '# \n'
         printf '%s\n' "$body"
     } > "$out"
+    {
+        printf '/* %s: models.dev entry "%s", generated %s.\n' "$arr" "$entry" "$stamp"
+        printf ' * One line per model, sorted by id; script emits\n'
+        printf ' * clang-format-stable output (.clang-format: ColumnLimit 0,\n'
+        printf ' * SpacesInContainerLiterals, Cpp11BracedListStyle off). */\n'
+        printf 'static const NmModel %s[] = {\n' "$arr"
+        printf '%s\n' "$body" |
+            jq -r '.[] | "    { \(.id|@json), \(.label|@json), \(.vision), \(.context_length) },"'
+        printf '    { 0 }\n};\n\n'
+    } >> "$c_hdr"
     echo "wrote $out ($label): $count models" >&2
+    echo "wrote $c_hdr:$arr ($label): $count models" >&2
 }
 
+{
+    printf '/* opencode_models_data.h - GENERATED OpenCode static catalogs.\n'
+    printf ' *\n'
+    printf ' * Produced by tools/generate-opencode-models.sh from models.dev\n'
+    printf ' * (entries "opencode-go" -> Go, "opencode" -> Zen); the derived\n'
+    printf ' * JSON sits beside it in data/. Do not edit by hand: regenerate\n'
+    printf ' * and commit. Never fetched at runtime, so the shipped binary\n'
+    printf ' * carries no third-party wire dependency (design §1a).\n'
+    printf ' *\n'
+    printf ' * These are the SHIPPED catalogs. The OpenCode live catalog\n'
+    printf ' * (GET {base}/models) is membership only — id + object, no\n'
+    printf ' * label/context/modality (docs/OPENCODE-API.md §5) — so a live\n'
+    printf ' * fetch keeps these rows metadata-bearing by id lookup\n'
+    printf ' * (opencode_meta_find), and the same tables are the offline\n'
+    printf ' * fallback. -1 context_length = models.dev had none.\n'
+    printf ' */\n\n'
+    printf '#ifndef NM_OPENCODE_MODELS_DATA_H\n#define NM_OPENCODE_MODELS_DATA_H\n\n'
+    printf '#include "provider.h"\n\n'
+} > "$c_hdr"
+
 # NOTE: models.dev entry -> nevermore file (inverted, see header).
-emit "opencode-go" "$root/data/nm-opencode-models.json" "Go"
-emit "opencode" "$root/data/nm-opencode-zen-models.json" "Zen"
+emit "opencode-go" "$root/data/nm-opencode-models.json" \
+    "opencode_go_models" "Go"
+emit "opencode" "$root/data/nm-opencode-zen-models.json" \
+    "opencode_zen_models" "Zen"
+
+printf '#endif /* NM_OPENCODE_MODELS_DATA_H */\n' >> "$c_hdr"

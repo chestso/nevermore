@@ -45,6 +45,7 @@ EXTRA_DIST = \
     nm_markdown_render.h \
     nm_process.h \
     nm_process_internal.h \
+    opencode_models_data.h \
     openai_client.h \
     provider.h \
     provider_internal.h \
