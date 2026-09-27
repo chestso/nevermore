@@ -2987,6 +2987,74 @@ static void test_submit_echoes_once(void)
     close(sc.fd);
 }
 
+/* The status line is live chrome (spinner + gauge + separator rule), not
+ * history: it must never be finalized into the scrollback. The frame
+ * finish_inline persists is the echoed prompt row ALONE — the chrome row
+ * sits directly above it in the live frame, so finishing the whole frame
+ * would strand a `--- ctx -/- ---…` row in the scrollback above every
+ * submitted line. The tell is the byte immediately before the echoed
+ * row's prompt span: a CLEARED row (`\r\x1b[K`, the textinput's own
+ * erase) with the fix, versus the status row's `\r\n\x1b[K` separator
+ * without it (the rule would sit where the `\n` is). */
+static void test_submit_does_not_finalize_status_line(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "unique-user-line");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    const char *out = harness_read(h);
+    /* The submit echo is the LAST render of the line (the input is
+     * cleared on submit, so nothing later repaints it). */
+    static const char line[] = "unique-user-line";
+    const char *echo = NULL;
+    for (const char *q = out + strlen(out); q > out; q--) {
+        if (strncmp(q - 1, line, sizeof(line) - 1) == 0) {
+            echo = q - 1;
+            break;
+        }
+    }
+    ASSERT_NOT_NULL(echo);
+    char *p = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(p);
+    size_t plen = strlen(p);
+    /* The prompt span that opens the echoed row. */
+    const char *pp = NULL;
+    for (const char *q = echo; q > out; q--) {
+        if (strncmp(q, p, plen) == 0) {
+            pp = q;
+            break;
+        }
+    }
+    free(p);
+    ASSERT_NOT_NULL(pp);
+    ASSERT_TRUE(pp - out >= 4);
+    /* The row opens on a plain erase (`\r\x1b[K`)... */
+    ASSERT_TRUE(memcmp(pp - 3, "\x1b[K", 3) == 0);
+    /* ...whose carriage return is a bare `\r`, not the `\n` of the
+     * status row's `\r\n\x1b[K` separator — i.e. no chrome row above. */
+    ASSERT_EQ(pp[-4], '\r');
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* A provider switch resets the transcript (emits nothing) and prints a
  * separator line marking the boundary. */
 static void test_provider_switch_clears_and_prints_separator(void)
@@ -4176,6 +4244,7 @@ int main(void)
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);
     RUN_TEST(test_fence_line_not_split_by_reasoning_stream_end);
     RUN_TEST(test_submit_echoes_once);
+    RUN_TEST(test_submit_does_not_finalize_status_line);
     RUN_TEST(test_provider_switch_clears_and_prints_separator);
     RUN_TEST(test_provider_switch_resolves_new_provider_key);
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);

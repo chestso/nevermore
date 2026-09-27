@@ -189,6 +189,13 @@ struct NmChatApp
      * the blank line is owed. Cleared when the separator is emitted, so
      * repeated stream ends in one turn cannot stack blank lines. */
     int pending_sep;
+
+    /* 1 for the ONE frame submit finalizes. The status line is live
+     * chrome (spinner/gauge/rule), not history, so it is dropped before
+     * the frame finish_inline persists — otherwise the chrome row lands
+     * in the scrollback above the echoed prompt. Held across the flush
+     * whose view would otherwise re-install the line. */
+    int submitting;
 };
 
 /* The singleton (see file header). */
@@ -1872,10 +1879,22 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
      * (ditty's pattern — the rendered input line persists into the
      * scrollback). The input must still be rendered when finish_inline
      * runs, so clearing happens after. Splitting the echo would
-     * double-print the user's line. */
+     * double-print the user's line.
+     *
+     * Chrome is live, not history: the status row (spinner/gauge/rule)
+     * sits ABOVE the prompt in the frame, so finishing the frame would
+     * strand that row in the scrollback above the echoed line. Suppress
+     * the status line for the frame submit finalizes — the flag holds
+     * across the flush whose view would re-install it — and invalidate
+     * status_last so the next refresh repaints the row below. */
+    app->submitting = 1;
+    tui_textinput_set_status_line(app->input, NULL, 0);
+    app->status_last[0] = '\0';
+
     send_msg(app, tui_msg_transcript_submit(saved, strlen(saved)));
     tui_runtime_flush(app->rt);
     tui_runtime_finish_inline(app->rt);
+    app->submitting = 0;
     tui_textinput_clear(app->input);
 
     if (saved[0] == '/') {
@@ -2287,6 +2306,10 @@ static TuiColor gauge_color(const NmChatApp *app)
 static void refresh_status_line(NmChatApp *app)
 {
     if (!app || !app->input || !app->agent)
+        return;
+    /* The submit frame carries no chrome: the status row is live, and
+     * finalizing it would strand it in the scrollback (see submit). */
+    if (app->submitting)
         return;
 
     NmAgentState st = nm_agent_state(app->agent);
