@@ -77,8 +77,13 @@
  * lifetime). Constructors return by value and cannot be borrowed. */
 static const TuiAttr NM_DIM = { .dim = 1 };
 
-#define PROMPT              "❯ "
-#define CONTINUATION_PROMPT "  "
+#define PROMPT "❯ "
+/* Continuation marker for a multi-row input, ditty-REPL style: the literal
+ * "..." (boba blank-pads the input-row gutter on continuation rows instead
+ * of repeating it). ditty pairs its ">>> " prompt with "... "; the chevron
+ * is one cell wide, so the marker is a column or two wider than "❯ " and
+ * the continued text sits just right of the first row's text column. */
+#define CONTINUATION_PROMPT "... "
 
 /* One system-stream line: 1 KiB (the config store's value cap) plus the
  * "key = value" framing. Both sys_line and the /config reply buffer a

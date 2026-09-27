@@ -886,6 +886,47 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     harness_free(h);
 }
 
+/* A multi-row input keeps the input-row gutter on ONE row. The status
+ * chrome (spinner + gauge + label) is status about the TURN, not per
+ * visual row: repeating it verbatim down a wrapped input would multiply
+ * the spinner. boba blank-pads its width on continuation rows instead,
+ * and nevermore marks those rows with the ditty-style `… ` continuation
+ * prompt under the prompt column. */
+static void test_multiline_input_continuation_pads_gutter(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    /* Shift+Enter inserts a newline (multiline input). */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    harness_type(h, "world");
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+
+    /* First row: the idle gutter (gauge) leads the prompt. */
+    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+
+    /* Continuation row: the literal `... ` ditty marker is drawn (under
+     * the prompt column, so the gutter's width was reserved as blank
+     * padding). */
+    char *cont = gutter_span_bytes(nm_color_prompt(), "... ");
+    ASSERT_NOT_NULL(cont);
+    ASSERT_TRUE(strstr(frame, cont) != NULL);
+
+    /* The chrome appears exactly once — the gutter is not repeated. */
+    const char *seed = strstr(frame, gauge);
+    ASSERT_NOT_NULL(seed);
+    ASSERT_TRUE(strstr(seed + 1, gauge) == NULL);
+
+    free(gauge);
+    free(cont);
+    harness_free(h);
+}
+
 /* A usage-carrying round fills the gauge from the provider's numbers —
  * used from the wire, limit from the catalog, cached from the
  * prompt_tokens_details breakdown — and colors it by how full the
@@ -4049,6 +4090,7 @@ int main(void)
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
+    RUN_TEST(test_multiline_input_continuation_pads_gutter);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_busy_input_gathers_type_ahead);
