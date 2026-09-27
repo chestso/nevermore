@@ -31,12 +31,14 @@ jobs:
           # tui_textinput_set_status_line, nevermore's spinner/context
           # gauge/separator rule — plus the display-column metrics fix
           # that lands the cursor on the right cell when a prompt is two
-          # cells wide, and the Windows stdin-reader teardown fix this
-          # repo's Windows loop inherits).
+          # cells wide, the inline-frame reflow-erase fix so a terminal
+          # resize no longer strands the frame's top rows, and the
+          # Windows stdin-reader teardown fix this repo's Windows loop
+          # inherits).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 53d0827f688f5bae98ad57330ea63613f87b4e9a
+          ref: f12750a8a9024392fc2e7b88b6a060f71c647a5c
           path: boba
           fetch-depth: 0
 
