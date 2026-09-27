@@ -598,35 +598,34 @@ static void harness_step_once(AppHarness *h)
     tui_runtime_flush(h->rt);
 }
 
-/* The exact bytes boba's span path paints for one gutter span. The
- * gutter is a TuiStyle span set (not an app byte writer), so a test
- * derives the expected bytes from the same color role the app declares
- * — that is what makes the assertion about the ROLE, not a literal.
- * Caller frees. */
-static char *gutter_span_bytes(TuiColor color, const char *text)
+/* The exact bytes boba's span path paints for one styled span (the status
+ * line and the prompt are both TuiStyle span sets, not app byte writers),
+ * so a test derives the expected bytes from the same color role the app
+ * declares — that is what makes the assertion about the ROLE, not a
+ * literal. Caller frees. */
+static char *span_bytes(TuiColor color, const char *text)
 {
     TuiStyle s = tui_style_foreground(tui_style_new(), color);
     s.inline_ = 1;
     return tui_style_render(&s, text);
 }
 
-/* Like gutter_span_bytes, but for the gutter's LAST span: the app pads the
- * whole chrome up to NM_CHAT_APP_GUTTER_MIN_COLS, and the spaces ride the
- * last span, so its rendered bytes carry the pad. `preceding_cols` is the
- * display width of the spans LEFT of this one. Caller frees. */
-static char *gutter_last_span_bytes(TuiColor color, const char *text,
-                                    int preceding_cols)
+/* The status row's separator rule: `─` filling the row to the terminal
+ * width (80 in these tests) after a chrome of `chrome` plain text. The
+ * rule is what makes the status row double as the transcript/input
+ * separator. Caller frees. */
+static char *status_rule_bytes(const char *chrome)
 {
-    char padded[128];
-    int target = NM_CHAT_APP_GUTTER_MIN_COLS - preceding_cols;
-    int w = (int)tui_utf8_display_width(text);
-    int n = snprintf(padded, sizeof(padded), "%s", text);
-    while (w < target && n + 1 < (int)sizeof(padded)) {
-        padded[n++] = ' ';
-        w++;
+    int n = 80 - (int)tui_utf8_display_width(chrome);
+    static char rule[240 * 3 + 1];
+    size_t o = 0;
+    for (int i = 0; i < n; i++) {
+        rule[o++] = (char)0xe2;
+        rule[o++] = (char)0x80;
+        rule[o++] = (char)0x94;
     }
-    padded[n] = '\0';
-    return gutter_span_bytes(color, padded);
+    rule[o] = '\0';
+    return span_bytes(nm_color_gutter(), rule);
 }
 
 /* ---------------------------------------------------------------- */
@@ -766,32 +765,42 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* The frame's first row is the spinner itself: no leading
      * line separator (the phantom row). */
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
-    /* The busy frame carries the INPUT ROW with its gutter: the braille
-     * glyph in the activity role, the context gauge (no usage, no known
-     * limit yet) and the busy label, then the accent prompt — the input
-     * is always where the next prompt is gathered (R1). */
-    char *glyph = gutter_span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
-    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
-    char *label = gutter_last_span_bytes(nm_color_gutter(), "thinking… ", 10);
-    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    /* The busy frame carries the INPUT AREA: its status line (the braille
+     * glyph in the activity role, the context gauge with no usage and no
+     * known limit yet, the busy label, and the separator rule filling the
+     * row) on one row, then the accent prompt on the next — the input is
+     * always where the next prompt is gathered (R1). */
+    char *glyph = span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *label = span_bytes(nm_color_gutter(), "thinking… ");
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *rule = status_rule_bytes("\xe2\xa0\x8b ctx -/- thinking… ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(label);
     ASSERT_NOT_NULL(prompt);
+    ASSERT_NOT_NULL(rule);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     ASSERT_TRUE(strstr(frame, label) != NULL);
     ASSERT_TRUE(strstr(frame, prompt) != NULL);
-    /* The order is (b): [glyph][gauge][label] then the prompt, with
-     * nothing between (no fixed-width slots) — the gauge is the row's
-     * fixed landmark, the label rides to its right. */
+    /* The order is (b): [glyph][gauge][label][rule] on the status row —
+     * the gauge is the row's one fixed landmark, the label rides to its
+     * right, and the rule fills the row out to the terminal width. */
     char joined[512];
-    snprintf(joined, sizeof(joined), "%s%s%s%s", glyph, gauge, label, prompt);
+    snprintf(joined, sizeof(joined), "%s%s%s", glyph, gauge, label);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
+    ASSERT_TRUE(strstr(frame, rule) != NULL);
+    /* The prompt opens the NEXT row — the status row is a separator, so
+     * the prompt never shares it. */
+    char next_row[512];
+    snprintf(next_row, sizeof(next_row), "\r\n\033[K%s", prompt);
+    ASSERT_TRUE(strstr(frame, next_row) != NULL);
     free(glyph);
     free(gauge);
     free(label);
     free(prompt);
+    free(rule);
     /* And once the tail grows, the tail row is frame row 0 too —
      * the first tail row renders where the spinner was, and the
      * spinner moves below it (no blank row in between). */
@@ -835,14 +844,14 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 
     /* Mid-stream: state STREAMING, the tail is LIVE-REGION content
      * (frame) and the INPUT ROW is rendered too — the submitted text is
-     * cleared, but the gutter + prompt are always there (R1). */
+     * cleared, but the status line + prompt are always there (R1). */
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
     ASSERT_TRUE(strstr(frame, "go") == NULL); /* submitted text cleared */
-    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, prompt) != NULL); /* the input row is here */
@@ -870,12 +879,12 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Context gauge (P2): provider-reported usage in the input gutter   */
+/* Context gauge (P2): provider-reported usage in the status line    */
 /* ---------------------------------------------------------------- */
 
-/* The idle frame carries the gauge alone (Q4) and it says "unknown"
- * honestly: no usage reported yet, and the catalog carries no window for
- * this model. */
+/* The idle frame carries the gauge alone plus the rule (Q4) and it says
+ * "unknown" honestly: no usage reported yet, and the catalog carries no
+ * window for this model. */
 static void test_context_gauge_unknown_reads_as_dash(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
@@ -883,18 +892,24 @@ static void test_context_gauge_unknown_reads_as_dash(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = gutter_last_span_bytes(nm_color_gutter(), "ctx -/- ", 0);
-    char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *rule = status_rule_bytes("ctx -/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
-    /* The idle gutter is the gauge alone, padded to the minimum width so
-     * the prompt column never jitters: the prompt follows it, with no slot
-     * and no busy chrome between (Q4). */
-    char joined[256];
-    snprintf(joined, sizeof(joined), "%s%s", gauge, prompt);
+    ASSERT_NOT_NULL(rule);
+    /* The idle status row is the gauge alone plus the rule, with no slot
+     * and no busy chrome (Q4); the prompt opens the NEXT row, so the
+     * gauge's width never moves it. */
+    char joined[512];
+    snprintf(joined, sizeof(joined), "%s%s", gauge, rule);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
+    char next_row[512];
+    snprintf(next_row, sizeof(next_row), "\r\n\033[K%s", prompt);
+    ASSERT_TRUE(strstr(frame, next_row) != NULL);
     free(gauge);
     free(prompt);
+    free(rule);
 
     /* /context spells the same state out. */
     harness_type(h, "/context");
@@ -907,13 +922,12 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     harness_free(h);
 }
 
-/* A multi-row input keeps the input-row gutter on ONE row. The status
- * chrome (spinner + gauge + label) is status about the TURN, not per
- * visual row: repeating it verbatim down a wrapped input would multiply
- * the spinner. boba blank-pads its width on continuation rows instead,
- * and nevermore marks those rows with the ditty-style `… ` continuation
- * prompt under the prompt column. */
-static void test_multiline_input_continuation_pads_gutter(void)
+/* A multi-row input keeps the status line on ONE row and aligns
+ * continuation rows under the prompt's text column. The status chrome
+ * (spinner + gauge + label) is status about the TURN, not per visual
+ * row: it never repeats down a wrapped input, and since it is a row of
+ * its own, the continuation column is the prompt's width alone. */
+static void test_multiline_input_continuation_aligns_under_prompt(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -926,25 +940,28 @@ static void test_multiline_input_continuation_pads_gutter(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
 
-    /* First row: the idle gutter (gauge, padded to the minimum) leads the
-     * prompt. */
-    char *gauge = gutter_last_span_bytes(nm_color_gutter(), "ctx -/- ", 0);
+    /* The status row (gauge + rule) appears exactly once. */
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     ASSERT_NOT_NULL(gauge);
-    ASSERT_TRUE(strstr(frame, gauge) != NULL);
-
-    /* Continuation row: the literal `... ` ditty marker is drawn (under
-     * the prompt column, so the gutter's width was reserved as blank
-     * padding). */
-    char *cont = gutter_span_bytes(nm_color_prompt(), "... ");
-    ASSERT_NOT_NULL(cont);
-    ASSERT_TRUE(strstr(frame, cont) != NULL);
-
-    /* The chrome appears exactly once — the gutter is not repeated. */
     const char *seed = strstr(frame, gauge);
     ASSERT_NOT_NULL(seed);
     ASSERT_TRUE(strstr(seed + 1, gauge) == NULL);
 
+    /* The prompt opens its own row; the continuation row indents by
+     * exactly the prompt's width, so its text aligns under the first
+     * row's text. */
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *cont = span_bytes(nm_color_prompt(), "  ");
+    ASSERT_NOT_NULL(prompt);
+    ASSERT_NOT_NULL(cont);
+    char row1[512], row2[512];
+    snprintf(row1, sizeof(row1), "%shello", prompt);
+    snprintf(row2, sizeof(row2), "%sworld", cont);
+    ASSERT_TRUE(strstr(frame, row1) != NULL);
+    ASSERT_TRUE(strstr(frame, row2) != NULL);
+
     free(gauge);
+    free(prompt);
     free(cont);
     harness_free(h);
 }
@@ -986,11 +1003,9 @@ static void test_context_gauge_reports_usage_and_limit(void)
     /* The idle frame's gauge: 12.4k of 131k, with the cached marker. */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge =
-        gutter_last_span_bytes(nm_color_gutter(),
-                               "ctx 12.4k/131k \xe2\x9a\xa1"
-                               "8.1k ",
-                               0);
+    char *gauge = span_bytes(nm_color_gutter(),
+                             "ctx 12.4k/131k \xe2\x9a\xa1"
+                             "8.1k ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -1045,8 +1060,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn =
-        gutter_last_span_bytes(nm_color_gutter_warn(), "ctx 860/1k ", 0);
+    char *warn = span_bytes(nm_color_gutter_warn(), "ctx 860/1k ");
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -1056,8 +1070,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot =
-        gutter_last_span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ", 0);
+    char *hot = span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ");
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -2074,15 +2087,13 @@ static void test_tool_runs_async_and_spinner_ticks(void)
 
     /* The gutter paints "executing run_command…" while the child runs:
      * the charset-tier glyph in the activity role, the gauge, then the
-     * label muted Comment — all in the input row's gutter. */
+     * label muted Comment — all on the input's status row. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") != NULL);
-    char *glyph = gutter_span_bytes(nm_color_spinner(), "\xc2\xb7 ");
-    char *label =
-        gutter_last_span_bytes(nm_color_gutter(), "executing run_command… ",
-                               10);
+    char *glyph = span_bytes(nm_color_spinner(), "\xc2\xb7 ");
+    char *label = span_bytes(nm_color_gutter(), "executing run_command… ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(label);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
@@ -4117,7 +4128,7 @@ int main(void)
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
-    RUN_TEST(test_multiline_input_continuation_pads_gutter);
+    RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_busy_input_gathers_type_ahead);

@@ -1,7 +1,7 @@
 /* chat_app.c - inline chat TUI component (modeled on ditty/cli/repl_app.c)
  *
  * The Elm component: a multiline textinput collects the prompt, agent
- * callbacks print the transcript, and the input row's gutter carries
+ * callbacks print the transcript, and the input's status line carries
  * the spinner + context gauge while the agent works. Inline mode in
  * the primary buffer — no alt screen, no mouse; the terminal
  * scrollback is the output history.
@@ -78,12 +78,12 @@
 static const TuiAttr NM_DIM = { .dim = 1 };
 
 #define PROMPT "❯ "
-/* Continuation marker for a multi-row input, ditty-REPL style: the literal
- * "..." (boba blank-pads the input-row gutter on continuation rows instead
- * of repeating it). ditty pairs its ">>> " prompt with "... "; the chevron
- * is one cell wide, so the marker is a column or two wider than "❯ " and
- * the continued text sits just right of the first row's text column. */
-#define CONTINUATION_PROMPT "... "
+/* Continuation marker for a multi-row input: spaces of the prompt's width,
+ * so a wrapped or Shift+Enter'd row's text aligns exactly under the first
+ * row's text (boba space-pads to the same column when no marker is set;
+ * this makes it explicit). The input's status line is its own row above,
+ * so nothing about the chrome can move this column. */
+#define CONTINUATION_PROMPT "  "
 
 /* One system-stream line: 1 KiB (the config store's value cap) plus the
  * "key = value" framing. Both sys_line and the /config reply buffer a
@@ -136,14 +136,15 @@ struct NmChatApp
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
     char *current_tool;        /* RUNNING_TOOL label hint */
-    /* The input row's gutter (P2): spinner glyph + context gauge + busy
-     * label, composed into ONE reused buffer. gutter_last is the
-     * change-detection copy — boba's setter re-copies every span
-     * string, so it runs only when the bytes actually changed
-     * (memory-reuse principle). Sized for the widest span set with
-     * room to spare: `⠋ ctx 999.9M/999.9M ⚡999.9M executing tool… `. */
-    char status_text[128];
-    char gutter_last[128];
+    /* The input's status line (P2): spinner glyph + context gauge + busy
+     * label + separator rule, composed into ONE reused buffer.
+     * status_last is the change-detection copy — boba's setter re-copies
+     * every span string, so it runs only when the bytes actually changed
+     * (memory-reuse principle). Sized for the chrome's widest span set
+     * (`⠋ ctx 999.9M/999.9M ⚡999.9M executing tool… `) plus the rule
+     * fill out to NM_STATUS_RULE_MAX_COLS columns (3 bytes each). */
+    char status_text[896];
+    char status_last[896];
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
@@ -1094,7 +1095,7 @@ size_t nm_chat_app_tail_len(const NmChatApp *app)
 /* Context gauge (P2): provider-reported usage only                 */
 /* ---------------------------------------------------------------- */
 
-/* Compact token count for the input-row gutter: one decimal at k/M,
+/* Compact token count for the input's status line: one decimal at k/M,
  * TRUNCATED (a gauge must never claim more than the provider
  * reported), with a zero fraction dropped ("128k", not "128.0k").
  * -1 (unknown) prints "-". */
@@ -2194,24 +2195,31 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 }
 
 /* ---------------------------------------------------------------- */
-/* Input-row gutter (P2): spinner + context gauge + busy label       */
+/* Input status line (P2): spinner + gauge + label + separator rule  */
 /* ---------------------------------------------------------------- */
 
-/* One composed gutter span. */
-typedef struct GutterSpan
+/* One composed status-line span. */
+typedef struct StatusSpan
 {
     size_t off; /* into the app's reused status_text buffer */
     size_t len;
     TuiColor color;
-} GutterSpan;
+} StatusSpan;
+
+/* The separator rule's column cap. The rule fills the status row out to
+ * the terminal width so the row doubles as the separator between the
+ * transcript and the input; the cap keeps the reused buffer fixed-size
+ * (a terminal wider than this gets a rule that stops early — cosmetic,
+ * never a correctness issue, and boba's EL clears the tail either way). */
+#define NM_STATUS_RULE_MAX_COLS 240
 
 /* Append one span's text (plus the separator space that follows it) to
  * the reused composition buffer and record its position/color. Sizes
  * here are far below the cap, so truncation is a formality. */
-static size_t gutter_add(char *buf, size_t cap, size_t o, GutterSpan *sp,
+static size_t status_add(char *buf, size_t cap, size_t o, StatusSpan *sp,
                          size_t *n_sp, TuiColor color, const char *fmt, ...)
 {
-    if (o >= cap || *n_sp >= 3)
+    if (o >= cap || *n_sp >= 4)
         return o;
     va_list ap;
     va_start(ap, fmt);
@@ -2266,15 +2274,17 @@ static TuiColor gauge_color(const NmChatApp *app)
     return nm_color_gutter();
 }
 
-/* Compose and install the input row's gutter from the app's current
+/* Compose and install the input's status line from the app's current
  * state, before every tui_textinput_view. Span order (Q1 = (b), no
- * fixed-width slots): [spinner glyph] [context gauge] [busy label] —
- * the gauge is the row's one fixed landmark (the label right of it
- * varies in width several times per tool-heavy turn, and only the spans
- * RIGHT of a change move). Idle: the gauge alone (Q4). Change-detected
- * against the last composition so boba re-copies only on a real
- * change. */
-static void refresh_gutter(NmChatApp *app)
+ * fixed-width slots): [spinner glyph] [context gauge] [busy label]
+ * [separator rule] — the gauge is the row's one fixed landmark (the label
+ * right of it varies in width several times per tool-heavy turn, and only
+ * the spans RIGHT of a change move). Idle: the gauge alone plus the rule
+ * (Q4). The row is the input's own, ABOVE the prompt, so its width is
+ * nobody's geometry: the prompt column never moves when the chrome
+ * changes. Change-detected against the last composition so boba re-copies
+ * only on a real change. */
+static void refresh_status_line(NmChatApp *app)
 {
     if (!app || !app->input || !app->agent)
         return;
@@ -2296,45 +2306,50 @@ static void refresh_gutter(NmChatApp *app)
     }
 
     char *buf = app->status_text;
-    GutterSpan sp[3];
+    StatusSpan sp[4];
     size_t n_sp = 0, o = 0;
     if (glyph && *glyph)
-        o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+        o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
                        nm_color_spinner(), "%s ", glyph);
-    o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+    o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
                    gauge_color(app), "%s ", gauge);
     if (busy)
-        o = gutter_add(buf, sizeof(app->status_text), o, sp, &n_sp,
+        o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
                        nm_color_gutter(), "%s ", label);
     buf[o] = '\0';
 
-    /* Pad the chrome to its minimum width so the prompt column holds still
-     * as the gauge grows (`ctx -/-` 8 -> `ctx 12.4k/131k ⚡8.1k` 22) or the
-     * busy label appears. The spaces ride the last span, so boba folds them
-     * into gutter_width — and therefore into every continuation row's
-     * padding. */
-    if (n_sp > 0) {
-        int w = (int)tui_utf8_display_width(buf);
-        while (w < NM_CHAT_APP_GUTTER_MIN_COLS &&
-               o + 1 < sizeof(app->status_text)) {
-            buf[o++] = ' ';
-            w++;
+    /* The separator rule: fill the rest of the row with `─`, so the status
+     * row divides the transcript from the input. Capped by the terminal
+     * width and the buffer's fixed size. */
+    int width = (int)tui_utf8_display_width(buf);
+    int rule = (app->term_w > 0 ? app->term_w : 80) - width;
+    if (rule > NM_STATUS_RULE_MAX_COLS)
+        rule = NM_STATUS_RULE_MAX_COLS;
+    if (rule > 0 && o + (size_t)rule * 3 + 1 <= sizeof(app->status_text)) {
+        size_t off = o;
+        for (int i = 0; i < rule; i++) {
+            buf[o++] = (char)0xe2;
+            buf[o++] = (char)0x80;
+            buf[o++] = (char)0x94;
         }
         buf[o] = '\0';
-        sp[n_sp - 1].len = o - sp[n_sp - 1].off;
+        sp[n_sp].off = off;
+        sp[n_sp].len = o - off;
+        sp[n_sp].color = nm_color_gutter();
+        n_sp++;
     }
 
-    if (strcmp(buf, app->gutter_last) == 0)
+    if (strcmp(buf, app->status_last) == 0)
         return; /* unchanged: no re-copy, no re-alloc in boba */
-    snprintf(app->gutter_last, sizeof(app->gutter_last), "%s", buf);
+    snprintf(app->status_last, sizeof(app->status_last), "%s", buf);
 
-    TuiSpan spans[3];
+    TuiSpan spans[4];
     for (size_t i = 0; i < n_sp; i++) {
         spans[i].text = buf + sp[i].off;
         spans[i].len = sp[i].len;
         spans[i].style = tui_style_foreground(tui_style_new(), sp[i].color);
     }
-    tui_textinput_set_gutter(app->input, spans, n_sp);
+    tui_textinput_set_status_line(app->input, spans, n_sp);
 }
 
 /* ---------------------------------------------------------------- */
@@ -2359,7 +2374,7 @@ static int nm_chat_app_input_rows(const NmChatApp *app)
 
 static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
 {
-    /* The view refreshes the input-row gutter from the app's live state
+    /* The view refreshes the input's status line from the app's live state
      * before painting the input; boba's component API hands the model in
      * const, so the cast is deliberate (the app is mutable frame state). */
     NmChatApp *app = (NmChatApp *)model;
@@ -2367,21 +2382,20 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
         return tui_view_default(out);
 
     /* Live-region budget (D8): the transcript takes the terminal height
-     * minus the input rows and one slack row; floored at 1. The
-     * transcript's own planner clips to the tail, so passing the full
-     * budget is safe. The input row is ALWAYS rendered (busy or not) —
-     * it is where the next prompt is gathered (R1) — so there is no
-     * separate status row to subtract. */
+     * minus the input's rows (status line + input rows) and one slack row;
+     * floored at 1. The transcript's own planner clips to the tail, so
+     * passing the full budget is safe. The input area is ALWAYS rendered
+     * (busy or not) — it is where the next prompt is gathered (R1). */
     int input_rows = nm_chat_app_input_rows(app);
-    int budget = app->term_h - input_rows - 1;
+    int budget = app->term_h - input_rows - 2; /* + status row + slack */
     if (budget < 1)
         budget = 1;
     int width = app->term_w > 0 ? app->term_w : 80;
 
     /* The transcript is always drawn (live blocks can outlive a busy
-     * state), then the input row (gutter + prompt) and the popup. On an
-     * empty live region rows == 0 and this reduces to the old behavior
-     * (a bare \r + EL, no phantom row). */
+     * state), then the input area (status line + prompt) and the popup.
+     * On an empty live region rows == 0 and this reduces to the old
+     * behavior (a bare \r + EL, no phantom row). */
     int rows = tui_transcript_live_rows(app->transcript, width, budget);
     tui_transcript_view(app->transcript, out, width, budget);
     if (rows > 0)
@@ -2390,9 +2404,10 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
     dynamic_buffer_append_str(out, EL_TO_END);
 
-    /* Spinner glyph + context gauge + busy label, in the gutter LEFT of
-     * the prompt (the input row is always painted: R1). */
-    refresh_gutter(app);
+    /* Spinner glyph + context gauge + busy label + separator rule, on the
+     * input's own row ABOVE the prompt (the input row is always painted:
+     * R1). */
+    refresh_status_line(app);
     tui_textinput_view(app->input, out);
     if (tui_list_popup_is_visible(app->popup)) {
         dynamic_buffer_append_str(out, "\r\n");
@@ -2402,8 +2417,9 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     TuiView v = tui_view_default(out);
     v.render_mode = TUI_RENDER_INLINE;
     v.bracketed_paste = 1;
-    /* The cursor is the textinput's, offset by the transcript's live
-     * rows — never hidden (the input always gathers the next prompt). */
+    /* The cursor is the textinput's (its row already counts the status
+     * line below boba's cursor_pos), offset by the transcript's live rows
+     * — never hidden (the input always gathers the next prompt). */
     TuiCursor c = tui_textinput_cursor_pos(app->input);
     v.cursor = tui_cursor_at(c.row + rows, c.col);
     return v;

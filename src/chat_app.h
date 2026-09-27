@@ -3,7 +3,7 @@
  * Inline mode in the primary terminal buffer: the conversation
  * transcript goes to the terminal's own scrollback, a textinput
  * collects the prompt, and the spinner + context gauge live in the
- * input row's gutter while the agent streams. No alt-screen —
+ * input's status line while the agent streams. No alt-screen —
  * nevermore behaves like a chat in your shell, not like an editor.
  *
  * Transcript protocol (boba's streaming IR; docs/TRANSCRIPT-BLOCKS.md):
@@ -44,13 +44,6 @@
 
 typedef struct NmChatApp NmChatApp;
 typedef struct NmConfig NmConfig;
-
-/* Minimum width of the input row's gutter, in display columns. The
- * chrome (spinner + gauge + label) is space-padded up to this, so the
- * prompt column holds still as the gauge grows (`ctx -/-` -> a
- * usage+cached gauge) or a busy label appears. Exposed so tests can
- * build the exact padded span bytes. */
-#define NM_CHAT_APP_GUTTER_MIN_COLS 24
 
 /* Create the app: resolves the provider by name, builds the toolset
  * and the agent (wired to the app's own delta/tool/state callbacks).

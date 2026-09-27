@@ -29,19 +29,17 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the input-row gutter —
-          # components/textinput.h's TuiSpan + tui_textinput_set_gutter,
-          # nevermore's spinner/context gauge — plus the display-column
-          # metrics fix that lands the cursor on the right cell when a
-          # gutter span or prompt is two cells wide, the gutter's
-          # paint-the-input-row-only fix so a multiline input's
-          # continuation rows pad its width instead of repeating the
-          # chrome, and the Windows stdin-reader teardown fix this repo's
-          # Windows loop inherits).
+          # new boba API (currently the input's status line —
+          # components/textinput.h's TuiSpan +
+          # tui_textinput_set_status_line, nevermore's spinner/context
+          # gauge/separator rule — plus the display-column metrics fix
+          # that lands the cursor on the right cell when a prompt is two
+          # cells wide, and the Windows stdin-reader teardown fix this
+          # repo's Windows loop inherits).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: c6362d2a8742690624f3e173e8fec9f45a8297b8
+          ref: 53d0827f688f5bae98ad57330ea63613f87b4e9a
           path: boba
           fetch-depth: 0
 
