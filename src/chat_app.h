@@ -45,6 +45,13 @@
 typedef struct NmChatApp NmChatApp;
 typedef struct NmConfig NmConfig;
 
+/* Minimum width of the input row's gutter, in display columns. The
+ * chrome (spinner + gauge + label) is space-padded up to this, so the
+ * prompt column holds still as the gauge grows (`ctx -/-` -> a
+ * usage+cached gauge) or a busy label appears. Exposed so tests can
+ * build the exact padded span bytes. */
+#define NM_CHAT_APP_GUTTER_MIN_COLS 24
+
 /* Create the app: resolves the provider by name, builds the toolset
  * and the agent (wired to the app's own delta/tool/state callbacks).
  * Default model is used when NULL. NULL when the provider is unknown

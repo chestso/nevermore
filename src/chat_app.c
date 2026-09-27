@@ -2308,6 +2308,22 @@ static void refresh_gutter(NmChatApp *app)
                        nm_color_gutter(), "%s ", label);
     buf[o] = '\0';
 
+    /* Pad the chrome to its minimum width so the prompt column holds still
+     * as the gauge grows (`ctx -/-` 8 -> `ctx 12.4k/131k ⚡8.1k` 22) or the
+     * busy label appears. The spaces ride the last span, so boba folds them
+     * into gutter_width — and therefore into every continuation row's
+     * padding. */
+    if (n_sp > 0) {
+        int w = (int)tui_utf8_display_width(buf);
+        while (w < NM_CHAT_APP_GUTTER_MIN_COLS &&
+               o + 1 < sizeof(app->status_text)) {
+            buf[o++] = ' ';
+            w++;
+        }
+        buf[o] = '\0';
+        sp[n_sp - 1].len = o - sp[n_sp - 1].off;
+    }
+
     if (strcmp(buf, app->gutter_last) == 0)
         return; /* unchanged: no re-copy, no re-alloc in boba */
     snprintf(app->gutter_last, sizeof(app->gutter_last), "%s", buf);

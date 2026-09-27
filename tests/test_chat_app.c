@@ -39,6 +39,7 @@
 #include <boba/msg.h>
 #include <boba/runtime.h>
 #include <boba/stream.h>
+#include <boba/unicode.h>
 
 #include "chat_app.h"
 #include "agent.h"
@@ -609,6 +610,25 @@ static char *gutter_span_bytes(TuiColor color, const char *text)
     return tui_style_render(&s, text);
 }
 
+/* Like gutter_span_bytes, but for the gutter's LAST span: the app pads the
+ * whole chrome up to NM_CHAT_APP_GUTTER_MIN_COLS, and the spaces ride the
+ * last span, so its rendered bytes carry the pad. `preceding_cols` is the
+ * display width of the spans LEFT of this one. Caller frees. */
+static char *gutter_last_span_bytes(TuiColor color, const char *text,
+                                    int preceding_cols)
+{
+    char padded[128];
+    int target = NM_CHAT_APP_GUTTER_MIN_COLS - preceding_cols;
+    int w = (int)tui_utf8_display_width(text);
+    int n = snprintf(padded, sizeof(padded), "%s", text);
+    while (w < target && n + 1 < (int)sizeof(padded)) {
+        padded[n++] = ' ';
+        w++;
+    }
+    padded[n] = '\0';
+    return gutter_span_bytes(color, padded);
+}
+
 /* ---------------------------------------------------------------- */
 /* Tests                                                            */
 /* ---------------------------------------------------------------- */
@@ -752,7 +772,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * is always where the next prompt is gathered (R1). */
     char *glyph = gutter_span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
     char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
-    char *label = gutter_span_bytes(nm_color_gutter(), "thinking… ");
+    char *label = gutter_last_span_bytes(nm_color_gutter(), "thinking… ", 10);
     char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
@@ -863,12 +883,13 @@ static void test_context_gauge_unknown_reads_as_dash(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = gutter_last_span_bytes(nm_color_gutter(), "ctx -/- ", 0);
     char *prompt = gutter_span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
-    /* The idle gutter is the gauge alone: the prompt follows it
-     * immediately, with no slot and no busy chrome between (Q4). */
+    /* The idle gutter is the gauge alone, padded to the minimum width so
+     * the prompt column never jitters: the prompt follows it, with no slot
+     * and no busy chrome between (Q4). */
     char joined[256];
     snprintf(joined, sizeof(joined), "%s%s", gauge, prompt);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
@@ -905,8 +926,9 @@ static void test_multiline_input_continuation_pads_gutter(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
 
-    /* First row: the idle gutter (gauge) leads the prompt. */
-    char *gauge = gutter_span_bytes(nm_color_gutter(), "ctx -/- ");
+    /* First row: the idle gutter (gauge, padded to the minimum) leads the
+     * prompt. */
+    char *gauge = gutter_last_span_bytes(nm_color_gutter(), "ctx -/- ", 0);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
 
@@ -965,8 +987,10 @@ static void test_context_gauge_reports_usage_and_limit(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge =
-        gutter_span_bytes(nm_color_gutter(), "ctx 12.4k/131k \xe2\x9a\xa1"
-                                             "8.1k ");
+        gutter_last_span_bytes(nm_color_gutter(),
+                               "ctx 12.4k/131k \xe2\x9a\xa1"
+                               "8.1k ",
+                               0);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -1021,7 +1045,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = gutter_span_bytes(nm_color_gutter_warn(), "ctx 860/1k ");
+    char *warn =
+        gutter_last_span_bytes(nm_color_gutter_warn(), "ctx 860/1k ", 0);
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -1031,7 +1056,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = gutter_span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ");
+    char *hot =
+        gutter_last_span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ", 0);
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -2055,7 +2081,8 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_TRUE(strstr(frame, "executing") != NULL);
     char *glyph = gutter_span_bytes(nm_color_spinner(), "\xc2\xb7 ");
     char *label =
-        gutter_span_bytes(nm_color_gutter(), "executing run_command… ");
+        gutter_last_span_bytes(nm_color_gutter(), "executing run_command… ",
+                               10);
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(label);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
