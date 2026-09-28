@@ -108,6 +108,42 @@ long nm_agent_context_cached_tokens(const NmAgent *a);
 long nm_agent_context_limit(const NmAgent *a);
 void nm_agent_set_context_limit(NmAgent *a, long limit);
 
+/* Session accounting: the provider-agnostic ledger over COMPLETED
+ * rounds (the facts in NmUsage — see the contract there). The agent
+ * owns the only conversation, so it owns the accumulation; the UI never
+ * sums provider numbers itself.
+ *
+ * A round contributes only when it completed AND reported usage: an
+ * errored or cancelled round adds nothing, and a round whose chunks
+ * carried no usage object adds nothing (a `"usage":null` placeholder is
+ * not a report). Each accessor returns -1 when NO round ever reported
+ * the fact — never a fabricated 0 (a real reported 0 is returned as 0).
+ *
+ *   nm_agent_session_rounds            completed rounds that reported usage
+ *   nm_agent_session_input_tokens      Σ prompt_tokens (total input)
+ *   nm_agent_session_output_tokens     Σ completion_tokens (total output)
+ *   nm_agent_session_cache_read_tokens Σ cached_tokens (cache reads)
+ *   nm_agent_session_cache_write_tokens Σ cache_write_tokens, absolute
+ *                                      only — the write side is tracked,
+ *                                      not yet rated (see NmUsage)
+ *   nm_agent_session_cache_base_tokens Σ prompt_tokens of the rounds that
+ *                                      reported a cached count: the
+ *                                      denominator of the cache-read rate
+ *                                      read/base. A round that omitted the
+ *                                      count is excluded from both (not
+ *                                      counted as a miss); a reported 0 is
+ *                                      a miss and counts in the base.
+ *
+ * The UI's cache % is cache_read / cache_base — never input or output,
+ * and never the write count (output is not cacheable, and mixing the
+ * two cache quantities would conflate two differently-billed facts). */
+long nm_agent_session_rounds(const NmAgent *a);
+long nm_agent_session_input_tokens(const NmAgent *a);
+long nm_agent_session_output_tokens(const NmAgent *a);
+long nm_agent_session_cache_read_tokens(const NmAgent *a);
+long nm_agent_session_cache_write_tokens(const NmAgent *a);
+long nm_agent_session_cache_base_tokens(const NmAgent *a);
+
 /* Stream-inactivity timeout (ms). While a round streams, if no delta
  * arrives for this long the step errors the turn ("timed out") instead
  * of waiting forever — a model that connects but never answers, or

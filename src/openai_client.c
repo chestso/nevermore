@@ -304,6 +304,43 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n)
     free(calls);
 }
 
+/* Fold one provider `usage` object into the canonical NmUsage (see the
+ * contract in provider.h). This is the ONE place a provider's cache
+ * dialect is decoded: every onboarded provider on this client is
+ * accounted for here, and adding a spelling is a clause here, not a
+ * branch in a caller.
+ *
+ * Rules:
+ *  - every field defaults to -1 ("not reported"); nm_json_num returns 0
+ *    for an absent key, so absence is checked explicitly (a real 0 is a
+ *    real report — a cache MISS, not a gap).
+ *  - total_tokens comes from the wire, or is derived as prompt+completion
+ *    when both are present (belt-and-braces for a terse upstream).
+ *  - cache read and cache write are DISTINCT facts with distinct billing
+ *    (Hyper's pricing.cache_create vs cache_hit) and are read from
+ *    distinct keys; prompt_tokens_details carries both on the providers
+ *    that report them. DeepSeek's `prompt_cache_hit_tokens` is a second
+ *    spelling of the read count, never a second source — it is not read
+ *    here (the canonical key always rides alongside it on the wire). */
+static void parse_usage(NmJson *uobj, NmUsage *u)
+{
+    NmJson *pt = nm_json_get(uobj, "prompt_tokens");
+    NmJson *ct = nm_json_get(uobj, "completion_tokens");
+    NmJson *tt = nm_json_get(uobj, "total_tokens");
+    u->prompt_tokens = pt ? (long)nm_json_num(pt) : -1;
+    u->completion_tokens = ct ? (long)nm_json_num(ct) : -1;
+    u->total_tokens = tt ? (long)nm_json_num(tt) : -1;
+    if (u->total_tokens < 0 && u->prompt_tokens >= 0 &&
+        u->completion_tokens >= 0)
+        u->total_tokens = u->prompt_tokens + u->completion_tokens;
+
+    NmJson *details = nm_json_get(uobj, "prompt_tokens_details");
+    NmJson *cr = details ? nm_json_get(details, "cached_tokens") : NULL;
+    NmJson *cw = details ? nm_json_get(details, "cache_write_tokens") : NULL;
+    u->cached_tokens = cr ? (long)nm_json_num(cr) : -1;
+    u->cache_write_tokens = cw ? (long)nm_json_num(cw) : -1;
+}
+
 /* Handle one complete SSE event's data payload (already JSON-parsed
  * arena tree `obj`, borrowed). Port of quoth's sse-extract-deltas +
  * merge-tool-calls; tool_calls are reported through on_delta as
@@ -340,7 +377,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
      * ride the finish_reason chunk (Hyper without stream_options), a
      * standalone choices:[] chunk (most providers), or more than one
      * chunk (OpenCode Zen) — so fire on any event that has it; the
-     * receiver keeps the last. Absent fields are -1.
+     * receiver keeps the last.
      *
      * Only an OBJECT is a report: some upstreams stamp a `"usage":null`
      * placeholder on every chunk of a round (the DeepSeek endpoint
@@ -351,25 +388,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
     NmJson *uobj = nm_json_get(obj, "usage");
     if (nm_json_type(uobj) == NM_JSON_OBJECT && st->on_usage) {
         NmUsage u;
-        u.prompt_tokens = (long)nm_json_num(nm_json_get(uobj, "prompt_tokens"));
-        u.completion_tokens =
-            (long)nm_json_num(nm_json_get(uobj, "completion_tokens"));
-        u.total_tokens = (long)nm_json_num(nm_json_get(uobj, "total_tokens"));
-        NmJson *details = nm_json_get(uobj, "prompt_tokens_details");
-        u.cached_tokens = details
-                              ? (long)nm_json_num(
-                                    nm_json_get(details, "cached_tokens"))
-                              : -1;
-        /* nm_json_num returns 0 for an absent key; normalize "absent" to
-         * -1 so the receiver can tell "not reported" from a real 0. */
-        if (!nm_json_get(uobj, "prompt_tokens"))
-            u.prompt_tokens = -1;
-        if (!nm_json_get(uobj, "completion_tokens"))
-            u.completion_tokens = -1;
-        if (!nm_json_get(uobj, "total_tokens"))
-            u.total_tokens = -1;
-        if (!details || !nm_json_get(details, "cached_tokens"))
-            u.cached_tokens = -1;
+        parse_usage(uobj, &u);
         st->on_usage(&u, st->userdata);
     }
 

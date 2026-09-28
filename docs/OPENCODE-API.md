@@ -169,6 +169,15 @@ format,index}]`. The non-streaming body also carries a
   `completion_tokens_details.{audio_tokens,reasoning_tokens}`,
   and on the trailing event a top-level `cost` string
   (`"0"` on the Go subscription — flat-rate, so cost is 0).
+  **Read vs. write are distinct facts** (distinct billing): `cached_tokens`
+  is the cache **read** (a prefix replayed), `cache_write_tokens` the cache
+  **write** (a prefix stored) — never conflate them. nevermore's live
+  captures (2026-09, 194 rounds) show `cache_write_tokens: 0` on every
+  round, alongside `cache_creation_input_tokens: 0` and `audio_tokens: 0`;
+  `cached_tokens` tracked the read count and equalled DeepSeek's
+  `prompt_cache_hit_tokens` whenever that key was also present. The shared
+  client folds both into the canonical `NmUsage` (`provider.h`), and the
+  session ledger pairs read with the input it was measured against.
 
 Request body: the OpenAI-shaped subset `compose_body` already
 emits (`model`, `messages` with `tool_calls`/`tool_call_id`,

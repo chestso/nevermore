@@ -1262,6 +1262,15 @@ data: [DONE]
 > cost readout is the account-level `GET /api/usage` meter below). Response
 > headers of interest: `x-request-id` (echoable in support requests) and
 > `x-build-commit`/`x-build-time`.
+>
+> **Correction (nevermore wire captures, Sep 2026).** The "no cached-token
+> breakdown" line below/above is not what the wire shows: both `ollama:cloud`
+> and `ollama:local` capture sessions in `~/.local/state/nevermore/wire/`
+> carry `prompt_tokens_details.cached_tokens` on their usage objects (and a
+> `cost` member), exactly the OpenAI-compatible shape — the doc's
+> "three fields" note was written from a bare streamed chunk, not a full
+> capture. nevermore reads the canonical key wherever it appears; no
+> provider-specific fallback is needed.
 
 #### Parameter handling (cloud, Sep 2026 live tests)
 

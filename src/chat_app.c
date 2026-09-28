@@ -141,7 +141,7 @@ struct NmChatApp
      * status_last is the change-detection copy — boba's setter re-copies
      * every span string, so it runs only when the bytes actually changed
      * (memory-reuse principle). Sized for the chrome's widest span set
-     * (`⠋ ctx 999.9M/999.9M ⚡999.9M executing tool… `) plus the rule
+     * (`⠋ ctx 999.9M/999.9M ⚡100.0% executing tool… `) plus the rule
      * fill out to NM_STATUS_RULE_MAX_COLS columns (3 bytes each). */
     char status_text[896];
     char status_last[896];
@@ -1207,6 +1207,49 @@ static void print_context(NmChatApp *app)
         sys_line(app, "context: %s tokens cached (%.1f%% of the prompt)", c,
                  used > 0 ? (double)cached * 100.0 / (double)used : 0.0);
     }
+
+    /* Session accounting: the accumulated picture across the whole
+     * conversation (every completed round that reported usage). The
+     * rate is cache_read / cache_base — reads over the input of the
+     * rounds that reported a read count — never output (it is not
+     * cacheable) and never the write count. */
+    long rounds = nm_agent_session_rounds(app->agent);
+    if (rounds <= 0) {
+        sys_line(app, "context: session accounting: no round has reported "
+                      "usage yet");
+        return;
+    }
+    long in = nm_agent_session_input_tokens(app->agent);
+    long out = nm_agent_session_output_tokens(app->agent);
+    char si[32], so[32];
+    format_tokens_exact(in, si, sizeof(si));
+    format_tokens_exact(out, so, sizeof(so));
+    sys_line(app, "context: session %ld round%s, %s input / %s output tokens",
+             rounds, rounds == 1 ? "" : "s", si, so);
+
+    long read = nm_agent_session_cache_read_tokens(app->agent);
+    long base = nm_agent_session_cache_base_tokens(app->agent);
+    if (read < 0 || base <= 0) {
+        sys_line(app, "context: session cache: not reported by this "
+                      "provider");
+    } else {
+        char sr[32], sb[32];
+        format_tokens_exact(read, sr, sizeof(sr));
+        format_tokens_exact(base, sb, sizeof(sb));
+        sys_line(app, "context: session cache read %s tokens (%.1f%% of the "
+                      "%s input)",
+                 sr, (double)read * 100.0 / (double)base,
+                 sb);
+    }
+    /* Cache WRITE: tracked as an absolute count only (the write side has
+     * its own billing and no rate yet — see NmUsage). Reported by only
+     * some providers; omitted when none has. */
+    long write = nm_agent_session_cache_write_tokens(app->agent);
+    if (write >= 0) {
+        char sw[32];
+        format_tokens_exact(write, sw, sizeof(sw));
+        sys_line(app, "context: session cache write %s tokens", sw);
+    }
 }
 
 /* Show a picker whose first entry is the currently active one: the
@@ -2254,10 +2297,15 @@ static size_t status_add(char *buf, size_t cap, size_t o, StatusSpan *sp,
     return o + add;
 }
 
-/* The gauge text: `ctx <used>/<limit>`, with a compact cached marker
- * appended when the provider reports a prefix-cache read. Both numbers
- * are provider-reported (used) / catalog metadata (limit); "-" is an
- * honest unknown, never an estimate. */
+/* The gauge text: `ctx <used>/<limit>`, with the SESSION's cache-read
+ * rate appended when any round has reported a cached count. Both ctx
+ * numbers are provider-reported (used) / catalog metadata (limit); "-"
+ * is an honest unknown, never an estimate. The ⚡ rate is
+ * cache_read / cache_base (see nm_agent_session_*): reads over the input
+ * of the rounds that reported a read count, so a round that omitted the
+ * fact is not counted as a miss. It is omitted entirely when no round
+ * ever reported one — never a fabricated 0 % — and the write count never
+ * enters it (a distinct, differently-billed fact). */
 static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
 {
     /* Sized for the worst a long can print (19 digits + '.' +
@@ -2269,12 +2317,11 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
     format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
     format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
     int n = snprintf(dst, cap, "ctx %s/%s", u, l);
-    long cached = nm_agent_context_cached_tokens(app->agent);
-    if (cached >= 0 && n > 0 && (size_t)n < cap) {
-        char c[24]; /* same worst case as u/l */
-        format_tokens(cached, c, sizeof(c));
-        snprintf(dst + n, cap - (size_t)n, " ⚡%s", c);
-    }
+    long read = nm_agent_session_cache_read_tokens(app->agent);
+    long base = nm_agent_session_cache_base_tokens(app->agent);
+    if (read >= 0 && base > 0 && n > 0 && (size_t)n < cap)
+        snprintf(dst + n, cap - (size_t)n, " ⚡%.1f%%",
+                 (double)read * 100.0 / (double)base);
 }
 
 /* The gauge's tier: Comment at rest, Orange past ~85 % of a KNOWN

@@ -260,6 +260,9 @@ static void test_usage_rides_finish_reason_chunk(void)
     ASSERT_EQ(cap.last_usage.completion_tokens, 32);
     ASSERT_EQ(cap.last_usage.total_tokens, 67);
     ASSERT_EQ(cap.last_usage.cached_tokens, 12);
+    /* No write key on the wire: -1, never a fabricated 0 (read and write
+     * are distinct facts). */
+    ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
     /* And the composed request asked for usage. */
     ASSERT_TRUE(strstr(last_request, "\"stream_options\"") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"include_usage\":true") != NULL);
@@ -301,8 +304,95 @@ static void test_usage_standalone_chunk(void)
     ASSERT_EQ(cap.last_usage.prompt_tokens, 100);
     /* cached_tokens absent => -1, never a fabricated 0. */
     ASSERT_EQ(cap.last_usage.cached_tokens, -1);
+    ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
     /* include_usage off => no stream_options field. */
     ASSERT_TRUE(strstr(last_request, "stream_options") == NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The Anthropic-shaped usage object the opencode upstreams report: a
+ * cache WRITE count alongside the read, and no `total_tokens` (the
+ * client derives it from prompt+completion). Read and write are
+ * distinct facts with distinct keys — neither stands in for the other. */
+static void test_usage_cache_read_and_write_are_distinct(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10621,"
+        "\"completion_tokens\":75,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":10496,"
+        "\"cache_write_tokens\":2048}}}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 1 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, capture_usage, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_usage, 1);
+    ASSERT_EQ(cap.last_usage.prompt_tokens, 10621);
+    ASSERT_EQ(cap.last_usage.cached_tokens, 10496);
+    ASSERT_EQ(cap.last_usage.cache_write_tokens, 2048);
+    /* total_tokens omitted on the wire: derived from prompt+completion. */
+    ASSERT_EQ(cap.last_usage.total_tokens, 10696);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* A reported 0 is a real report (a cache MISS), never confused with the
+ * -1 "not reported" sentinel — this is what the session rate's paired
+ * denominator rests on. */
+static void test_usage_reported_zero_is_not_absent(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8936,"
+        "\"completion_tokens\":153,\"total_tokens\":9089,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 1 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, capture_usage, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.last_usage.cached_tokens, 0);
+    /* and the write key was absent on this shape. */
+    ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
 
     pthread_join(th, NULL);
     close(lfd);
@@ -2066,6 +2156,8 @@ int main(int argc, char *argv[])
     printf("test_openai_client:\n");
     RUN_TEST(test_usage_rides_finish_reason_chunk);
     RUN_TEST(test_usage_standalone_chunk);
+    RUN_TEST(test_usage_cache_read_and_write_are_distinct);
+    RUN_TEST(test_usage_reported_zero_is_not_absent);
     RUN_TEST(test_usage_absent_fires_nothing);
     RUN_TEST(test_usage_null_chunk_fires_nothing);
     RUN_TEST(test_chat_stream_end_to_end);

@@ -2046,6 +2046,101 @@ static void test_agent_context_usage_survives_null_usage_round(void)
     ASSERT_TRUE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
     ASSERT_EQ(nm_agent_context_cached_tokens(agent), 900);
+    /* And the session ledger counted turn 1 only: a round with no report
+     * adds nothing (it must not re-add the stale last_usage). */
+    ASSERT_EQ(nm_agent_session_rounds(agent), 1);
+    ASSERT_EQ(nm_agent_session_input_tokens(agent), 1234);
+    ASSERT_EQ(nm_agent_session_output_tokens(agent), 5);
+    ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 900);
+    ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 1234);
+    ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), -1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Session accounting accumulates over COMPLETED rounds, and the cache
+ * rate's operands stay paired: a round that reports the read fact (even
+ * 0 — a real miss) contributes to both read and base; a round that omits
+ * it contributes to input/output but to NEITHER cache operand. The
+ * cache write is tracked as an absolute count only. */
+static void test_agent_session_accounting_accumulates_and_pairs(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    /* Round 1: a plain miss (cached 0 — a REPORT, it counts). */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8936,"
+        "\"completion_tokens\":153,\"total_tokens\":9089,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 2: a hit, plus a cache write count. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":11322,"
+        "\"completion_tokens\":164,\"total_tokens\":11486,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":9088,"
+        "\"cache_write_tokens\":2048}}}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 3: no cached key at all — it moves input/output but neither
+     * cache operand (excluded from the rate, not a miss). */
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"c\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12191,"
+        "\"completion_tokens\":253,\"total_tokens\":12444}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    /* Before any round: every session accessor is the unknown sentinel. */
+    ASSERT_EQ(nm_agent_session_rounds(agent), 0);
+    ASSERT_EQ(nm_agent_session_input_tokens(agent), 0);
+    ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), -1);
+
+    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_session_rounds(agent), 1);
+    ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936);
+    ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 0);
+    ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936);
+
+    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_EQ(nm_agent_session_rounds(agent), 2);
+    ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936 + 11322);
+    ASSERT_EQ(nm_agent_session_output_tokens(agent), 153 + 164);
+    ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 9088);
+    ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936 + 11322);
+    ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), 2048);
+
+    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(nm_agent_session_rounds(agent), 3);
+    /* Input/output grew; the cache operands did NOT (round 3 omitted the
+     * key — excluded from the rate, not counted as a miss). */
+    ASSERT_EQ(nm_agent_session_input_tokens(agent),
+              8936 + 11322 + 12191);
+    ASSERT_EQ(nm_agent_session_output_tokens(agent),
+              153 + 164 + 253);
+    ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 9088);
+    ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936 + 11322);
+    /* The rate the UI shows: 9088 / 20258 = 44.9 %. */
+    ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), 2048);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -2500,6 +2595,7 @@ int main(void)
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_context_usage_accessors);
     RUN_TEST(test_agent_context_usage_survives_null_usage_round);
+    RUN_TEST(test_agent_session_accounting_accumulates_and_pairs);
     RUN_TEST(test_agent_rolling_window_default_off);
     RUN_TEST(test_agent_context_overflow_reports_provider_error);
     RUN_TEST(test_agent_set_model_changes_wire_model);

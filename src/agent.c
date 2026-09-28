@@ -130,6 +130,32 @@ struct NmAgent
     NmUsage last_usage;
     int has_usage;
     long context_limit;
+
+    /* 1 while THIS round has carried a real usage report: cleared at
+     * round_reset, set by round_on_usage. finish_round accumulates the
+     * session ledger only when it is set — a round with no report must
+     * not re-add last_usage (which still holds the previous round's
+     * numbers). */
+    int round_usage_seen;
+
+    /* Session accounting: the provider-agnostic ledger behind the
+     * session's cache-read rate (see NmUsage's contract). Accumulated
+     * once per COMPLETED round (finish_round, status OK, a real report
+     * seen) — an errored or cancelled round contributes nothing, and a
+     * round with no usage report adds nothing (last_usage still holds
+     * the previous round's numbers; the `"usage":null` trap).
+     *
+     * in/out grow with every reporting round. The cache pair is PAIRED:
+     * read and base (the prompt_tokens of the rounds that reported a
+     * cached count) move together, so a round that omits the fact is
+     * excluded from the rate rather than counted as a miss — while a
+     * round that reports 0 IS a miss (0 in the numerator, its input in
+     * the base). write is accumulated as an absolute count only: the
+     * write side is not rated or rendered beyond that yet. -1 means
+     * "no round ever reported the fact". */
+    long sess_in, sess_out;
+    long sess_cache_read, sess_cache_write, sess_cache_base;
+    int sess_rounds, sess_read_seen, sess_write_seen;
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -308,6 +334,44 @@ long nm_agent_context_cached_tokens(const NmAgent *a)
 long nm_agent_context_limit(const NmAgent *a)
 {
     return a ? a->context_limit : -1;
+}
+
+/* ---- session accounting (provider-agnostic; see NmUsage) ---- */
+
+long nm_agent_session_rounds(const NmAgent *a)
+{
+    return a ? a->sess_rounds : 0;
+}
+
+long nm_agent_session_input_tokens(const NmAgent *a)
+{
+    return a ? a->sess_in : -1;
+}
+
+long nm_agent_session_output_tokens(const NmAgent *a)
+{
+    return a ? a->sess_out : -1;
+}
+
+long nm_agent_session_cache_read_tokens(const NmAgent *a)
+{
+    if (!a || !a->sess_read_seen)
+        return -1;
+    return a->sess_cache_read;
+}
+
+long nm_agent_session_cache_write_tokens(const NmAgent *a)
+{
+    if (!a || !a->sess_write_seen)
+        return -1;
+    return a->sess_cache_write;
+}
+
+long nm_agent_session_cache_base_tokens(const NmAgent *a)
+{
+    if (!a || !a->sess_read_seen)
+        return -1;
+    return a->sess_cache_base;
 }
 
 void nm_agent_set_context_limit(NmAgent *a, long limit)
@@ -513,14 +577,16 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
 }
 
 /* Agent-internal usage receiver: records the LAST usage object seen this
- * round (multiple fires possible — see NmUsageFn) and flips the gate on
- * the first real prompt_tokens. */
+ * round (multiple fires possible — see NmUsageFn), flips the gate on the
+ * first real prompt_tokens, and marks the round as having reported (what
+ * lets finish_round accumulate the session ledger exactly once). */
 static void round_on_usage(const NmUsage *usage, void *userdata)
 {
     NmAgent *a = userdata;
     if (!usage)
         return;
     a->last_usage = *usage;
+    a->round_usage_seen = 1;
     if (usage->prompt_tokens >= 0)
         a->has_usage = 1;
 }
@@ -577,6 +643,9 @@ static void round_reset(NmAgent *a)
      * the next round believing its first call was already announced. */
     a->tool_exec_idx = 0;
     a->tool_announced = 0;
+    /* A fresh round has not reported usage yet: the session ledger must
+     * not re-add the previous round's last_usage (see finish_round). */
+    a->round_usage_seen = 0;
 }
 
 /* Compose the user-facing error from a failed chat round. The
@@ -722,6 +791,36 @@ static int begin_round(NmAgent *a)
 /* A round's stream completed: record the assistant message; on tool
  * calls, execute them, append results, and open the next round.
  * Returns 0 if the turn continues, 1 if the turn is DONE. */
+/* Accumulate the completed round into the session ledger (see the
+ * ledger's comment in the struct). Only a round that actually reported
+ * usage contributes; the cache pair moves together so a round that
+ * omitted the cached count stays out of the rate, while a reported 0
+ * counts as a miss. */
+static void session_account_round(NmAgent *a)
+{
+    if (!a->round_usage_seen)
+        return;
+    const NmUsage *u = &a->last_usage;
+    if (u->prompt_tokens >= 0)
+        a->sess_in += u->prompt_tokens;
+    if (u->completion_tokens >= 0)
+        a->sess_out += u->completion_tokens;
+    if (u->cached_tokens >= 0) {
+        a->sess_cache_read += u->cached_tokens;
+        /* The rate's denominator: input of the rounds that reported the
+         * read fact. prompt_tokens is present on any real usage object;
+         * if it were not, this round simply adds nothing to the base. */
+        if (u->prompt_tokens >= 0)
+            a->sess_cache_base += u->prompt_tokens;
+        a->sess_read_seen = 1;
+    }
+    if (u->cache_write_tokens >= 0) {
+        a->sess_cache_write += u->cache_write_tokens;
+        a->sess_write_seen = 1;
+    }
+    a->sess_rounds++;
+}
+
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
     if (r->status != NM_CHAT_OK) {
@@ -730,6 +829,11 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         set_error(a, msg);
         return -1;
     }
+
+    /* The round completed: fold its usage into the session ledger (a
+     * failed round above never reaches here, so it contributes no
+     * partial numbers). */
+    session_account_round(a);
 
     /* Record what the model said, with the round's reasoning trace
      * kept alongside it. The trace is display/history material: the

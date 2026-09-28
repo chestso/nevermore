@@ -141,19 +141,45 @@ typedef void (*NmStreamCallback)(NmStreamChannel channel,
 
 void nm_tool_calls_free(NmToolCall *calls, size_t n);
 
-/* Provider-reported token usage for a round (the OpenAI `usage`
- * object). Every field is -1 when the provider did not report it:
- * the provider never invents a number. prompt_tokens is the context
- * sent this round — the number a context gauge shows. cached_tokens
- * is the prefix-cache read count (absent on providers that do not
- * report a breakdown). cost/credits are a later tier on this same
- * object (Hyper's cost.usd; OpenRouter's cost). */
+/* Provider accounting contract: one canonical set of per-round facts
+ * (the OpenAI `usage` object), and EVERY onboarded provider folds its
+ * dialect into it — the shared client is the only reader of a
+ * provider's wire keys. Every field is -1 when the provider did not
+ * report it: a provider never invents a number, and "absent" is never
+ * confused with a real 0 (a reported 0 is a real report).
+ *
+ *   prompt_tokens      input: the context sent this round (the number
+ *                      the context gauge shows). The denominator of the
+ *                      session's cache-read rate.
+ *   completion_tokens  output: what the model generated.
+ *   total_tokens       the wire's total, else prompt+completion when
+ *                      both are present, else -1.
+ *   cached_tokens      cache READ: the prefix replayed from the
+ *                      server-side cache this round. This is the
+ *                      canonical cache key; DeepSeek's
+ *                      `prompt_cache_hit_tokens` rides alongside it
+ *                      and is not a second source.
+ *   cache_write_tokens cache WRITE: the prefix written INTO the cache.
+ *                      Read and write are distinct quantities with
+ *                      distinct billing (Hyper's pricing.cache_create
+ *                      vs pricing.cache_hit; Anthropic-shaped upstreams
+ *                      bill cache creation separately) — never conflate
+ *                      them. Reported by only some providers (the
+ *                      Anthropic-shaped upstreams behind opencode);
+ *                      tracked here but not yet rated or displayed
+ *                      beyond an absolute count.
+ *
+ * Deliberately OUT of the canonical set for now: cost/credits (Hyper's
+ * cost.usd, OpenRouter's cost, hypercredits) — a later tier on this
+ * same object. Dialect mapping lives in one place, openai_client.c's
+ * parse_usage. */
 typedef struct NmUsage
 {
-    long prompt_tokens;     /* context sent this round; -1 unknown */
-    long completion_tokens; /* -1 unknown */
-    long total_tokens;      /* -1 unknown */
-    long cached_tokens;     /* prefix-cache read; -1 unknown */
+    long prompt_tokens;      /* input sent this round; -1 unknown */
+    long completion_tokens;  /* output generated; -1 unknown */
+    long total_tokens;       /* wire total, else prompt+completion; -1 */
+    long cached_tokens;      /* cache READ (prefix replayed); -1 unknown */
+    long cache_write_tokens; /* cache WRITE (prefix stored); -1 unknown */
 } NmUsage;
 
 /* Fired whenever a streamed event carries a usage object. May fire more

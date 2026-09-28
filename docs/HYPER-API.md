@@ -578,6 +578,17 @@ Each model entry:
   presented refresh token, an HTTP `401` on an LLM request indicates the refresh
   token is stale/consumed and the client must re-run the device flow
   (`crush auth`).
+- **Cache read vs. write are distinct fields with distinct billing** (nevermore
+  wire captures, Sep 2026). `usage.prompt_tokens_details.cached_tokens` is the
+  cache **read** — the prefix replayed, billed at `pricing.cache_hit`;
+  `usage.prompt_tokens_details.cache_write_tokens` is the cache **write** —
+  the prefix stored, billed at `pricing.cache_create`. Never conflate them.
+  Hyper's own usage object was observed to carry `cached_tokens` and **no**
+  write count; the DeepSeek-shaped upstreams behind opencode report both (with
+  the write count `0` in every captured round). nevermore folds both spellings
+  into the canonical `NmUsage` (`provider.h`) and rates only the read against
+  the round's input — an output token is never cacheable, so folding
+  `completion_tokens` into the denominator would dilute the rate.
 - **`thinking` and `reasoning_effort` interact nontrivially.** `thinking`
   (boolean) is a silencer, not an enabler: reasoning is on by default for every
   thinking model, `thinking: true` is a no-op on every model, and `false`

@@ -1000,17 +1000,18 @@ static void test_context_gauge_reports_usage_and_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    /* The idle frame's gauge: 12.4k of 131k, with the cached marker. */
+    /* The idle frame's gauge: 12.4k of 131k, with the SESSION cache-read
+     * rate (the one round's 8100 read / 12400 input = 65.3 %). */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(),
-                             "ctx 12.4k/131k \xe2\x9a\xa1"
-                             "8.1k ");
+    char *gauge = span_bytes(nm_color_gutter(), "ctx 12.4k/131k \xe2\x9a\xa1"
+                                                "65.3% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
 
-    /* /context is the spelled-out breakdown. */
+    /* /context is the spelled-out breakdown, the per-round lines plus
+     * the session accrual. */
     harness_type(h, "/context");
     harness_enter(h);
     const char *out = harness_read(h);
@@ -1020,6 +1021,108 @@ static void test_context_gauge_reports_usage_and_limit(void)
                             "(9.5%)") != NULL);
     ASSERT_TRUE(strstr(out, "context: 8,100 tokens cached (65.3% of the "
                             "prompt)") != NULL);
+    ASSERT_TRUE(strstr(out, "context: session 1 round, 12,400 input / 5 "
+                            "output tokens") != NULL);
+    ASSERT_TRUE(strstr(out, "context: session cache read 8,100 tokens "
+                            "(65.3% of the 12,400 input)") != NULL);
+    /* No write count on this shape: the line is absent. */
+    ASSERT_TRUE(strstr(out, "session cache write") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The ⚡ rate is CUMULATIVE over the session, not a per-round number:
+ * round 1 reports no cache fact at all (the gauge shows ctx alone), then
+ * two read-reporting rounds move the rate to the session's own
+ * read/base. A reported 0 counts as a miss (its input in the base). */
+static void test_context_gauge_cache_rate_is_cumulative(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    /* No prompt_tokens_details: no read reported. */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":8936,"
+        "\"completion_tokens\":153,\"total_tokens\":9089}}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":11322,"
+        "\"completion_tokens\":164,\"total_tokens\":11486,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":9088,"
+        "\"cache_write_tokens\":2048}}}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10000,"
+        "\"completion_tokens\":100,\"total_tokens\":10100,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    nm_agent_set_context_limit(nm_chat_app_agent(h->app), 131072);
+
+    /* Round 1: usage, but no cache read ever reported => no ⚡ at all
+     * (never a fabricated 0 %) and the session line says so. */
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge = span_bytes(nm_color_gutter(), "ctx 8.9k/131k ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    ASSERT_TRUE(strstr(frame, "\xe2\x9a\xa1") == NULL);
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: session 1 round, 8,936 input / 153 "
+                            "output tokens") != NULL);
+    ASSERT_TRUE(strstr(out, "context: session cache: not reported") != NULL);
+
+    /* Round 2: 9088 / 11322 = 80.3 %. */
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    gauge = span_bytes(nm_color_gutter(), "ctx 11.3k/131k \xe2\x9a\xa1"
+                                          "80.3% ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+
+    /* Round 3: a miss (0 read) joins the base => 9088 / 21322 = 42.6 %,
+     * cumulative, and the write count shows as an absolute number. */
+    harness_type(h, "three");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    gauge = span_bytes(nm_color_gutter(), "ctx 10k/131k \xe2\x9a\xa1"
+                                          "42.6% ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    harness_type(h, "/context");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: session 3 rounds, 30,258 input / 417 "
+                            "output tokens") != NULL);
+    ASSERT_TRUE(strstr(out, "context: session cache read 9,088 tokens "
+                            "(42.6% of the 21,322 input)") != NULL);
+    ASSERT_TRUE(strstr(out, "context: session cache write 2,048 tokens") != NULL);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -4198,6 +4301,7 @@ int main(void)
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
+    RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_busy_input_gathers_type_ahead);
     RUN_TEST(test_quit_command_quits);

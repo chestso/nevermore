@@ -72,12 +72,28 @@ default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
 The input row is always on screen, busy or not: it gathers the next
 prompt while a turn runs (keys edit it; Enter is a no-op until the turn
-ends; Ctrl+C interrupts). Left of the prompt its gutter carries the
-context gauge, `ctx <used>/<limit>`, built only from what the provider
-last reported against the active model's catalog window — with a `⚡`
-marker when the prefix cache was read — plus `thinking…` /
-`executing <tool>…` while a turn is in flight. `/context` prints the
-exact breakdown; an unknown number reads as `-`, never an estimate.
+ends; Ctrl+C interrupts). Above the prompt its status line carries the
+context gauge, `ctx <used>/<limit>`, where the used count is the prompt
+the provider last reported and the limit the active model's catalog
+window — plus, once some round has reported a cache read, the session's
+cache rate `⚡<pct>`: the share of this conversation's input that came
+from the provider's prefix cache, accumulated over every completed round
+that reported a read count (a round that omits the field is left out of
+the rate, never counted as a miss). The write side is tracked separately
+and not rated. An unknown number reads as `-`, never an estimate, and
+the `⚡` marker is simply absent until a read count exists. `thinking…` /
+`executing <tool>…` rides the same row while a turn is in flight.
+`/context` prints the exact breakdown — the last round's numbers plus the
+session totals, the cache read (and its rate), and the cache write count.
+
+Providers differ in what they report: OpenAI, Hyper, OpenRouter and the
+OpenCode tiers report a cache read (`prompt_tokens_details.cached_tokens`)
+— Hyper's is occasionally absent for a round — the OpenCode upstreams
+also report a cache write, and Ollama reports the token counts but no
+cache breakdown. Every provider's usage object is folded into one
+canonical set by the shared client; where a fact is not reported the
+display degrades (no `⚡`, `session cache: not reported`), it is never
+invented.
 
 ## Configuration
 
