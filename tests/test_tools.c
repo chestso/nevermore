@@ -139,6 +139,34 @@ static int path_exists(void *u)
     return 1;
 }
 
+/* Read a child-written pid file, waiting for its CONTENT rather than
+ * for the path to appear. The shell sets up the `> file` redirection
+ * (creating/truncating the file) before it writes into it, so a bare
+ * existence probe can observe an EMPTY file and read no pid at all —
+ * a race that failed `test_run_command_cancel_kills_the_child` about
+ * 1 run in 15 (2026-09-28). Poll until the file parses to a positive
+ * pid, bounded by wall clock; 0 means the budget ran out. Same
+ * convention as wait_for_fd (a real condition, never a guessed sleep). */
+static pid_t wait_for_pid_file(const char *path, int budget_ms)
+{
+    struct timeval t0, now;
+    gettimeofday(&t0, NULL);
+    for (;;) {
+        FILE *f = fopen(path, "rb");
+        if (f) {
+            long v = 0;
+            int got = fscanf(f, "%ld", &v);
+            fclose(f);
+            if (got == 1 && v > 0)
+                return (pid_t)v;
+        }
+        gettimeofday(&now, NULL);
+        if (elapsed_us(&t0, &now) > (long long)budget_ms * 1000)
+            return 0;
+        usleep(1000);
+    }
+}
+
 /* Block until `fd` is readable (a PTY master / pipe), or the budget
  * runs out. Returns 0 when readable, -1 on timeout. */
 static int wait_readable(int fd, int budget_ms)
@@ -1285,19 +1313,10 @@ static void test_run_command_cancel_kills_the_child(void)
     /* Read the child's own pid (the session/group leader the spawn
      * created — SETPGROUP), so after the cancel the test can wait on a
      * POSITIVE liveness signal (the group is gone) instead of sleeping
-     * past the write point. */
-    pid_t child = 0;
-    for (int i = 0; i < 2000 && child <= 0; i++) {
-        FILE *f = fopen(pidfile, "rb");
-        if (f) {
-            long v = 0;
-            if (fscanf(f, "%ld", &v) == 1)
-                child = (pid_t)v;
-            fclose(f);
-            break;
-        }
-        usleep(1000);
-    }
+     * past the write point. Wait for the file's CONTENT: the shell's
+     * `> file` redirection creates it empty a moment before the pid is
+     * written, and probing only for existence read an empty file. */
+    pid_t child = wait_for_pid_file(pidfile, 3000);
     ASSERT_TRUE(child > 0);
 
     t->end(e); /* cancel kills the group: shell + descendants */
