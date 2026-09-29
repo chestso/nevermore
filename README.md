@@ -39,8 +39,9 @@ Dependencies:
 
 - **boba** (required) — TUI runtime, textinput, styles
 - **TLS** (optional, per-OS, never libcurl) — Schannel on Windows,
-  Secure Transport on macOS, mbedTLS or OpenSSL on Linux; `--with-tls=none`
-  builds a plain-HTTP-only client (fine against a local Ollama daemon)
+  Secure Transport on macOS, mbedTLS (≥ 2.28) or OpenSSL on Linux;
+  `--with-tls=none` builds a plain-HTTP-only client (fine against a
+  local Ollama daemon)
 
 ## Usage
 

@@ -3,10 +3,13 @@
  * Compiled only when NM_TLS_MBEDTLS is defined. Used when OpenSSL
  * isn't present (or for small/embedded builds): --with-tls=mbedtls.
  *
- * mbedTLS 3.x API: mbedtls_ssl_config + mbedtls_ssl_context over a
+ * mbedTLS 2.28+/3.x API: mbedtls_ssl_config + mbedtls_ssl_context over a
  * mbedtls_net_context wrapper of the existing fd, system trust via
  * mbedtls_x509_crt_parse_path, hostname verification via
- * mbedtls_ssl_set_hostname.
+ * mbedtls_ssl_set_hostname. The 2.28 floor is deliberate: Ubuntu
+ * 24.04 LTS ships 2.28.8 and every API used here predates 3.0, so the
+ * distro package configure recommends actually compiles (CI's
+ * linux-mbedtls job pins exactly that).
  *
  * Memory model: one config + trust store + DRBG for the process
  * lifetime (created on first use, never freed); one ssl context + bio

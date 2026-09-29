@@ -12,8 +12,17 @@ permissions:
 
 jobs:
   linux:
-    name: GNU/Linux
+    name: GNU/Linux (${{ matrix.backend }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both Linux TLS backends are compiled AND tested — an explicit
+        # --with-tls per job, so neither depends on distro-version luck.
+        # mbedTLS auto-detect would pick Ubuntu's 2.28 (the widened
+        # floor), which would leave tls_openssl.c dead; openssl would
+        # leave tls_mbedtls.c dead. Two jobs close both blind spots.
+        backend: [openssl, mbedtls]
 
     steps:
       - name: Checkout nevermore
@@ -46,8 +55,13 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf automake libtool make pkg-config \
-            libmbedtls-dev
+            autoconf automake libtool make pkg-config
+          # The backend each job is pinned to (never auto-detect's pick).
+          if [ "${{ matrix.backend }}" = "mbedtls" ]; then
+            sudo apt-get install -y libmbedtls-dev
+          else
+            sudo apt-get install -y libssl-dev
+          fi
 
       - name: Build and install boba
         run: |
@@ -62,7 +76,7 @@ jobs:
           export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig"
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$HOME/.local" --with-tls=${{ matrix.backend }}
           make -j"$(nproc)"
 
       - name: Run tests
@@ -75,7 +89,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: test-logs-linux
+          name: test-logs-linux-${{ matrix.backend }}
           path: |
             build/tests/*.log
             build/tests/test-progress.log

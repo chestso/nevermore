@@ -38,20 +38,52 @@
 #endif
 
 /* ---------------------------------------------------------------- */
-/* TLS dummy server (OpenSSL server side; only built when the
- * OpenSSL backend is compiled in — otherwise the negative test
- * degrades to "TLS unavailable", which is itself the contract.)      */
+/* TLS dummy server, built with whatever backend is compiled in.
+ *
+ * The negative case (the client MUST refuse the committed self-signed
+ * cert) is the offline gate for the handshake loop, SNI and
+ * verification — so it has to run under every Linux backend, not just
+ * OpenSSL. The server half is therefore compiled against the SAME
+ * backend the client uses: OpenSSL when NM_TLS_OPENSSL, mbedTLS when
+ * NM_TLS_MBEDTLS (CI's linux-mbedtls job pins the latter), the OS
+ * backend on Windows/macOS. A build with no TLS backend degrades to
+ * "TLS unavailable", which is itself the contract (test below).      */
 /* ---------------------------------------------------------------- */
 
-#ifdef NM_TLS_OPENSSL
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
 static int tls_port;
 static int tls_listen_fd = -1;
-#endif
-
-#ifdef NM_TLS_OPENSSL
 
 static const char *CERT = "tls/test-cert.pem";
 static const char *KEY = "tls/test-key.pem";
+
+static int tls_server_start(void)
+{
+    tls_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(tls_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+        return -1;
+    socklen_t l = sizeof(a);
+    getsockname(tls_listen_fd, (struct sockaddr *)&a, &l);
+    tls_port = ntohs(a.sin_port);
+    if (listen(tls_listen_fd, 1) < 0)
+        return -1;
+    return 0;
+}
+
+static void tls_server_stop(void)
+{
+    if (tls_listen_fd >= 0)
+        close(tls_listen_fd);
+    tls_listen_fd = -1;
+}
+#endif
+
+#ifdef NM_TLS_OPENSSL
 
 static void *tls_server_thread(void *arg)
 {
@@ -82,31 +114,6 @@ static void *tls_server_thread(void *arg)
     SSL_CTX_free(ctx);
     close(cfd);
     return NULL;
-}
-
-static int tls_server_start(void)
-{
-    tls_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(tls_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    getsockname(tls_listen_fd, (struct sockaddr *)&a, &l);
-    tls_port = ntohs(a.sin_port);
-    if (listen(tls_listen_fd, 1) < 0)
-        return -1;
-    return 0;
-}
-
-static void tls_server_stop(void)
-{
-    if (tls_listen_fd >= 0)
-        close(tls_listen_fd);
-    tls_listen_fd = -1;
 }
 
 static void test_tls_rejects_untrusted_cert(void)
@@ -141,11 +148,116 @@ static void test_tls_no_backend_fails_fast(void)
     ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
 }
 
-#else /* no OpenSSL backend in this build */
+#elif defined(NM_TLS_MBEDTLS)
+
+/* Same negative gate, mbedTLS server side — so the mbedTLS backend is
+ * TESTED (handshake, SNI, verification), not merely compiled. Mirrors
+ * the OpenSSL path above; the client half is the real backend under
+ * test (nm_tls_backend() = mbedtls). */
+#include <mbedtls/ctr_drbg.h>
+#include <mbedtls/entropy.h>
+#include <mbedtls/error.h>
+#include <mbedtls/net_sockets.h>
+#include <mbedtls/pk.h>
+#include <mbedtls/ssl.h>
+#include <mbedtls/x509_crt.h>
+
+static void *tls_server_thread(void *arg)
+{
+    (void)arg;
+    int cfd = accept(tls_listen_fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+
+    mbedtls_ssl_config conf;
+    mbedtls_x509_crt srvcert;
+    mbedtls_pk_context pkey;
+    mbedtls_entropy_context entropy;
+    mbedtls_ctr_drbg_context drbg;
+    mbedtls_ssl_context ssl;
+
+    mbedtls_ssl_config_init(&conf);
+    mbedtls_x509_crt_init(&srvcert);
+    mbedtls_pk_init(&pkey);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_ctr_drbg_init(&drbg);
+
+    int ok = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                                   (const unsigned char *)"test-tls-server", 15) == 0 &&
+             mbedtls_x509_crt_parse_file(&srvcert, CERT) == 0 &&
+             mbedtls_pk_parse_keyfile(&pkey, KEY, NULL) == 0 &&
+             mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER,
+                                         MBEDTLS_SSL_TRANSPORT_STREAM,
+                                         MBEDTLS_SSL_PRESET_DEFAULT) == 0;
+    if (ok) {
+        mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
+        mbedtls_ssl_conf_own_cert(&conf, &srvcert, &pkey);
+        mbedtls_ssl_init(&ssl);
+        if (mbedtls_ssl_setup(&ssl, &conf) == 0) {
+            mbedtls_ssl_set_bio(&ssl, &cfd, mbedtls_net_send,
+                                mbedtls_net_recv, NULL);
+            int ret;
+            while ((ret = mbedtls_ssl_handshake(&ssl)) != 0) {
+                if (ret != MBEDTLS_ERR_SSL_WANT_READ &&
+                    ret != MBEDTLS_ERR_SSL_WANT_WRITE)
+                    break;
+            }
+            if (ret == 0) {
+                unsigned char d[512];
+                mbedtls_ssl_read(&ssl, d, sizeof(d));
+                const char resp[] =
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    "Content-Length: 2\r\n\r\nhi";
+                mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
+                                  sizeof(resp) - 1);
+            }
+            mbedtls_ssl_close_notify(&ssl);
+            mbedtls_ssl_free(&ssl);
+        }
+    }
+    mbedtls_x509_crt_free(&srvcert);
+    mbedtls_pk_free(&pkey);
+    mbedtls_ctr_drbg_free(&drbg);
+    mbedtls_entropy_free(&entropy);
+    mbedtls_ssl_config_free(&conf);
+    close(cfd);
+    return NULL;
+}
 
 static void test_tls_rejects_untrusted_cert(void)
 {
-    printf("  (OpenSSL backend not compiled — negative TLS test n/a)\n");
+    if (!nm_tls_backend()) {
+        printf("  (no TLS backend — skipped by contract)\n");
+        return;
+    }
+    ASSERT_EQ(tls_server_start(), 0);
+    pthread_t th;
+    pthread_create(&th, NULL, tls_server_thread, NULL);
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", tls_port, NM_TRANSPORT_TLS, &ci);
+    /* Self-signed: the system trust store must reject it. */
+    ASSERT_NULL(c);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
+    pthread_join(th, NULL);
+    tls_server_stop();
+}
+
+static void test_tls_no_backend_fails_fast(void)
+{
+    if (nm_tls_backend())
+        return; /* backend present: contract satisfied elsewhere */
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", 1, NM_TRANSPORT_TLS, &ci);
+    ASSERT_NULL(c);
+    ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
+}
+
+#else /* no Linux TLS backend in this build */
+
+static void test_tls_rejects_untrusted_cert(void)
+{
+    printf("  (no Linux TLS backend compiled — negative TLS test n/a)\n");
 }
 
 static void test_tls_no_backend_fails_fast(void)

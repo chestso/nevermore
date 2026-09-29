@@ -95,6 +95,11 @@ dnl   macOS:   Secure Transport  (Security.framework, always present)
 dnl   Linux/other: optional, auto-detected at configure time
 dnl                (--with-tls=mbedtls|openssl|none)
 dnl
+dnl mbedTLS floor is 2.28 (Ubuntu 24.04 LTS ships 2.28.8, still
+dnl Canonical-maintained there): the backend uses nothing newer, so
+dnl the distro package our own error text recommends is accepted
+dnl rather than silently falling through to OpenSSL.
+dnl
 dnl Plain HTTP (localhost Ollama / llama.cpp servers) works with TLS=none
 dnl on every platform, so the zero-dependency core always builds.
 dnl ------------------------------------------------------------------
@@ -117,7 +122,7 @@ elif test "x$host_macos" = "xyes"; then
   AC_MSG_NOTICE([TLS backend: macOS Secure Transport])
 else
   if test "x$with_tls" = "xauto" || test "x$with_tls" = "xmbedtls"; then
-    PKG_CHECK_MODULES([MBEDTLS], [mbedtls >= 3.0 mbedx509 mbedcrypto],
+    PKG_CHECK_MODULES([MBEDTLS], [mbedtls >= 2.28 mbedx509 mbedcrypto],
       [tls_backend=mbedtls
        AC_DEFINE([NM_TLS_MBEDTLS], [1], [TLS backend: mbedTLS])
        AC_MSG_NOTICE([TLS backend: mbedTLS])],
