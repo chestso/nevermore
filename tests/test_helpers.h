@@ -66,6 +66,7 @@ static TEST_HELPERS_UNUSED int test_fail_count = 0;
         } else {                          \
             printf("  FAIL: %s\n", #fn);  \
         }                                 \
+        fflush(stdout);                   \
     } while (0)
 
 #define TEST_SUMMARY()                            \
