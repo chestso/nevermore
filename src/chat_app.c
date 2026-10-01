@@ -56,6 +56,7 @@
 #include "colors.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
+#include "nm_image.h"
 #include "nm_process.h"
 #include "spinner.h"
 
@@ -697,6 +698,10 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         app->classifiers[i] = nm_markdown_classifier(&app->markdown[i]);
     }
     nm_markdown_render_state_init(&app->render_state);
+    /* The image tier's display math reads the layout width from the
+     * render state (the measure seam carries no width); kept current
+     * on every resize below. */
+    app->render_state.width = app->term_w;
     app->streams[0].name = "content";
     app->streams[1].name = "reasoning";
     /* The reasoning stream dims in the live region too: boba paints
@@ -708,6 +713,8 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     TuiTranscriptConfig tcfg = {
         .render_block = nm_markdown_render_block,
         .render_live = nm_markdown_render_live,
+        .measure_image = nm_image_measure,
+        .render_image = nm_image_render,
         .streams = app->streams,
         .classifiers = app->classifiers,
         .n_streams = NM_STREAM_COUNT,
@@ -775,6 +782,7 @@ void nm_chat_app_free(NmChatApp *app)
         nm_config_set_store(NULL);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
+    nm_markdown_render_state_free(&app->render_state); /* image slot */
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
     /* Jobs are process-global (a tool's userdata is a workdir path
@@ -2190,6 +2198,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         app->term_h = msg.data.size.height;
         tui_textinput_set_terminal_width(app->input, app->term_w);
         tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
+        app->render_state.width = app->term_w; /* image display math */
         tui_transcript_update(app->transcript, msg);
         return tui_update_result_none();
 
@@ -2487,6 +2496,12 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     TuiView v = tui_view_default(out);
     v.render_mode = TUI_RENDER_INLINE;
     v.bracketed_paste = 1;
+    /* Declared so the terminal profile probe runs at startup: the
+     * IMAGE tier's transport choice (kitty/iTerm2 marker) needs the
+     * verdict, and the commit gate holds image batches for it. A
+     * terminal that answers nothing resolves conservatively (markers)
+     * within the probe's 250 ms deadline. */
+    v.probe_terminal = 1;
     /* The cursor is the textinput's (its row already counts the status
      * line below boba's cursor_pos), offset by the transcript's live rows
      * — never hidden (the input always gathers the next prompt). */

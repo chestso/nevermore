@@ -3335,6 +3335,59 @@ static void test_markdown_table_reaches_scrollback_aligned(void)
     close(rr.fd);
 }
 
+/* End-to-end: an image data URI streamed from a canned SSE round
+ * degrades to the marker through the full chat_app stack (the test
+ * terminal answers no probe, so the profile resolves conservative) —
+ * and the payload NEVER lands in the captured output. */
+static void test_image_data_uri_degrades_to_marker(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
+        "\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "draw something");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    /* The tmpfile terminal never answers the probe; the real loop's
+     * tick would resolve it at the 250 ms deadline — do the verdict
+     * by hand and flush once more, which is exactly what that tick
+     * does (the held image batch then commits as the marker). */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* the marker: alt, format, dims, reason */
+    ASSERT_TRUE(strstr(out, "pic") != NULL);
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "no graphics support") != NULL);
+    /* the payload and the transport never appear (the probe's own
+     * query is _Gi=..., not the transmit form) */
+    ASSERT_TRUE(strstr(out, "iVBORw0KGgo") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b_Gf=100") == NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
 /* ---------------------------------------------------------------- */
 /* Config write-back: the runtime shadow                          */
 /* ---------------------------------------------------------------- */
@@ -4354,6 +4407,7 @@ int main(void)
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
+    RUN_TEST(test_image_data_uri_degrades_to_marker);
     RUN_TEST(test_job_cap_fits_the_fd_budget);
     RUN_TEST(test_ps_without_jobs);
 #ifdef _WIN32

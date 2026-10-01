@@ -278,6 +278,14 @@ static inline TuiAttr nm_attr_table_border(void)
                               NM_DRACULA_COMMENT_B);
 }
 
+/* Image degradation marker: the one row a terminal without graphics
+ * (or a payload that cannot ride one) shows instead of the image. */
+static inline TuiAttr nm_attr_image_marker(void)
+{
+    return nm_attr_foreground(NM_DRACULA_COMMENT_R, NM_DRACULA_COMMENT_G,
+                              NM_DRACULA_COMMENT_B);
+}
+
 static inline TuiAttr nm_attr_table_header(void)
 {
     TuiAttr a = nm_attr_plain();

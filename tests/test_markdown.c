@@ -238,6 +238,84 @@ static void test_unterminated_inline_span_is_literal(void)
     ASSERT_EQ(k, TUI_BLOCK_HEADING);
 }
 
+static void test_standalone_image_line_opens_image_block(void)
+{
+    Cls c;
+    TuiBlockKind k = TUI_BLOCK_PARAGRAPH;
+
+    /* after a blank (block boundary): BLOCK_START + IMAGE */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+    ASSERT_EQ(cls_feed(&c, "![alt](data:image/png;base64,AA)", &k),
+              TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+
+    /* stream start counts as a boundary (prev == NULL) */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "![alt](/tmp/x.png)", &k),
+              TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+
+    /* indent <= 3 + trailing spaces are fine */
+    cls_init(&c);
+    cls_feed(&c, "", &k);
+    ASSERT_EQ(cls_feed(&c, "   ![a](b)  ", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+
+    /* malformed: text after, empty src, unclosed — paragraph */
+    cls_init(&c);
+    cls_feed(&c, "", &k);
+    ASSERT_EQ(cls_feed(&c, "![a](b) tail", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+    cls_init(&c);
+    cls_feed(&c, "", &k);
+    ASSERT_EQ(cls_feed(&c, "![]()", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+}
+
+static void test_image_line_inside_paragraph_stays_inline(void)
+{
+    Cls c;
+    TuiBlockKind k = TUI_BLOCK_PARAGRAPH;
+
+    /* GFM: a lone image is a paragraph; without a blank line before
+     * it, the line CONTINUES the paragraph (an inline image, rendered
+     * as today's link span) */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "text before", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_CONTINUES);
+
+    /* after a list item / quote line without a blank: the dialect
+     * ends that block and the image rides a new PARAGRAPH (an image
+     * never interrupts; D14 — the standalone case needs the blank) */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "- item", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "> quoted", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+
+    /* inside a fence: the container owns the line (suppressed) */
+    cls_init(&c);
+    cls_feed(&c, "```", &k);
+    ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_CONTINUES);
+}
+
+static void test_image_ref_scanner_edges(void)
+{
+    NmImageRef r;
+
+    /* the block text carries the trailing newline */
+    ASSERT_TRUE(nm_markdown_image_ref("![a](b)\n", 8, &r));
+    ASSERT_EQ(r.src_len, 1u);
+
+    /* src with parens: the LAST ')' closes */
+    ASSERT_TRUE(nm_markdown_image_ref("![a](u_(v).png)", 15, &r));
+    ASSERT_EQ(r.src_len, 9u);
+}
+
 static void test_reset_clears_fence_state(void)
 {
     Cls c;
@@ -1235,6 +1313,9 @@ int main(void)
     RUN_TEST(test_blank_line_ends_paragraph);
     RUN_TEST(test_unterminated_inline_span_is_literal);
     RUN_TEST(test_reset_clears_fence_state);
+    RUN_TEST(test_standalone_image_line_opens_image_block);
+    RUN_TEST(test_image_line_inside_paragraph_stays_inline);
+    RUN_TEST(test_image_ref_scanner_edges);
     RUN_TEST(test_reclassify_fires_inside_lookahead);
     RUN_TEST(test_line_lookahead_commits);
     RUN_TEST(test_fence_line_commits_immediately);

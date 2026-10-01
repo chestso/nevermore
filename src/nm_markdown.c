@@ -144,6 +144,52 @@ static int fence_rest_blank(const char *s, size_t len, size_t run_off,
     return i >= len;
 }
 
+/* Parse one line as a standalone image reference (see the header).
+ * Character-level, no allocation. */
+int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref)
+{
+    if (!line || !ref)
+        return 0;
+    /* one optional trailing newline (block text carries it) */
+    if (len > 0 && line[len - 1] == '\n')
+        len--;
+    size_t i = block_indent(line, len);
+    if (i + 1 >= len || line[i] != '!' || line[i + 1] != '[')
+        return 0;
+    i += 2;
+    size_t alt = i;
+    while (i < len && line[i] != ']')
+        i++;
+    if (i >= len)
+        return 0;
+    size_t alt_end = i;
+    i++; /* ']' */
+    if (i >= len || line[i] != '(')
+        return 0;
+    i++;
+    size_t src = i;
+    /* the source ends at the LAST ')' on the line (URLs may carry
+     * balanced parens; data URIs and paths never do) */
+    size_t close = len;
+    while (close > src && line[close - 1] != ')')
+        close--;
+    if (close == src)
+        return 0; /* no ')' at all */
+    close--;      /* the ')' itself */
+    if (close == src)
+        return 0; /* `![]()`: empty source */
+    /* only spaces may follow the closing paren */
+    for (size_t t = close + 1; t < len; t++) {
+        if (!is_space(line[t]))
+            return 0;
+    }
+    ref->alt_off = alt;
+    ref->alt_len = alt_end - alt;
+    ref->src_off = src;
+    ref->src_len = close - src;
+    return 1;
+}
+
 /* ---------------------------------------------------------------- */
 /* Classifier                                                       */
 /* ---------------------------------------------------------------- */
@@ -323,6 +369,18 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
         m->last_quote = 1;
         *out_kind = TUI_BLOCK_QUOTE;
         return TUI_LINE_BLOCK_START;
+    }
+
+    /* Standalone image line at a block boundary: an IMAGE block
+     * (block-granular — see the header's dialect note). After a
+     * non-blank line the same bytes stay inline (the paragraph path
+     * below), which is the GFM rule; not a table-header candidate. */
+    if (prev_blank && !was_list && !was_quote) {
+        NmImageRef ref;
+        if (nm_markdown_image_ref(line, len, &ref)) {
+            *out_kind = TUI_BLOCK_IMAGE;
+            return TUI_LINE_BLOCK_START;
+        }
     }
 
     /* Plain text: continues a pending paragraph, else starts one.

@@ -23,6 +23,13 @@
  *   - finality is classifier-driven: a blank line inside a loose list
  *     or block quote returns CONTINUES (GFM-legal), keeping the block
  *     open.
+ *   - a STANDALONE image line (`![alt](src)`, nothing else) at a block
+ *     boundary opens an IMAGE block (block-granular: the payload
+ *     streams into a one-row placeholder and renders once, at commit,
+ *     through the profile-gated image tier). After a non-blank line
+ *     it stays inline (GFM: a lone image is a paragraph), and inside
+ *     quotes/lists it stays prose — only the clean standalone case
+ *     opens the block.
  */
 
 #ifndef NM_MARKDOWN_H
@@ -54,6 +61,23 @@ typedef struct NmMarkdown
     /* boba's view of this state (returned by nm_markdown_classifier). */
     TuiClassifier cls;
 } NmMarkdown;
+
+/* A parsed image reference `![alt](src)`: byte ranges into the line
+ * (borrowed; the line lives in the transcript's raw buffer for the
+ * duration of the render callbacks). src_len == 0 means `![]()` —
+ * the parser fails, so callers never see it. */
+typedef struct NmImageRef
+{
+    size_t alt_off, alt_len;
+    size_t src_off, src_len;
+} NmImageRef;
+
+/* Parse one line as a standalone image reference: optional block
+ * indent (<= 3 spaces), `!`, `[alt]`, `(src)`, one optional trailing
+ * newline, trailing spaces only. Returns 1 and fills `ref`; 0 when
+ * the line is anything else (including a partial image while it
+ * streams — the live placeholder parses the same way). */
+int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref);
 
 /* Reset a fresh instance. */
 void nm_markdown_init(NmMarkdown *m);

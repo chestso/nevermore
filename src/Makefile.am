@@ -41,6 +41,7 @@ EXTRA_DIST = \
     nevermore.h \
     nm_clock.h \
     nm_highlight.h \
+    nm_image.h \
     nm_markdown.h \
     nm_markdown_render.h \
     nm_process.h \
@@ -135,6 +136,8 @@ nevermore_SOURCES = \
     nm_markdown.c \
     nm_markdown_render.h \
     nm_markdown_render.c \
+    nm_image.h \
+    nm_image.c \
     nm_highlight.h \
     nm_highlight.c \
     chat_app.h \

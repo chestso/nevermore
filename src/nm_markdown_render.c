@@ -28,11 +28,14 @@
 
 #include "nm_markdown_render.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include <boba/unicode.h>
 
 #include "colors.h"
+#include "nm_image.h"
+#include "nm_markdown.h"
 
 #define MAX_COLS      16
 #define MIN_COL_WIDTH 1
@@ -901,6 +904,16 @@ void nm_markdown_render_state_init(NmMarkdownRenderState *rs)
         return;
     for (int i = 0; i < NM_STREAM_COUNT; i++)
         nm_highlight_init(&rs->hl[i]);
+    /* the slot's buffer is kept (it is the reuse); the unit is
+     * dropped, and `width` is layout input, not stream state */
+    nm_image_slot_reset(&rs->img);
+}
+
+void nm_markdown_render_state_free(NmMarkdownRenderState *rs)
+{
+    if (!rs)
+        return;
+    nm_image_slot_free(&rs->img);
 }
 
 /* The highlighter for `blk`'s stream, or NULL when there is no state or
@@ -911,6 +924,99 @@ static NmHighlight *hl_for(const TuiBlock *blk, void *user_data)
     if (!rs || blk->stream < 0 || blk->stream >= NM_STREAM_COUNT)
         return NULL;
     return &rs->hl[blk->stream];
+}
+
+/* ---------------------------------------------------------------- */
+/* IMAGE blocks: degradation marker + live placeholder               */
+/* ---------------------------------------------------------------- */
+
+/* Human byte size for markers: "214.3 KiB" / "1.8 MiB" / "912 B". */
+static void format_bytes(char *buf, size_t n, size_t cap)
+{
+    if (n >= 1024 * 1024)
+        snprintf(buf, cap, "%.1f MiB", (double)n / (1024.0 * 1024.0));
+    else if (n >= 1024)
+        snprintf(buf, cap, "%.1f KiB", (double)n / 1024.0);
+    else
+        snprintf(buf, cap, "%zu B", n);
+}
+
+/* The IMAGE block's committed fallback: one row, Comment-styled,
+ * carrying what the app knows (alt, format, dims, size) and why it
+ * did not render. The payload itself is NEVER the fallback text —
+ * that is the point of the marker. */
+static void render_image_marker(const TuiBlock *blk, const char *text,
+                                size_t len, int width, TuiRowSink *sink,
+                                void *user_data)
+{
+    (void)width;
+    NmMarkdownRenderState *rs = user_data;
+    const NmImageSlot *slot =
+        (rs && rs->img.image_id == blk->image_id) ? &rs->img : NULL;
+
+    NmImageRef ref;
+    int have_ref = nm_markdown_image_ref(text, len, &ref);
+
+    char alt[64];
+    size_t alt_len = 0;
+    if (have_ref && ref.alt_len > 0) {
+        alt_len = ref.alt_len < sizeof(alt) ? ref.alt_len : sizeof(alt) - 1;
+        memcpy(alt, text + ref.alt_off, alt_len);
+    }
+    alt[alt_len] = '\0';
+
+    char size[24] = "";
+    if (slot && slot->len > 0)
+        format_bytes(size, slot->len, sizeof(size));
+
+    char dims[40] = "";
+    if (slot && slot->w > 0 && slot->h > 0)
+        snprintf(dims, sizeof(dims), "%s %dx%d",
+                 nm_image_format_name(slot->format), slot->w, slot->h);
+    else if (slot && slot->len > 0)
+        snprintf(dims, sizeof(dims), "%s", nm_image_format_name(slot->format));
+
+    const char *reason = slot && slot->reason[0] ? slot->reason
+                                                 : "not rendered";
+
+    char line[200];
+    int n = snprintf(line, sizeof(line), "\xe2\x96\x92 %s", alt);
+    if (n < 0)
+        return;
+    if (dims[0] && n < (int)sizeof(line))
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s", dims);
+    if (size[0] && n < (int)sizeof(line))
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s",
+                      size);
+    if (n < (int)sizeof(line))
+        snprintf(line + n, sizeof(line) - (size_t)n, " \xe2\x80\x94 %s",
+                 reason);
+    emit_lines(line, strlen(line), sink, nm_attr_image_marker(), 0);
+}
+
+/* The IMAGE block's live representation: exactly one dim row (the
+ * payload streams for seconds; the live region must never carry it).
+ * Parses the partial line's alt when it is already closed. */
+static void render_image_placeholder(const TuiBlock *live, const char *text,
+                                     size_t len, TuiRowSink *sink)
+{
+    (void)live;
+    NmImageRef ref;
+    char alt[64];
+    size_t alt_len = 0;
+    if (nm_markdown_image_ref(text, len, &ref) && ref.alt_len > 0) {
+        alt_len = ref.alt_len < sizeof(alt) ? ref.alt_len : sizeof(alt) - 1;
+        memcpy(alt, text + ref.alt_off, alt_len);
+    }
+    alt[alt_len] = '\0';
+
+    char size[24] = "";
+    format_bytes(size, len, sizeof(size));
+
+    char line[128];
+    snprintf(line, sizeof(line), "\xe2\x96\x92 %s \xe2\x80\x94 %s so far",
+             alt_len ? alt : "image", size);
+    emit_lines(line, strlen(line), sink, nm_attr_dim(), 0);
 }
 
 void nm_markdown_render_block(const TuiBlock *blk, const char *text,
@@ -987,9 +1093,11 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     case TUI_BLOCK_PARAGRAPH:
     case TUI_BLOCK_FENCE_PLAIN:
     case TUI_BLOCK_RAW:
-    case TUI_BLOCK_IMAGE:
     default:
         emit_lines(text, len, sink, base, 1);
+        break;
+    case TUI_BLOCK_IMAGE:
+        render_image_marker(blk, text, len, width, sink, user_data);
         break;
     }
 }
@@ -1002,7 +1110,11 @@ void nm_markdown_render_live(const TuiBlock *live, const char *text,
     if (!live || !sink)
         return;
     /* Only block-granular kinds have a LIVE block; line/byte kinds are
-     * painted by boba itself. Table is the only one today. */
+     * painted by boba itself. Table and IMAGE are the two. */
+    if (live->kind == TUI_BLOCK_IMAGE) {
+        render_image_placeholder(live, text, len, sink);
+        return;
+    }
     if (live->kind != TUI_BLOCK_TABLE)
         return;
     Table t;
