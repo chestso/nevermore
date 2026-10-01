@@ -28,10 +28,10 @@
 #include <boba/stream.h>
 
 /* Policy cap on a decoded payload: images larger than this degrade
- * to their marker ("too large"). A memory bound, not correctness;
- * sized so the base64 copy in boba's staging stays comfortably under
- * TUI_TRANSCRIPT_STAGED_CAP. Not a config key (D13): the degradation
- * ladder is the switch, dumb terminals see markers. */
+ * to their marker ("too large"). A memory bound, not correctness —
+ * it also bounds the transient base64 copy boba's staging carries
+ * after the profile resolves. Not a config key (D13): the
+ * degradation ladder is the switch, dumb terminals see markers. */
 #define NM_IMAGE_MAX_BYTES (1024 * 1024)
 
 /* The one-slot image state. Owned by the app's render state; zeroing
