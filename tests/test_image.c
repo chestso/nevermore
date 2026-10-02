@@ -508,10 +508,12 @@ static void test_integration_kitty_commits_apc(void)
 
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
     const char *out = ih_read(h);
-    /* the golden transport bytes: kitty APC, 7 cols x 2 rows, id 1 */
+    /* the golden transport bytes: kitty APC (a=T transmit-and-display,
+     * s/v source pixels), 7 cols x 2 rows, id 1 */
     char golden[160];
-    snprintf(golden, sizeof(golden), "\x1b_Gf=100,q=2,C=1,c=7,r=2,i=1;%s"
-                                     "\x1b\\\r\n\r\n",
+    snprintf(golden, sizeof(golden),
+             "\x1b_Ga=T,f=100,s=64,v=32,c=7,r=2,i=1,q=2,C=1;%s"
+             "\x1b\\\r\n\r\n",
              FIX_PNG_B64);
     ASSERT_TRUE(strstr(out, golden) != NULL);
     /* the following unit lands below the image's rows */
@@ -581,7 +583,7 @@ static void test_integration_live_placeholder_not_payload(void)
     /* finalize: the image commits (the profile is kitty) */
     ih_send(h, tui_msg_stream_delta(0, "\n", 1));
     ih_flush(h);
-    ASSERT_TRUE(strstr(ih_read(h), "\x1b_Gf=100") != NULL);
+    ASSERT_TRUE(strstr(ih_read(h), "\x1b_Ga=T,f=100") != NULL);
 
     ih_free(h);
 }

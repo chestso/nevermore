@@ -3381,7 +3381,7 @@ static void test_image_data_uri_degrades_to_marker(void)
     /* the payload and the transport never appear (the probe's own
      * query is _Gi=..., not the transmit form) */
     ASSERT_TRUE(strstr(out, "iVBORw0KGgo") == NULL);
-    ASSERT_TRUE(strstr(out, "\x1b_Gf=100") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b_Ga=T") == NULL);
 
     harness_free(h);
     pthread_join(th, NULL);
