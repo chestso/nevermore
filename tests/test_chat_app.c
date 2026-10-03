@@ -1828,6 +1828,12 @@ static void test_connect_walk_notice_is_printed(void)
     tui_runtime_flush(h->rt);
 
     const char *out = harness_read(h);
+    if (!strstr(out, "did not answer")) {
+        char *clean = strip_frames(out);
+        fprintf(stderr, "  note: no walk notice (state=%d): %.400s\n",
+                (int)nm_chat_app_state(h->app), clean ? clean : "(null)");
+        free(clean);
+    }
     /* The notice names the abandoned attempt and the walk length. */
     ASSERT_TRUE(strstr(out, "did not answer") != NULL);
     ASSERT_TRUE(strstr(out, "1/") != NULL);
