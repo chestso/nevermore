@@ -1807,19 +1807,18 @@ static void test_connect_walk_notice_is_printed(void)
     harness_type(h, "hello");
     harness_enter(h);
 
-    /* Drive the walk on virtual time to its end: the per-attempt budget
-     * is the only thing that can move a silent address on, and with no
-     * listener on any address the walk runs out and the turn fails. */
-    for (int i = 0; i < 500; i++) {
+    /* Drive the walk on virtual time to its end: move the clock past any
+     * per-attempt budget, then STEP (a step drives the walk
+     * unconditionally — the tick only does when the app reports a due
+     * deadline, which is not something this test should depend on). With
+     * no listener on any address the walk runs out and the turn fails. */
+    for (int i = 0; i < 200; i++) {
         NmAgentState st = nm_chat_app_state(h->app);
         if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
             st == NM_AGENT_IDLE)
             break;
-        int wait = nm_chat_app_tick_ms(h->app);
-        if (wait < 0)
-            wait = 5;
-        nm_test_clock_advance_ms(wait);
-        nm_chat_app_tick(h->app);
+        nm_test_clock_advance_ms(300);
+        nm_chat_app_step(h->app);
         tui_runtime_flush(h->rt);
     }
 
