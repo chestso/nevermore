@@ -1770,33 +1770,34 @@ static void test_connect_error_prints_and_returns_to_idle(void)
 }
 
 /* The connect walk's notice reaches the transcript: a turn whose host
- * has a black-holed address prints a system line about it while the
- * connect is still in flight, instead of spinning silently. The
- * listener lives on the LAST address "localhost" resolves to, so the
- * walk's first attempt is abandoned before the live one is dialled —
- * refused at once on Linux, by the per-attempt budget on Windows,
- * which is why the drive is virtual time (the budget must be able to
- * pass). */
+ * has more than one address — and no listener on ANY of them — prints a
+ * system line naming the attempt it gave up on, instead of spinning
+ * silently.
+ *
+ * No server here on purpose: the notice is the app's own line, and
+ * whether the walk then LANDS on a live address is a host property
+ * (which address answers, in what order the resolver returns them).
+ * That half is pinned where the production clock lives, in test_wire's
+ * test_connect_walk_notice_reports_the_next_address (a blocking walk
+ * against a bound tail address). What this test owns is the app's half,
+ * and it needs no I/O at all: the walk abandons the first address —
+ * instantly on a refusal, or on its budget where a refusal is not
+ * prompt — so the drive is virtual time and the outcome is the same on
+ * every platform. */
 static void test_connect_walk_notice_is_printed(void)
 {
     store_clear(NM_CFG_KEY_SKIP_FAMILIES);
+    /* A port nothing listens on, plus the walk's precondition: a
+     * single-address resolver has no hop to make, so the notice cannot
+     * be exercised there (a healthy box, not a failure). */
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
+    int probe = test_bind_last_localhost_addr(&port);
+    if (probe < 0) {
         fprintf(stderr, "  note: 'localhost' has no second address to "
                         "walk to; notice line not exercised\n");
         return;
     }
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 1;
-    sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
-                "data: [DONE]\n\n";
-    sc.fd = lfd;
-    sc.port = port;
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    close(probe); /* the port is free again: nothing must answer */
 
     char base[64];
     snprintf(base, sizeof(base), "http://localhost:%d/v1", port);
@@ -1805,11 +1806,15 @@ static void test_connect_walk_notice_is_printed(void)
 
     harness_type(h, "hello");
     harness_enter(h);
-    /* Phase 1: the first localhost address is black-holed (only the LAST
-     * one is bound), so the walk's per-attempt budget is what moves it
-     * on — advance VIRTUAL time until the notice lands (waiting for real
-     * I/O here would just wait for something that never comes). */
-    for (int i = 0; i < 200; i++) {
+
+    /* Drive the walk on virtual time until the notice lands (or the turn
+     * ends): the per-attempt budget is the only thing that can move a
+     * silent address on. */
+    for (int i = 0; i < 500; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
+            st == NM_AGENT_IDLE)
+            break;
         if (strstr(harness_read(h), "did not answer"))
             break;
         int wait = nm_chat_app_tick_ms(h->app);
@@ -1819,21 +1824,16 @@ static void test_connect_walk_notice_is_printed(void)
         nm_chat_app_tick(h->app);
         tui_runtime_flush(h->rt);
     }
-    /* Phase 2: the live address answers, and that IS real I/O — drive it
-     * with the clock frozen so nothing cuts the handshake short. */
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
     const char *out = harness_read(h);
     /* The notice names the abandoned attempt and the walk length. */
     ASSERT_TRUE(strstr(out, "did not answer") != NULL);
     ASSERT_TRUE(strstr(out, "1/") != NULL);
-    /* And the turn still completed on the live address. */
-    ASSERT_TRUE(strstr(out, "hi") != NULL);
+    /* The walk ran out of addresses: the turn failed, loudly, rather
+     * than hanging on the first one. */
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
 }
 
 /* The walk's budget needs a DRIVE on the event-driven path. A
