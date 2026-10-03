@@ -647,6 +647,30 @@ static int harness_drive(AppHarness *h, int max_spins)
  * for tests that intentionally STALL (no SSE payload at all), where
  * harness_step_once would burn its whole budget waiting for a tail
  * that never comes (5 s of the watchdog's 10 s per binary). */
+/* Drive a turn to its end on VIRTUAL time: tick at the app's reported
+ * cadence, advancing the fake clock by that cadence — the timer-driven
+ * sibling of harness_drive (which waits on real I/O). For a turn whose
+ * progress comes from a DEADLINE (a connect walk's per-attempt budget,
+ * the stream-inactivity timeout) this is exact and instant, and it is
+ * the same drive boba's loop performs: the tick IS the timer. Returns 0
+ * when the turn ended, -1 when the tick budget ran out. */
+static int harness_drive_virtual(AppHarness *h, int max_ticks)
+{
+    for (int i = 0; i < max_ticks; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
+            st == NM_AGENT_IDLE)
+            return 0;
+        int wait = nm_chat_app_tick_ms(h->app);
+        if (wait < 0)
+            wait = 5;
+        nm_test_clock_advance_ms(wait);
+        nm_chat_app_tick(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    return -1;
+}
+
 /* One step, plus the flush the event loop would do. No payload wait:
  * for tests that intentionally STALL (no SSE payload at all), where
  * harness_step_once would burn its whole budget waiting for a tail
@@ -1693,16 +1717,11 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     ASSERT_TRUE(ms > 0 && ms <= 100);
 
     /* The fd is silent; only the timer advances. Drive VIRTUAL time:
-     * each pass moves the fake clock by the app's own cadence and
-     * ticks, which is exactly what boba's loop does — except the
-     * deadline is crossed instantly instead of in wall clock (a loaded
-     * runner can no longer decide the outcome). */
-    for (int i = 0;
-         i < 200 && nm_chat_app_state(h->app) == NM_AGENT_STREAMING; i++) {
-        int wait = nm_chat_app_tick_ms(h->app);
-        nm_test_clock_advance_ms(wait > 0 ? wait : 1);
-        nm_chat_app_tick(h->app);
-    }
+     * the tick moves the clock by the app's own cadence, which is what
+     * boba's loop does — except the deadline is crossed instantly
+     * instead of in wall clock (a loaded runner can no longer decide
+     * the outcome). */
+    ASSERT_EQ(harness_drive_virtual(h, 200), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
     tui_runtime_flush(h->rt);
 
@@ -1754,8 +1773,10 @@ static void test_connect_error_prints_and_returns_to_idle(void)
  * has a black-holed address prints a system line about it while the
  * connect is still in flight, instead of spinning silently. The
  * listener lives on the LAST address "localhost" resolves to, so the
- * walk's first attempt is guaranteed to be abandoned (refused) before
- * the live one is dialled. */
+ * walk's first attempt is abandoned before the live one is dialled —
+ * refused at once on Linux, by the per-attempt budget on Windows,
+ * which is why the drive is virtual time (the budget must be able to
+ * pass). */
 static void test_connect_walk_notice_is_printed(void)
 {
     store_clear(NM_CFG_KEY_SKIP_FAMILIES);
@@ -1784,6 +1805,22 @@ static void test_connect_walk_notice_is_printed(void)
 
     harness_type(h, "hello");
     harness_enter(h);
+    /* Phase 1: the first localhost address is black-holed (only the LAST
+     * one is bound), so the walk's per-attempt budget is what moves it
+     * on — advance VIRTUAL time until the notice lands (waiting for real
+     * I/O here would just wait for something that never comes). */
+    for (int i = 0; i < 200; i++) {
+        if (strstr(harness_read(h), "did not answer"))
+            break;
+        int wait = nm_chat_app_tick_ms(h->app);
+        if (wait < 0)
+            wait = 5;
+        nm_test_clock_advance_ms(wait);
+        nm_chat_app_tick(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    /* Phase 2: the live address answers, and that IS real I/O — drive it
+     * with the clock frozen so nothing cuts the handshake short. */
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
@@ -1831,43 +1868,16 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     int to = nm_agent_next_timeout_ms(nm_chat_app_agent(h->app));
     ASSERT_TRUE(to >= 0 && to <= 250);
 
-    /* Drive the loop the way boba does: tick at the app's reported
-     * cadence, and let VIRTUAL time do the waiting (the fake clock
-     * advances by that cadence instead of sleeping it). The deadline,
-     * not the pass count, ends the walk: a pass costs microseconds, so
-     * an iteration bound could be spent before the budget elapsed —
-     * which is exactly the ~40 % flake the wall-clock bound below used
-     * to paper over. Now the clock IS the deadline's clock, so the
-     * outcome cannot depend on how fast the box is. The wall-clock
-     * bound stays as a safety net against a drive that never ends. */
-    time_t t0 = time(NULL);
-    for (;;) {
-        NmAgentState st = nm_chat_app_state(h->app);
-        if (st == NM_AGENT_ERROR || st == NM_AGENT_DONE ||
-            st == NM_AGENT_IDLE)
-            break;
-        /* Drive by the app's CADENCE, not by the fd source. In boba's
-         * loop the tick is a TIMER (get_tick_timeout_ms), separate from
-         * the fd-ready path; here the unroutable socket is ready the
-         * whole time, so an fd wait returns at once and paints a
-         * spinner frame per microsecond — ~250k frames and 16 MB in a
-         * couple hundred ms on a slow box, which pushes the error line
-         * past what harness_read can see (the CI-only failure). Waiting
-         * the cadence is what the timer does. */
-        int wait = nm_chat_app_tick_ms(h->app);
-        if (wait < 0)
-            wait = 5;
-        nm_test_clock_advance_ms(wait);
-        nm_chat_app_tick(h->app);
-        tui_runtime_flush(h->rt);
-        if (time(NULL) - t0 >= 5)
-            break; /* far under the 300 s inactivity default: a
-                    * STREAMING exit here is a missing drive, not a
-                    * slow box */
-    }
-    time_t dt = time(NULL) - t0;
+    /* Drive the loop the way boba does, on VIRTUAL time: the tick moves
+     * the clock by the app's own reported cadence, so the per-address
+     * budget is crossed by the deadline itself. That is the point of
+     * the test — the deadline, not the pass count, ends the walk (a
+     * pass costs microseconds, so an iteration bound could be spent
+     * before the budget elapsed: the ~40 % flake this replaced). The
+     * drive is bounded by the tick count, so a walk that never
+     * advances still fails loudly. */
+    ASSERT_EQ(harness_drive_virtual(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
-    ASSERT_TRUE(dt <= 5);
 
     tui_runtime_flush(h->rt);
     ASSERT_TRUE(strstr(harness_read(h), "nevermore") != NULL);
