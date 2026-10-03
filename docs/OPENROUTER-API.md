@@ -101,6 +101,56 @@ Same shape as OpenAI. Reasoning models may spend the token budget on
 `reasoning` before answering: budget `max_tokens` accordingly
 (verified: a 30-token budget produced only reasoning, no content).
 
+## 5.1 Image generation — output images (live test, 2026-10-03)
+
+Probed with the real key against
+`google/gemini-3.1-flash-lite-image` and `openai/gpt-5-image-mini`
+(image-output models are the catalog rows whose
+`architecture.output_modalities` contains `"image"`; ~11 of them,
+Sep 2026 — auto-beta included).
+
+- **Delivery: `delta.images` on a stream chunk**, the OpenAI
+  content-part shape, ONE event carrying the whole image inline
+  (never split across chunks; a single SSE line runs to ~1.2 MiB):
+  `"delta":{"content":"","role":"assistant","images":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,<payload>"}}]}`
+  The image event may arrive FIRST (before the reasoning and content
+  events). Empty `content` alongside images is not a content delta.
+  No `modalities` field is required to receive images (an unmodified
+  OpenAI-shaped request works).
+- **Container: model-determined.** Gemini emits `image/jpeg`,
+  `gpt-5-image*` emits `image/png` (a "PNG" prompt did not change the
+  Gemini container).
+- **Usage: image tokens are completion tokens.** A one-image round
+  reported `completion_tokens: 1120` (Gemini) / `4727` (gpt-image)
+  with image-output billing at the catalog's `pricing.image_output`
+  PER TOKEN — e.g. 1120 × $0.00003 = $0.0336, matching the reported
+  `cost` to the cent. `prompt_tokens_details.cached_tokens` was
+  `0` with `cache_write_tokens: 0` on every image round probed
+  (small histories; no cache observed either way).
+- **Gemini's `prompt_tokens` excludes image input**: a 3-message
+  history carrying one ~200 KB replayed image reported
+  `prompt_tokens: 31` — text only. gpt-image's prompt count is
+  larger and opaque. So the context gauge undercounts image input on
+  Gemini-family image models — an upstream reporting truth, not a
+  nevermore bug.
+- **Multi-turn editing works by replaying the assistant `images`
+  array verbatim**: history
+  `[user, {role:"assistant","content":"","images":[<the received
+part>]}, user]` is accepted (no 400) and the model edits the image
+  ("make it blue" → blue image). The assistant message carries
+  `images` at MESSAGE level with a plain string `content` — the
+  response's own shape, NOT content-parts on an assistant message
+  (content-parts-in-assistant is untested; do not guess it).
+- **`reasoning_details` rides image rounds** (both providers):
+  `{"type":"reasoning.text","signature":...,"format":"google-gemini-v1"}`
+  (Gemini) / `{"type":"reasoning.encrypted","data":...}` (OpenAI).
+  Ignored by nevermore today (never echoed back; no observed
+  requirement to).
+- Keep-alives are the usual `: OPENROUTER PROCESSING` comments
+  (gpt-image emits dozens while generating — the minutes-long gap
+  before the image event; the stream-inactivity deadline must be
+  sized for it, or generation rounds will abort mid-wait).
+
 ## 6. Provider notes for the nevermore side
 
 - `provider_openrouter.c` only supplies base URL, auth, and the
