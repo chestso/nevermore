@@ -1807,15 +1807,13 @@ static void test_connect_walk_notice_is_printed(void)
     harness_type(h, "hello");
     harness_enter(h);
 
-    /* Drive the walk on virtual time until the notice lands (or the turn
-     * ends): the per-attempt budget is the only thing that can move a
-     * silent address on. */
+    /* Drive the walk on virtual time to its end: the per-attempt budget
+     * is the only thing that can move a silent address on, and with no
+     * listener on any address the walk runs out and the turn fails. */
     for (int i = 0; i < 500; i++) {
         NmAgentState st = nm_chat_app_state(h->app);
         if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
             st == NM_AGENT_IDLE)
-            break;
-        if (strstr(harness_read(h), "did not answer"))
             break;
         int wait = nm_chat_app_tick_ms(h->app);
         if (wait < 0)
