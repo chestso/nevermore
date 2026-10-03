@@ -1829,10 +1829,10 @@ static void test_connect_walk_notice_is_printed(void)
 
     const char *out = harness_read(h);
     if (!strstr(out, "did not answer")) {
-        char *clean = strip_frames(out);
-        fprintf(stderr, "  note: no walk notice (state=%d): %.400s\n",
-                (int)nm_chat_app_state(h->app), clean ? clean : "(null)");
-        free(clean);
+        size_t n = strlen(out);
+        fprintf(stderr, "  note: no walk notice (state=%d): %s\n",
+                (int)nm_chat_app_state(h->app),
+                n > 400 ? out + (n - 400) : out);
     }
     /* The notice names the abandoned attempt and the walk length. */
     ASSERT_TRUE(strstr(out, "did not answer") != NULL);
