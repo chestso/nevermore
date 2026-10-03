@@ -1,12 +1,16 @@
 /* tools_file.c - built-in file tools
  *
- * read_file, edit_file, list_dir, search_dir — ports of quoth's
- * tool semantics (quoth-tools.el): byte-exact UTF-8 reads and writes,
- * cat -n numbering, literal whole-text matching (multiline spans are
- * first-class; matching is character-level, never per-line, never
- * regex). Edit_file requires a unique match unless replace_all;
+ * read_file, write_file, edit_file, list_dir, search_dir — ports of
+ * quoth's tool semantics (quoth-tools.el): byte-exact UTF-8 reads and
+ * writes, cat -n numbering, literal whole-text matching (multiline
+ * spans are first-class; matching is character-level, never per-line,
+ * never regex). Edit_file requires a unique match unless replace_all;
  * zero or ambiguous matches are error results naming the match lines,
  * so a stale copy fails loudly instead of clobbering the file.
+ * Write_file (create or overwrite the WHOLE file) and edit_file's
+ * splice both go through write_atomic — a same-directory tmp file plus
+ * a rename, so a crash mid-write can never truncate the previous
+ * content.
  *
  * Every result rides the output budget (NM_TOOL_MAX_OUTPUT): the head
  * is kept and the tail dropped, with a marker. read_file's marker
@@ -17,10 +21,20 @@
  * the rendered transcript and the session history see the same bytes.
  */
 
+#include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+#ifdef _WIN32
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "json.h"
 #include "tools.h"
@@ -150,6 +164,150 @@ static int utf8_valid(const unsigned char *b, size_t n)
         }
     }
     return 1;
+}
+
+/* ---------------------------------------------------------------- */
+/* Atomic whole-file write (the family's write seam)                 */
+/* ---------------------------------------------------------------- */
+
+/* Write `len` bytes to `path` atomically: a tmp file in the SAME
+ * directory (a rename never crosses filesystems), then rename over the
+ * target. A crash, disk-full or kill mid-write therefore leaves the
+ * PREVIOUS content intact — never a truncated file, which is the worst
+ * failure mode a write tool can have. No fsync: parity with
+ * nm_config.c's shadow flush (a crash may lose the write, never
+ * corrupt what was there). The tmp name is `<path>.tmp-<pid>-<n>` — a
+ * process-global counter, because a pid alone repeats across calls in
+ * one process, so sequential writes cannot collide; a crash can strand
+ * one, named so it is recognizable and skippable. Removed on failure.
+ * Returns 0, or -1 with errno preserved for the caller's message.
+ *
+ * Both callers are in this TU (write_file, edit_file's splice), so the
+ * seam is static — an unused export would read as live API. */
+static unsigned long g_write_seq;
+
+#ifdef _WIN32
+/* MoveFileExA reports through GetLastError, never errno: map the cases
+ * a caller can act on (a locked or denied target) and fall back to EIO,
+ * so the refusal message names something true. */
+static void errno_from_last_error(void)
+{
+    switch (GetLastError()) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+        errno = ENOENT;
+        break;
+    case ERROR_ACCESS_DENIED:
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+        errno = EACCES;
+        break;
+    case ERROR_DISK_FULL:
+    case ERROR_HANDLE_DISK_FULL:
+        errno = ENOSPC;
+        break;
+    default:
+        errno = EIO;
+        break;
+    }
+}
+#endif
+
+static int write_atomic(const char *path, const void *buf, size_t len)
+{
+    if (!path || !*path)
+        return -1;
+    size_t need = strlen(path) + 40;
+    char *tmp = malloc(need);
+    if (!tmp)
+        return -1;
+#ifdef _WIN32
+    snprintf(tmp, need, "%s.tmp-%ld-%lu", path, (long)_getpid(),
+             ++g_write_seq);
+    int fd = _open(tmp, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
+                   _S_IREAD | _S_IWRITE);
+#else
+    snprintf(tmp, need, "%s.tmp-%ld-%lu", path, (long)getpid(),
+             ++g_write_seq);
+    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0666);
+#endif
+    if (fd < 0) {
+        free(tmp);
+        return -1;
+    }
+    int ok = 1;
+    const char *p = buf;
+    size_t left = len;
+    while (left > 0) {
+#ifdef _WIN32
+        unsigned int chunk = left > (1u << 20) ? (1u << 20)
+                                               : (unsigned int)left;
+        int n = _write(fd, p, chunk);
+#else
+        ssize_t n = write(fd, p, left);
+#endif
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            ok = 0;
+            break;
+        }
+        if (n == 0) {
+            ok = 0;
+            break;
+        }
+        p += (size_t)n;
+        left -= (size_t)n;
+    }
+#ifdef _WIN32
+    if (_close(fd) != 0)
+        ok = 0;
+#else
+    if (close(fd) != 0)
+        ok = 0;
+#endif
+    int e = errno; /* errno from the failing step, not the cleanup */
+    if (!ok) {
+        remove(tmp);
+        free(tmp);
+        errno = e;
+        return -1;
+    }
+#ifdef _WIN32
+    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+        errno_from_last_error();
+        e = errno;
+        DeleteFileA(tmp);
+        free(tmp);
+        errno = e;
+        return -1;
+    }
+#else
+    if (rename(tmp, path) != 0) {
+        e = errno;
+        remove(tmp);
+        free(tmp);
+        errno = e;
+        return -1;
+    }
+#endif
+    free(tmp);
+    return 0;
+}
+
+/* Pre-write size probe: byte count when `path` exists and is readable,
+ * -1 otherwise. An existence probe, never a read into memory — the
+ * created/overwrote report is the only thing it feeds. */
+static long probe_file_size(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    long sz = -1;
+    if (fseek(f, 0, SEEK_END) == 0)
+        sz = ftell(f);
+    fclose(f);
+    return sz;
 }
 
 /* ---------------------------------------------------------------- */
@@ -553,9 +711,10 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     wi += len - prev;
     out[wi] = '\0';
 
-    /* Byte-exact write (LF stays LF; no translation). */
-    FILE *f = fopen(path, "wb");
-    if (!f) {
+    /* Byte-exact write (LF stays LF; no translation) through the
+     * family's atomic seam: a crash, disk-full or kill mid-write leaves
+     * the previous content intact instead of a truncated file. */
+    if (write_atomic(path, out, wi) != 0) {
         char *msg = malloc(strlen(path) + 64);
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot write %s", path);
@@ -566,8 +725,6 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         nm_json_free(args);
         return (NmToolResult){ 0, msg };
     }
-    fwrite(out, 1, wi, f);
-    fclose(f);
     free(out);
 
     /* Status line: path, count, match lines; then a mini context
@@ -632,6 +789,147 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     nm_json_free(args);
     NmToolResult r = nm_tool_format_result(body, 0);
     free(body);
+    return r;
+}
+
+/* ---------------------------------------------------------------- */
+/* write_file                                                        */
+/* ---------------------------------------------------------------- */
+
+/* Parent directory of a resolved path: "/a/b" -> "/a", "/b" -> "/",
+ * "C:/b" -> "C:/"; a bare name (no separator) has the CWD as its
+ * parent. Heap-owned, or NULL on OOM. */
+static char *parent_dir_of(const char *path)
+{
+    char *p = strdup(path);
+    if (!p)
+        return NULL;
+    char *sep = strrchr(p, '/');
+    char *bs = strrchr(p, '\\');
+    if (bs && (!sep || bs > sep))
+        sep = bs;
+    if (!sep) {
+        free(p);
+        return strdup(".");
+    }
+#ifdef _WIN32
+    if (sep == p + 2 && p[1] == ':') { /* "C:/b" -> "C:/" */
+        sep[1] = '\0';
+        return p;
+    }
+#endif
+    if (sep == p) { /* "/b" -> "/" */
+        sep[1] = '\0';
+        return p;
+    }
+    *sep = '\0';
+    return p;
+}
+
+static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
+                                    void *userdata)
+{
+    (void)tool;
+    const char *jerr = NULL;
+    NmJson *args =
+        nm_json_parse(args_json, strlen(args_json), &jerr);
+    if (!args)
+        return nm_tool_result_error("arguments are not a JSON object");
+
+    char *path = resolve_path(args, userdata);
+    if (!path) {
+        nm_json_free(args);
+        return nm_tool_result_error("missing or empty path");
+    }
+    /* `content' is REQUIRED: an absent key (or a non-string) is a
+     * validation error, distinct from the empty string, which is a
+     * legal create-empty / truncate-to-zero. The schema says so too. */
+    NmJson *jcontent = nm_json_get(args, "content");
+    if (!jcontent || nm_json_type(jcontent) != NM_JSON_STRING) {
+        free(path);
+        nm_json_free(args);
+        return nm_tool_result_error(
+            "missing content (an empty string creates or truncates to an "
+            "empty file)");
+    }
+    const char *content = nm_json_str(jcontent);
+    size_t clen = strlen(content);
+
+    /* A missing (or non-directory) parent REFUSES: the blast radius is
+     * exactly one file, so a typo'd path must error and name the fix
+     * rather than silently materialize a tree of typos. */
+    char *parent = parent_dir_of(path);
+    struct stat pst;
+    if (!parent || stat(parent, &pst) != 0 || !S_ISDIR(pst.st_mode)) {
+        const char *dir = parent ? parent : path;
+        size_t need = strlen(dir) + 128;
+        char *msg = malloc(need);
+        if (msg)
+            snprintf(msg, need,
+                     "no such directory: %s — create it first "
+                     "(run_command \"mkdir -p %s\")",
+                     dir, dir);
+        free(parent);
+        free(path);
+        nm_json_free(args);
+        return (NmToolResult){ 0, msg };
+    }
+    free(parent);
+
+    /* created vs overwrote comes from the pre-write size (an existence
+     * probe, never a read); -1 means the file was not there. */
+    long old_size = probe_file_size(path);
+    if (write_atomic(path, content, clen) != 0) {
+        int e = errno;
+        size_t need = strlen(path) + 128;
+        char *msg = malloc(need);
+        if (msg)
+            snprintf(msg, need, "cannot write %s: %s", path, strerror(e));
+        free(path);
+        nm_json_free(args);
+        return (NmToolResult){ 0, msg };
+    }
+
+    /* The result is a SUMMARY, never the content (the model knows what
+     * it wrote; echoing it burns the output budget for nothing). Line
+     * count is over the NEW content, and a missing final newline is
+     * reported because byte-exact means the omission was written as
+     * given. */
+    size_t nl = 0;
+    for (size_t i = 0; i < clen; i++)
+        if (content[i] == '\n')
+            nl++;
+    int no_trailing = clen > 0 && content[clen - 1] != '\n';
+    size_t lines = nl + (no_trailing ? 1 : 0);
+
+    size_t need = strlen(path) + 200;
+    char *body = malloc(need);
+    if (!body) {
+        free(path);
+        nm_json_free(args);
+        return nm_tool_result_error("out of memory");
+    }
+    size_t used;
+    if (old_size >= 0)
+        used = (size_t)snprintf(body, need,
+                                "Wrote %s: %zu bytes, %zu %s (overwrote "
+                                "%ld bytes",
+                                path, clen, lines,
+                                lines == 1 ? "line" : "lines", old_size);
+    else
+        used = (size_t)snprintf(body, need,
+                                "Wrote %s: %zu bytes, %zu %s (created",
+                                path, clen, lines,
+                                lines == 1 ? "line" : "lines");
+    if (no_trailing)
+        used += (size_t)snprintf(body + used, need - used,
+                                 "; no trailing newline");
+    snprintf(body + used, need - used, ")\n");
+
+    NmToolResult r = nm_tool_format_result(body, 0);
+    free(body);
+    free(path);
+    nm_json_free(args);
     return r;
 }
 
@@ -998,6 +1296,19 @@ static const char edit_file_schema[] =
     "occurrence instead of requiring a unique match.\"}},"
     "\"required\":[\"path\",\"old_string\",\"new_string\"]}";
 
+static const char write_file_schema[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"path\":{\"type\":\"string\",\"description\":\"Target path; the "
+    "file's entire new content is written verbatim (LF stays LF; no "
+    "newline translation).\"},"
+    "\"workdir\":{\"type\":\"string\",\"description\":\"Base directory for "
+    "a relative path.\"},"
+    "\"content\":{\"type\":\"string\",\"description\":\"The file's complete "
+    "new content, byte-exact. An empty string creates or truncates to an "
+    "empty file. For targeted changes to an existing file use "
+    "edit_file.\"}},"
+    "\"required\":[\"path\",\"content\"]}";
+
 static const char list_dir_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"Directory to list; "
@@ -1028,10 +1339,21 @@ const NmTool nm_tool_read_file = {
 const NmTool nm_tool_edit_file = {
     .name = "edit_file",
     .description = "Edit a file by literal find/replace; the old_string "
-                   "must match uniquely unless replace_all",
+                   "must match uniquely unless replace_all. For whole-file "
+                   "creation or a complete rewrite, use write_file",
     .emoji = "✏️",
     .params_schema = edit_file_schema,
     .execute = edit_file_exec,
+};
+const NmTool nm_tool_write_file = {
+    .name = "write_file",
+    .description = "Write a file's entire content, byte-exact (create or "
+                   "overwrite). For a targeted change to an existing file, "
+                   "use edit_file, which fails safely when the match is "
+                   "ambiguous",
+    .emoji = "📝",
+    .params_schema = write_file_schema,
+    .execute = write_file_exec,
 };
 const NmTool nm_tool_list_dir = {
     .name = "list_dir",

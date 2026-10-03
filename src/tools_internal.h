@@ -67,8 +67,9 @@ size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
  * rendered transcript and the session history see identical bytes. */
 NmToolResult nm_tool_format_result(const char *body, int exit_code);
 
-/* tools_file.c: built-in file tools (read/edit/list/search). */
+/* tools_file.c: built-in file tools (read/write/edit/list/search). */
 extern const NmTool nm_tool_read_file;
+extern const NmTool nm_tool_write_file;
 extern const NmTool nm_tool_edit_file;
 extern const NmTool nm_tool_list_dir;
 extern const NmTool nm_tool_search_dir;

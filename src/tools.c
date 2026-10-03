@@ -270,6 +270,7 @@ NmToolset *nm_toolset_new_defaults(void)
     if (!ts)
         return NULL;
     nm_toolset_add(ts, &nm_tool_read_file);
+    nm_toolset_add(ts, &nm_tool_write_file);
     nm_toolset_add(ts, &nm_tool_edit_file);
     nm_toolset_add(ts, &nm_tool_list_dir);
     nm_toolset_add(ts, &nm_tool_search_dir);

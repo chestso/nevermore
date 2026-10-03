@@ -224,8 +224,9 @@ static void test_registry_defaults(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     ASSERT_NOT_NULL(ts);
-    ASSERT_EQ(nm_toolset_len(ts), 9);
+    ASSERT_EQ(nm_toolset_len(ts), 10);
     ASSERT_NOT_NULL(nm_toolset_find(ts, "read_file"));
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "write_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "edit_file"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "list_dir"));
     ASSERT_NOT_NULL(nm_toolset_find(ts, "search_dir"));
@@ -259,7 +260,7 @@ static void test_schema_json(void)
     NmJson *arr = nm_json_parse(json, strlen(json), &err);
     ASSERT_NOT_NULL(arr);
     ASSERT_EQ(nm_json_type(arr), NM_JSON_ARRAY);
-    ASSERT_EQ(nm_json_len(arr), 9);
+    ASSERT_EQ(nm_json_len(arr), 10);
     NmJson *first = nm_json_at(arr, 0);
     ASSERT_STR_EQ(nm_json_str(nm_json_get(first, "type")), "function");
     NmJson *fn = nm_json_get(first, "function");
@@ -757,6 +758,290 @@ static void test_edit_file_multiline_diff_fits(void)
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
+
+/* ---------------------------------------------------------------- */
+/* write_file                                                        */
+/* ---------------------------------------------------------------- */
+
+/* Slurp a whole file into `buf` (NUL-terminated); byte count or -1. */
+static long slurp_file(const char *path, char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    size_t n = fread(buf, 1, cap - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    return (long)n;
+}
+
+/* Does `dir` hold one of write_atomic's stranded tmp files? Rides the
+ * shipped list_dir (no second directory walker in the test), so the
+ * check is the same on POSIX and Windows. */
+static int dir_has_stray_tmp(const char *dir)
+{
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(dir));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "list_dir", args, NULL);
+    free(args);
+    int found = r.output && strstr(r.output, ".tmp-") != NULL;
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+    return found;
+}
+
+static void test_write_file_creates_byte_exact(void)
+{
+    char *path = scratch_path("write1.txt");
+    remove(path); /* created, not overwritten */
+
+    /* UTF-8, a CRLF pair, and NO trailing newline: all of it must
+     * survive verbatim (byte-exact means no newline translation). */
+    const char *content = "alpha\nbeta\r\ngamma \xf0\x9f\x98\x80";
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string(content));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Wrote ") != NULL);
+    ASSERT_TRUE(strstr(r.output, "(created") != NULL);
+    /* The content is NOT echoed back — the result is a summary. */
+    ASSERT_TRUE(strstr(r.output, "gamma") == NULL);
+    nm_tool_result_free(&r);
+
+    char buf[128];
+    long n = slurp_file(path, buf, sizeof(buf));
+    ASSERT_EQ(n, (long)strlen(content));
+    ASSERT_STR_EQ(buf, content);
+    /* created, 3 lines, and the missing final newline is reported. */
+    ASSERT_TRUE(!dir_has_stray_tmp(scratch_dir()));
+    free(path);
+    nm_toolset_free(ts);
+}
+
+static void test_write_file_overwrites_and_reports(void)
+{
+    char *path = scratch_path("write2.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("old content here\n", f);
+    fclose(f);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("new\nlines\n"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "(overwrote 17 bytes)") != NULL);
+    ASSERT_TRUE(strstr(r.output, "10 bytes, 2 lines") != NULL);
+    nm_tool_result_free(&r);
+
+    char buf[64];
+    slurp_file(path, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "new\nlines\n");
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* An empty content is legal and distinct from the absent key: it
+ * truncates (or creates) a zero-byte file. */
+static void test_write_file_empty_content_truncates(void)
+{
+    char *path = scratch_path("write3.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("delete me\n", f);
+    fclose(f);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string(""));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "0 bytes, 0 lines") != NULL);
+    ASSERT_TRUE(strstr(r.output, "overwrote 10 bytes") != NULL);
+    nm_tool_result_free(&r);
+
+    char buf[64];
+    long n = slurp_file(path, buf, sizeof(buf));
+    ASSERT_EQ(n, 0);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A one-line file with no final LF: "1 line" (singular) and the
+ * omission is called out. */
+static void test_write_file_reports_singular_line(void)
+{
+    char *path = scratch_path("write4.txt");
+    remove(path);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("abc"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "3 bytes, 1 line ") != NULL);
+    ASSERT_TRUE(strstr(r.output, "; no trailing newline") != NULL);
+    nm_tool_result_free(&r);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A relative path resolves against the `workdir' arg (the family's
+ * plumbing), not the process CWD. */
+static void test_write_file_workdir_relative_path(void)
+{
+    char *dir = scratch_sub_dir("write_dir");
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string("rel.txt"));
+    nm_json_set(jargs, "workdir", nm_json_new_string(dir));
+    nm_json_set(jargs, "content", nm_json_new_string("rel\n"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_TRUE(r.ok);
+    nm_tool_result_free(&r);
+
+    char *path = scratch_in(dir, "rel.txt");
+    char buf[32];
+    long n = slurp_file(path, buf, sizeof(buf));
+    ASSERT_EQ(n, 4);
+    ASSERT_STR_EQ(buf, "rel\n");
+    free(path);
+    free(dir);
+    nm_toolset_free(ts);
+}
+
+/* A missing parent directory REFUSES (and names the fix) instead of
+ * materializing a tree of typos. */
+static void test_write_file_missing_parent_refuses(void)
+{
+    char *path = scratch_path("no_such_dir_here/file.txt");
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("x"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "no such directory") != NULL);
+    ASSERT_TRUE(strstr(r.output, "no_such_dir_here") != NULL);
+    ASSERT_TRUE(strstr(r.output, "mkdir -p") != NULL);
+    nm_tool_result_free(&r);
+
+    /* Nothing was created. */
+    FILE *f = fopen(path, "rb");
+    ASSERT_NULL(f);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* The absent `content' key is a validation error, distinct from "" —
+ * and the path arg is validated too. */
+static void test_write_file_missing_args(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *path = scratch_path("write5.txt");
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "missing content") != NULL);
+    nm_tool_result_free(&r);
+
+    r = nm_toolset_execute(ts, "write_file", "{\"content\":\"x\"}", NULL);
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "missing or empty path") != NULL);
+    nm_tool_result_free(&r);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+#ifndef _WIN32
+/* The seam's reason for existing: a write that cannot complete must
+ * leave the ORIGINAL file intact — the in-place `fopen "wb"` would have
+ * truncated it before failing. A read-only DIRECTORY makes the tmp
+ * create fail; the target is untouched and no `.tmp-*` is stranded.
+ * Root bypasses directory permissions, so skip there (the behavior is
+ * covered on every non-root CI runner). */
+static void test_write_file_failed_write_keeps_original(void)
+{
+    if (geteuid() == 0)
+        return; /* permission bits are not enforced for root */
+    char *dir = scratch_sub_dir("write_ro_dir");
+    char *path = scratch_in(dir, "keep.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("PRECIOUS\n", f);
+    fclose(f);
+
+    ASSERT_EQ(chmod(dir, 0500), 0);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("CLOBBERED\n"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+
+    chmod(dir, 0755); /* restore before asserting so cleanup works */
+
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "cannot write") != NULL);
+    nm_tool_result_free(&r);
+    ASSERT_TRUE(!dir_has_stray_tmp(dir));
+
+    char buf[64];
+    long n = slurp_file(path, buf, sizeof(buf));
+    ASSERT_EQ(n, 9);
+    ASSERT_STR_EQ(buf, "PRECIOUS\n");
+    free(path);
+    free(dir);
+    nm_toolset_free(ts);
+}
+#endif /* !_WIN32 */
 
 /* ---------------------------------------------------------------- */
 /* list_dir / search_dir                                             */
@@ -2533,6 +2818,16 @@ int main(void)
     RUN_TEST(test_edit_file_no_match);
     RUN_TEST(test_edit_file_multiline_literal);
     RUN_TEST(test_edit_file_multiline_diff_fits);
+    RUN_TEST(test_write_file_creates_byte_exact);
+    RUN_TEST(test_write_file_overwrites_and_reports);
+    RUN_TEST(test_write_file_empty_content_truncates);
+    RUN_TEST(test_write_file_reports_singular_line);
+    RUN_TEST(test_write_file_workdir_relative_path);
+    RUN_TEST(test_write_file_missing_parent_refuses);
+    RUN_TEST(test_write_file_missing_args);
+#ifndef _WIN32
+    RUN_TEST(test_write_file_failed_write_keeps_original);
+#endif
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
     RUN_TEST(test_search_dir_root_must_be_a_directory);

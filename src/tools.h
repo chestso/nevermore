@@ -148,9 +148,9 @@ char *nm_tool_plan(const char *name, const char *args_json);
 /* Built-in tools (registered by nm_toolset_add_defaults())          */
 /* ---------------------------------------------------------------- */
 
-/* read_file(path), edit_file(path, old_string, new_string),
- * list_dir(path), search_dir(path, needle) — character-level scan,
- * no regex; run_command(cmd) — portable spawn
+/* read_file(path), write_file(path, content), edit_file(path,
+ * old_string, new_string), list_dir(path), search_dir(path, needle) —
+ * character-level scan, no regex; run_command(cmd) — portable spawn
  * (posix_spawn / CreateProcessW); web_search(query) — a local SearXNG
  * instance over HTTP (one async step machine, see tools_websearch.c) */
 NmToolset *nm_toolset_new_defaults(void);
