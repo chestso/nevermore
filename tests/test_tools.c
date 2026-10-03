@@ -276,6 +276,26 @@ static int drive_virtual(const NmTool *t, NmToolExec *e, NmToolResult *out,
     }
 }
 
+/* Drive to DONE on REAL readiness alone, with the clock frozen: the call
+ * ends when the child speaks or exits, never because a window closed.
+ * This is the shape for a result that IS the child's exit (closing its
+ * stdin and reading the flush) — nothing may cut it short. */
+static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
+                            int budget_ms)
+{
+    long long t0 = wall_ms();
+    for (;;) {
+        if (t->step(e, out) == NM_TOOL_DONE)
+            return 0;
+        NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
+        if (t->source)
+            t->source(e, &src);
+        source_ready(&src, 50);
+        if (wall_ms() - t0 > (long long)budget_ms)
+            return -1;
+    }
+}
+
 /* nm_toolset_execute's synchronous pump (the `execute` vtable entry)
  * waits a yield window out on the REAL clock, so a live child would hang
  * a fake-clock test. Drive the async seam instead — same result, virtual
@@ -294,6 +314,28 @@ static NmToolResult exec_virtual(const char *name, const char *args_json,
         } else {
             /* begin declined (bad args): the synchronous path reports
              * it, exactly as the agent's fallback does. */
+            r = nm_toolset_execute(ts, name, args_json, NULL);
+        }
+    } else {
+        r = nm_toolset_execute(ts, name, args_json, NULL);
+    }
+    nm_toolset_free(ts);
+    return r;
+}
+
+/* exec_virtual's sibling for a call whose result is the child's EXIT
+ * (nothing may close its window first) — see drive_until_done. */
+static NmToolResult exec_virtual_done(const char *name, const char *args_json)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, name);
+    NmToolResult r = { 0, NULL };
+    if (t && t->begin) {
+        NmToolExec *e = t->begin(t, args_json, NULL);
+        if (e) {
+            drive_until_done(t, e, &r, 15000);
+            t->end(e);
+        } else {
             r = nm_toolset_execute(ts, name, args_json, NULL);
         }
     } else {
@@ -2781,7 +2823,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     nm_json_set(j, "yield_time_ms", nm_json_new_number(1000));
     args = nm_json_dump(j);
     nm_json_free(j);
-    r = exec_virtual("write_stdin", args, 1); /* the flush at exit */
+    r = exec_virtual_done("write_stdin", args); /* the flush at exit */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);

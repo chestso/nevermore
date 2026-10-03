@@ -3,8 +3,10 @@
 #
 # Wired in as automake's TEST_LOG_COMPILER: every test binary runs
 # with a background watchdog. If the test exceeds NM_TEST_TIMEOUT
-# seconds (default 10 — loopback tests are ms-fast; a hang is a
-# bug), the watchdog:
+# seconds (default 60 — a HANG detector, so the cap sits ~5x above the
+# heaviest binary's legitimate runtime; on the MSYS2 runner
+# test_chat_app takes ~11 s for environment reasons that no test-side
+# change removes, see tests/Makefile.am), the watchdog:
 #
 #   1. announces the hang into the test's .log (test-driver
 #      redirects our stdout there),
@@ -34,7 +36,7 @@
 #
 # Never a polling loop in the app sense: this is test harness only.
 
-secs=${NM_TEST_TIMEOUT:-10}
+secs=${NM_TEST_TIMEOUT:-60}
 progress=${NM_TEST_PROGRESS:-test-progress.log}
 
 now() { date -u +%H:%M:%S; }

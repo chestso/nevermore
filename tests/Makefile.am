@@ -31,13 +31,24 @@ AM_CPPFLAGS = \
     -I$(top_builddir) \
     $(BOBA_CFLAGS)
 
-# Per-test runtime cap (house rule: loopback tests are ms-fast; a
-# hang is a bug, not a condition to wait out). The watchdog wraps
-# every test binary: NM_TEST_TIMEOUT seconds (default 10), then a
-# stack snapshot into the .log and a core-dumping kill — so a hung
-# test FAILS loudly with a diagnosable core in CI artifacts instead
-# of stalling the workflow until the 4h job watchdog cancels it.
+# Per-test runtime cap (house rule: a hang is a bug, not a condition
+# to wait out). The watchdog wraps every test binary: NM_TEST_TIMEOUT
+# seconds (default 60), then a stack snapshot into the .log and a
+# core-dumping kill — so a hung test FAILS loudly with a diagnosable
+# core in CI artifacts instead of stalling the workflow until the 4h
+# job watchdog cancels it.
 # Override for interactive debugging: NM_TEST_TIMEOUT=0 turns it off.
+#
+# WHY 60 AND NOT 10 (2026-10-03): the cap is a HANG DETECTOR, so it
+# must sit far above the binary's legitimate runtime — and on the
+# MSYS2 runner it did not. The heaviest binary (test_chat_app, 73
+# tests) runs 0.7 s here, 11 s there, and the gap is NOT the tests'
+# sleeps: the suite's sleeps were removed (test_wire went 1.4 s -> 0.2 s
+# here) and the Windows number did not move at all. It is per-test
+# environment overhead (thread/socket setup on a slow runner), so the
+# old 10 s was measuring the runner, not a hang — and killed
+# test_chat_app twice. 60 s is ~5x the worst legitimate runtime
+# observed, still bounded, and still loud.
 #
 # HARNESS GOTCHA (found the hard way, 2026-09): without automake's
 # `parallel-tests` option this project uses the SERIAL harness, and
