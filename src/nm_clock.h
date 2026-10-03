@@ -1,38 +1,25 @@
-/* nm_clock.h - the one clock (internal)
+/* nm_clock.h - the one clock
  *
- * Monotonic where the OS offers it, wall clock otherwise. Extracted
- * from wire_recorder.c's private helper so the wire recorder's `t`
- * field and the conversation-id fallback seed share one definition
- * rather than drifting into two clocks.
+ * Monotonic where the OS offers it, wall clock otherwise. The single
+ * time source for every deadline in the program — the connect walk's
+ * per-attempt budget, the agent's stream-inactivity budget, the tool
+ * yield/inactivity windows — plus the wire recorder's `t` field
+ * (seconds since the banner, immune to NTP jumps where possible) and
+ * the conversation-id fallback seed.
  *
- * Header-only (static inline) on purpose: three test link sets and
- * the binary would otherwise need a new TU, and the helper is a
- * two-line OS call. The t-field contract — "seconds since the
- * banner", immune to NTP jumps where possible" — still holds.
+ * A real function in its own TU, NOT a header-only inline: the tests
+ * that own a deadline replace it at link time with a fake clock, so
+ * they advance time instead of sleeping through it (tests/fake_clock.c
+ * supplies the definition; the production surface carries no test
+ * hook, it just calls the clock). A deadline is a pure function of
+ * this value, which is what makes it testable at all.
  */
 
 #ifndef NM_CLOCK_H
 #define NM_CLOCK_H
 
-#ifdef _WIN32
-#include <windows.h>
-/* 100ns ticks since 1601 -> unix seconds. */
-static inline double nm_monotonic_seconds(void)
-{
-    FILETIME ft;
-    GetSystemTimeAsFileTime(&ft);
-    unsigned long long t =
-        ((unsigned long long)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
-    return (double)t / 10000000.0 - 11644473600.0;
-}
-#else
-#include <time.h>
-static inline double nm_monotonic_seconds(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
-}
-#endif
+/* Seconds from a monotonic origin (unspecified). Never goes backwards
+ * on the platforms that have a monotonic source. */
+double nm_monotonic_seconds(void);
 
 #endif /* NM_CLOCK_H */

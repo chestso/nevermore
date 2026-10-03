@@ -116,6 +116,7 @@ nevermore_SOURCES = \
     json.c \
     xxh3.h \
     xxh3.c \
+    nm_clock.c \
     agent.c \
     conversation_id.c \
     context.h \

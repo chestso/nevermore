@@ -26,6 +26,7 @@
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
 
+#include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "tools_internal.h"
 #include "test_helpers.h"
 
@@ -186,6 +187,121 @@ static int wait_readable(int fd, int budget_ms)
     }
 }
 #endif /* !_WIN32 */
+
+/* Milliseconds from a portable wall clock: a test's own bound, never
+ * the clock under test (that one is tests/fake_clock.c). */
+static long long wall_ms(void)
+{
+#ifdef _WIN32
+    return (long long)GetTickCount64();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+#endif
+}
+
+/* Has the step's live source something to read? Waits up to `ms` of REAL
+ * time. The kind is the tool's to declare — a POSIX child's pipe is a
+ * descriptor, a Windows job's readiness object is a waitable HANDLE — so
+ * both are mapped here. */
+static int source_ready(const NmSource *s, int ms)
+{
+    if (!s || s->handle < 0 || !(s->flags & NM_INTEREST_READ))
+        return 0;
+#ifdef _WIN32
+    if (s->kind == NM_SRC_HANDLE)
+        return WaitForSingleObject((HANDLE)s->handle, (DWORD)ms) ==
+               WAIT_OBJECT_0;
+    fd_set r;
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_SET((SOCKET)s->handle, &r);
+    return select(0, &r, NULL, NULL, &tv) > 0;
+#else
+    fd_set r;
+    struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_SET((int)s->handle, &r);
+    return select((int)s->handle + 1, &r, NULL, NULL, &tv) > 0;
+#endif
+}
+
+/* Drive one async call with VIRTUAL time — the exec/write_stdin pair,
+ * whose yield window is the only thing that would otherwise burn wall
+ * clock.
+ *
+ * Real readiness is still honoured: the child's own I/O (its bytes, its
+ * exit) is what the loop waits on, and it is never raced. What the loop
+ * refuses to do is SLEEP OUT a deadline: when the source is quiet, the
+ * fake clock moves instead (tests/fake_clock.c), so the window closes at
+ * once. The wall clock only bounds the whole drive.
+ *
+ * `want_output` says whether the result must CARRY the child's bytes: if
+ * so, the loop waits (real time, generously) for the child to speak
+ * before closing the window; a silent child (`cat` before its input, a
+ * `sleep 30`) closes the window on the first quiet pass. */
+static int drive_virtual(const NmTool *t, NmToolExec *e, NmToolResult *out,
+                         int budget_ms, int want_output)
+{
+    long long t0 = wall_ms();
+    int spoken = 0; /* the child has produced bytes at least once */
+    for (;;) {
+        if (t->step(e, out) == NM_TOOL_DONE)
+            return 0;
+        NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
+        if (t->source)
+            t->source(e, &src);
+        int quiet = 1;
+        if (src.handle >= 0 && (src.flags & NM_INTEREST_READ)) {
+            /* A real readiness window: short when the child is expected
+             * to be silent, longer when its bytes are the point. A PTY
+             * echoes our own input first, so "readable" is not yet "the
+             * child answered" — the loop takes every window until one
+             * comes up empty. */
+            int grace = want_output ? 50 : 2;
+            if (source_ready(&src, grace)) {
+                spoken = 1;
+                quiet = 0;
+            }
+        }
+        if (quiet && (!want_output || spoken)) {
+            /* The child has said all it is going to say (or had nothing
+             * to say): close the window on virtual time. */
+            int dl = t->deadline_ms ? t->deadline_ms(e) : -1;
+            nm_test_clock_advance_ms(dl > 0 ? dl : 1);
+        }
+        if (wall_ms() - t0 > (long long)budget_ms)
+            return -1;
+    }
+}
+
+/* nm_toolset_execute's synchronous pump (the `execute` vtable entry)
+ * waits a yield window out on the REAL clock, so a live child would hang
+ * a fake-clock test. Drive the async seam instead — same result, virtual
+ * time. `want_output` as in drive_virtual. */
+static NmToolResult exec_virtual(const char *name, const char *args_json,
+                                 int want_output)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, name);
+    NmToolResult r = { 0, NULL };
+    if (t && t->begin) {
+        NmToolExec *e = t->begin(t, args_json, NULL);
+        if (e) {
+            drive_virtual(t, e, &r, 15000, want_output);
+            t->end(e);
+        } else {
+            /* begin declined (bad args): the synchronous path reports
+             * it, exactly as the agent's fallback does. */
+            r = nm_toolset_execute(ts, name, args_json, NULL);
+        }
+    } else {
+        r = nm_toolset_execute(ts, name, args_json, NULL);
+    }
+    nm_toolset_free(ts);
+    return r;
+}
 
 /* ---------------------------------------------------------------- */
 /* Registry                                                          */
@@ -1958,9 +2074,15 @@ static int reported_job_id(const char *output)
 
 /* One run_command call, driven by the async seam, with `budget_ms` as
  * the process-global inactivity budget. The knob is restored to its
- * default afterwards so a later test is never left with a short one. */
+ * default afterwards so a later test is never left with a short one.
+ *
+ * `virtual_deadline`: the child is silent by construction, so nothing
+ * needs to interleave with the clock — drive it with virtual time and
+ * the budget is crossed at once. A child whose PRINTS are the subject
+ * (the deadline-reset case) passes 0: there the child's real cadence
+ * against the real budget is the property under test. */
 static NmToolResult run_command_driven(const char *cmd, int budget_ms,
-                                       int *declared_dl)
+                                       int *declared_dl, int virtual_deadline)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, "run_command");
@@ -1977,7 +2099,10 @@ static NmToolResult run_command_driven(const char *cmd, int budget_ms,
     if (e) {
         if (declared_dl && t->deadline_ms)
             *declared_dl = t->deadline_ms(e);
-        drive_async(t, e, &r, 15000);
+        if (virtual_deadline)
+            drive_virtual(t, e, &r, 15000, 0);
+        else
+            drive_async(t, e, &r, 15000);
         t->end(e);
     }
     nm_tool_run_command_set_timeout_ms(0); /* restore the default */
@@ -1987,16 +2112,14 @@ static NmToolResult run_command_driven(const char *cmd, int budget_ms,
 
 /* A child that produces nothing is stopped once the budget has passed:
  * without the deadline the turn waits forever (`sleep 30` never makes
- * the pipe readable, so nothing ever re-steps the tool). Kept short —
- * the whole test binary shares the harness's runtime cap. */
+ * the pipe readable, so nothing ever re-steps the tool). The budget is
+ * crossed on virtual time — the wait it guards is a deadline, not a
+ * child's work, so the test no longer pays it. */
 static void test_run_command_silent_child_is_stopped(void)
 {
-    struct timeval t0, t1;
-    gettimeofday(&t0, NULL);
     int dl = -2;
     NmToolResult r = run_command_driven("sleep 30; printf 'never\\n'", 250,
-                                        &dl);
-    gettimeofday(&t1, NULL);
+                                        &dl, 1);
 
     /* The budget is declared on the NmTool.deadline_ms seam — the drive a
      * silent child needs. */
@@ -2005,8 +2128,6 @@ static void test_run_command_silent_child_is_stopped(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
     ASSERT_TRUE(strstr(r.output, "never") == NULL); /* the child never got there */
-    long long ms = elapsed_us(&t0, &t1) / 1000;
-    ASSERT_TRUE(ms < 4000); /* nowhere near the 30 s sleep */
     nm_tool_result_free(&r);
 }
 
@@ -2016,11 +2137,12 @@ static void test_run_command_output_resets_the_deadline(void)
 {
     /* Prints every ~60 ms for ~0.3 s: each line resets the 300 ms
      * budget, so this must finish with its own exit status (were the
-     * deadline absolute it would be stopped around 300 ms). */
+     * deadline absolute it would be stopped around 300 ms). Real time:
+     * the child's own cadence against the budget IS the property. */
     NmToolResult r = run_command_driven(
         "i=0; while [ $i -lt 5 ]; do printf 'tick\\n'; i=$((i+1)); "
         "sleep 0.06; done; exit 0",
-        300, NULL);
+        300, NULL, 0);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "tick") != NULL);
@@ -2127,7 +2249,7 @@ static void test_exec_command_yields_job_id(void)
     ASSERT_EQ(src.flags, NM_INTEREST_READ);
 
     NmToolResult r = { 0, NULL };
-    ASSERT_EQ(drive_async(t, e, &r, 5000), 0);
+    ASSERT_EQ(drive_virtual(t, e, &r, 5000, 1), 0);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
@@ -2159,7 +2281,7 @@ static void test_exec_command_yield_string_form(void)
     nm_json_set(j, "cmd", nm_json_new_string("sleep 2"));
     nm_json_set(j, "yield_time_ms", nm_json_new_string("1"));
     char *args = args_dump(j);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     nm_proc_close_all(); /* the job outlives the call: retire it here */
     ASSERT_TRUE(r.ok);
@@ -2197,7 +2319,7 @@ static void test_write_stdin_yield_string_form(void)
     /* Blocks on stdin, then takes 1 s to finish — longer than the 1 s
      * write_stdin default, shorter than the requested window. */
     char *args = exec_args("read x; sleep 1; echo done", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2208,6 +2330,9 @@ static void test_write_stdin_yield_string_form(void)
     nm_json_set(j, "job_id", nm_json_new_number(sid));
     nm_json_set(j, "input", nm_json_new_string("go\n"));
     nm_json_set(j, "yield_time_ms", nm_json_new_string("30000"));
+    /* The child's own 1 s (it must outlive the 1 s default window) — the
+     * point of the test, and the sync pump's own wait: the exit is what
+     * ends the call, so this one stays on the real path. */
     args = args_dump(j);
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
@@ -2316,7 +2441,7 @@ static void test_write_stdin_round_trip(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args("cat", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2331,7 +2456,7 @@ static void test_write_stdin_round_trip(void)
     nm_json_set(j1, "input", nm_json_new_string("hello there\n"));
     nm_json_set(j1, "yield_time_ms", nm_json_new_number(300));
     args = args_dump(j1);
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 1); /* the echo must be in it */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
@@ -2362,7 +2487,7 @@ static void test_write_stdin_partial_line_and_eof(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args("cat; printf 'after:\\n'", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2392,7 +2517,7 @@ static void test_write_stdin_interior_marker_rejected(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args("sleep 30", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
@@ -2434,7 +2559,7 @@ static void test_write_stdin_reads_progress(void)
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args("printf 'first\\n'; sleep 0.4; printf 'second\\n'",
                            300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 1);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2447,7 +2572,7 @@ static void test_write_stdin_reads_progress(void)
     nm_json_set(jp, "job_id", nm_json_new_number(sid));
     nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
     args = args_dump(jp);
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 1);
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -2466,7 +2591,7 @@ static void test_write_stdin_interest_includes_write(void)
     const NmTool *t = nm_toolset_find(ts, "write_stdin");
     ASSERT_NOT_NULL(t);
     char *args = exec_args("sleep 30", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
@@ -2503,7 +2628,7 @@ static void test_kill_job_stops_and_reports(void)
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args(
         "printf 'before\\n'; sleep 0.5; printf 'after\\n'; sleep 30", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 1);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2559,7 +2684,7 @@ static void test_exec_job_lifecycle(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     char *args = exec_args("while read line; do echo \"got $line\"; done", 300);
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     ASSERT_TRUE(r.ok);
     int sid = reported_job_id(r.output);
@@ -2567,7 +2692,7 @@ static void test_exec_job_lifecycle(void)
     nm_tool_result_free(&r);
 
     args = stdin_args(sid, "one\n");
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 1); /* the echo must be in it */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(strstr(r.output, "got one"));
@@ -2579,7 +2704,7 @@ static void test_exec_job_lifecycle(void)
     nm_json_set(jp, "job_id", nm_json_new_number(sid));
     nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
     args = args_dump(jp);
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 0); /* silent: the window closes */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
@@ -2620,7 +2745,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     char *args = nm_json_dump(j);
     nm_json_free(j);
 
-    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -2640,7 +2765,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     nm_json_set(j, "yield_time_ms", nm_json_new_number(300));
     args = nm_json_dump(j);
     nm_json_free(j);
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 0); /* still live: the window closes */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -2656,7 +2781,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     nm_json_set(j, "yield_time_ms", nm_json_new_number(1000));
     args = nm_json_dump(j);
     nm_json_free(j);
-    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    r = exec_virtual("write_stdin", args, 1); /* the flush at exit */
     free(args);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -2772,27 +2897,17 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     int dl = t->deadline_ms(e);
     ASSERT_TRUE(dl >= 0 && dl <= 500);
 
+    /* The readiness event never fires (a silent child), so the budget
+     * is the only thing that ends it — crossed on VIRTUAL time, exactly
+     * as the POSIX twin does, instead of waiting the 500 ms out. */
     NmToolResult r = { 0, NULL };
-    long t0 = (long)GetTickCount64();
-    int steps = 0;
-    while (t->step(e, &r) == NM_TOOL_RUNNING && ++steps < 20000) {
-        int left = t->deadline_ms(e);
-        if (left < 0 || left > 50)
-            left = 50; /* wait the event, then re-check the deadline */
-        NmSource src = { -1, 0, NM_SRC_HANDLE };
-        if (t->source(e, &src) && src.handle >= 0)
-            WaitForSingleObject((HANDLE)src.handle, (DWORD)left);
-        else
-            Sleep((DWORD)left);
-    }
+    ASSERT_EQ(drive_virtual(t, e, &r, 15000, 0), 0);
     t->end(e);
-    long elapsed = (long)GetTickCount64() - t0;
     nm_tool_run_command_set_timeout_ms(0); /* restore the default */
 
     ASSERT_FALSE(r.ok);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
-    ASSERT_TRUE(elapsed < 10000); /* nowhere near the 31 s ping */
     nm_tool_result_free(&r);
     ASSERT_EQ(nm_proc_count(), 0); /* the timeout closed the job itself */
     nm_toolset_free(ts);

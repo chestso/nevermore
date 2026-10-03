@@ -106,7 +106,7 @@ test_config_CFLAGS = $(TEST_CFLAGS)
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
-test_provider_SOURCES = test_provider.c ../src/nm_config.c \
+test_provider_SOURCES = test_provider.c ../src/nm_clock.c ../src/nm_config.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
@@ -123,7 +123,7 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
-test_source_SOURCES = test_source.c ../src/source.c ../src/nm_config.c \
+test_source_SOURCES = test_source.c ../src/nm_clock.c ../src/source.c ../src/nm_config.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
@@ -140,7 +140,7 @@ test_source_LDADD = $(TEST_TLS_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
-test_wire_SOURCES = test_wire.c ../src/transport.c ../src/transport_socket.c \
+test_wire_SOURCES = test_wire.c ../src/nm_clock.c ../src/transport.c ../src/transport_socket.c \
     ../src/nm_config.c \
     ../src/wire_recorder.c ../src/json.c $(TEST_TLS_SOURCE)
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -151,7 +151,7 @@ test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 # lines + redaction via the header secret marker, plus a tap round
 # trip against a canned loopback server. Direct recorder calls, no
 # real network.
-test_wire_recorder_SOURCES = test_wire_recorder.c ../src/wire_recorder.c \
+test_wire_recorder_SOURCES = test_wire_recorder.c ../src/nm_clock.c ../src/wire_recorder.c \
     ../src/json.c ../src/transport.c ../src/transport_socket.c \
     ../src/nm_config.c \
     $(TEST_TLS_SOURCE)
@@ -161,7 +161,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # End-to-end: the shared OpenAI-compatible client against a canned
 # chat/completions SSE server (request validation + delta assembly).
-test_openai_client_SOURCES = test_openai_client.c \
+test_openai_client_SOURCES = test_openai_client.c ../src/nm_clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
@@ -177,7 +177,7 @@ test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
 # TLS: negative handshake over loopback with the committed self-signed
 # cert (system trust must reject it). Live probe is manual
 # (NM_LIVE_TLS=1), never in make check.
-test_tls_SOURCES = test_tls.c ../src/transport.c ../src/transport_socket.c \
+test_tls_SOURCES = test_tls.c ../src/nm_clock.c ../src/transport.c ../src/transport_socket.c \
     ../src/nm_config.c \
     $(TEST_TLS_SOURCE)
 test_tls_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -205,7 +205,7 @@ endif
 # web_search rides transport (the async HTTP step machine), so the
 # tools binary links the wire stack and the TLS backend source; the
 # spawn source is still needed for run_command's vtable.
-test_tools_SOURCES = test_tools.c ../src/tools.c ../src/tools_file.c \
+test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
     ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
@@ -219,7 +219,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # web_search: the SearXNG HTTP tool against a canned loopback server —
 # request shaping, result normalization (sort/dedup/cap), errors, the
 # reachability cache and its timeout.
-test_web_search_SOURCES = test_web_search.c \
+test_web_search_SOURCES = test_web_search.c ../src/nm_clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
@@ -238,7 +238,7 @@ test_process_CFLAGS = $(TEST_CFLAGS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
-test_agent_SOURCES = test_agent.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
+test_agent_SOURCES = test_agent.c ../src/nm_clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/context.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
@@ -298,7 +298,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # canned SSE servers. The full source stack rides along: the app owns
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
-test_chat_app_SOURCES = test_chat_app.c ../src/chat_app.c ../src/nm_config.c \
+test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/nm_image.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
@@ -350,7 +350,8 @@ check-programs: $(check_PROGRAMS)
 # suite cannot silently inherit one.
 TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1
 
-EXTRA_DIST = test_helpers.h test_net_helpers.h tls/test-cert.pem tls/test-key.pem \
+EXTRA_DIST = test_helpers.h test_net_helpers.h fake_clock.h \
+    tls/test-cert.pem tls/test-key.pem \
     tls/README.md
 
 # The watchdog appends START/END pairs to test-progress.log by default

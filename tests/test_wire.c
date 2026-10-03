@@ -320,8 +320,17 @@ static void *stall_server_thread(void *arg)
         return NULL;
     char drain[2048];
     recv(cfd, drain, sizeof(drain), 0);
-    /* Hold the connection open, send nothing. */
-    usleep(500 * 1000);
+    /* Hold the connection open, send nothing, until the peer closes:
+     * the client's read must see WOULD_BLOCK, not EOF. A drain-recv —
+     * the same convention the process-job servers use — is what makes
+     * that deterministic, where a sleep only made it likely (and cost
+     * the test half a second). */
+    for (;;) {
+        char sink[256];
+        long n = recv(cfd, sink, sizeof(sink), 0);
+        if (n <= 0)
+            break; /* peer closed */
+    }
     close(cfd);
     return NULL;
 }
@@ -377,7 +386,7 @@ static void *dribble_server_thread(void *arg)
     char drain[2048];
     recv(cfd, drain, sizeof(drain), 0);
     send(cfd, sc->first, sc->first_len, 0);
-    usleep(200 * 1000); /* stall: client must WOULD_BLOCK here */
+    usleep(30 * 1000); /* stall: client must WOULD_BLOCK here */
     send(cfd, sc->second, sc->second_len, 0);
     close(cfd);
     return NULL;
@@ -864,8 +873,10 @@ static void test_async_connect_walks_to_reachable_address(void)
  * CLOCK, which is exactly the property the walk added. */
 static void test_connect_budget_bounds_a_black_hole(void)
 {
-    knobs_set_timeout(300);
-    ASSERT_EQ(nm_connection_connect_timeout_ms(), 300);
+    /* A short per-address budget: the property is that the walk is
+     * BOUNDED by it, not what the number is. */
+    knobs_set_timeout(50);
+    ASSERT_EQ(nm_connection_connect_timeout_ms(), 50);
 
     time_t t0 = time(NULL);
     NmConnectInfo ci = { 0 };
@@ -878,7 +889,7 @@ static void test_connect_budget_bounds_a_black_hole(void)
     /* Always-set contract still holds: the failure names the target. */
     ASSERT_TRUE(ci.detail[0] != '\0');
     ASSERT_TRUE(strstr(ci.detail, "192.0.2.1") != NULL);
-    /* The walk's bound: 1 address x 300 ms, with slack for a slow
+    /* The walk's bound: 1 address x 50 ms, with slack for a slow
      * runner. The pre-walk behavior (the OS's ~130 s) fails here. */
     ASSERT_TRUE(dt <= 5);
 
@@ -977,7 +988,7 @@ static void test_connect_walk_notice_reports_the_next_address(void)
 static void test_async_black_hole_reports_a_deadline(void)
 {
     knobs_clear_skip_families();
-    knobs_set_timeout(300);
+    knobs_set_timeout(50);
 
     NmConnectInfo ci = { 0 };
     NmConnection *c =
@@ -991,11 +1002,15 @@ static void test_async_black_hole_reports_a_deadline(void)
     NmSource i = nm_connection_interest(c);
     ASSERT_TRUE(i.flags & NM_INTEREST_WRITE);
     int ms = nm_connection_wait_ms(c);
-    ASSERT_TRUE(ms >= 0 && ms <= 300);
+    ASSERT_TRUE(ms >= 0 && ms <= 50);
 
     /* Step at the reported deadline (nothing else will ever wake us):
      * the walk abandons the silent address, reports the budget, and
-     * with one address the walk is exhausted -> the connect errors. */
+     * with one address the walk is exhausted -> the connect errors.
+     * The loop's small sleeps are what let the wall clock reach the
+     * budget: the socket reads writable without the probe having an
+     * answer, so an interest-only wait would spin here without time
+     * passing. The budget is short (50 ms), so they cost little. */
     struct timeval tv = { ms / 1000, (ms % 1000) * 1000 };
     fd_set w;
     FD_ZERO(&w);

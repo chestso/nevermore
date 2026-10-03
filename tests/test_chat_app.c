@@ -47,6 +47,7 @@
 #include "authinfo.h"
 #include "colors.h"
 #include "nm_process.h"
+#include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"
 #include "test_net_helpers.h"
 
@@ -109,7 +110,62 @@ struct ServerScript
     int delay_us;     /* between events of each round (0 = none) */
     int stall_at_end; /* keep the last round's connection open (no
                        * terminating chunk) until the peer closes */
+
+    /* Rendezvous pacing — the deterministic replacement for delay_us
+     * for tests that need ONE event per client step. With `paced` set,
+     * the server sends event N only after the test has granted permit
+     * N (see server_paced_init / server_ack): a handshake, not a
+     * guessed sleep, so the interleaving is the test's to decide and
+     * costs no wall clock. `released` unblocks a server left waiting
+     * when the test stops driving (teardown, an early break). */
+    int paced;
+    pthread_mutex_t lock;
+    pthread_cond_t cv;
+    int permits;  /* events the test has let through */
+    int released; /* test is done driving: send the rest */
 };
+
+/* Arm the rendezvous (call right after memset'ing the script). */
+static void server_paced_init(struct ServerScript *sc)
+{
+    pthread_mutex_init(&sc->lock, NULL);
+    pthread_cond_init(&sc->cv, NULL);
+    sc->paced = 1;
+}
+
+/* Let one more event through: the test calls this once per step it
+ * takes, so the client sees one event per step. */
+static void server_ack(struct ServerScript *sc)
+{
+    if (!sc->paced)
+        return;
+    pthread_mutex_lock(&sc->lock);
+    sc->permits++;
+    pthread_cond_broadcast(&sc->cv);
+    pthread_mutex_unlock(&sc->lock);
+}
+
+/* Stop pacing: whatever is left goes out at once (teardown path). */
+static void server_release(struct ServerScript *sc)
+{
+    if (!sc->paced)
+        return;
+    pthread_mutex_lock(&sc->lock);
+    sc->released = 1;
+    pthread_cond_broadcast(&sc->cv);
+    pthread_mutex_unlock(&sc->lock);
+}
+
+/* Block until event `idx` may be sent (paced mode only). */
+static void server_wait_permit(struct ServerScript *sc, int idx)
+{
+    if (!sc->paced)
+        return;
+    pthread_mutex_lock(&sc->lock);
+    while (sc->permits <= idx && !sc->released)
+        pthread_cond_wait(&sc->cv, &sc->lock);
+    pthread_mutex_unlock(&sc->lock);
+}
 
 static void *chat_server_thread(void *arg)
 {
@@ -171,10 +227,14 @@ static void *chat_server_thread(void *arg)
         send(cfd, head, (size_t)hl, 0);
         size_t bl = strlen(body);
         size_t off = 0;
+        int ev_idx = 0;
         while (off < bl) {
             const char *ev_end = strstr(body + off, "\n\n");
             size_t ev_len =
                 ev_end ? (size_t)(ev_end - (body + off)) + 2 : bl - off;
+            /* Paced: event N goes out only once the test has stepped
+             * N times (so the client sees one event per step). */
+            server_wait_permit(sc, ev_idx);
             char chunk[REQ_CAP];
             int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
             memcpy(chunk + cl, body + off, ev_len);
@@ -191,6 +251,7 @@ static void *chat_server_thread(void *arg)
             if (sc->delay_us)
                 usleep((unsigned)sc->delay_us);
             off += ev_len;
+            ev_idx++;
         }
         if (sc->stall_at_end && round == sc->n_rounds - 1) {
             /* Hold the connection open without the terminal chunk —
@@ -252,6 +313,11 @@ typedef struct AppHarness
     TuiRuntime *rt;
     FILE *out;
     char *text; /* snapshot of everything written */
+    /* Optional rendezvous partner: when set, every step this harness
+     * takes grants the scripted server one more event (see
+     * server_paced_init). Tests that need one event per step set it
+     * instead of a delay_us guess. */
+    struct ServerScript *pacer;
 } AppHarness;
 
 /* Read the whole output FILE* into a heap string (rewinds nothing —
@@ -284,6 +350,10 @@ static void harness_free(AppHarness *h)
 static AppHarness *harness_new(const char *provider, const char *model,
                                const char *base_url)
 {
+    /* A test starts from a known instant: deadlines are all relative,
+     * but a stale advance from a previous test would make a failure
+     * depend on test order. */
+    nm_test_clock_reset();
     AppHarness *h = calloc(1, sizeof(*h));
     if (!h)
         return NULL;
@@ -533,6 +603,15 @@ static void app_wait(AppHarness *h, int timeout_ms)
     app_wait_src(&s, timeout_ms);
 }
 
+/* One step, plus the rendezvous grant the step just consumed (a paced
+ * server sends the next event only when the test asks for it). */
+static void harness_step_ack(AppHarness *h)
+{
+    nm_chat_app_step(h->app);
+    if (h->pacer)
+        server_ack(h->pacer);
+}
+
 /* Drive the agent to completion the way the runtime's external-fd
  * loop would: poll fd -> step. Bounded. */
 /* Drive the agent to completion the way the runtime's external-fd
@@ -547,11 +626,11 @@ static int harness_drive(AppHarness *h, int max_spins)
         NmSource s = nm_chat_app_source(h->app);
         if (s.handle >= 0 && s.flags) {
             app_wait(h, 10);
-            nm_chat_app_step(h->app);
+            harness_step_ack(h);
         } else if (s.handle < 0) {
             /* Tool phase (announce/execute): no source, step makes
              * progress immediately. */
-            nm_chat_app_step(h->app);
+            harness_step_ack(h);
         } else {
             usleep(10 * 1000);
         }
@@ -575,7 +654,7 @@ static int harness_drive(AppHarness *h, int max_spins)
 static void harness_single_step(AppHarness *h)
 {
     app_wait(h, 50);
-    nm_chat_app_step(h->app);
+    harness_step_ack(h);
     tui_runtime_flush(h->rt);
 }
 
@@ -591,7 +670,7 @@ static void harness_step_once(AppHarness *h)
         if (nm_chat_app_source(h->app).handle < 0)
             break;
         app_wait(h, 50);
-        nm_chat_app_step(h->app);
+        harness_step_ack(h);
         if (nm_chat_app_tail_len(h->app) > 0)
             break;
     }
@@ -688,16 +767,16 @@ static void test_delta_line_continuation_is_preserved(void)
     /* The regression test for the line-buffer protocol: two deltas
      * split across readable events must continue on ONE scrollback
      * line — no forced newline, no interleaved spinner row. The
-     * server delays between events so the app sees them as separate
-     * steps. */
+     * server's rendezvous lets the app see exactly one delta per step
+     * (a handshake, not a guessed delay). */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
+    server_paced_init(&sc);
     sc.n_rounds = 1;
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.delay_us = 120 * 1000; /* force separate readable events */
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
     pthread_t th;
@@ -707,6 +786,7 @@ static void test_delta_line_continuation_is_preserved(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("openai", "test-model", base);
     ASSERT_NOT_NULL(h);
+    h->pacer = &sc;
 
     harness_type(h, "continue");
     harness_enter(h);
@@ -720,6 +800,7 @@ static void test_delta_line_continuation_is_preserved(void)
      * which would print "world" as the start of the next line). */
     ASSERT_TRUE(strstr(out, "Hello \r\nworld") == NULL);
 
+    server_release(&sc);
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -1611,11 +1692,15 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     int ms = nm_chat_app_tick_ms(h->app);
     ASSERT_TRUE(ms > 0 && ms <= 100);
 
-    /* The fd is silent; only ticks advance the clock. Pump until the
-     * tick drives the step that fires the timeout. Bounded. */
+    /* The fd is silent; only the timer advances. Drive VIRTUAL time:
+     * each pass moves the fake clock by the app's own cadence and
+     * ticks, which is exactly what boba's loop does — except the
+     * deadline is crossed instantly instead of in wall clock (a loaded
+     * runner can no longer decide the outcome). */
     for (int i = 0;
          i < 200 && nm_chat_app_state(h->app) == NM_AGENT_STREAMING; i++) {
-        usleep(2 * 1000);
+        int wait = nm_chat_app_tick_ms(h->app);
+        nm_test_clock_advance_ms(wait > 0 ? wait : 1);
         nm_chat_app_tick(h->app);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
@@ -1746,16 +1831,15 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     int to = nm_agent_next_timeout_ms(nm_chat_app_agent(h->app));
     ASSERT_TRUE(to >= 0 && to <= 250);
 
-    /* Drive the loop the way boba does: wait on the fd source, tick at
-     * the reported interval. Bounded by WALL CLOCK, not an iteration
-     * count: the source can read ready on every pass (a non-blocking
-     * connect's socket), so a pass can cost microseconds and a fixed
-     * iteration budget (400) could be spent in ~20 ms — before the
-     * 250 ms budget even elapsed — leaving the agent STREAMING. That
-     * was a ~40% flake on a fast box; the deadline drives the walk as
-     * soon as the wall clock passes it (the tick re-checks the clock,
-     * so a hot pass loop still fires it). No sleep floor needed: the
-     * point is that the deadline, not the pass count, ends the walk. */
+    /* Drive the loop the way boba does: tick at the app's reported
+     * cadence, and let VIRTUAL time do the waiting (the fake clock
+     * advances by that cadence instead of sleeping it). The deadline,
+     * not the pass count, ends the walk: a pass costs microseconds, so
+     * an iteration bound could be spent before the budget elapsed —
+     * which is exactly the ~40 % flake the wall-clock bound below used
+     * to paper over. Now the clock IS the deadline's clock, so the
+     * outcome cannot depend on how fast the box is. The wall-clock
+     * bound stays as a safety net against a drive that never ends. */
     time_t t0 = time(NULL);
     for (;;) {
         NmAgentState st = nm_chat_app_state(h->app);
@@ -1773,7 +1857,7 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
         int wait = nm_chat_app_tick_ms(h->app);
         if (wait < 0)
             wait = 5;
-        usleep((useconds_t)wait * 1000);
+        nm_test_clock_advance_ms(wait);
         nm_chat_app_tick(h->app);
         tui_runtime_flush(h->rt);
         if (time(NULL) - t0 >= 5)
@@ -2672,7 +2756,9 @@ static void test_open_json_fence_before_tool_call_commits(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"Done. The tool said "
         "hello.\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.delay_us = 60 * 1000; /* separate readable events per delta */
+    /* Rendezvous: one delta per step (the unclosed fence's body must be
+     * seen growing in the live region, not delivered in one burst). */
+    server_paced_init(&sc);
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
     pthread_t th;
@@ -2682,6 +2768,7 @@ static void test_open_json_fence_before_tool_call_commits(void)
     snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("openai", "test-model", base2);
     ASSERT_NOT_NULL(h);
+    h->pacer = &sc;
 
     harness_type(h, "check it");
     harness_enter(h);
@@ -2720,6 +2807,7 @@ static void test_open_json_fence_before_tool_call_commits(void)
     /* The turn's answer is also present. */
     ASSERT_TRUE(strstr(out, "Done. The tool said hello.") != NULL);
 
+    server_release(&sc);
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -2872,7 +2960,9 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\" for "
         "contrast\\n- `history.c` is next\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.delay_us = 120 * 1000; /* separate readable events */
+    /* One delta per step (rendezvous), so the mid-stream loop below
+     * sees the partial tail grow instead of the whole round at once. */
+    server_paced_init(&sc);
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
     pthread_t th;
@@ -2882,6 +2972,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("openai", "test-model", base);
     ASSERT_NOT_NULL(h);
+    h->pacer = &sc;
 
     /* Force the geometry: narrow enough that the partial tail and the
      * completed line both wrap. */
@@ -2906,7 +2997,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         FD_ZERO(&fds);
         FD_SET(fd, &fds);
         select(fd + 1, &fds, NULL, NULL, &tv);
-        nm_chat_app_step(h->app); /* prints internally, NO flush here */
+        harness_step_ack(h); /* prints internally, NO flush here */
     }
     tui_runtime_flush(h->rt);
     ASSERT_EQ(harness_drive(h, 500), 0);
@@ -2944,6 +3035,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     ASSERT_EQ(count_transcript_line(out, "## The others,"), 0u);
     ASSERT_EQ(count_transcript_line(out, "## The others"), 0u);
 
+    server_release(&sc);
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -3977,8 +4069,10 @@ static void test_interest_dedupes_active_exec_job(void)
     ASSERT_EQ(set[0].handle, job_handle);
     ASSERT_EQ(set[0].flags, NM_INTEREST_READ);
 
-    /* The yield window closes, the call ends, the round finishes — and
-     * the job survives on its own in the wait set. */
+    /* Close the yield window — virtual time, so the exec's 250 ms
+     * window costs nothing — then the call ends, the round finishes,
+     * and the job survives on its own in the wait set. */
+    nm_test_clock_advance_ms(1000);
     ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     ASSERT_EQ(app_fd(h->app), -1);
