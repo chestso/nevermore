@@ -35,11 +35,14 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the input's status line —
-          # components/textinput.h's TuiSpan +
+          # new boba API (currently the image tier's kitty transport —
+          # a=T with s/v, without which an IMAGE unit reserves its rows
+          # and places nothing — plus the earlier APIs this repo already
+          # depends on: the input's status line
+          # (components/textinput.h's TuiSpan +
           # tui_textinput_set_status_line, nevermore's spinner/context
-          # gauge/separator rule — plus the display-column metrics fix
-          # that lands the cursor on the right cell when a prompt is two
+          # gauge/separator rule), the display-column metrics fix that
+          # lands the cursor on the right cell when a prompt is two
           # cells wide, the inline-frame reflow-erase fix so a terminal
           # resize no longer strands the frame's top rows, and the
           # Windows stdin-reader teardown fix this repo's Windows loop
