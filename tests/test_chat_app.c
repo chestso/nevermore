@@ -1823,6 +1823,10 @@ static void test_connect_walk_notice_is_printed(void)
         tui_runtime_flush(h->rt);
     }
 
+    /* The commit pass: a turn that errored inside the drive may have left
+     * its notice in the transcript buffer with no flush after it. */
+    tui_runtime_flush(h->rt);
+
     const char *out = harness_read(h);
     /* The notice names the abandoned attempt and the walk length. */
     ASSERT_TRUE(strstr(out, "did not answer") != NULL);
