@@ -127,6 +127,41 @@ static const unsigned char FIX_WEBP_VP8L[] = {
     0x3f, 0xc0, 0x07, 0x00 /* width-1 = 63, height-1 = 31 (14 bits each) */
 };
 
+/* SOI + a COM segment and NO SOF anywhere: recognised, unsizable. */
+static const unsigned char FIX_JPEG_NOSOF[] = {
+    0xff, 0xd8, 0xff, 0xfe, 0x00, 0x06, 'c', 'c', 'c', 'c'
+};
+
+/* Build a JPEG whose SOF sits PAST a 64-byte head probe (78 bytes of
+ * COM segment in front of it). This is what every real camera JPEG
+ * looks like — EXIF/APP segments precede SOF — so recognition has to
+ * come from the SOI and the dimensions from a deeper read. Returns the
+ * length written, or 0 when cap is too small. */
+static size_t make_jpeg_far(unsigned char *buf, size_t cap)
+{
+    if (cap < 93)
+        return 0;
+    size_t o = 0;
+    buf[o++] = 0xff;
+    buf[o++] = 0xd8; /* SOI */
+    buf[o++] = 0xff;
+    buf[o++] = 0xfe; /* COM */
+    buf[o++] = 0x00;
+    buf[o++] = 0x50; /* segment length 80 */
+    memset(buf + o, 'c', 78);
+    o += 78;
+    buf[o++] = 0xff;
+    buf[o++] = 0xc0; /* SOF0 */
+    buf[o++] = 0x00;
+    buf[o++] = 0x11; /* length 17 */
+    buf[o++] = 0x08; /* precision */
+    buf[o++] = 0x00;
+    buf[o++] = 0x20; /* height 32 */
+    buf[o++] = 0x00;
+    buf[o++] = 0x40; /* width 64 */
+    return o;        /* 93 bytes: SOF0 lands at 84, past a 64-byte head */
+}
+
 /* ---------------------------------------------------------------- */
 /* Image-ref parsing (nm_markdown's scanner, pure)                   */
 /* ---------------------------------------------------------------- */
@@ -930,11 +965,14 @@ static void probe_write_file(const char *name, const void *bytes, size_t len)
 
 static void test_bytes_file_probe(void)
 {
-    char png[128], jpg[128], gif[128], webp[128], txt[128], empty[128];
+    char png[128], jpg[128], gif[128], webp[128], far[128], nosof[128];
+    char txt[128], empty[128];
     snprintf(png, sizeof(png), "nm_probe_%ld.png", (long)getpid());
     snprintf(jpg, sizeof(jpg), "nm_probe_%ld.jpg", (long)getpid());
     snprintf(gif, sizeof(gif), "nm_probe_%ld.gif", (long)getpid());
     snprintf(webp, sizeof(webp), "nm_probe_%ld.webp", (long)getpid());
+    snprintf(far, sizeof(far), "nm_probe_%ld_far.jpg", (long)getpid());
+    snprintf(nosof, sizeof(nosof), "nm_probe_%ld_nosof.jpg", (long)getpid());
     snprintf(txt, sizeof(txt), "nm_probe_%ld.txt", (long)getpid());
     snprintf(empty, sizeof(empty), "nm_probe_%ld.empty", (long)getpid());
     probe_write_file(png, FIX_PNG, sizeof(FIX_PNG));
@@ -1017,10 +1055,43 @@ static void test_bytes_file_probe(void)
     ASSERT_EQ(p.kind, NM_IMAGE_KIND_WEBP);
     nm_image_probe_free(&p);
 
+    /* A JPEG whose SOF sits PAST the head probe — every real camera
+     * JPEG (EXIF segments precede SOF). The head still answers WHAT it
+     * is (which is what sends read_file to the full probe), and only
+     * the deeper read can answer how big. */
+    unsigned char far_buf[128];
+    size_t far_len = make_jpeg_far(far_buf, sizeof(far_buf));
+    ASSERT_TRUE(far_len > 64);
+    probe_write_file(far, far_buf, far_len);
+
+    ASSERT_EQ(nm_image_file_probe(far, 64, &p), NM_IMAGE_ERR_OVERSIZE);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
+    ASSERT_EQ(p.w, 0); /* not in the head we read */
+    ASSERT_EQ(p.h, 0);
+    nm_image_probe_free(&p);
+
+    ASSERT_EQ(nm_image_file_probe(far, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_OK);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
+    ASSERT_EQ(p.w, 64);
+    ASSERT_EQ(p.h, 32);
+    nm_image_probe_free(&p);
+
+    /* a truncated JPEG: recognised by its SOI, unsizable anywhere */
+    probe_write_file(nosof, FIX_JPEG_NOSOF, sizeof(FIX_JPEG_NOSOF));
+    ASSERT_EQ(nm_image_file_probe(nosof, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_ERR_UNKNOWN);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
+    ASSERT_EQ(p.w, 0);
+    ASSERT_EQ(p.h, 0);
+    nm_image_probe_free(&p);
+
     unlink(png);
     unlink(jpg);
     unlink(gif);
     unlink(webp);
+    unlink(far);
+    unlink(nosof);
     unlink(txt);
     unlink(empty);
 }

@@ -65,9 +65,10 @@ typedef enum
     NM_IMAGE_ERR_UNREADABLE, /* open/read failed */
     NM_IMAGE_ERR_EMPTY,      /* the file held no bytes */
     NM_IMAGE_ERR_OVERSIZE,   /* over the caller's cap (a HEAD is held) */
-    NM_IMAGE_ERR_UNKNOWN,    /* no container the WIRE takes — unrecognised,
-                              * or recognised but unattachable (the probe's
-                              * `kind` says which) */
+    NM_IMAGE_ERR_UNKNOWN,    /* not attachable: no container the wire takes
+                              * (unrecognised, or recognised but unattachable),
+                              * or one whose dimensions could not be read —
+                              * the probe's `kind`/dims say which */
     NM_IMAGE_ERR_NOMEM
 } NmImageStatus;
 
@@ -132,12 +133,16 @@ typedef struct NmImageProbe
                            * can still name the container and dims */
     size_t len;           /* bytes held */
     size_t file_bytes;    /* the size the OS reported */
-    NmImageKind kind;     /* what the bytes ARE; NM_IMAGE_KIND_UNKNOWN
-                           * when unrecognised. The WIRE answer is
+    NmImageKind kind;     /* what the bytes ARE, from the HEAD (so a
+                           * JPEG is recognised even when its dimensions
+                           * sit behind megabytes of metadata);
+                           * NM_IMAGE_KIND_UNKNOWN when unrecognised.
+                           * The WIRE answer is
                            * nm_image_format_from_kind(kind) — a
                            * recognised container the wire does not take
                            * (WebP) reads NM_IMAGE_FMT_UNKNOWN there */
-    int w, h;             /* source pixels (0 = unknown) */
+    int w, h;             /* source pixels (0 = unknown: not in the bytes
+                           * we read, or not a container we size) */
     NmImageStatus status; /* NM_IMAGE_OK only for a readable container
                            * the WIRE takes, with positive dims */
 } NmImageProbe;

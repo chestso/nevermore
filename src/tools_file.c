@@ -408,14 +408,15 @@ static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
     return r;
 }
 
-/* The refusal for a container we RECOGNISE but the WIRE does not take
- * (a WebP, a BMP): name what the file IS — container, dims, size — and
- * what would work. The tool's third answer, so the model is never left
- * with the text path's "file is not valid UTF-8" on a binary it can
- * see is an image (observed live: the model shelled out to ImageMagick
- * and converted, two rounds it did not have to spend). */
-static NmToolResult unsupported_container_result(const char *path,
-                                                 const NmImageProbe *p)
+/* The refusal for a container we RECOGNISE but cannot attach as it
+ * stands: either the WIRE does not take it (a WebP, a BMP), or its
+ * dimensions could not be read (a truncated image). Name what the file
+ * IS — container, dims, size — and why, so the model is never left with
+ * the text path's "file is not valid UTF-8" on a binary it can see is
+ * an image (observed live: the model shelled out to ImageMagick and
+ * converted, two rounds it did not have to spend). */
+static NmToolResult unreadable_image_result(const char *path,
+                                            const NmImageProbe *p)
 {
     const char *alt = file_base_name(path);
     const char *kindname = nm_image_kind_name(p->kind);
@@ -424,15 +425,16 @@ static NmToolResult unsupported_container_result(const char *path,
     char dims[32] = "";
     if (p->w > 0 && p->h > 0)
         snprintf(dims, sizeof(dims), " %dx%d", p->w, p->h);
-    size_t need =
-        strlen(alt) + strlen(kindname) + strlen(size) + strlen(dims) + 128;
+    const char *why =
+        nm_image_format_from_kind(p->kind) == NM_IMAGE_FMT_UNKNOWN
+            ? "not an attachable container (PNG/JPEG/GIF); convert it first"
+            : "its dimensions could not be read — the file looks truncated";
+    size_t need = strlen(alt) + strlen(kindname) + strlen(size) +
+                  strlen(dims) + strlen(why) + 16;
     char *msg = malloc(need);
     if (!msg)
         return nm_tool_result_error("out of memory");
-    snprintf(msg, need,
-             "%s — %s%s, %s — not an attachable container (PNG/JPEG/GIF); "
-             "convert it first",
-             alt, kindname, dims, size);
+    snprintf(msg, need, "%s — %s%s, %s — %s", alt, kindname, dims, size, why);
     return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
 }
 
@@ -487,18 +489,25 @@ static int read_file_image_branch(const char *path, NmToolResult *out)
         nm_image_probe_free(&full);
         return 1;
     }
-    /* A recognised container the wire does not take: the third answer,
-     * and it wins over the size refusal because it is the fatal one —
-     * converting is the fix, and shrinking would not help. */
+    /* A recognised container the wire does not take: the fatal problem,
+     * and it wins over the size refusal below — converting is the fix,
+     * and shrinking would not help. */
     if (full.kind != NM_IMAGE_KIND_UNKNOWN &&
         nm_image_format_from_kind(full.kind) == NM_IMAGE_FMT_UNKNOWN) {
-        *out = unsupported_container_result(path, &full);
+        *out = unreadable_image_result(path, &full);
         nm_image_probe_free(&full);
         return 1;
     }
     /* Over the cap: refuse, naming both sizes. */
     if (fs == NM_IMAGE_ERR_OVERSIZE) {
         *out = oversize_result(path, &full);
+        nm_image_probe_free(&full);
+        return 1;
+    }
+    /* A container the wire takes, but with no dimensions to be had (a
+     * truncated image): named, not handed to the text path. */
+    if (full.kind != NM_IMAGE_KIND_UNKNOWN) {
+        *out = unreadable_image_result(path, &full);
         nm_image_probe_free(&full);
         return 1;
     }

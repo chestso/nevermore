@@ -113,6 +113,28 @@ static int sniff_webp(const unsigned char *d, size_t n, int *w, int *h)
     return 0; /* an animation/auxiliary first chunk: no canvas here */
 }
 
+/* What container the first bytes announce — RECOGNITION only, no dims.
+ * A JPEG is why this exists apart from nm_image_sniff_kind: its SOF
+ * (where the dimensions live) can sit far behind metadata segments, so
+ * a short head can say WHAT a file is long before it can say how big.
+ * Every magic here is inside 12 bytes, and a JPEG is confirmed by SOI
+ * plus the next marker's 0xFF, never by SOI alone. */
+static NmImageKind sniff_head_kind(const unsigned char *d, size_t n)
+{
+    if (!d)
+        return NM_IMAGE_KIND_UNKNOWN;
+    if (n >= 8 && d[0] == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G' &&
+        d[4] == 0x0d && d[5] == 0x0a && d[6] == 0x1a && d[7] == 0x0a)
+        return NM_IMAGE_KIND_PNG;
+    if (n >= 3 && d[0] == 0xFF && d[1] == 0xD8 && d[2] == 0xFF)
+        return NM_IMAGE_KIND_JPEG;
+    if (n >= 4 && memcmp(d, "GIF8", 4) == 0)
+        return NM_IMAGE_KIND_GIF;
+    if (n >= 12 && memcmp(d, "RIFF", 4) == 0 && memcmp(d + 8, "WEBP", 4) == 0)
+        return NM_IMAGE_KIND_WEBP;
+    return NM_IMAGE_KIND_UNKNOWN;
+}
+
 NmImageKind nm_image_sniff_kind(const unsigned char *d, size_t n, int *w,
                                 int *h)
 {
@@ -380,17 +402,25 @@ NmImageStatus nm_image_file_probe(const char *path, size_t max,
     if (n == 0)
         return out->status = NM_IMAGE_ERR_EMPTY;
 
-    int w = 0, h = 0;
-    NmImageKind kind = nm_image_sniff_kind(buf, n, &w, &h);
-    if (kind != NM_IMAGE_KIND_UNKNOWN) {
-        out->kind = kind;
-        out->w = w;
-        out->h = h;
+    /* Recognition comes from the HEAD — a JPEG's dimensions can sit far
+     * behind metadata segments, so a 64-byte probe must still be able
+     * to answer "that is a JPEG" (which is what sends the caller to the
+     * full probe). The dimensions come from the same buffer, when they
+     * are in it. */
+    out->kind = sniff_head_kind(buf, n);
+    if (out->kind != NM_IMAGE_KIND_UNKNOWN) {
+        int w = 0, h = 0;
+        if (nm_image_sniff_kind(buf, n, &w, &h) == out->kind) {
+            out->w = w;
+            out->h = h;
+        }
     }
     if (oversize)
         return out->status = NM_IMAGE_ERR_OVERSIZE;
-    if (nm_image_format_from_kind(kind) == NM_IMAGE_FMT_UNKNOWN)
+    if (nm_image_format_from_kind(out->kind) == NM_IMAGE_FMT_UNKNOWN)
         return out->status = NM_IMAGE_ERR_UNKNOWN;
+    if (out->w <= 0 || out->h <= 0)
+        return out->status = NM_IMAGE_ERR_UNKNOWN; /* no dims to be had */
     return out->status = NM_IMAGE_OK;
 }
 

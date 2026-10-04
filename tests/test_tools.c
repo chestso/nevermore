@@ -572,6 +572,55 @@ static const unsigned char T_IMG_WEBP[] = {
     0x1f, 0x00, 0x00  /* height - 1 = 31 */
 };
 
+/* SOI + a COM segment and NO SOF anywhere: recognised, unsizable. */
+static const unsigned char T_IMG_JPEG_NOSOF[] = {
+    0xff, 0xd8, 0xff, 0xfe, 0x00, 0x06, 'c', 'c', 'c', 'c'
+};
+
+/* Build a 64x32 JPEG whose SOF sits PAST a 64-byte head probe (78
+ * bytes of COM segment in front of it) — the shape of every real camera
+ * JPEG, since EXIF/APP segments precede SOF. Recognition must come from
+ * the SOI; only a deeper read can size it. (Same builder as
+ * test_image.c's.) */
+static size_t make_jpeg_far(unsigned char *buf, size_t cap)
+{
+    if (cap < 93)
+        return 0;
+    size_t o = 0;
+    buf[o++] = 0xff;
+    buf[o++] = 0xd8; /* SOI */
+    buf[o++] = 0xff;
+    buf[o++] = 0xfe; /* COM */
+    buf[o++] = 0x00;
+    buf[o++] = 0x50; /* segment length 80 */
+    memset(buf + o, 'c', 78);
+    o += 78;
+    buf[o++] = 0xff;
+    buf[o++] = 0xc0; /* SOF0 */
+    buf[o++] = 0x00;
+    buf[o++] = 0x11; /* length 17 */
+    buf[o++] = 0x08; /* precision */
+    buf[o++] = 0x00;
+    buf[o++] = 0x20; /* height 32 */
+    buf[o++] = 0x00;
+    buf[o++] = 0x40; /* width 64 */
+    return o;
+}
+
+/* One read_file call on a path, with the JSON built for us. */
+static NmToolResult read_file_at(const char *path)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    nm_toolset_free(ts);
+    return r;
+}
+
 /* read_file on a supported image captures the bytes (docs/TOOL-IMAGE-
  * PLAN.md): the result carries the file's bytes byte-equal and a
  * one-line summary (name · format · dims · size), so the agent can fan
@@ -756,6 +805,64 @@ static void test_read_file_unsupported_container(void)
     remove(path);
     free(path);
     nm_toolset_free(ts);
+}
+
+/* A JPEG whose SOF sits PAST the 64-byte head probe still ATTACHES: the
+ * head answers the container, the full probe answers the dimensions.
+ * Every real camera JPEG is shaped like this (EXIF/APP segments precede
+ * SOF), so before this the image branch never saw one — the file fell
+ * into the text path and came back "file is not valid UTF-8". */
+static void test_read_file_jpeg_metadata_before_sof(void)
+{
+    unsigned char buf[128];
+    size_t len = make_jpeg_far(buf, sizeof(buf));
+    ASSERT_TRUE(len > 64);
+
+    char *path = scratch_path("far.jpg");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(buf, 1, len, f);
+    fclose(f);
+
+    NmToolResult r = read_file_at(path);
+
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "JPEG 64x32") != NULL);
+    ASSERT_TRUE(strstr(r.output, "not valid UTF-8") == NULL);
+    ASSERT_NOT_NULL(r.image);
+    ASSERT_EQ(r.image_len, len);
+    ASSERT_TRUE(memcmp(r.image, buf, len) == 0);
+    ASSERT_STR_EQ(r.image_alt, "far.jpg");
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
+}
+
+/* A recognised container with no dimensions to be had (a truncated
+ * image): named, not handed to the text path, and nothing attached. */
+static void test_read_file_image_without_dimensions(void)
+{
+    char *path = scratch_path("cut.jpg");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_IMG_JPEG_NOSOF, 1, sizeof(T_IMG_JPEG_NOSOF), f);
+    fclose(f);
+
+    NmToolResult r = read_file_at(path);
+
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "cut.jpg") != NULL);
+    ASSERT_TRUE(strstr(r.output, "JPEG") != NULL);
+    ASSERT_TRUE(strstr(r.output, "dimensions could not be read") != NULL);
+    ASSERT_TRUE(strstr(r.output, "not valid UTF-8") == NULL);
+    ASSERT_NULL(r.image);
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
 }
 
 /* A text file carries no image (the common case: every textual tool). */
@@ -3226,6 +3333,8 @@ int main(void)
     RUN_TEST(test_read_file_image_too_large);
     RUN_TEST(test_read_file_binary_is_not_an_image);
     RUN_TEST(test_read_file_unsupported_container);
+    RUN_TEST(test_read_file_jpeg_metadata_before_sof);
+    RUN_TEST(test_read_file_image_without_dimensions);
     RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);
