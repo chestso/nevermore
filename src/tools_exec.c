@@ -182,7 +182,7 @@ static int ms_until(double deadline)
 static NmToolStatus take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
-    e->result = (NmToolResult){ 0, NULL };
+    e->result = (NmToolResult){ 0 };
     return NM_TOOL_DONE;
 }
 
@@ -208,7 +208,7 @@ static NmToolResult job_result(const char *status, const char *body)
     char *clamped = body ? nm_clamp_job_output(body) : NULL;
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { out != NULL, out };
+    NmToolResult r = { .ok = out != NULL, .output = out };
     return r;
 }
 
@@ -588,7 +588,7 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
     if (!e)
         return nm_tool_result_error(oom_msg);
     for (;;) {
-        NmToolResult r = { 0, NULL };
+        NmToolResult r = { 0 };
         if (step(e, &r) == NM_TOOL_DONE) {
             exec_end(e);
             return r;

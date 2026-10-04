@@ -74,7 +74,7 @@ const NmTool *nm_toolset_find(const NmToolset *ts, const char *name)
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                                 const char *args_json, void *userdata)
 {
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     (void)args_json;
     const NmTool *t = nm_toolset_find(ts, name);
     if (!t) {
@@ -93,7 +93,7 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
 
 NmToolResult nm_tool_result_error(const char *message)
 {
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     r.ok = 0;
     r.output = strdup(message ? message : "error");
     return r;
@@ -101,7 +101,7 @@ NmToolResult nm_tool_result_error(const char *message)
 
 NmToolResult nm_tool_result_text(const char *text)
 {
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     r.ok = 1;
     r.output = strdup(text ? text : "");
     return r;
@@ -292,7 +292,7 @@ NmToolResult nm_tool_format_result(const char *body, int exit_code)
     snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { out != NULL && exit_code == 0, out };
+    NmToolResult r = { .ok = out != NULL && exit_code == 0, .output = out };
     return r;
 }
 
@@ -341,7 +341,10 @@ void nm_tool_result_free(NmToolResult *r)
     if (!r)
         return;
     free(r->output);
+    free(r->image);
     r->output = NULL;
+    r->image = NULL;
+    r->image_len = 0;
 }
 
 /* ---------------------------------------------------------------- */

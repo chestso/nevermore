@@ -203,7 +203,7 @@ static NmToolResult run_command_result(const char *output, size_t len,
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    NmToolResult r = { code == 0 && note == NULL, body };
+    NmToolResult r = { .ok = code == 0 && note == NULL, .output = body };
     return r;
 }
 

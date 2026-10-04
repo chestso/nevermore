@@ -125,6 +125,21 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
 long nm_session_attach_image(NmSession *s, const char *path, char *reason,
                              size_t reason_cap);
 
+/* Attach bytes already in hand (a tool that read the file itself, e.g.
+ * read_file's image branch): the same core as the path variant — sniff
+ * the buffer (header-only), enforce the wire cap, freeze the data URL +
+ * wire part into the store — but from a caller-owned buffer, so the
+ * file is read ONCE (the tool's read) and capture-not-reference holds
+ * even if the file changes between the read and the attach. `alt` is
+ * the marker/alt text (the tool passes the base name). The store copies
+ * the bytes into the frozen base64 URL; the caller's buffer is not
+ * retained. Returns the new index, or -1 with `reason` filled — the
+ * same vocabulary as the path variant ("too large", "unknown
+ * container", "no memory", "empty file"). */
+long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
+                                   size_t len, const char *alt, char *reason,
+                                   size_t reason_cap);
+
 /* The store: a borrowed image by index (NULL when out of range), and
  * how many are attached. */
 const NmImage *nm_session_image(const NmSession *s, size_t idx);

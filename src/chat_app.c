@@ -225,6 +225,13 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg);
 static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out);
 static void chat_app_free(TuiModel *model);
 
+/* Image helpers defined in the images section below; on_tool (which
+ * precedes them) needs the one render pipeline for a tool-captured
+ * image (TOOL-IMAGE-PLAN D9). */
+static int terminal_renders(const NmChatApp *app, const NmImage *img);
+static void post_image_block(NmChatApp *app, const NmImage *img);
+static int model_vision(const NmChatApp *app, const NmProvider *p);
+
 /* ---------------------------------------------------------------- */
 /* Transcript writers (boba's streaming IR owns the scrollback)     */
 /* ---------------------------------------------------------------- */
@@ -522,7 +529,7 @@ static void sys_tool_result(NmChatApp *app, const char *output, int ok)
 
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
-                         void *userdata)
+                         long image_id, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
@@ -540,14 +547,43 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         app->current_tool = strdup(name);
     } else {
         sys_tool_result(app, result ? result->output : "", result && result->ok);
+        /* A tool-captured image renders through the SAME pipeline as
+         * /img's attach (D9): the one markdown block, the one profile
+         * ladder, the same nm_image_supported front door. When the
+         * terminal cannot render it nothing is posted — the panel's
+         * result line already names the image (alt · format · dims ·
+         * size) and IS the record, with no marker duplication (there is
+         * no later submit echo here, and there need not be). */
+        int posted = 0;
+        if (image_id >= 0) {
+            const NmImage *img = nm_agent_image(app->agent, (size_t)image_id);
+            if (img && terminal_renders(app, img)) {
+                post_image_block(app, img);
+                hold_flush(app, NM_STREAM_ID_CONTENT);
+                posted = 1;
+            }
+        }
         free(app->current_tool);
         app->current_tool = NULL;
         /* One blank line closes THIS tool block (principle 4), so a
          * round's consecutive calls are visually separated and the
          * answer is never glued to the last result. Emitted per call,
          * not per round: the calls are sequential, so each one is its
-         * own block. */
-        sys_blank(app);
+         * own block. The image post already owed a separator, so that
+         * IS the closing blank — never two. */
+        if (posted)
+            emit_separator(app);
+        else
+            sys_blank(app);
+        /* The image is attached either way (the wire takes it and a
+         * text-only provider strips it — gating is UX, not validity):
+         * say so when the ACTIVE model cannot see it. The catalog-live
+         * lookup, not the agent's construction-time flag — /model does
+         * not rebuild the agent. */
+        if (image_id >= 0 && model_vision(app, app->provider) == 0)
+            sys_line(app, "note: %s is text-only — the provider strips the "
+                          "image read_file attached",
+                     app->model ? app->model : "(no model)");
     }
     tui_runtime_wakeup(app->rt);
 }

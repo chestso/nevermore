@@ -258,6 +258,8 @@ static char g_tool_seq[64];     /* 'S'/'E' in callback order */
 static size_t g_tool_seq_len;
 static char g_start_names[128]; /* names announced, in START order */
 static size_t g_start_names_len;
+static long g_start_image_id; /* image_id seen on the last START */
+static long g_end_image_id;   /* image_id seen on the last END */
 static int g_final_state;
 
 static void reset_capture(void)
@@ -274,6 +276,8 @@ static void reset_capture(void)
     g_tool_seq_len = 0;
     g_start_names[0] = '\0';
     g_start_names_len = 0;
+    g_start_image_id = -2;
+    g_end_image_id = -2;
     g_final_state = -1;
     g_n_requests = 0;
     for (int i = 0; i < MAX_ROUNDS; i++)
@@ -306,7 +310,7 @@ static void cap_delta(NmStreamChannel channel, const char *delta_text,
 
 static void cap_tool(const NmTool *tool, const char *args_json,
                      NmToolEvent event, const NmToolResult *result,
-                     void *userdata)
+                     long image_id, void *userdata)
 {
     (void)userdata;
     if (g_tool_seq_len + 1 < sizeof(g_tool_seq)) {
@@ -316,6 +320,7 @@ static void cap_tool(const NmTool *tool, const char *args_json,
     }
     if (event == NM_TOOL_EVENT_START) {
         g_tool_starts++;
+        g_start_image_id = image_id;
         if (args_json && tool)
             snprintf(g_tool_args, sizeof(g_tool_args), "%s", args_json);
         if (tool && tool->name &&
@@ -330,6 +335,7 @@ static void cap_tool(const NmTool *tool, const char *args_json,
         }
     } else {
         g_tool_ends++;
+        g_end_image_id = image_id;
         if (result && result->output)
             snprintf(g_tool_output, sizeof(g_tool_output), "%s",
                      result->output);
@@ -2782,12 +2788,327 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Tool images (TOOL-IMAGE-PLAN): read_file captures an image, the     */
+/* agent fans it out as a synthetic user message one round later      */
+/* ---------------------------------------------------------------- */
+
+/* Write a PNG header fixture in the scratch cwd and return its relative
+ * name (the read_file path arg). */
+static const char *write_tool_image_fixture(const char *name,
+                                            const unsigned char *bytes,
+                                            size_t len)
+{
+    FILE *f = fopen(name, "wb");
+    if (f) {
+        fwrite(bytes, 1, len, f);
+        fclose(f);
+    }
+    return name;
+}
+
+/* A second, DISTINCT 8x4 PNG header: different dims ⇒ different bytes
+ * and a different data URL, so the call-order assertion is meaningful
+ * (two identical fixtures would share one part_json). */
+static const unsigned char T_PNG_HDR_B[] = {
+    0x89,
+    'P',
+    'N',
+    'G',
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    'I',
+    'H',
+    'D',
+    'R',
+    0x00,
+    0x00,
+    0x00,
+    0x08, /* width 8  */
+    0x00,
+    0x00,
+    0x00,
+    0x04, /* height 4 */
+};
+
+/* read_file on an image: the tool result is a placeholder (no base64),
+ * the image is attached, the END event carries its store id, and the
+ * agent appends ONE synthetic user message with the parts array — after
+ * the round's tool message, before the next round. */
+static void test_agent_read_file_image_fans_out(void)
+{
+    reset_capture();
+    const char *img = write_tool_image_fixture("nm-agent-toolimg.png", T_PNG_HDR, sizeof(T_PNG_HDR));
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    /* Built at runtime so the path literal is escaped once. */
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             img);
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "look at this image", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "i see it");
+
+    /* The events: START carries -1, END carries the attached store id
+     * (the first image in the fresh session's store is id 0). */
+    ASSERT_STR_EQ(g_tool_seq, "SE");
+    ASSERT_EQ(g_start_image_id, -1);
+    ASSERT_EQ(g_end_image_id, 0);
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+    const NmImage *stored = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(stored);
+    ASSERT_STR_EQ(stored->alt, "nm-agent-toolimg.png");
+
+    /* Round 2's request: the assistant tool_calls, the tool message
+     * carrying the PLACEHOLDER (not the bytes), then ONE synthetic user
+     * message whose parts array is text-first + the image, verbatim. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_img\"") !=
+                NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "[image] nm-agent-toolimg.png") !=
+                NULL);
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"content\":[{\"type\":\"text\",\"text\":\"[image "
+                       "from read_file: nm-agent-toolimg.png]\"},") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], stored->part_json) != NULL);
+    /* exactly ONE data URL on the wire: the tool message carried none
+     * (a tool message cannot carry an image), the fan-out carries it
+     * once */
+    ASSERT_EQ(count_substr(g_requests[1], "base64,"), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
+
+    /* Prefix byte-stability: round 1's serialized messages are a
+     * byte-equal prefix of round 2's, with the tool-image round in
+     * between (the fan-out only APPENDS). */
+    const char *m1 = strstr(g_requests[0], "\"messages\":[");
+    const char *m2 = strstr(g_requests[1], "\"messages\":[");
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    const char *end1 = strstr(m1, "],\"stream\"");
+    ASSERT_NOT_NULL(end1);
+    size_t n1 = (size_t)(end1 + 1 - m1);
+    ASSERT_TRUE(memcmp(m1, m2, n1 - 1) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(img);
+}
+
+/* Parallel image-producing calls in ONE round: the tool messages stay
+ * contiguous (the wire contract), and the agent appends ONE synthetic
+ * user message carrying every part in CALL order (D6/D1 — the contract
+ * the batched fan-out exists to hold). */
+static void test_agent_parallel_read_file_images_one_message(void)
+{
+    reset_capture();
+    const char *img_a = write_tool_image_fixture("nm-agent-img-a.png", T_PNG_HDR, sizeof(T_PNG_HDR));
+    const char *img_b = write_tool_image_fixture("nm-agent-img-b.png", T_PNG_HDR_B, sizeof(T_PNG_HDR_B));
+
+    char sse0[2048];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_a\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":1,"
+             "\"id\":\"call_b\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             img_a, img_b);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"both seen\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "look at both", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_tool_seq, "SESE"); /* paired, sequential */
+    ASSERT_EQ(g_end_image_id, 1);      /* the last attached id */
+    ASSERT_EQ(nm_agent_image_count(agent), 2u);
+
+    ASSERT_EQ(g_n_requests, 2);
+    /* Two tool messages, contiguous, then ONE user message with BOTH
+     * parts in call order (a.jpg before b.gif). */
+    const char *a = strstr(g_requests[1], "\"tool_call_id\":\"call_a\"");
+    const char *b = strstr(g_requests[1], "\"tool_call_id\":\"call_b\"");
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(b);
+    ASSERT_TRUE(a < b); /* call order preserved */
+    const char *um = strstr(g_requests[1],
+                            "\"[2 images from tool results: "
+                            "nm-agent-img-a.png, nm-agent-img-b.png]\"");
+    ASSERT_NOT_NULL(um);
+    ASSERT_TRUE(b < um); /* the user message follows BOTH tool results */
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 2);
+    const char *pa = strstr(g_requests[1],
+                            nm_agent_image(agent, 0)->part_json);
+    const char *pb = strstr(g_requests[1],
+                            nm_agent_image(agent, 1)->part_json);
+    ASSERT_NOT_NULL(pa);
+    ASSERT_NOT_NULL(pb);
+    ASSERT_TRUE(pa < pb); /* parts in call order */
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(img_a);
+    remove(img_b);
+}
+
+/* Cancel AFTER a call attached its image but before the round's tail
+ * fan-out: the pending images are dropped by round_reset, the group is
+ * closed with a synthetic tool reply (the wire contract), and the next
+ * turn streams fine with NO image fan-out (D8). */
+static void test_agent_cancel_drops_pending_image_fanout(void)
+{
+    reset_capture();
+    const char *img = write_tool_image_fixture("nm-agent-cancel-img.png", T_PNG_HDR, sizeof(T_PNG_HDR));
+
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             img);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Stream to the tool phase. */
+    ASSERT_EQ(nm_agent_start(agent, "read the image", NULL, 0), 0);
+    for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
+         i++) {
+        int fd = agent_fd(agent);
+        if (fd >= 0) {
+            fd_set r;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_SET(fd, &r);
+            select(fd + 1, &r, NULL, NULL, &tv);
+        }
+        ASSERT_EQ(nm_agent_step(agent), 0);
+    }
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+
+    /* One step runs the call: the image is attached (id 0) and queued
+     * for the round's fan-out; the state stays RUNNING_TOOL (the tail
+     * fan-out runs on the NEXT step). */
+    ASSERT_EQ(nm_agent_step(agent), 0);
+    ASSERT_EQ(g_end_image_id, 0);
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+
+    /* Cancel before that tail: the pending fan-out is dropped. */
+    nm_agent_cancel(agent);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
+
+    /* The next turn is well-formed: the cancelled call has a synthetic
+     * reply, and the image is NOT fanned out (no parts array). */
+    ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "after cancel");
+
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_c\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\"role\":\"tool\"") != NULL);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(img);
+}
+
 /* The offline-catalog tripwire: agent construction resolves the active
  * model's vision flag from the provider catalog (the system prompt's
  * capability clause), so a live fetch would both probe a real service
  * and answer with whatever it serves today (see test_net_helpers.h). */
 TEST_OFFLINE_CATALOG_PIN_CHECK()
-
 int main(void)
 {
 #ifndef _WIN32
@@ -2828,6 +3149,9 @@ int main(void)
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
+    RUN_TEST(test_agent_read_file_image_fans_out);
+    RUN_TEST(test_agent_parallel_read_file_images_one_message);
+    RUN_TEST(test_agent_cancel_drops_pending_image_fanout);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_each_tool_as_it_runs);

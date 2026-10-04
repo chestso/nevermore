@@ -25,6 +25,15 @@ typedef struct NmToolResult
 {
     int ok;       /* exit status / success flag */
     char *output; /* text the model sees; heap-owned */
+    /* An image the tool captured, or NULL (the common case: every
+     * textual tool). One slot, not a list — read_file reads one file,
+     * and a round with several image-producing calls is aggregated by
+     * the agent, which owns the fan-out into the conversation (the
+     * tool messages cannot carry images; see docs/TOOL-IMAGE-PLAN.md).
+     * Heap-owned; nm_tool_result_free releases it. */
+    unsigned char *image;
+    size_t image_len;
+    char image_alt[64]; /* the image's base name (marker/alt text) */
 } NmToolResult;
 
 typedef enum
@@ -38,10 +47,16 @@ typedef enum
  * the rest of the round. The model may ask for several calls in one
  * message (parallel tool calls), but they run sequentially, so a UI
  * that renders on START and END shows plan -> its own result, call
- * after call. */
+ * after call.
+ *
+ * `image_id` is the session image id of the bytes the call captured
+ * (the UI renders the ATTACHED image — the session's frozen bytes — so
+ * it needs the store id, which exists only after the agent attaches).
+ * -1 on START, and on END when the call produced no image (or the
+ * attach failed). */
 typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
                                NmToolEvent event, const NmToolResult *result,
-                               void *userdata);
+                               long image_id, void *userdata);
 
 /* Optional asynchronous execution (spawn-based tools). When a tool sets
  * begin, the agent drives begin/step/source/end instead of execute, so

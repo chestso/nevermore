@@ -394,6 +394,75 @@ static void test_session_attach_refusals(void)
     nm_session_free(s);
 }
 
+/* The bytes attach (docs/TOOL-IMAGE-PLAN.md D1): a tool that read the
+ * file itself hands the buffer in; the store copies it into the frozen
+ * data URL, so the file is read ONCE and capture-not-reference holds
+ * even if the caller mutates or frees its buffer. The reason vocabulary
+ * is the path variant's, verbatim. */
+static void test_session_attach_image_bytes(void)
+{
+    NmSession *s = nm_session_new("sys");
+    ASSERT_NOT_NULL(s);
+
+    unsigned char *bytes = malloc(sizeof(T_PNG));
+    ASSERT_NOT_NULL(bytes);
+    memcpy(bytes, T_PNG, sizeof(T_PNG));
+
+    char reason[64];
+    long id = nm_session_attach_image_bytes(s, bytes, sizeof(T_PNG),
+                                            "shot.png", reason,
+                                            sizeof(reason));
+    ASSERT_EQ(id, 0);
+    ASSERT_STR_EQ(reason, "");
+    ASSERT_EQ(nm_session_image_count(s), 1u);
+    const NmImage *img = nm_session_image(s, 0);
+    ASSERT_NOT_NULL(img);
+    ASSERT_EQ(img->format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(img->w, 64);
+    ASSERT_EQ(img->h, 32);
+    ASSERT_EQ(img->bytes, sizeof(T_PNG));
+    ASSERT_STR_EQ(img->alt, "shot.png");
+    char want_url[256];
+    snprintf(want_url, sizeof(want_url), "data:image/png;base64,%s",
+             T_PNG_B64);
+    ASSERT_STR_EQ(img->data_url, want_url);
+
+    /* CAPTURE, NOT REFERENCE: mutate and free the SOURCE buffer — the
+     * frozen URL is unchanged (the store copied the bytes). */
+    memset(bytes, 0xAB, sizeof(T_PNG));
+    free(bytes);
+    ASSERT_STR_EQ(img->data_url, want_url);
+
+    /* unknown container: nothing stored, shared vocabulary */
+    ASSERT_EQ(nm_session_attach_image_bytes(
+                  s, (const unsigned char *)"plain text", 10, "x.txt", reason,
+                  sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "unknown container");
+    ASSERT_EQ(nm_session_image_count(s), 1u);
+
+    /* empty: nothing stored */
+    ASSERT_EQ(nm_session_attach_image_bytes(s, NULL, 0, "x", reason,
+                                            sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "empty file");
+
+    /* over the wire cap: the sniff passes (a real header), the length
+     * does not — refused with the same reason the path variant uses */
+    size_t big = NM_IMAGE_MAX_WIRE_BYTES + 1;
+    unsigned char *huge = calloc(1, big);
+    ASSERT_NOT_NULL(huge);
+    memcpy(huge, T_PNG, sizeof(T_PNG));
+    ASSERT_EQ(nm_session_attach_image_bytes(s, huge, big, "huge.png", reason,
+                                            sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "too large");
+    free(huge);
+    ASSERT_EQ(nm_session_image_count(s), 1u);
+
+    nm_session_free(s);
+}
+
 static void test_session_append_user_images(void)
 {
     char png[128], gif[128];
@@ -517,6 +586,7 @@ int main(void)
     RUN_TEST(test_session_save);
     RUN_TEST(test_session_attach_image);
     RUN_TEST(test_session_attach_refusals);
+    RUN_TEST(test_session_attach_image_bytes);
     RUN_TEST(test_session_append_user_images);
     RUN_TEST(test_session_context_view_carries_images);
     TEST_SUMMARY();

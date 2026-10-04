@@ -22,6 +22,7 @@
 #endif
 
 #include "json.h"
+#include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
@@ -305,7 +306,7 @@ static NmToolResult exec_virtual(const char *name, const char *args_json,
 {
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, name);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     if (t && t->begin) {
         NmToolExec *e = t->begin(t, args_json, NULL);
         if (e) {
@@ -329,7 +330,7 @@ static NmToolResult exec_virtual_done(const char *name, const char *args_json)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, name);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     if (t && t->begin) {
         NmToolExec *e = t->begin(t, args_json, NULL);
         if (e) {
@@ -528,6 +529,206 @@ static void test_read_file_missing(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "cannot read") != NULL);
     nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
+/* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
+static const unsigned char T_IMG_PNG[] = {
+    0x89,
+    'P',
+    'N',
+    'G',
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a, /* signature */
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    'I',
+    'H',
+    'D',
+    'R', /* IHDR      */
+    0x00,
+    0x00,
+    0x00,
+    0x40, /* width 64  */
+    0x00,
+    0x00,
+    0x00,
+    0x20, /* height 32 */
+};
+
+/* read_file on a supported image captures the bytes (docs/TOOL-IMAGE-
+ * PLAN.md): the result carries the file's bytes byte-equal and a
+ * one-line summary (name · format · dims · size), so the agent can fan
+ * the image out and the model reads what happened. */
+static void test_read_file_image_branch(void)
+{
+    char *path = scratch_path("shot.png");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_IMG_PNG, 1, sizeof(T_IMG_PNG), f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    /* the one-line summary names the file, format, dims and size */
+    ASSERT_TRUE(strstr(r.output, "shot.png") != NULL);
+    ASSERT_TRUE(strstr(r.output, "PNG") != NULL);
+    ASSERT_TRUE(strstr(r.output, "64x32") != NULL);
+    ASSERT_TRUE(strstr(r.output, "24 B") != NULL);
+    /* the captured bytes are byte-equal to the file, and the alt is the
+     * base name */
+    ASSERT_NOT_NULL(r.image);
+    ASSERT_EQ(r.image_len, sizeof(T_IMG_PNG));
+    ASSERT_TRUE(memcmp(r.image, T_IMG_PNG, sizeof(T_IMG_PNG)) == 0);
+    ASSERT_STR_EQ(r.image_alt, "shot.png");
+    /* the text path's envelope is NOT here: the image branch's output is
+     * the summary line alone */
+    ASSERT_TRUE(strstr(r.output, "Output:") == NULL);
+
+    nm_tool_result_free(&r);
+    ASSERT_NULL(r.image); /* freed with the result */
+    remove(path);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* The image branch wins over the window args (D3): offset/limit/
+ * line_numbers are text concepts, and on a 24-byte image an offset=2
+ * window would error "past the last line" — the image is the answer. */
+static void test_read_file_image_branch_beats_window_args(void)
+{
+    char *path = scratch_path("shot2.png");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_IMG_PNG, 1, sizeof(T_IMG_PNG), f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "offset", nm_json_new_number(2));
+    nm_json_set(jargs, "limit", nm_json_new_number(1));
+    nm_json_set(jargs, "line_numbers", nm_json_new_bool(1));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_TRUE(r.ok);
+    ASSERT_NOT_NULL(r.image);
+    ASSERT_TRUE(strstr(r.output, "past the last line") == NULL);
+    ASSERT_TRUE(strstr(r.output, "PNG 64x32") != NULL);
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* An image over the wire cap is refused with both sizes named: the
+ * probe stats the file (a SPARSE file here — the probe never reads it
+ * whole), so the refusal is cheap and honest. */
+static void test_read_file_image_too_large(void)
+{
+    char *path = scratch_path("big.png");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_IMG_PNG, 1, sizeof(T_IMG_PNG), f);
+    ASSERT_EQ(fseek(f, (long)NM_IMAGE_MAX_WIRE_BYTES, SEEK_SET), 0);
+    fputc('x', f); /* file_bytes == cap + 1 */
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "too large to attach") != NULL);
+    ASSERT_TRUE(strstr(r.output, "big.png") != NULL);
+    /* both sizes: the file's (8.0 MiB) and the cap's (8.0 MiB) */
+    ASSERT_TRUE(strstr(r.output, "8.0 MiB") != NULL);
+    ASSERT_NULL(r.image);
+    ASSERT_EQ(r.image_len, 0u);
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A binary file with no known container falls through to the text path,
+ * which refuses it as non-UTF-8 — the existing behaviour, and no image
+ * is carried (the image branch must not claim an unrecognised file). */
+static void test_read_file_binary_is_not_an_image(void)
+{
+    char *path = scratch_path("blob.bin");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    const unsigned char junk[] = { 0xff, 0xfe, 0x00, 0x01, 0x80 };
+    fwrite(junk, 1, sizeof(junk), f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_FALSE(r.ok);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "not valid UTF-8") != NULL);
+    ASSERT_NULL(r.image);
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A text file carries no image (the common case: every textual tool). */
+static void test_read_file_text_has_no_image(void)
+{
+    char *path = scratch_path("plain.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("just text\n", f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_TRUE(r.ok);
+    ASSERT_NULL(r.image);
+    ASSERT_EQ(r.image_len, 0u);
+    ASSERT_STR_EQ(r.image_alt, "");
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
     nm_toolset_free(ts);
 }
 
@@ -1626,7 +1827,7 @@ static void test_run_command_async(void)
 
     /* First step: the child is still sleeping, so RUNNING (not a
      * blocking wait). */
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
     ASSERT_TRUE(t->source(e, &src));
     ASSERT_TRUE(src.handle >= 0);
@@ -1703,7 +1904,7 @@ static void test_run_command_cancel_is_prompt(void)
     ASSERT_TRUE(t->source(e, &src));
     ASSERT_TRUE(src.handle >= 0);
 
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING); /* the child is asleep */
 
     struct timeval t0, t1;
@@ -1750,7 +1951,7 @@ static void test_run_command_cancel_kills_the_child(void)
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
 
     /* Read the child's own pid (the session/group leader the spawn
@@ -1825,7 +2026,7 @@ static void test_run_command_cancel_kills_the_process_group(void)
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
 
     /* Bounded wait for the pid file, then for the grandchild's
@@ -1998,7 +2199,7 @@ static void test_run_command_async_stdin_is_dev_null(void)
 
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     int status = NM_TOOL_RUNNING;
     while ((status = t->step(e, &r)) == NM_TOOL_RUNNING) {
         NmSource src = { -1, 0, NM_SRC_FD };
@@ -2137,7 +2338,7 @@ static NmToolResult run_command_driven(const char *cmd, int budget_ms,
     nm_tool_run_command_set_timeout_ms(budget_ms);
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     if (e) {
         if (declared_dl && t->deadline_ms)
             *declared_dl = t->deadline_ms(e);
@@ -2290,7 +2491,7 @@ static void test_exec_command_yields_job_id(void)
     ASSERT_TRUE(dl >= 0 && dl <= 400);
     ASSERT_EQ(src.flags, NM_INTEREST_READ);
 
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(drive_virtual(t, e, &r, 5000, 1), 0);
     ASSERT_TRUE(r.ok);
     ASSERT_NOT_NULL(r.output);
@@ -2880,7 +3081,7 @@ static void test_run_command_async_on_windows(void)
 
     /* First step: the child is asleep, so RUNNING — never a blocking
      * read of the whole command. */
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
 
     /* Drive it the way the loop does: wait the event, step, repeat. */
@@ -2942,7 +3143,7 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     /* The readiness event never fires (a silent child), so the budget
      * is the only thing that ends it — crossed on VIRTUAL time, exactly
      * as the POSIX twin does, instead of waiting the 500 ms out. */
-    NmToolResult r = { 0, NULL };
+    NmToolResult r = { 0 };
     ASSERT_EQ(drive_virtual(t, e, &r, 15000, 0), 0);
     t->end(e);
     nm_tool_run_command_set_timeout_ms(0); /* restore the default */
@@ -2966,6 +3167,11 @@ int main(void)
     RUN_TEST(test_read_file_byte_exact);
     RUN_TEST(test_read_file_line_numbers_and_window);
     RUN_TEST(test_read_file_missing);
+    RUN_TEST(test_read_file_image_branch);
+    RUN_TEST(test_read_file_image_branch_beats_window_args);
+    RUN_TEST(test_read_file_image_too_large);
+    RUN_TEST(test_read_file_binary_is_not_an_image);
+    RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);
     RUN_TEST(test_edit_file_unique_replace);

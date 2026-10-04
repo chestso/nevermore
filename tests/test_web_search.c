@@ -232,7 +232,7 @@ static void test_web_search_deadline_ms_seam(void)
      * then fails with the timeout instead of hanging. */
     tsleep(250);
     ASSERT_EQ(t->deadline_ms(e), 0);
-    NmToolResult out = { 0, NULL };
+    NmToolResult out = { 0 };
     ASSERT_EQ((int)t->step(e, &out), (int)NM_TOOL_DONE);
     ASSERT_TRUE(!out.ok);
     ASSERT_NOT_NULL(out.output);
@@ -529,7 +529,7 @@ static void test_web_search_async_step_seam(void)
     ASSERT_TRUE(t->source(e, &src));
     ASSERT_TRUE(src.handle >= 0);
 
-    NmToolResult out = { 0, NULL };
+    NmToolResult out = { 0 };
     NmToolStatus st = t->step(e, &out);
     ASSERT_EQ((int)st, (int)NM_TOOL_RUNNING);
     /* A live wait target: write while connecting/sending, read while

@@ -287,7 +287,7 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    NmToolResult r = { (int)st == 0, body };
+    NmToolResult r = { .ok = (int)st == 0, .output = body };
     return r;
 }
 
@@ -323,7 +323,7 @@ static int run_command_budget_ms(void)
 static NmToolStatus take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
-    e->result = (NmToolResult){ 0, NULL };
+    e->result = (NmToolResult){ 0 };
     return NM_TOOL_DONE;
 }
 
@@ -447,7 +447,7 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     if (!clamped)
         e->result = nm_tool_result_error("out of memory");
     else
-        e->result = (NmToolResult){ code == 0 && !timed_out, clamped };
+        e->result = (NmToolResult){ .ok = code == 0 && !timed_out, .output = clamped };
     e->done = 1;
     return take(e, out);
 }

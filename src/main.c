@@ -145,9 +145,11 @@ static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
 
 static void ask_on_tool(const NmTool *tool, const char *args_json,
                         NmToolEvent event, const NmToolResult *result,
-                        void *userdata)
+                        long image_id, void *userdata)
 {
     (void)userdata;
+    (void)image_id; /* ask mode renders text only: the result body already
+                     * carries the "[image] ..." line (parity with -i) */
     const char *name = tool ? tool->name : "?";
 
     if (event == NM_TOOL_EVENT_START) {

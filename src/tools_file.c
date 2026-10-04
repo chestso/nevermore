@@ -37,6 +37,7 @@
 #endif
 
 #include "json.h"
+#include "nm_image_bytes.h"
 #include "tools.h"
 
 #include "tools_internal.h"
@@ -362,6 +363,98 @@ static long line_at(const char *text, size_t pos)
     return line;
 }
 
+/* The last path component ("/a/b/foo.png" and "C:\a\foo.png" both give
+ * "foo.png") — the image result's name and its alt/marker text. Both
+ * separators are honoured whatever the host is: a Windows path can
+ * appear in a transcript read on POSIX. */
+static const char *file_base_name(const char *path)
+{
+    const char *b = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            b = p + 1;
+    }
+    return *b ? b : path;
+}
+
+/* The image branch's result: a one-line summary the model reads, plus
+ * the captured bytes and the base name. The probe's buffer is STOLEN
+ * (the probe is emptied) so the file is read exactly once — the session
+ * copies the bytes into its frozen data URL, so no third read and no
+ * ownership transfer across the seam. */
+static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
+{
+    const char *alt = file_base_name(path);
+    char size[32];
+    nm_image_size_text(p->len, size, sizeof(size));
+    const char *fmtname = nm_image_format_name(p->format);
+    size_t need = strlen(alt) + strlen(fmtname) + strlen(size) + 128;
+    char *body = malloc(need);
+    if (!body) {
+        nm_image_probe_free(p);
+        return nm_tool_result_error("out of memory");
+    }
+    snprintf(body, need,
+             "[image] %s — %s %dx%d, %s — attached; the image follows as a "
+             "user message",
+             alt, fmtname, p->w, p->h, size);
+    NmToolResult r = { 1, body, p->bytes, p->len, "" };
+    snprintf(r.image_alt, sizeof(r.image_alt), "%s", alt);
+    p->bytes = NULL; /* ownership moved into the result */
+    p->len = 0;
+    return r;
+}
+
+/* read_file's image branch (docs/TOOL-IMAGE-PLAN.md D2/D3): a two-step
+ * probe so the text hot path never pays for a full read. Returns 1 when
+ * it handled the call (`out` filled), 0 when the file is not a
+ * supported image (fall through to the text path UNCHANGED). */
+static int read_file_image_branch(const char *path, NmToolResult *out)
+{
+    /* Step 1: a 64-byte header probe. Any file over 64 bytes answers
+     * OVERSIZE with the HEAD held — the format and dims are known
+     * either way, so the text path costs one 64-byte read. */
+    NmImageProbe h;
+    NmImageStatus hs = nm_image_file_probe(path, 64, &h);
+    int known = (hs == NM_IMAGE_OK) || (h.format != NM_IMAGE_FMT_UNKNOWN);
+    if (!known) {
+        nm_image_probe_free(&h);
+        return 0; /* no container we know: the text path's job */
+    }
+    /* A tiny image (<= 64 bytes) answers OK with the full bytes already
+     * held (a 43-byte 1x1 GIF is real) — take them, no second read. */
+    if (hs == NM_IMAGE_OK) {
+        *out = image_result_from_probe(path, &h);
+        nm_image_probe_free(&h);
+        return 1;
+    }
+    /* A known container over 64 bytes: full probe at the wire cap. */
+    nm_image_probe_free(&h);
+    NmImageProbe full;
+    NmImageStatus fs =
+        nm_image_file_probe(path, NM_IMAGE_MAX_WIRE_BYTES, &full);
+    if (fs == NM_IMAGE_OK) {
+        *out = image_result_from_probe(path, &full);
+        nm_image_probe_free(&full);
+        return 1;
+    }
+    /* Over the cap (or a race that shrank/failed it): refuse, naming
+     * both sizes — the probe stats the file, never reads it whole. */
+    const char *alt = file_base_name(path);
+    char big[32], cap[32];
+    nm_image_size_text(full.file_bytes, big, sizeof(big));
+    nm_image_size_text(NM_IMAGE_MAX_WIRE_BYTES, cap, sizeof(cap));
+    size_t need = strlen(alt) + strlen(big) + strlen(cap) + 64;
+    char *msg = malloc(need);
+    if (msg)
+        snprintf(msg, need,
+                 "image too large to attach: %s — %s over the %s wire cap",
+                 alt, big, cap);
+    nm_image_probe_free(&full);
+    *out = (NmToolResult){ .output = msg };
+    return 1;
+}
+
 static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
                                    void *userdata)
 {
@@ -378,6 +471,17 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("missing or empty path");
     }
 
+    /* Image branch (D2/D3): a supported image is the useful answer, so
+     * it wins over the window args (offset/limit/line_numbers are text
+     * concepts; the model guessed the type wrong). Returns 0 for a file
+     * that is not an image, and the text path below runs unchanged. */
+    NmToolResult img;
+    if (read_file_image_branch(path, &img)) {
+        free(path);
+        nm_json_free(args);
+        return img;
+    }
+
     size_t len = 0;
     char *text = read_file_bytes(path, &len);
     if (!text) {
@@ -386,7 +490,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         char *msg = malloc(strlen(path) + 64);
@@ -396,7 +500,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
 
     /* Optional window: offset (1-based first line) + limit (max line
@@ -416,7 +520,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     if (jlim && limit < 1) {
         char *msg = malloc(64);
@@ -426,7 +530,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
 
     /* Line table walk: advance to the start of line `offset',
@@ -467,7 +571,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
 
     /* Walk window lines spending the budget on whole rendered lines. */
@@ -613,7 +717,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         free(text);
@@ -655,7 +759,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     if (nhits > 1 && !replace_all) {
         /* Name the match lines so the model can disambiguate. */
@@ -685,7 +789,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
 
     /* Splice: one pass writes the new text into a single output
@@ -723,7 +827,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     free(out);
 
@@ -872,7 +976,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         free(parent);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     free(parent);
 
@@ -887,7 +991,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, need, "cannot write %s: %s", path, strerror(e));
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
 
     /* The result is a SUMMARY, never the content (the model knows what
@@ -1000,7 +1104,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     do {
         char name[256];
@@ -1025,7 +1129,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     struct dirent *ent;
     char full[4096];
@@ -1238,7 +1342,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
                      "cannot search %s: not a readable directory", path);
         free(path);
         free(needle);
-        return (NmToolResult){ 0, msg };
+        return (NmToolResult){ .output = msg };
     }
     free(path);
     free(needle);
@@ -1331,7 +1435,10 @@ static const char search_dir_schema[] =
 const NmTool nm_tool_read_file = {
     .name = "read_file",
     .description = "Read a UTF-8 text file, byte-exact, optionally "
-                   "line-numbered and windowed (offset/limit)",
+                   "line-numbered and windowed (offset/limit). If the file "
+                   "is a supported image (PNG/JPEG/GIF), the image is "
+                   "attached to the conversation so you can see it; the "
+                   "result is a one-line summary",
     .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,

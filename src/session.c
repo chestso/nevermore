@@ -225,6 +225,64 @@ static NmImage *image_slot(NmSession *s)
     return &s->images[s->n_images++];
 }
 
+/* The one attach core (both the path and the bytes variants land here):
+ * sniff the container from the buffer's head, enforce the wire cap,
+ * freeze the data URL + its pre-serialized wire part into a store slot.
+ * The store COPIES the bytes (via base64) into the frozen URL, so the
+ * caller's buffer is never retained — the tool that read the file frees
+ * it with the result. `alt` is the file path (or a base name): the
+ * marker/alt text is its last component. On refusal nothing is stored
+ * and `reason` carries the shared vocabulary. */
+static long attach_core(NmSession *s, const unsigned char *bytes, size_t len,
+                        const char *alt, char *reason, size_t reason_cap)
+{
+    int w = 0, h = 0;
+    NmImageFormat fmt = nm_image_sniff(bytes, len, &w, &h);
+    if (fmt == NM_IMAGE_FMT_UNKNOWN) {
+        attach_reason(reason, reason_cap, "unknown container");
+        return -1;
+    }
+    /* The wire cap is the attach cap: these bytes ride EVERY request
+     * (chat/completions has no upload endpoint), so refusing locally
+     * keeps the message ours instead of a provider 400. */
+    if (len > NM_IMAGE_MAX_WIRE_BYTES) {
+        attach_reason(reason, reason_cap, "too large");
+        return -1;
+    }
+
+    size_t url_len = 0;
+    char *url = nm_image_data_url(fmt, bytes, len, &url_len);
+    if (!url) {
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    size_t part_len = 0;
+    char *part = build_part_json(url, url_len, &part_len);
+    if (!part) {
+        free(url);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+
+    NmImage *img = image_slot(s);
+    if (!img) {
+        free(url);
+        free(part);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    img->data_url = url;
+    img->data_url_len = url_len;
+    img->part_json = part;
+    img->part_json_len = part_len;
+    img->format = fmt;
+    img->w = w;
+    img->h = h;
+    img->bytes = len;
+    snprintf(img->alt, sizeof(img->alt), "%s", base_name(alt ? alt : ""));
+    return (long)(s->n_images - 1);
+}
+
 long nm_session_attach_image(NmSession *s, const char *path, char *reason,
                              size_t reason_cap)
 {
@@ -233,9 +291,6 @@ long nm_session_attach_image(NmSession *s, const char *path, char *reason,
         attach_reason(reason, reason_cap, "no path");
         return -1;
     }
-    /* The wire cap is the attach cap: these bytes ride EVERY request
-     * (chat/completions has no upload endpoint), so refusing locally
-     * keeps the message ours instead of a provider 400. */
     NmImageProbe p;
     NmImageStatus st = nm_image_file_probe(path, NM_IMAGE_MAX_WIRE_BYTES, &p);
     if (st != NM_IMAGE_OK) {
@@ -262,42 +317,21 @@ long nm_session_attach_image(NmSession *s, const char *path, char *reason,
         attach_reason(reason, reason_cap, msg);
         return -1;
     }
-
-    size_t url_len = 0;
-    char *url = nm_image_data_url(p.format, p.bytes, p.len, &url_len);
-    if (!url) {
-        nm_image_probe_free(&p);
-        attach_reason(reason, reason_cap, "no memory");
-        return -1;
-    }
-    size_t part_len = 0;
-    char *part = build_part_json(url, url_len, &part_len);
-    if (!part) {
-        free(url);
-        nm_image_probe_free(&p);
-        attach_reason(reason, reason_cap, "no memory");
-        return -1;
-    }
-
-    NmImage *img = image_slot(s);
-    if (!img) {
-        free(url);
-        free(part);
-        nm_image_probe_free(&p);
-        attach_reason(reason, reason_cap, "no memory");
-        return -1;
-    }
-    img->data_url = url;
-    img->data_url_len = url_len;
-    img->part_json = part;
-    img->part_json_len = part_len;
-    img->format = p.format;
-    img->w = p.w;
-    img->h = p.h;
-    img->bytes = p.len;
-    snprintf(img->alt, sizeof(img->alt), "%s", base_name(path));
+    long id = attach_core(s, p.bytes, p.len, path, reason, reason_cap);
     nm_image_probe_free(&p);
-    return (long)(s->n_images - 1);
+    return id;
+}
+
+long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
+                                   size_t len, const char *alt, char *reason,
+                                   size_t reason_cap)
+{
+    attach_reason(reason, reason_cap, "");
+    if (!s || !bytes || len == 0) {
+        attach_reason(reason, reason_cap, "empty file");
+        return -1;
+    }
+    return attach_core(s, bytes, len, alt ? alt : "image", reason, reason_cap);
 }
 
 const NmImage *nm_session_image(const NmSession *s, size_t idx)

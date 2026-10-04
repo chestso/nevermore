@@ -46,6 +46,16 @@
 
 #include "provider_internal.h"
 
+/* One image a round's tool phase collected (docs/TOOL-IMAGE-PLAN.md D6):
+ * the session id to fan out, and the producing tool's name for the
+ * synthetic message's text. The agent owns the aggregation; the store
+ * owns the bytes. */
+typedef struct NmToolImage
+{
+    size_t id;  /* session image id */
+    char *tool; /* producing tool's name, or NULL */
+} NmToolImage;
+
 struct NmAgent
 {
     const NmProvider *provider;
@@ -121,6 +131,17 @@ struct NmAgent
     int tool_announced; /* this call's plan already emitted */
     NmToolExec *exec;
     const NmTool *exec_tool;
+
+    /* Images the round's calls captured (D6): each attached into the
+     * session store (the id) with its producing tool's name. Aggregated
+     * here and fanned out as ONE synthetic user message at the round's
+     * tail — a tool message cannot carry an image, and the fan-out must
+     * not interleave between tool results (the contiguity contract).
+     * Reset in round_reset, freed with the agent; per-round allocation,
+     * never per token. */
+    NmToolImage *tool_images;
+    size_t n_tool_images;
+    size_t tool_images_cap;
 
     /* Provider-reported token usage: the LAST usage object seen this
      * round (sentinels -1 when a field was not reported). has_usage is
@@ -238,6 +259,9 @@ void nm_agent_free(NmAgent *a)
     free(a->last_error);
     free(a->text); /* reused round buffer; released with the agent */
     free(a->reasoning);
+    for (size_t i = 0; i < a->n_tool_images; i++)
+        free(a->tool_images[i].tool);
+    free(a->tool_images);
     nm_tool_calls_free(a->calls, a->n_calls);
     nm_context_free(a->context);
     nm_session_free(a->session);
@@ -698,6 +722,12 @@ static void round_reset(NmAgent *a)
      * the next round believing its first call was already announced. */
     a->tool_exec_idx = 0;
     a->tool_announced = 0;
+    /* The round's collected images go with the round: a cancel drops the
+     * pending fan-out (D8 — the turn is dead, and an unreferenced store
+     * entry is harmless), and a fresh round starts collecting anew. */
+    for (size_t i = 0; i < a->n_tool_images; i++)
+        free(a->tool_images[i].tool);
+    a->n_tool_images = 0;
     /* A fresh round has not reported usage yet: the session ledger must
      * not re-add the previous round's last_usage (see finish_round). */
     a->round_usage_seen = 0;
@@ -967,16 +997,111 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     return 0;
 }
 
+/* Remember one attached image for the round's fan-out (D6). Returns 0 on
+ * success, -1 on OOM (the image stays in the store, just unfanned — the
+ * cancel case's harmless leftover). */
+static int tool_image_push(NmAgent *a, size_t id, const char *tool)
+{
+    if (a->n_tool_images == a->tool_images_cap) {
+        size_t ncap = a->tool_images_cap ? a->tool_images_cap * 2 : 4;
+        NmToolImage *ni = realloc(a->tool_images, ncap * sizeof(*ni));
+        if (!ni)
+            return -1;
+        a->tool_images = ni;
+        a->tool_images_cap = ncap;
+    }
+    a->tool_images[a->n_tool_images].id = id;
+    a->tool_images[a->n_tool_images].tool = tool ? strdup(tool) : NULL;
+    a->n_tool_images++;
+    return 0;
+}
+
 /* Emit the END event for a finished call, record its result, and free
- * it (the session copies the text). */
+ * it (the session copies the text). A result that carries an image is
+ * attached into the session store FIRST, so the END event can hand the
+ * UI the store id of the frozen bytes (D5); the tool pre-checked size
+ * and container, so a refusal here is OOM-class and degrades to a
+ * notice + image_id -1 (D7). */
 static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
                              NmToolResult *res)
 {
+    long image_id = -1;
+    if (res->image && res->image_len > 0) {
+        char reason[64];
+        image_id = nm_session_attach_image_bytes(
+            a->session, res->image, res->image_len, res->image_alt, reason,
+            sizeof(reason));
+        if (image_id < 0) {
+            /* The bytes never made it into the store: the UI shows the
+             * panel line alone, the model gets no fan-out, and the
+             * notice says why (D7). */
+            if (a->on_notice) {
+                char msg[160];
+                snprintf(msg, sizeof(msg), "image: %s — could not attach: %s",
+                         res->image_alt, reason);
+                a->on_notice(msg, a->userdata);
+            }
+        } else {
+            /* Queue it for the round's fan-out (D6). A queue failure is
+             * OOM: the image is attached (the UI can still render it at
+             * END) but never fanned out — the cancel case's harmless
+             * leftover. */
+            (void)tool_image_push(a, (size_t)image_id, tc->name);
+        }
+    }
     if (a->on_tool)
         a->on_tool(nm_toolset_find(a->tools, tc->name), tc->args_json,
-                   NM_TOOL_EVENT_END, res, a->userdata);
+                   NM_TOOL_EVENT_END, res, image_id, a->userdata);
     nm_session_append_tool_result(a->session, tc->id, tc->name, res->output);
     nm_tool_result_free(res);
+}
+
+/* Append the round's synthetic user message carrying every collected
+ * image, in call order (D6): the wire shape is text part first, then
+ * the image parts. The text is deterministic provenance — one image
+ * names its producing tool, several are "N images from tool results".
+ * Returns 0 on success. */
+static int append_tool_images(NmAgent *a)
+{
+    size_t n = a->n_tool_images;
+    size_t *ids = malloc(n * sizeof(*ids));
+    if (!ids)
+        return -1;
+    for (size_t i = 0; i < n; i++)
+        ids[i] = a->tool_images[i].id;
+
+    char text[512];
+    if (n == 1) {
+        const NmImage *img = nm_session_image(a->session, ids[0]);
+        snprintf(text, sizeof(text), "[image from %s: %s]",
+                 a->tool_images[0].tool ? a->tool_images[0].tool : "a tool",
+                 img ? img->alt : "image");
+    } else {
+        size_t o = (size_t)snprintf(text, sizeof(text),
+                                    "[%zu images from tool results: ", n);
+        for (size_t i = 0; i < n && o + 2 < sizeof(text); i++) {
+            const NmImage *img = nm_session_image(a->session, ids[i]);
+            const char *name = img ? img->alt : "image";
+            int w = snprintf(text + o, sizeof(text) - o, "%s%s",
+                             i ? ", " : "", name);
+            if (w < 0)
+                break;
+            o += (size_t)w;
+            if (o >= sizeof(text)) {
+                o = sizeof(text) - 1;
+                break;
+            }
+        }
+        if (o + 2 > sizeof(text))
+            o = sizeof(text) - 2;
+        text[o] = ']';
+        text[o + 1] = '\0';
+    }
+
+    const NmSessionMessage *m =
+        nm_session_append_user_images(a->session, text, ids, n);
+    free(ids);
+    return m ? 0 : -1;
 }
 
 /* Advance to the round's next pending call: the next one re-announces
@@ -1012,13 +1137,13 @@ static int tool_step(NmAgent *a)
         if (!a->tool_announced) {
             a->tool_announced = 1;
             if (a->on_tool)
-                a->on_tool(t, tc->args_json, NM_TOOL_EVENT_START, NULL,
+                a->on_tool(t, tc->args_json, NM_TOOL_EVENT_START, NULL, -1,
                            a->userdata);
         }
 
         /* Drain a running async exec. */
         if (a->exec) {
-            NmToolResult res = { 0, NULL };
+            NmToolResult res = { 0 };
             NmToolStatus st = a->exec_tool->step(a->exec, &res);
             if (st == NM_TOOL_RUNNING)
                 return 0; /* more to read; the fd stays subscribed */
@@ -1058,6 +1183,17 @@ static int tool_step(NmAgent *a)
     a->n_calls = 0;
     a->tool_exec_idx = 0;
     a->tool_announced = 0;
+
+    /* Fan the round's collected images out as ONE synthetic user
+     * message, after the round's LAST tool result and before the next
+     * round (D6): the wire contract keeps tool messages contiguous, so
+     * the user message cannot be interleaved between results, and one
+     * message carries every part in call order. The model's tool result
+     * and its image are therefore one round apart, never a turn apart. */
+    if (a->n_tool_images > 0 && append_tool_images(a) != 0) {
+        set_error(a, "out of memory");
+        return -1;
+    }
     return begin_round(a) == 0 ? 0 : -1;
 }
 

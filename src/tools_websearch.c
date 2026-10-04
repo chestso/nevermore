@@ -571,7 +571,7 @@ static void ws_finalize(NmToolExec *e)
 static NmToolStatus ws_take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
-    e->result = (NmToolResult){ 0, NULL };
+    e->result = (NmToolResult){ 0 };
     return NM_TOOL_DONE;
 }
 
@@ -795,7 +795,7 @@ static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
     if (!e)
         return nm_tool_result_error("web_search: out of memory");
     for (;;) {
-        NmToolResult r = { 0, NULL };
+        NmToolResult r = { 0 };
         if (ws_step(e, &r) == NM_TOOL_DONE) {
             ws_end(e);
             return r;

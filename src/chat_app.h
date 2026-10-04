@@ -142,7 +142,7 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
                           void *userdata);
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          NmToolEvent event, const NmToolResult *result,
-                         void *userdata);
+                         long image_id, void *userdata);
 void nm_chat_app_on_state(NmAgentState state, void *userdata);
 void nm_chat_app_on_notice(const char *msg, void *userdata);
 

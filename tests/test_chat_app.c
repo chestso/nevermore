@@ -4743,6 +4743,177 @@ static void test_img_attach_shows_the_image_when_supported(void)
     close(sc.fd);
 }
 
+/* read_file on an image (TOOL-IMAGE-PLAN D9): the tool panel names it,
+ * and the image renders under that panel through the ONE pipeline —
+ * the same markdown block /img posts, the same profile ladder. */
+static void test_tool_read_file_image_renders_under_the_panel(void)
+{
+    const char *png = chat_png_fixture("nm-chat-tool-img.png");
+
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             png);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A graphics terminal: the image renders (kitty APC). */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+
+    harness_type(h, "look at this");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* the panel names the image (alt · format · dims · size) ... */
+    const char *named = strstr(out, "[image] nm-chat-tool-img.png — PNG 64x32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    ASSERT_NOT_NULL(named);
+    ASSERT_NOT_NULL(apc);
+    ASSERT_TRUE(named < apc); /* the image lands under its own panel */
+    ASSERT_EQ(count_image_apc(out), 1);
+    /* the fan-out rode the wire as a parts array (the synthetic user
+     * message), and the answer follows the block */
+    ASSERT_TRUE(strstr(g_request, "\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(out, "i see it") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The same round on a terminal that cannot take the image: nothing is
+ * posted, the panel's result line IS the record, and there is no marker
+ * duplication (unlike /img, there is no later submit echo to carry
+ * one). */
+static void test_tool_read_file_image_degrades_to_the_panel_line(void)
+{
+    const char *png = chat_png_fixture("nm-chat-tool-img-dumb.png");
+
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             png);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A resolved profile with NO graphics support: the gate says no. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 0;
+    h->rt->profile.iterm2_images = 0;
+
+    harness_type(h, "look at this");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* the panel line is the record ... */
+    ASSERT_TRUE(strstr(out, "[image] nm-chat-tool-img-dumb.png — PNG 64x32") !=
+                NULL);
+    /* ... nothing rendered, and no marker duplicated under it */
+    ASSERT_EQ(count_image_apc(out), 0);
+    ASSERT_TRUE(strstr(out, "no graphics support") == NULL);
+    ASSERT_TRUE(strstr(out, "i see it") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A text-only model: the image is still attached and fanned out (the
+ * wire takes it; the provider strips it), and the app says so. */
+static void test_tool_read_file_image_text_only_model_warns(void)
+{
+    const char *png = chat_png_fixture("nm-chat-tool-img-warn.png");
+
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             png);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"blind answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    /* deepseek-v4-flash: the offline catalog says text-only. */
+    AppHarness *h = harness_new("opencode:go", "deepseek-v4-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "look at this");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "note: deepseek-v4-flash is text-only — the "
+                            "provider strips the image read_file attached") !=
+                NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -4847,6 +5018,9 @@ int main(void)
     RUN_TEST(test_img_command_refusals);
     RUN_TEST(test_img_submit_sends_parts_and_echoes);
     RUN_TEST(test_img_attach_shows_the_image_when_supported);
+    RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
+    RUN_TEST(test_tool_read_file_image_degrades_to_the_panel_line);
+    RUN_TEST(test_tool_read_file_image_text_only_model_warns);
     RUN_TEST(test_img_text_only_model_warns);
     RUN_TEST(test_img_pending_dropped_on_provider_switch);
     RUN_TEST(test_job_cap_fits_the_fd_budget);

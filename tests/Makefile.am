@@ -223,7 +223,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
-    ../src/wire_recorder.c \
+    ../src/wire_recorder.c ../src/nm_image_bytes.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -237,7 +237,7 @@ test_web_search_SOURCES = test_web_search.c ../src/nm_clock.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
-    ../src/wire_recorder.c \
+    ../src/wire_recorder.c ../src/nm_image_bytes.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
