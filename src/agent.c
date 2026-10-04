@@ -172,6 +172,31 @@ static void set_error(NmAgent *a, const char *msg)
     set_state(a, NM_AGENT_ERROR);
 }
 
+/* The active model's vision flag, from the provider catalog (the one
+ * authority): 1 accepts image content parts, 0 is text-only, -1
+ * unknown. Resolved here, at construction, because the assembled
+ * system prompt has to declare the capability (context.c's
+ * vision_clause) — a coding-agent identity with file tools otherwise
+ * makes an attached image read as a file to go read. The UI resolves
+ * the same flag for its text-only warning; it cannot be the source
+ * here because a /model switch changes the model without rebuilding
+ * the agent, while this value is per-chat on purpose (that is what
+ * keeps the clause inside the cached prefix). */
+static int model_vision(const NmProvider *p, const char *model)
+{
+    if (!p || !p->models || !model)
+        return -1;
+    size_t n = 0;
+    const NmModel *models = p->models(p, NULL, NULL, &n);
+    if (!models)
+        return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, model) == 0)
+            return models[i].vision;
+    }
+    return -1;
+}
+
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata)
 {
@@ -192,8 +217,9 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->context_limit = -1;
     /* Context assembly is construction-time I/O (one walk + a couple
      * of bounded reads). Failure degrades to the base prompt, never
-     * to a failed agent. */
-    a->context = nm_context_new(NULL);
+     * to a failed agent. The model's vision flag is part of the
+     * prompt (the capability clause), so it is resolved here. */
+    a->context = nm_context_new(NULL, model_vision(provider, model));
     nm_conversation_id_new(a->conversation_id);
     return a;
 }

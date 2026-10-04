@@ -123,7 +123,7 @@ static void test_no_context_files_base_prompt_only(void)
     char proj[600];
     setup_tree("empty", proj, sizeof(proj));
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     ASSERT_NOT_NULL(c);
     const char *sp = nm_context_system_prompt(c);
     ASSERT_STR_EQ(sp, nm_context_base_system_prompt());
@@ -140,7 +140,7 @@ static void test_root_agents_md_is_embedded(void)
     proj_path(p, sizeof(p), proj, "AGENTS.md");
     write_file_at(p, "# Project rules\nRun make check before commit.\n");
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     ASSERT_NOT_NULL(c);
     const char *sp = nm_context_system_prompt(c);
 
@@ -169,7 +169,7 @@ static void test_nested_nearest_file_comes_last(void)
     write_file_at(p, "SUB-ONLY-MARKER\n");
     proj_path(p, sizeof(p), proj, "sub");
 
-    NmContext *c = nm_context_new(p);
+    NmContext *c = nm_context_new(p, 0);
     const char *sp = nm_context_system_prompt(c);
     const char *root_at = strstr(sp, "ROOT-ONLY-MARKER");
     const char *sub_at = strstr(sp, "SUB-ONLY-MARKER");
@@ -214,7 +214,7 @@ static void test_walk_stops_at_project_root(void)
     snprintf(mv_to, sizeof(mv_to), "%s/AGENTS.md", nested);
     rename(mv_from, mv_to);
 
-    NmContext *c = nm_context_new(nested);
+    NmContext *c = nm_context_new(nested, 0);
     const char *sp = nm_context_system_prompt(c);
     ASSERT_TRUE(strstr(sp, "INSIDE-THE-ROOT-MARKER") != NULL);
     ASSERT_TRUE(strstr(sp, "ABOVE-THE-ROOT-MARKER") == NULL);
@@ -241,7 +241,7 @@ static void test_no_marker_means_cwd_only(void)
     write_file_at(p, "CWD-ONLY\n");
     proj_path(p, sizeof(p), proj, "child");
 
-    NmContext *c = nm_context_new(p);
+    NmContext *c = nm_context_new(p, 0);
     const char *sp = nm_context_system_prompt(c);
     ASSERT_TRUE(strstr(sp, "CWD-ONLY") != NULL);
     ASSERT_TRUE(strstr(sp, "PARENT-UNREACHABLE") == NULL);
@@ -260,7 +260,7 @@ static void test_global_file_comes_first(void)
     proj_path(p, sizeof(p), proj, "AGENTS.md");
     write_file_at(p, "PROJECT-RULE-MARKER\n");
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     const char *sp = nm_context_system_prompt(c);
     const char *g = strstr(sp, "GLOBAL-PREF-MARKER");
     const char *pr = strstr(sp, "PROJECT-RULE-MARKER");
@@ -282,7 +282,7 @@ static void test_blank_file_omits_block(void)
     proj_path(p, sizeof(p), proj, "AGENTS.md");
     write_file_at(p, "   \n\t\n  \n");
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     const char *sp = nm_context_system_prompt(c);
     ASSERT_STR_EQ(sp, nm_context_base_system_prompt());
     ASSERT_TRUE(strstr(sp, "project_context") == NULL);
@@ -305,7 +305,7 @@ static void test_oversize_file_truncates_at_newline(void)
                 i);
     fclose(f);
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     const char *sp = nm_context_system_prompt(c);
 
     ASSERT_TRUE(strstr(sp, "[truncated:") != NULL);
@@ -330,7 +330,7 @@ static void test_fitting_file_has_no_notice(void)
     proj_path(p, sizeof(p), proj, "AGENTS.md");
     write_file_at(p, "# small\n");
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     const char *sp = nm_context_system_prompt(c);
     ASSERT_TRUE(strstr(sp, "[truncated:") == NULL);
     nm_context_free(c);
@@ -345,7 +345,7 @@ static void test_system_prompt_is_stable(void)
     proj_path(p, sizeof(p), proj, "AGENTS.md");
     write_file_at(p, "STABLE-MARKER\n");
 
-    NmContext *c = nm_context_new(proj);
+    NmContext *c = nm_context_new(proj, 0);
     const char *a = nm_context_system_prompt(c);
     const char *b = nm_context_system_prompt(c);
     ASSERT_TRUE(a == b);
@@ -360,7 +360,7 @@ static void test_null_dir_uses_process_cwd(void)
     char proj[600];
     setup_tree("null-dir", proj, sizeof(proj));
 
-    NmContext *c = nm_context_new(NULL);
+    NmContext *c = nm_context_new(NULL, 0);
     ASSERT_NOT_NULL(c);
     ASSERT_NOT_NULL(nm_context_system_prompt(c));
     nm_context_free(c);
@@ -371,6 +371,66 @@ static void test_null_dir_uses_process_cwd(void)
     nm_context_free(NULL);
 
     nm_context_set_global_dir(NULL); /* restore the default chain */
+}
+
+/* The image-capability clause (VISION-PLAN): a model the catalog says
+ * can see gets it, right after the identity — the identity alone is a
+ * coding agent with file tools, which reads "tell me about this image"
+ * as "read this file". */
+static void test_vision_clause_follows_the_identity(void)
+{
+    char proj[600];
+    setup_tree("vision-clause", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 1);
+    ASSERT_NOT_NULL(c);
+    const char *sp = nm_context_system_prompt(c);
+    const char *base = nm_context_base_system_prompt();
+    ASSERT_TRUE(strncmp(sp, base, strlen(base)) == 0);
+    ASSERT_TRUE(strncmp(sp + strlen(base), "\n\nYou can see images", 20) ==
+                0);
+    nm_context_free(c);
+}
+
+/* The clause precedes the project block: it is a fact about the model,
+ * not about the project, so no AGENTS.md can displace it. */
+static void test_vision_clause_precedes_the_project_block(void)
+{
+    char proj[600];
+    setup_tree("vision-order", proj, sizeof(proj));
+    char p[600];
+    proj_path(p, sizeof(p), proj, "AGENTS.md");
+    write_file_at(p, "PROJECT-MARKER\n");
+
+    NmContext *c = nm_context_new(proj, 1);
+    ASSERT_NOT_NULL(c);
+    const char *sp = nm_context_system_prompt(c);
+    const char *clause = strstr(sp, "You can see images");
+    const char *block = strstr(sp, "# Project-Specific Context");
+    ASSERT_NOT_NULL(clause);
+    ASSERT_NOT_NULL(block);
+    ASSERT_TRUE(clause < block);
+    nm_context_free(c);
+}
+
+/* The gate: text-only (0) and unknown (-1) models get the base prompt
+ * unchanged — the prompt never claims a capability we cannot confirm. */
+static void test_vision_clause_gated_on_the_catalog_flag(void)
+{
+    char proj[600];
+    setup_tree("vision-gate", proj, sizeof(proj));
+
+    NmContext *text_only = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(text_only);
+    ASSERT_STR_EQ(nm_context_system_prompt(text_only),
+                  nm_context_base_system_prompt());
+    nm_context_free(text_only);
+
+    NmContext *unknown = nm_context_new(proj, -1);
+    ASSERT_NOT_NULL(unknown);
+    ASSERT_STR_EQ(nm_context_system_prompt(unknown),
+                  nm_context_base_system_prompt());
+    nm_context_free(unknown);
 }
 
 int main(void)
@@ -387,5 +447,8 @@ int main(void)
     RUN_TEST(test_fitting_file_has_no_notice);
     RUN_TEST(test_system_prompt_is_stable);
     RUN_TEST(test_null_dir_uses_process_cwd);
+    RUN_TEST(test_vision_clause_follows_the_identity);
+    RUN_TEST(test_vision_clause_precedes_the_project_block);
+    RUN_TEST(test_vision_clause_gated_on_the_catalog_flag);
     TEST_SUMMARY();
 }

@@ -601,7 +601,10 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
 /* The active model's vision flag, from the provider catalog (the one
  * authority): 1 accepts image parts, 0 is text-only, -1 unknown. Same
  * borrowed static/cached lookup as model_context_limit — never a wire
- * fetch from the UI thread. */
+ * fetch from the UI thread. The agent resolves the same flag itself at
+ * construction (the system prompt's capability clause), and it cannot
+ * be the source here: /model changes the model without rebuilding the
+ * agent, and this warning must follow the CURRENT model. */
 static int model_vision(const NmChatApp *app, const NmProvider *p)
 {
     if (!p || !app->model)

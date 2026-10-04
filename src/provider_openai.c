@@ -40,6 +40,21 @@ static const NmModel openai_static_models[] = {
 static NmModel *openai_live_models;
 static size_t openai_live_n;
 
+/* The curated static table is OpenAI's only metadata source: the live
+ * /v1/models list is ids-only (no capabilities, no context window) —
+ * the opencode case exactly. A live id keeps the curated label /
+ * vision / context_length when the table knows it, and the ids-only
+ * defaults when it does not (an id we have never seen is not a
+ * capability claim; it stays text-only + unknown context, as before). */
+static const NmModel *openai_static_lookup(const char *id)
+{
+    for (size_t i = 0; openai_static_models[i].id; i++) {
+        if (strcmp(openai_static_models[i].id, id) == 0)
+            return &openai_static_models[i];
+    }
+    return NULL;
+}
+
 static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
                                 const char *base_url, const char *api_key)
 {
@@ -170,11 +185,15 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
             continue;
         /* Strings are owned by the parsed document — but that document
          * is freed below, so strdup them into the cache. One-time cost
-         * per process, not per-call (memory reuse across calls). */
+         * per process, not per-call (memory reuse across calls). The
+         * metadata comes from the curated table (the ids-only wire
+         * carries none): membership from the live list, capabilities
+         * from what we know. */
+        const NmModel *meta = openai_static_lookup(id);
         models[out].id = strdup(id);
-        models[out].label = models[out].id;
-        models[out].vision = 0;
-        models[out].context_length = -1;
+        models[out].label = meta ? meta->label : models[out].id;
+        models[out].vision = meta ? meta->vision : 0;
+        models[out].context_length = meta ? meta->context_length : -1;
         out++;
     }
     if (out == 0) {

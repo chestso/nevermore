@@ -39,6 +39,20 @@ static const char *const base_prompt =
     "You are nevermore, an interactive coding agent. Answer concisely "
     "and correctly. Use the tools for file operations and commands.";
 
+/* The image-capability clause (VISION-PLAN). The identity above is a
+ * coding agent with file tools, which makes "tell me about this image"
+ * read as "read this file": the model hunts for a tool to decode the
+ * image and doubts its own vision — live wire, 2026-10-04: "I don't
+ * have vision capability described", with the image sitting right
+ * there in the request. So when the catalog says the model can see,
+ * the prompt says it too. Text-only (0) and unknown (-1) add nothing:
+ * the prompt never claims a capability we cannot confirm. */
+static const char *const vision_clause =
+    "\n\nYou can see images: when the user attaches one it arrives as "
+    "an image content part inside their message, never as a file path. "
+    "Describe what you see directly — do not say you cannot see an "
+    "attached image, and do not look for a tool to decode it.";
+
 /* The block scaffolding, quoth-context.el's exact shape (the prompt
  * in the project's own system message). */
 static const char *const block_header =
@@ -329,12 +343,20 @@ typedef struct
     char label[NM_CONTEXT_DIR_MAX + 16];
 } Candidate;
 
-NmContext *nm_context_new(const char *dir)
+NmContext *nm_context_new(const char *dir, int vision)
 {
     NmContext *c = calloc(1, sizeof(*c));
     if (!c)
         return NULL;
     if (append_str(c, base_prompt) != 0) {
+        nm_context_free(c);
+        return NULL;
+    }
+    /* The capability clause sits between the identity and the project
+     * block: it is a fact about the model, not about the project. It is
+     * assembled ONCE here, so it is frozen for the chat's life and
+     * stays inside the provider's cached prefix. */
+    if (vision == 1 && append_str(c, vision_clause) != 0) {
         nm_context_free(c);
         return NULL;
     }

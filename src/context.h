@@ -64,15 +64,21 @@ extern "C" {
 typedef struct NmContext NmContext;
 
 /* Build the context for `dir` (NULL/empty = the process cwd): reads
- * the global file and walks the tree as described above. Never
- * fails hard — an unreadable or absent AGENTS.md yields the base
- * prompt alone. Returns NULL only on allocation failure. */
-NmContext *nm_context_new(const char *dir);
+ * the global file and walks the tree as described above. `vision` is
+ * the active model's catalog flag (1 accepts image content parts, 0
+ * is text-only, -1 unknown): 1 puts the image-capability clause in the
+ * assembled prompt, so the model never has to infer its own vision
+ * from the transcript. Never fails hard — an unreadable or absent
+ * AGENTS.md yields the base prompt alone. Returns NULL only on
+ * allocation failure. */
+NmContext *nm_context_new(const char *dir, int vision);
 void nm_context_free(NmContext *c);
 
-/* The assembled system prompt: base text + optional
- * <project_context> block. Borrowed; stable for the context's
- * lifetime. Never NULL (base text alone when nothing was found). */
+/* The assembled system prompt: base text + the image-capability clause
+ * (vision == 1) + optional <project_context> block. Borrowed; stable
+ * for the context's lifetime — which is what keeps the clause inside
+ * the provider's cached prefix. Never NULL (base text alone when
+ * nothing was found). */
 const char *nm_context_system_prompt(const NmContext *c);
 
 /* The base prompt with no context files (exposed for the tests and

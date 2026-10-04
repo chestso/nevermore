@@ -1391,6 +1391,74 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
 }
 
+/* OpenAI catalog: the live /v1/models wire is ids-only (no
+ * capabilities, no context window), so a live fetch takes membership
+ * from the wire and METADATA from the curated static table by id —
+ * exactly the opencode case. Without it every live OpenAI model would
+ * read as text-only, which would both suppress the system prompt's
+ * image-capability clause and warn "text-only" at the wrong models. */
+static void *openai_models_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char body[] =
+        "{\"object\":\"list\",\"data\":["
+        "{\"id\":\"gpt-4o\",\"object\":\"model\",\"owned_by\":\"openai\"},"
+        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"openai\"}"
+        "]}";
+    char head[256];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             sizeof(body) - 1);
+    send(cfd, head, strlen(head), 0);
+    send(cfd, body, sizeof(body) - 1, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_openai_models_fetch_keeps_curated_capabilities(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openai_models_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    size_t n = 0;
+    const NmModel *models = p->models(p, base, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_EQ(n, 2);
+    /* Known id: curated label, vision and window, NOT the ids-only
+     * defaults the wire would imply. */
+    ASSERT_STR_EQ(models[0].id, "gpt-4o");
+    ASSERT_STR_EQ(models[0].label, "GPT-4o");
+    ASSERT_EQ(models[0].vision, 1);
+    ASSERT_EQ(models[0].context_length, 128000);
+    /* An id the curated table has not seen: id-only, unknown window. */
+    ASSERT_STR_EQ(models[1].id, "future-model-9");
+    ASSERT_STR_EQ(models[1].label, "future-model-9");
+    ASSERT_EQ(models[1].vision, 0);
+    ASSERT_EQ(models[1].context_length, -1);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* no key */
+}
+
 /* The static fallback is per-tier: Zen's differs from Go's, and both
  * carry the generated models.dev metadata (the offline catalog pin
  * makes default-base calls no-ops, so these are the shipped tables). */
@@ -1477,5 +1545,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
     RUN_TEST(test_opencode_models_fetch_maps_ids);
+    RUN_TEST(test_openai_models_fetch_keeps_curated_capabilities);
     TEST_SUMMARY();
 }

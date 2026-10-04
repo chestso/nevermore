@@ -2717,6 +2717,77 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
     close(sc.fd);
 }
 
+/* The image-capability clause: a model the catalog says can see gets a
+ * system prompt that says so. Without it the model has to infer its own
+ * vision from the transcript — the live wire of 2026-10-04 shows
+ * exactly that ("I don't have vision capability described", with the
+ * image sitting in the request), which reads to a user as "it doesn't
+ * know which image I mean". The clause rides message 0, so it is frozen
+ * with the session: the two requests' system messages are byte-equal
+ * (the prefix-cache discipline), and it appears exactly once. */
+static void test_agent_vision_model_prompt_declares_the_capability(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    /* gpt-4o: the static catalog says vision = 1 (the offline pin makes
+     * that the whole catalog). The agent resolves the flag itself, from
+     * the catalog the UI reads for its warning. */
+    NmAgent *agent = nm_agent_new(p, "gpt-4o", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+
+    /* The clause is in the system message, exactly once per round. */
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 1);
+
+    /* Frozen with the session: the system message is byte-identical
+     * across rounds, so the clause can never churn the cached prefix. */
+    const char *s1 = strstr(g_requests[0], "\"role\":\"system\"");
+    const char *s2 = strstr(g_requests[1], "\"role\":\"system\"");
+    ASSERT_NOT_NULL(s1);
+    ASSERT_NOT_NULL(s2);
+    const char *end1 = strstr(s1, "},{\"role\":\"user\"");
+    ASSERT_NOT_NULL(end1);
+    size_t n1 = (size_t)(end1 + 1 - s1);
+    ASSERT_TRUE(memcmp(s1, s2, n1) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The offline-catalog tripwire: agent construction resolves the active
+ * model's vision flag from the provider catalog (the system prompt's
+ * capability clause), so a live fetch would both probe a real service
+ * and answer with whatever it serves today (see test_net_helpers.h). */
+TEST_OFFLINE_CATALOG_PIN_CHECK()
+
 int main(void)
 {
 #ifndef _WIN32
@@ -2726,6 +2797,14 @@ int main(void)
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;
     }
+    /* No default-base catalog probes: agent construction reads the
+     * provider catalog for the model's vision flag, and a live fetch
+     * would block on a real service (the canned loopback bases the
+     * tests set are explicit and unaffected). */
+    if (test_pin_offline_catalog() != 0) {
+        fprintf(stderr, "  FAIL: offline catalog pin\n");
+        return 1;
+    }
     /* No context files in the test's cwd: agent construction reads
      * AGENTS.md from the working directory. */
     if (test_chdir_to_scratch() != 0) {
@@ -2733,6 +2812,7 @@ int main(void)
         return 1;
     }
     printf("test_agent:\n");
+    RUN_TEST(test_offline_catalog_is_pinned);
     /* The agent resolves the tool-round cap and the reasoning echo from
      * the config store at the point of use, so the tests install a
      * scratch store (no file I/O) exactly as the app does. */
@@ -2747,6 +2827,7 @@ int main(void)
     RUN_TEST(test_agent_plain_answer_no_tools);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
+    RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_each_tool_as_it_runs);
