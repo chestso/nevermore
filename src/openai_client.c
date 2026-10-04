@@ -164,8 +164,34 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
     for (size_t i = 0; i < req->n_messages; i++) {
         NmJson *m = nm_json_new_object();
         nm_json_set(m, "role", nm_json_new_string(req->messages[i].role));
-        nm_json_set(m, "content",
-                    nm_json_new_string(req->messages[i].content));
+        if (req->messages[i].n_images > 0) {
+            /* A user turn carrying images: `content` is a parts array,
+             * text part FIRST then the image parts in attach order (the
+             * order every probed provider example uses, and — more to
+             * the point — the order is FROZEN here so the serialized
+             * prefix is byte-stable round after round, which is what the
+             * prompt cache keys on). Each part is embedded VERBATIM via
+             * the raw node: it is pre-serialized JSON whose payload is
+             * megabytes of base64, so a parse/copy/escape round trip per
+             * round is exactly what the seam exists to avoid. */
+            NmJson *parts = nm_json_new_array();
+            NmJson *text_part = nm_json_new_object();
+            nm_json_set(text_part, "type", nm_json_new_string("text"));
+            nm_json_set(text_part, "text",
+                        nm_json_new_string(req->messages[i].content
+                                               ? req->messages[i].content
+                                               : ""));
+            nm_json_push(parts, text_part);
+            for (size_t k = 0; k < req->messages[i].n_images; k++) {
+                const char *part = req->messages[i].image_parts[k];
+                if (part)
+                    nm_json_push(parts, nm_json_new_raw(part, strlen(part)));
+            }
+            nm_json_set(m, "content", parts);
+        } else {
+            nm_json_set(m, "content",
+                        nm_json_new_string(req->messages[i].content));
+        }
         /* Tool-call round-trip: an assistant message may carry its
          * tool_calls array (pre-serialized JSON, embedded verbatim);
          * a tool message names the call it answers. */

@@ -51,6 +51,7 @@ nevermore ask "explain this repo"  # one-shot
 nevermore models                   # provider model catalog
 NEVERMORE_PROVIDER=openrouter nevermore ask "..."
 nevermore -p openai -m glm-5.3     # one run, ignoring the saved config
+nevermore -i shot.png "what is wrong in this screenshot?"
 ```
 
 Provider keys come from the environment (`HYPER_API_KEY`,
@@ -206,6 +207,37 @@ comes from (including machinery-written runtime values), `/config set
 <key> <value>` writes one key to the shadow, and `/config reset
 [key|all]` drops both the shadow line and any runtime value for the
 key.
+
+## Images (vision models)
+
+A turn may carry images. In the chat, `/img <path>` attaches one to
+the NEXT message (repeat for several), `/img` lists what is pending,
+and `/img -<n>` drops one; in ask mode, `-i <path>` (repeatable) does
+the same for the one-shot prompt:
+
+```
+/img ~/shot.png
+what is wrong in this screenshot?     # the pending image rides this turn
+```
+
+The file is read **once, at attach**: the bytes are frozen into the
+session as a canonical `data:` URL, so later rounds never re-read it.
+That is not an optimization — the file can change under you, and the
+provider's prompt cache keys on the serialized request bytes, so a
+re-read would silently swap the image _and_ throw the cached prefix
+away. The transcript echoes the captured bytes (the same IMAGE block
+the model's own images render as), never the path.
+
+`/img` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or is
+over 8 MiB — the bytes ride **every** request, so the cap bounds the
+body, and a local refusal keeps the message yours instead of a provider
+error. The display cap (1 MiB) is a different fact: a larger image
+still sends fine and renders as its marker.
+
+Sending an image to a text-only model is not an error — the provider
+strips it and the model answers blind — so the catalog's vision flag is
+a **warning**, never a refusal: `/img` notes it, and `/model` notes it
+when the conversation already carries images.
 
 ## Long-running commands
 

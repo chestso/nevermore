@@ -3,7 +3,9 @@
  * The session is the persistent chat transcript plus context-window
  * management (the job quoth-context.el does in Elisp). Messages are
  * stored as plain-text role/content pairs with optional tool-call
- * annotations, so the wire format stays a provider concern.
+ * annotations and optional image references, so the wire format stays a
+ * provider concern. Images are captured ONCE at attach into the
+ * session's store (NmImage); messages carry indices into it.
  *
  * Memory model: one growable message array per session, grown
  * geometrically; message strings are heap-owned copies made once at
@@ -31,6 +33,36 @@ typedef enum
     NM_ROLE_TOOL
 } NmRole;
 
+/* A captured image (VISION-PLAN §3: capture, not reference). The bytes
+ * are read from the file exactly ONCE, at attach, and frozen here as the
+ * canonical `data:` URL — later rounds never re-read the file. Two
+ * reasons, both hard: the file can change mid-conversation (a re-read
+ * would silently swap the image the conversation is about), and the
+ * provider's prefix cache keys on the serialized bytes (re-derived bytes
+ * that differ even by a base64 line break throw the whole cached prefix
+ * away).
+ *
+ * One representation, two consumers: `part_json` is what rides the wire
+ * (embedded VERBATIM — base64 is escape-free, so no per-round copy), and
+ * `data_url` is the same bytes the transcript's IMAGE block displays
+ * (the display path parses, sniffs and sizes it itself). The two cannot
+ * disagree because they are the same string.
+ *
+ * The store is owned by the session, so it dies with the chat (a
+ * /provider switch rebuilds the agent and wipes the session — images
+ * included). */
+typedef struct NmImage
+{
+    char *data_url; /* "data:image/png;base64,...." — THE bytes */
+    size_t data_url_len;
+    char *part_json; /* the image_url content part, pre-serialized */
+    size_t part_json_len;
+    char alt[64]; /* the file's base name (marker/alt text) */
+    int format;   /* NmImageFormat (nm_image_bytes.h) */
+    int w, h;     /* source pixels (0 = unknown) */
+    size_t bytes; /* decoded byte count (the attach line) */
+} NmImage;
+
 typedef struct NmSessionMessage
 {
     NmRole role;
@@ -38,6 +70,12 @@ typedef struct NmSessionMessage
     char *tool_calls_json; /* NM_ROLE_ASSISTANT: wire tool_calls array, or NULL */
     char *tool_call_id;    /* NM_ROLE_TOOL: answered call id, or NULL */
     char *tool_name;       /* NM_ROLE_TOOL: tool that produced this result */
+    /* NM_ROLE_USER: indices into the session's image store (not copies),
+     * or NULL when the message carries none. Fixed when the message is
+     * appended (append-only: a prefix that gains or loses an image part
+     * is a different prefix, so the list never changes afterwards). */
+    size_t *images;
+    size_t n_images;
     /* NM_ROLE_ASSISTANT: the round's reasoning trace. Kept for
      * display; re-sent as reasoning_content only when the agent's echo
      * mode says so (`tools` on every tool-call message, `all` on those
@@ -72,6 +110,37 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
                                                       const char *tool_name,
                                                       const char *output);
 
+/* --- images (VISION-PLAN) ----------------------------------------- */
+
+/* Attach a file to the conversation: read it ONCE (bounded by
+ * NM_IMAGE_MAX_WIRE_BYTES — the bytes ride every request, so the wire
+ * cap is the attach cap), sniff the container, and freeze the canonical
+ * data URL + its pre-serialized wire part. Returns the new image's
+ * index into the session's store (>= 0), or -1 with `reason` filled
+ * (a short, user-visible phrase: "source unreadable", "unknown
+ * container", "too large", "no memory").
+ *
+ * Attaching does not touch the transcript: the returned id is the
+ * caller's handle until a message claims it (the app's pending set). */
+long nm_session_attach_image(NmSession *s, const char *path, char *reason,
+                             size_t reason_cap);
+
+/* The store: a borrowed image by index (NULL when out of range), and
+ * how many are attached. */
+const NmImage *nm_session_image(const NmSession *s, size_t idx);
+size_t nm_session_image_count(const NmSession *s);
+
+/* Append the user message that owns images (the text part is ALWAYS
+ * present — the wire shape is frozen: text first, then the image parts
+ * in order). An empty/NULL text with images pending becomes the
+ * deterministic "<alt> attached" (one name, or "N images attached"),
+ * never an empty part and never a missing one. Returns NULL without
+ * appending when any id is out of range. */
+const NmSessionMessage *nm_session_append_user_images(NmSession *s,
+                                                      const char *text,
+                                                      const size_t *image_ids,
+                                                      size_t n_images);
+
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
 
@@ -101,7 +170,11 @@ typedef struct NmContextView
 
 NmContextView nm_session_context(const NmSession *s, long budget_tokens);
 
-/* Persistence: load/save as markdown transcript with metadata header. */
+/* Persistence: load/save as markdown transcript with metadata header.
+ * Attached images are NOT written (a data URL is megabytes and the save
+ * is an inspection surface); session persistence including images is a
+ * post-1.0 item, where images are blobs in the save format and never
+ * re-read paths. */
 int nm_session_save(const NmSession *s, const char *path);
 NmSession *nm_session_load(const char *path);
 

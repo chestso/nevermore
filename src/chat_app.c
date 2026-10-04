@@ -197,6 +197,16 @@ struct NmChatApp
      * in the scrollback above the echoed prompt. Held across the flush
      * whose view would otherwise re-install the line. */
     int submitting;
+
+    /* Pending image attachments (VISION-PLAN §7): ids into the agent's
+     * session image store, consumed by the next submit. Turn-scoped,
+     * NOT model-scoped: /model keeps them. A /provider switch rebuilds
+     * the agent — and the session, images included — so it drops them
+     * and says so (an id into a dead store is worse than a lost
+     * attachment). Grown geometrically, reused across turns. */
+    size_t *pending_images;
+    size_t n_pending;
+    size_t pending_cap;
 };
 
 /* The singleton (see file header). */
@@ -585,6 +595,189 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
  * build_agent's registration. */
 
 /* ---------------------------------------------------------------- */
+/* Images (VISION-PLAN §7): /img, the pending set, the echo          */
+/* ---------------------------------------------------------------- */
+
+/* The active model's vision flag, from the provider catalog (the one
+ * authority): 1 accepts image parts, 0 is text-only, -1 unknown. Same
+ * borrowed static/cached lookup as model_context_limit — never a wire
+ * fetch from the UI thread. */
+static int model_vision(const NmChatApp *app, const NmProvider *p)
+{
+    if (!p || !app->model)
+        return -1;
+    size_t n = 0;
+    const NmModel *models = p->models(p, NULL, NULL, &n);
+    if (!models)
+        return -1;
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, app->model) == 0)
+            return models[i].vision;
+    }
+    return -1;
+}
+
+/* Vision gating is a WARNING, never a refusal: the wire takes the
+ * image and the model answers blind (live-probed on hyper — no 4xx, the
+ * image is stripped), so the catalog flag is UX, not validity. */
+static void warn_text_only(NmChatApp *app)
+{
+    if (model_vision(app, app->provider) != 0)
+        return;
+    sys_line(app, "note: %s is text-only — the provider strips image "
+                  "content (pick a vision model with /model)",
+             app->model ? app->model : "(no model)");
+}
+
+/* The same note for a /model switch on a conversation that already
+ * carries images. */
+static void warn_images_on_text_only(NmChatApp *app)
+{
+    size_t n = nm_agent_image_count(app->agent);
+    if (n == 0 || model_vision(app, app->provider) != 0)
+        return;
+    sys_line(app, "note: %s is text-only — the provider strips the %zu "
+                  "image%s in this conversation",
+             app->model ? app->model : "(no model)", n, n == 1 ? "" : "s");
+}
+
+static int pending_push(NmChatApp *app, size_t id)
+{
+    if (app->n_pending == app->pending_cap) {
+        size_t ncap = app->pending_cap ? app->pending_cap * 2 : 4;
+        size_t *ni = realloc(app->pending_images, ncap * sizeof(*ni));
+        if (!ni)
+            return -1;
+        app->pending_images = ni;
+        app->pending_cap = ncap;
+    }
+    app->pending_images[app->n_pending++] = id;
+    return 0;
+}
+
+/* Drop one pending attachment (0-based). */
+static void pending_drop(NmChatApp *app, size_t idx)
+{
+    if (idx >= app->n_pending)
+        return;
+    memmove(&app->pending_images[idx], &app->pending_images[idx + 1],
+            (app->n_pending - idx - 1) * sizeof(*app->pending_images));
+    app->n_pending--;
+}
+
+static void pending_clear(NmChatApp *app)
+{
+    app->n_pending = 0; /* the array is the reuse */
+}
+
+/* The pending attachments, as the numbered list /img prints. */
+static void print_pending(NmChatApp *app)
+{
+    if (app->n_pending == 0) {
+        sys_line(app, "images: none pending — /img <path> attaches one");
+        return;
+    }
+    sys_line(app, "images: %zu pending (consumed by the next message)",
+             app->n_pending);
+    for (size_t i = 0; i < app->n_pending; i++) {
+        const NmImage *img = nm_agent_image(app->agent, app->pending_images[i]);
+        if (!img)
+            continue;
+        char size[32];
+        nm_image_size_text(img->bytes, size, sizeof(size));
+        sys_line(app, "  %zu  %s — %s %dx%d, %s", i + 1, img->alt,
+                 nm_image_format_name(img->format), img->w, img->h, size);
+    }
+}
+
+/* /img: attach a file, list the pending set, or drop one. */
+static void img_command(NmChatApp *app, const char *arg)
+{
+    if (!*arg) {
+        print_pending(app);
+        return;
+    }
+    if (arg[0] == '-') {
+        /* /img -<n>: drop one (the number is the listing's). */
+        char *end = NULL;
+        long n = strtol(arg + 1, &end, 10);
+        if (end == arg + 1 || (end && *end != '\0') || n < 1 ||
+            (size_t)n > app->n_pending) {
+            sys_line(app, NM_SGR_ERROR "img: '-%s' is not a pending image "
+                                       "(1..%zu; bare /img lists them)" NM_SGR_RESET,
+                     arg + 1, app->n_pending);
+            return;
+        }
+        const NmImage *img =
+            nm_agent_image(app->agent, app->pending_images[n - 1]);
+        char name[64];
+        snprintf(name, sizeof(name), "%s", img ? img->alt : "image");
+        pending_drop(app, (size_t)n - 1);
+        sys_line(app, "image: %s — dropped (%zu pending)", name,
+                 app->n_pending);
+        return;
+    }
+
+    /* The whole remainder is the path: a file name may contain spaces,
+     * and trailing whitespace is the user's stray, not the name. */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", arg);
+    size_t len = strlen(path);
+    while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t'))
+        path[--len] = '\0';
+    if (len == 0) {
+        print_pending(app);
+        return;
+    }
+
+    char reason[64];
+    long id = nm_agent_attach_image(app->agent, path, reason, sizeof(reason));
+    if (id < 0) {
+        sys_line(app, NM_SGR_ERROR "image: %s — not attached: %s" NM_SGR_RESET,
+                 path, reason);
+        return;
+    }
+    if (pending_push(app, (size_t)id) != 0) {
+        sys_line(app, NM_SGR_ERROR "image: out of memory" NM_SGR_RESET);
+        return;
+    }
+    const NmImage *img = nm_agent_image(app->agent, (size_t)id);
+    char size[32];
+    nm_image_size_text(img ? img->bytes : 0, size, sizeof(size));
+    sys_line(app, "image: %s — %s %dx%d, %s", img ? img->alt : path,
+             nm_image_format_name(img ? img->format : NM_IMAGE_FMT_UNKNOWN),
+             img ? img->w : 0, img ? img->h : 0, size);
+    warn_text_only(app);
+}
+
+/* Echo the turn's images into the transcript. The line is the SAME
+ * markdown the model's own images arrive as (`![alt](data_url)`), so the
+ * classifier makes each one an IMAGE block and the existing profile
+ * ladder renders or degrades it — one image pipeline, no second path.
+ * The DATA URL is posted, never the file path: the transcript must show
+ * the captured bytes (the file may already be gone). */
+static void echo_pending_images(NmChatApp *app)
+{
+    for (size_t i = 0; i < app->n_pending; i++) {
+        const NmImage *img = nm_agent_image(app->agent, app->pending_images[i]);
+        if (!img)
+            continue;
+        size_t line_len = strlen(img->alt) + img->data_url_len + 8;
+        char *line = malloc(line_len + 1);
+        if (!line)
+            return;
+        int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", img->alt,
+                         img->data_url);
+        stream_text(app, NM_STREAM_ID_CONTENT, line, (size_t)n);
+        free(line);
+    }
+    /* The run is closed here: the images are their own speech, and the
+     * answer that follows gets its own paragraph. */
+    if (app->n_pending)
+        emit_separator(app);
+}
+
+/* ---------------------------------------------------------------- */
 /* Construction / destruction                                       */
 /* ---------------------------------------------------------------- */
 
@@ -798,6 +991,7 @@ void nm_chat_app_free(NmChatApp *app)
     free(app->base_url);
     free(app->api_key);
     free(app->current_tool);
+    free(app->pending_images);
     for (int i = 0; i < NM_STREAM_COUNT; i++)
         free(app->hold[i]);
     if (app->transcript)
@@ -1170,6 +1364,9 @@ static void print_help(NmChatApp *app)
                   "  /config set <k> <v>  write one key to the session shadow\n"
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
                   "  /context           context-window usage (provider-reported)\n"
+                  "  /img <path>        attach an image to the next message\n"
+                  "  /img               list pending attachments\n"
+                  "  /img -<n>          drop pending attachment n\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
@@ -1371,8 +1568,13 @@ static int switch_provider(NmChatApp *app, const char *name)
         return 0;
     }
     /* New chat: reset every stream (emits nothing) and mark the
-     * boundary; the agent rebuild wipes the session. The hold-back and
-     * owed-separator state reset with the transcript. */
+     * boundary; the agent rebuild wipes the session — and the session
+     * owns the attached images, so the pending set goes with it. An id
+     * into a dead store would be worse than a lost attachment, so the
+     * drop is reported, not silent. The hold-back and owed-separator
+     * state reset with the transcript. */
+    size_t dropped = app->n_pending;
+    pending_clear(app);
     send_msg(app, tui_msg_transcript_clear());
     hold_discard(app, NM_STREAM_ID_CONTENT);
     hold_discard(app, NM_STREAM_ID_REASONING);
@@ -1380,6 +1582,10 @@ static int switch_provider(NmChatApp *app, const char *name)
     app->reasoning_open = 0;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
+    if (dropped)
+        sys_line(app, "image: %zu pending attachment%s dropped with the "
+                      "session",
+                 dropped, dropped == 1 ? "" : "s");
     return 1;
 }
 
@@ -1789,6 +1995,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             char line[256];
             snprintf(line, sizeof(line), "model: %s (exact)", app->model);
             persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
+            warn_images_on_text_only(app);
             return;
         }
         /* Validation: refuse an unknown id instead of a silent 404
@@ -1816,6 +2023,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         char line[256];
         snprintf(line, sizeof(line), "model: %s", app->model);
         persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
+        warn_images_on_text_only(app);
         return;
     }
     if (NAME_IS("provider")) {
@@ -1895,6 +2103,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         print_context(app);
         return;
     }
+    if (NAME_IS("img")) {
+        img_command(app, arg);
+        return;
+    }
     if (NAME_IS("ps")) {
         print_jobs(app);
         return;
@@ -1916,13 +2128,18 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
 static void submit(NmChatApp *app, TuiCmd **cmd_out)
 {
     const char *text = tui_textinput_text(app->input);
-    if (!text || !*text)
+    /* An image-only send is legal: the pending attachments carry the
+     * turn, and the session supplies the deterministic text part. */
+    if (!text)
+        text = "";
+    if (!*text && app->n_pending == 0)
         return;
 
     char *saved = strdup(text);
     if (!saved)
         return;
-    tui_textinput_history_add(app->input, saved);
+    if (*saved)
+        tui_textinput_history_add(app->input, saved);
 
     /* The echo contract (D10): submit FINALIZES every LIVE block across
      * all streams and does not echo; a flush commits those blocks above
@@ -1951,9 +2168,17 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     if (saved[0] == '/') {
         run_command(app, saved, cmd_out);
     } else {
+        /* The turn's images are echoed FIRST (the transcript shows the
+         * captured bytes right under the user's line), then handed to
+         * the agent — which copies the ids into the session message, so
+         * the pending set is consumed whatever the send does next. */
+        echo_pending_images(app);
+        size_t n_images = app->n_pending;
+        const size_t *ids = app->pending_images;
         /* Failure prints via on_state(ERROR); the session keeps the
          * user message for the retry. */
-        nm_agent_start(app->agent, saved);
+        nm_agent_start(app->agent, saved, ids, n_images);
+        pending_clear(app);
     }
     free(saved);
 }
@@ -1970,8 +2195,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/context", "/ps", "/kill",
-        "/quit", NULL
+        "/help", "/model", "/provider", "/config", "/context", "/img", "/ps",
+        "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

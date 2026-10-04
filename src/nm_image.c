@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nm_image_bytes.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 
@@ -20,149 +21,22 @@
  * nothing sane is that long. */
 #define IMG_PATH_MAX 1024
 
-/* ---------------------------------------------------------------- */
-/* base64 (decode only; boba ships the encoder)                      */
-/* ---------------------------------------------------------------- */
-
-static int b64_val(char c)
-{
-    if (c >= 'A' && c <= 'Z')
-        return c - 'A';
-    if (c >= 'a' && c <= 'z')
-        return c - 'a' + 26;
-    if (c >= '0' && c <= '9')
-        return c - '0' + 52;
-    if (c == '+')
-        return 62;
-    if (c == '/')
-        return 63;
-    return -1;
-}
-
-/* Standard-alphabet base64 decode into dst. Returns the decoded
- * length, or -1 on malformed input (bad length, garbage, misplaced
- * padding — data URIs are well-formed or they degrade, never
- * half-decode). */
-static long b64_decode(const char *src, size_t len, unsigned char *dst,
-                       size_t dst_cap)
-{
-    if (len % 4 != 0)
-        return -1;
-    size_t o = 0;
-    for (size_t i = 0; i < len; i += 4) {
-        int v[4];
-        int pad = 0;
-        for (int k = 0; k < 4; k++) {
-            char c = src[i + k];
-            if (c == '=') {
-                pad++;
-                v[k] = 0;
-            } else {
-                if (pad)
-                    return -1; /* data after padding */
-                v[k] = b64_val(c);
-                if (v[k] < 0)
-                    return -1;
-            }
-        }
-        if (pad > 2)
-            return -1;
-        if (i + 4 < len && pad)
-            return -1; /* padding mid-stream */
-        int outn = 3 - pad;
-        if (o + (size_t)outn > dst_cap)
-            return -1;
-        unsigned trip = ((unsigned)v[0] << 18) | ((unsigned)v[1] << 12) |
-                        ((unsigned)v[2] << 6) | (unsigned)v[3];
-        dst[o++] = (unsigned char)(trip >> 16);
-        if (outn > 1)
-            dst[o++] = (unsigned char)(trip >> 8);
-        if (outn > 2)
-            dst[o++] = (unsigned char)trip;
-    }
-    return (long)o;
-}
-
-/* ---------------------------------------------------------------- */
-/* Dimension sniffing (headers only)                                 */
-/* ---------------------------------------------------------------- */
-
-static int sniff_png(const unsigned char *d, size_t n, int *w, int *h)
-{
-    static const unsigned char sig[8] = { 0x89, 'P', 'N', 'G', '\r', '\n',
-                                          0x1a, '\n' };
-    if (n < 24 || memcmp(d, sig, 8) != 0)
-        return 0;
-    if (memcmp(d + 12, "IHDR", 4) != 0)
-        return 0; /* IHDR must be the first chunk */
-    *w = (d[16] << 24) | (d[17] << 16) | (d[18] << 8) | d[19];
-    *h = (d[20] << 24) | (d[21] << 16) | (d[22] << 8) | d[23];
-    return *w > 0 && *h > 0;
-}
-
-static int sniff_jpeg(const unsigned char *d, size_t n, int *w, int *h)
-{
-    if (n < 4 || d[0] != 0xFF || d[1] != 0xD8)
-        return 0;
-    size_t i = 2;
-    while (i + 4 <= n) {
-        if (d[i] != 0xFF) {
-            i++;
-            continue;
-        }
-        unsigned char m = d[i + 1];
-        if (m == 0x01 || (m >= 0xD0 && m <= 0xD9)) {
-            i += 2; /* standalone markers carry no length */
-            continue;
-        }
-        size_t seglen = ((size_t)d[i + 2] << 8) | d[i + 3];
-        if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
-            /* SOF: marker(2) len(2) precision(1) height(2) width(2) */
-            if (i + 9 > n)
-                return 0;
-            *h = (d[i + 5] << 8) | d[i + 6];
-            *w = (d[i + 7] << 8) | d[i + 8];
-            return *w > 0 && *h > 0;
-        }
-        if (seglen < 2)
-            return 0; /* corrupt length: stop guessing */
-        i += 2 + seglen;
-    }
-    return 0;
-}
-
-static int sniff_gif(const unsigned char *d, size_t n, int *w, int *h)
-{
-    if (n < 10 || memcmp(d, "GIF8", 4) != 0)
-        return 0;
-    *w = d[6] | (d[7] << 8);
-    *h = d[8] | (d[9] << 8);
-    return *w > 0 && *h > 0;
-}
-
-/* Sniff the format + dimensions. Returns the TuiImageFormat or -1. */
-static int sniff(const unsigned char *d, size_t n, int *w, int *h)
-{
-    if (sniff_png(d, n, w, h))
-        return TUI_IMAGE_PNG;
-    if (sniff_jpeg(d, n, w, h))
-        return TUI_IMAGE_JPEG;
-    if (sniff_gif(d, n, w, h))
-        return TUI_IMAGE_GIF;
-    return -1;
-}
-
-static const char *format_name(int format)
+/* boba's vocabulary at the boba boundary: the slot holds nevermore's
+ * NmImageFormat (the shared codec's), and the ONE place boba's enum
+ * appears is the spec it fills. The mapping is total over the formats
+ * the sniffer can return, and render is only reached for a unit that
+ * measure accepted (so the format is always one of the three). */
+static TuiImageFormat to_tui_format(int format)
 {
     switch (format) {
-    case TUI_IMAGE_PNG:
-        return "PNG";
-    case TUI_IMAGE_JPEG:
-        return "JPEG";
-    case TUI_IMAGE_GIF:
-        return "GIF";
+    case NM_IMAGE_FMT_PNG:
+        return TUI_IMAGE_PNG;
+    case NM_IMAGE_FMT_JPEG:
+        return TUI_IMAGE_JPEG;
+    case NM_IMAGE_FMT_GIF:
+        return TUI_IMAGE_GIF;
     default:
-        return "image";
+        return TUI_IMAGE_PNG; /* unreachable: measure rejects unknown */
     }
 }
 
@@ -229,14 +103,7 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
         size_t semi = 5;
         while (semi < src_len && src[semi] != ';')
             semi++;
-        size_t mime_len = semi - 5;
-        int fmt = -1;
-        if (mime_len == 9 && memcmp(src + 5, "image/png", 9) == 0)
-            fmt = TUI_IMAGE_PNG;
-        else if (mime_len == 10 && memcmp(src + 5, "image/jpeg", 10) == 0)
-            fmt = TUI_IMAGE_JPEG;
-        else if (mime_len == 9 && memcmp(src + 5, "image/gif", 9) == 0)
-            fmt = TUI_IMAGE_GIF;
+        int fmt = nm_image_format_from_mime(src + 5, semi - 5);
         if (fmt < 0 || semi + 8 > src_len ||
             memcmp(src + semi, ";base64,", 8) != 0) {
             slot_reason(s, "undecodable source");
@@ -254,7 +121,7 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
                 return -1;
             size_t head = b64_len < 64 ? b64_len : 64;
             head -= head % 4;
-            long n = b64_decode(b64, head, s->data, s->cap);
+            long n = nm_image_b64_decode(b64, head, s->data, s->cap);
             if (n > 0) {
                 s->len = (size_t)n;
                 s->format = fmt;
@@ -265,7 +132,7 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
             slot_reason(s, "no memory");
             return -1;
         }
-        long n = b64_decode(b64, b64_len, s->data, s->cap);
+        long n = nm_image_b64_decode(b64, b64_len, s->data, s->cap);
         if (n < 0) {
             slot_reason(s, "undecodable source");
             return -1;
@@ -281,45 +148,38 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
         char path[IMG_PATH_MAX];
         memcpy(path, src, src_len);
         path[src_len] = '\0';
-        FILE *f = fopen(path, "rb");
-        if (!f) {
-            slot_reason(s, "source unreadable");
-            return -1;
+        /* The one file probe (shared with the attach path): it reads the
+         * file bounded by the DISPLAY cap — a bigger image sends fine and
+         * renders as its marker. The slot keeps its own reused buffer, so
+         * the probe's bytes are copied in and released. */
+        NmImageProbe p;
+        NmImageStatus st = nm_image_file_probe(path, NM_IMAGE_MAX_BYTES, &p);
+        if (p.len && slot_reserve(s, p.len) == 0) {
+            memcpy(s->data, p.bytes, p.len);
+            s->len = p.len;
+            s->format = p.format;
+            s->w = p.w;
+            s->h = p.h;
         }
-        long sz = 0;
-        if (fseek(f, 0, SEEK_END) == 0) {
-            sz = ftell(f);
-            fseek(f, 0, SEEK_SET);
-        }
-        if (sz < 0)
-            sz = 0;
-        if ((size_t)sz > NM_IMAGE_MAX_BYTES) {
-            /* oversize: read only the head, so the marker can still
-             * name the format and dims */
+        switch (st) {
+        case NM_IMAGE_OK:
+            break;
+        case NM_IMAGE_ERR_OVERSIZE:
             slot_reason(s, "too large");
-            size_t n = 0;
-            if (slot_reserve(s, 64) == 0)
-                n = fread(s->data, 1, 64, f);
-            fclose(f);
-            s->len = n;
-            return -1;
-        }
-        size_t want = (size_t)sz;
-        if (want == 0)
-            want = 64; /* a pipe-ish file: read what is there */
-        if (slot_reserve(s, want) != 0) {
-            fclose(f);
+            break;
+        case NM_IMAGE_ERR_NOMEM:
             slot_reason(s, "no memory");
-            return -1;
-        }
-        size_t n = fread(s->data, 1, want, f);
-        fclose(f);
-        if (n == 0) {
+            break;
+        case NM_IMAGE_ERR_UNREADABLE:
+            slot_reason(s, "source unreadable");
+            break;
+        case NM_IMAGE_ERR_EMPTY:
+        case NM_IMAGE_ERR_UNKNOWN:
             slot_reason(s, "undecodable source");
-            return -1;
+            break;
         }
-        s->len = n;
-        return 0;
+        nm_image_probe_free(&p);
+        return st == NM_IMAGE_OK ? 0 : -1;
     }
 
     /* anything else (http(s) URLs, relative paths): not fetched by
@@ -389,8 +249,8 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
      * still names its size and format in the marker */
     if (s->len >= 10) {
         int w = 0, h = 0;
-        int fmt = sniff(s->data, s->len, &w, &h);
-        if (fmt >= 0) {
+        NmImageFormat fmt = nm_image_sniff(s->data, s->len, &w, &h);
+        if (fmt != NM_IMAGE_FMT_UNKNOWN) {
             s->format = fmt;
             s->w = w;
             s->h = h;
@@ -410,11 +270,9 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
 
     /* tier (D5): kitty takes PNG only (f=100); iTerm2 decodes its own
      * containers. kitty preferred where both answer (WezTerm). */
-    if (profile->kitty_graphics && s->format == TUI_IMAGE_PNG) {
+    if (profile->kitty_graphics && s->format == NM_IMAGE_FMT_PNG) {
         s->transport = TUI_IMAGE_KITTY;
-    } else if (profile->iterm2_images &&
-               (s->format == TUI_IMAGE_PNG || s->format == TUI_IMAGE_JPEG ||
-                s->format == TUI_IMAGE_GIF)) {
+    } else if (profile->iterm2_images && s->format != NM_IMAGE_FMT_UNKNOWN) {
         s->transport = TUI_IMAGE_ITERM2;
     } else {
         slot_reason(s, profile->kitty_graphics || profile->iterm2_images
@@ -444,18 +302,10 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
 
     TuiImageSpec spec;
     tui_image_spec_init(&spec, (TuiImageTransport)s->transport,
-                        (TuiImageFormat)s->format, s->data, s->len, s->w,
+                        to_tui_format(s->format), s->data, s->len, s->w,
                         s->h, s->disp_cols, rows > 0 ? rows : s->disp_rows,
                         blk->image_id);
     (void)col_span; /* the display size was fixed at measure time */
     tui_row_image(sink, &spec);
     tui_row_end(sink);
-}
-/* ---------------------------------------------------------------- */
-/* Marker text support (consumed by nm_markdown_render.c)            */
-/* ---------------------------------------------------------------- */
-
-const char *nm_image_format_name(int format)
-{
-    return format_name(format);
 }

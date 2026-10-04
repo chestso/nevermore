@@ -46,6 +46,7 @@
 #include "nm_config.h"
 #include "authinfo.h"
 #include "colors.h"
+#include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"
@@ -4419,6 +4420,252 @@ static void test_exec_command_spinner_tier(void)
 }
 #endif /* !_WIN32 */
 
+/* ---------------------------------------------------------------- */
+/* Images (VISION-PLAN §7): /img, the pending set, the echo          */
+/* ---------------------------------------------------------------- */
+
+/* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
+static const unsigned char CHAT_PNG[] = {
+    0x89,
+    'P',
+    'N',
+    'G',
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a, /* signature */
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    'I',
+    'H',
+    'D',
+    'R', /* IHDR      */
+    0x00,
+    0x00,
+    0x00,
+    0x40, /* width 64  */
+    0x00,
+    0x00,
+    0x00,
+    0x20, /* height 32 */
+};
+
+/* Write the PNG header into the scratch cwd and hand back its path
+ * (a static buffer: one fixture path per test). */
+static const char *chat_png_fixture(const char *name)
+{
+    static char path[300];
+    snprintf(path, sizeof(path), "%s/%s", test_scratch_dir(), name);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+        fwrite(CHAT_PNG, 1, sizeof(CHAT_PNG), f);
+        fclose(f);
+    }
+    return path;
+}
+
+/* Submit one /img command for a path (the command takes the whole
+ * remainder verbatim, spaces included). */
+static void chat_img_cmd(AppHarness *h, const char *path)
+{
+    char cmd[320];
+    snprintf(cmd, sizeof(cmd), "/img %s", path);
+    harness_type(h, cmd);
+    harness_enter(h);
+}
+
+static void test_img_command_attaches_lists_and_drops(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    const char *path = chat_png_fixture("chat-img.png");
+    chat_img_cmd(h, path);
+    const char *out = harness_read(h);
+    /* the attach line: alt, format, dims, size */
+    ASSERT_TRUE(strstr(out, "image: chat-img.png — PNG 64x32, 24 B") != NULL);
+
+    /* bare /img lists the pending set, numbered (the /img -n argument) */
+    harness_type(h, "/img");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "images: 1 pending") != NULL);
+    ASSERT_TRUE(strstr(out, "1  chat-img.png — PNG 64x32, 24 B") != NULL);
+
+    /* /img -1 drops it (and says what went) */
+    harness_type(h, "/img -1");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "image: chat-img.png — dropped (0 pending)") != NULL);
+    harness_type(h, "/img");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "images: none pending") != NULL);
+
+    harness_free(h);
+}
+
+static void test_img_command_refusals(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* unreadable: named, not attached */
+    harness_type(h, "/img /nonexistent-dir/nm-chat-img.png");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "not attached: source unreadable") != NULL);
+
+    /* not a container we know */
+    char txt[300];
+    snprintf(txt, sizeof(txt), "%s/nm-chat-notimage.txt", test_scratch_dir());
+    write_file_at(txt, "plain text, no image here");
+    chat_img_cmd(h, txt);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "not attached: unknown container") != NULL);
+
+    /* over the WIRE cap: refused locally, because those bytes would
+     * ride every request */
+    char big[300];
+    snprintf(big, sizeof(big), "%s/nm-chat-big.png", test_scratch_dir());
+    FILE *f = fopen(big, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(CHAT_PNG, 1, sizeof(CHAT_PNG), f);
+    ASSERT_EQ(fseek(f, (long)NM_IMAGE_MAX_WIRE_BYTES, SEEK_SET), 0);
+    fputc('x', f);
+    fclose(f);
+    chat_img_cmd(h, big);
+    ASSERT_TRUE(strstr(harness_read(h), "not attached: too large") != NULL);
+
+    /* dropping from an empty set is an error, not a crash */
+    harness_type(h, "/img -3");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "is not a pending image") != NULL);
+
+    /* nothing was ever attached */
+    harness_type(h, "/img");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "images: none pending") != NULL);
+
+    harness_free(h);
+}
+
+/* The pending set is consumed by the next message, the wire carries the
+ * parts array, and the transcript shows the CAPTURED bytes (the echo is
+ * the same IMAGE markdown the model's own images arrive as). */
+static void test_img_submit_sends_parts_and_echoes(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"a test "
+                "image\"}}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    const char *path = chat_png_fixture("chat-img-send.png");
+    chat_img_cmd(h, path);
+
+    harness_type(h, "what is this?");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    /* the wire: content is a parts array — the text part first, then
+     * the frozen image part */
+    ASSERT_TRUE(strstr(g_request,
+                       "\"content\":[{\"type\":\"text\",\"text\":\"what is "
+                       "this?\"},{\"type\":\"image_url\",") != NULL);
+    ASSERT_TRUE(strstr(g_request, "\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(g_request, "\"detail\"") == NULL);
+
+    /* The tmpfile terminal never answers the profile probe; do the
+     * verdict by hand and flush once more (exactly what the real
+     * loop's tick does), so the held image batch commits as its
+     * marker. The marker carries the alt, the format and the dims —
+     * and never the payload. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "chat-img-send.png") != NULL);
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "base64,") == NULL);
+
+    /* the pending set was consumed by the turn */
+    harness_type(h, "/img");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "images: none pending") != NULL);
+
+    harness_free(h);
+    close(sc.fd);
+}
+
+/* Vision gating is a warning, never a refusal (the wire takes the
+ * image and the model answers blind — live-probed on hyper), and the
+ * catalog flag is the only authority. opencode:go's static catalog
+ * carries text-only ids; the offline pin keeps the lookup static. */
+static void test_img_text_only_model_warns(void)
+{
+    AppHarness *h = harness_new("opencode:go", "deepseek-v4-flash", NULL);
+    ASSERT_NOT_NULL(h);
+
+    const char *path = chat_png_fixture("chat-img-warn.png");
+    chat_img_cmd(h, path);
+    const char *out = harness_read(h);
+    /* attached all the same — the warning is a note, not a refusal */
+    ASSERT_TRUE(strstr(out, "image: chat-img-warn.png — PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "note: deepseek-v4-flash is text-only — the "
+                            "provider strips image content") != NULL);
+
+    /* the /model twin: the conversation already carries an image, and
+     * the new model is text-only too */
+    harness_type(h, "/model deepseek-v4-pro");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "note: deepseek-v4-pro is text-only — the provider "
+                       "strips the 1 image in this conversation") != NULL);
+
+    harness_free(h);
+}
+
+/* A provider switch rebuilds the agent — and the session owns the
+ * attached images, so the pending set dies with it. That is reported,
+ * never silent (an id into a dead store would be worse). */
+static void test_img_pending_dropped_on_provider_switch(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    const char *path = chat_png_fixture("chat-img-switch.png");
+    chat_img_cmd(h, path);
+    ASSERT_TRUE(strstr(harness_read(h), "1 pending") == NULL ||
+                strstr(harness_read(h), "image: chat-img-switch.png") != NULL);
+
+    harness_type(h, "/provider openai");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "— provider: openai (fresh session) —") != NULL);
+    ASSERT_TRUE(strstr(out,
+                       "image: 1 pending attachment dropped with the "
+                       "session") != NULL);
+    /* the set is empty afterwards */
+    harness_type(h, "/img");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "images: none pending") != NULL);
+
+    harness_free(h);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -4519,6 +4766,11 @@ int main(void)
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     RUN_TEST(test_image_data_uri_degrades_to_marker);
+    RUN_TEST(test_img_command_attaches_lists_and_drops);
+    RUN_TEST(test_img_command_refusals);
+    RUN_TEST(test_img_submit_sends_parts_and_echoes);
+    RUN_TEST(test_img_text_only_model_warns);
+    RUN_TEST(test_img_pending_dropped_on_provider_switch);
     RUN_TEST(test_job_cap_fits_the_fd_budget);
     RUN_TEST(test_ps_without_jobs);
 #ifdef _WIN32

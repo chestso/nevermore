@@ -24,6 +24,7 @@
 
 #include "nevermore.h"
 #include "agent.h"
+#include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "provider.h"
 #include "session.h"
@@ -60,6 +61,7 @@ static void usage(FILE *out)
             "                        openai | openrouter | opencode:go |\n"
             "                        opencode:zen | test:replay\n"
             "  -m, --model ID        model id (provider-specific)\n"
+            "  -i, --image PATH      attach an image to the prompt (repeatable)\n"
             "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"
             "  -v, --version         version\n"
@@ -349,6 +351,11 @@ int main(int argc, char *argv[])
     const char *cli_model = NULL;
     const char *prompt = NULL;
     int want_models = 0;
+    /* -i: images attached to the ask-mode prompt, in order (repeatable).
+     * Ask mode only — the TUI attaches with /img, where the pending set
+     * is visible in the transcript. */
+    const char *image_paths[16];
+    size_t n_image_paths = 0;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--provider") == 0) {
@@ -363,6 +370,19 @@ int main(int argc, char *argv[])
                 return 1;
             }
             cli_model = argv[i];
+        } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0) {
+            if (++i >= argc) {
+                fprintf(stderr, "nevermore: --image needs a value\n");
+                return 1;
+            }
+            if (n_image_paths ==
+                sizeof(image_paths) / sizeof(image_paths[0])) {
+                fprintf(stderr, "nevermore: too many --image arguments "
+                                "(max %zu)\n",
+                        sizeof(image_paths) / sizeof(image_paths[0]));
+                return 1;
+            }
+            image_paths[n_image_paths++] = argv[i];
         } else if (strcmp(argv[i], "models") == 0) {
             want_models = 1;
         } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
@@ -378,6 +398,16 @@ int main(int argc, char *argv[])
         } else {
             prompt = argv[i];
         }
+    }
+
+    /* -i is an ask-mode flag: the TUI attaches with /img, where the
+     * pending set is visible in the transcript. Silently ignoring the
+     * paths (which is what a fall-through to interactive would do) is
+     * the one outcome a user cannot debug. */
+    if (n_image_paths > 0 && !prompt) {
+        fprintf(stderr, "nevermore: --image needs a prompt "
+                        "(interactive mode attaches with /img)\n");
+        return 1;
     }
 
     /* One resolution, one place (nm_config.h): user file < runtime
@@ -464,8 +494,34 @@ int main(int argc, char *argv[])
          * stream-inactivity timeout, which is not a config key. */
         nm_agent_set_timeout_ms(agent, resolved_timeout_ms());
 
+        /* -i attachments: read once here, report on stderr (the tool-plan
+         * line's shape), and hand the ids to the turn. A refusal names
+         * the reason and the run continues without that image — the
+         * bytes are the model's input, not a reason to fail the ask. */
+        size_t image_ids[16];
+        size_t n_ids = 0;
+        for (size_t i = 0; i < n_image_paths; i++) {
+            char reason[64];
+            long id = nm_agent_attach_image(agent, image_paths[i], reason,
+                                            sizeof(reason));
+            if (id < 0) {
+                fprintf(stderr, "[image] %s — not attached: %s\n",
+                        image_paths[i], reason);
+                continue;
+            }
+            const NmImage *img = nm_agent_image(agent, (size_t)id);
+            char size[32];
+            nm_image_size_text(img ? img->bytes : 0, size, sizeof(size));
+            fprintf(stderr, "[image] %s — %s %dx%d, %s\n",
+                    img ? img->alt : image_paths[i],
+                    nm_image_format_name(img ? img->format
+                                             : NM_IMAGE_FMT_UNKNOWN),
+                    img ? img->w : 0, img ? img->h : 0, size);
+            image_ids[n_ids++] = (size_t)id;
+        }
+
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
-        int rc = nm_agent_turn(agent, prompt);
+        int rc = nm_agent_turn(agent, prompt, n_ids ? image_ids : NULL, n_ids);
         if (rc != 0) {
             const char *err = nm_agent_last_error(agent);
             fprintf(stderr, "nevermore: %s\n", err ? err : "turn failed");

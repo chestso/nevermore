@@ -659,6 +659,104 @@ static void test_json_number_locale_independent(void)
     nm_json_free(doc);
 }
 
+/* The raw node: pre-serialized JSON embedded VERBATIM at dump time,
+ * with BORROWED bytes — the seam that keeps a multi-megabyte image
+ * content part from being copied (and re-escaped) per round. The
+ * contract is the caller's: base64 is JSON-escape-free by alphabet,
+ * which is why verbatim is safe for the image part. */
+static void test_json_raw_node_verbatim(void)
+{
+    /* The exact image content part the composer embeds. */
+    static const char part[] =
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":"
+        "\"data:image/png;base64,iVBORw0KGgo=\"}}";
+
+    /* Standalone: the dump IS the bytes. */
+    NmJson *r = nm_json_new_raw(part, sizeof(part) - 1);
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(nm_json_type(r), NM_JSON_RAW);
+    char *d = nm_json_dump(r);
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d, part);
+    free(d);
+    nm_json_free(r);
+
+    /* Inside a larger document (the content-parts array): the bytes are
+     * embedded as-is, and the whole text re-parses to the same value. */
+    NmJson *arr = nm_json_new_array();
+    nm_json_push(arr, nm_json_new_raw(part, sizeof(part) - 1));
+    char *da = nm_json_dump(arr);
+    ASSERT_NOT_NULL(da);
+    ASSERT_STR_EQ(da, "[{\"type\":\"image_url\",\"image_url\":{\"url\":"
+                      "\"data:image/png;base64,iVBORw0KGgo=\"}}]");
+    const char *err = NULL;
+    NmJson *rt = nm_json_parse(da, strlen(da), &err);
+    ASSERT_NOT_NULL(rt);
+    ASSERT_STR_EQ(nm_json_str(nm_json_get(nm_json_get(nm_json_at(rt, 0),
+                                                      "image_url"),
+                                          "url")),
+                  "data:image/png;base64,iVBORw0KGgo=");
+    nm_json_free(rt);
+    free(da);
+    nm_json_free(arr);
+}
+
+/* Verbatim means verbatim: a string node escapes, a raw node does not.
+ * The builder vouches for the text, so a '"' inside a raw node rides
+ * out raw (and would be the caller's bug, not the writer's). */
+static void test_json_raw_node_is_not_escaped(void)
+{
+    NmJson *o = nm_json_new_object();
+    nm_json_set(o, "content", nm_json_new_string("a\"b"));
+    char *escaped = nm_json_dump(o);
+    ASSERT_NOT_NULL(escaped);
+    ASSERT_STR_EQ(escaped, "{\"content\":\"a\\\"b\"}");
+    free(escaped);
+    nm_json_free(o);
+
+    /* A raw node replaces the value slot wholesale: the caller's bytes
+     * are the value's serialization. */
+    NmJson *o2 = nm_json_new_object();
+    nm_json_set(o2, "content", nm_json_new_raw("\"a\\\"b\"", 6));
+    char *raw = nm_json_dump(o2);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_STR_EQ(raw, "{\"content\":\"a\\\"b\"}");
+    free(raw);
+    nm_json_free(o2);
+}
+
+/* Zero-length raw text is a legal (if useless) node: it dumps as
+ * nothing, never as a NULL dereference. */
+static void test_json_raw_node_empty(void)
+{
+    NmJson *arr = nm_json_new_array();
+    nm_json_push(arr, nm_json_new_raw("", 0));
+    nm_json_push(arr, nm_json_new_raw(NULL, 0));
+    char *d = nm_json_dump(arr);
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d, "[,]");
+    free(d);
+    nm_json_free(arr);
+}
+
+/* A raw node grafted into a built tree keeps its BORROWED text: the
+ * graft is by pointer (a heap-owned node is not cloned), so the
+ * document reads the caller's bytes at dump time — a copy would make
+ * the mutation below invisible. */
+static void test_json_raw_node_borrows_the_bytes(void)
+{
+    char json[16];
+    snprintf(json, sizeof(json), "{\"n\":1}");
+    NmJson *doc = nm_json_new_object();
+    nm_json_set(doc, "part", nm_json_new_raw(json, strlen(json)));
+    json[2] = 'm'; /* the caller's buffer is still the one dumped */
+    char *d = nm_json_dump(doc);
+    ASSERT_NOT_NULL(d);
+    ASSERT_STR_EQ(d, "{\"part\":{\"m\":1}}");
+    free(d);
+    nm_json_free(doc);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -689,5 +787,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_dump_number_text);
     RUN_TEST(test_json_dump_number_wire_roundtrip);
     RUN_TEST(test_json_number_locale_independent);
+    RUN_TEST(test_json_raw_node_verbatim);
+    RUN_TEST(test_json_raw_node_is_not_escaped);
+    RUN_TEST(test_json_raw_node_empty);
+    RUN_TEST(test_json_raw_node_borrows_the_bytes);
     TEST_SUMMARY();
 }

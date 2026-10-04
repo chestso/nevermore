@@ -23,7 +23,8 @@ typedef enum
     NM_JSON_NUMBER,
     NM_JSON_STRING,
     NM_JSON_ARRAY,
-    NM_JSON_OBJECT
+    NM_JSON_OBJECT,
+    NM_JSON_RAW /* pre-serialized JSON, embedded verbatim at dump */
 } NmJsonType;
 
 typedef struct NmJson NmJson;
@@ -63,6 +64,16 @@ NmJson *nm_json_new_string(const char *s);
 NmJson *nm_json_new_number(double d);
 NmJson *nm_json_new_bool(int b);
 NmJson *nm_json_new_null(void);
+/* A pre-serialized JSON value, embedded VERBATIM at dump time — no
+ * escaping, no copy, and no validation: the bytes are the caller's
+ * vouched-for JSON text. The pointer is BORROWED (the owner must
+ * outlive the document), which is what makes it worth having: a
+ * multi-megabyte image content part rides into the request body
+ * without a per-round copy. Its one user is the image_url content
+ * part, frozen at attach into the session's image store; base64's
+ * alphabet (A-Z a-z 0-9 + / =) is JSON-escape-free by construction,
+ * which is why verbatim is safe for it. */
+NmJson *nm_json_new_raw(const char *text, size_t len);
 void nm_json_set(NmJson *obj, const char *key, NmJson *v);
 void nm_json_push(NmJson *arr, NmJson *v);
 char *nm_json_dump(const NmJson *v);

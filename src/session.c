@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nm_image_bytes.h"
 #include "session.h"
 
 struct NmSession
@@ -19,7 +20,22 @@ struct NmSession
     size_t cap;
     const NmSessionMessage **view; /* reused context-view array */
     size_t view_cap;
+    /* The image store (VISION-PLAN §3): attached files, read once and
+     * frozen as data URLs. Grown geometrically — an attach is an event,
+     * not churn. Messages carry INDICES into this array. */
+    NmImage *images;
+    size_t n_images;
+    size_t image_cap;
 };
+
+/* Rough token estimate for one attached image. Real image tokenization
+ * is provider-side and pixel-based (the probed ballpark for a
+ * full-resolution tile set is ~1.2k tokens), so it cannot be derived
+ * from the byte count — the base64 length would overcount by orders of
+ * magnitude. A flat per-image allowance keeps the estimate in the right
+ * neighbourhood; the authoritative number is always the provider's
+ * prompt_tokens (the context gauge reads that, never this). */
+#define NM_SESSION_IMAGE_TOKEN_ESTIMATE 1200
 
 static char *dup_or_null(const char *s)
 {
@@ -70,7 +86,13 @@ void nm_session_free(NmSession *s)
         free(s->msgs[i].tool_call_id);
         free(s->msgs[i].tool_name);
         free(s->msgs[i].reasoning);
+        free(s->msgs[i].images);
     }
+    for (size_t i = 0; i < s->n_images; i++) {
+        free(s->images[i].data_url);
+        free(s->images[i].part_json);
+    }
+    free(s->images);
     free(s->msgs);
     free(s->view);
     free(s);
@@ -136,14 +158,233 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
     return m;
 }
 
-size_t nm_session_len(const NmSession *s) { return s ? s->n : 0; }
+/* ---------------------------------------------------------------- */
+/* Images (VISION-PLAN §3: capture, not reference)                   */
+/* ---------------------------------------------------------------- */
+
+static void attach_reason(char *reason, size_t cap, const char *msg)
+{
+    if (reason && cap)
+        snprintf(reason, cap, "%s", msg);
+}
+
+/* The last path component ("/a/b/foo.png" and "C:\a\foo.png" both give
+ * "foo.png") — the image's alt/marker text. Both separators are
+ * honoured whatever the host is: a Windows path can appear in a
+ * transcript read on POSIX. */
+static const char *base_name(const char *path)
+{
+    const char *b = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/' || *p == '\\')
+            b = p + 1;
+    }
+    return *b ? b : path;
+}
+
+/* The pre-serialized wire part for one image. Assembled by hand (not
+ * through nm_json) because the payload is the point: a megabyte of
+ * base64 must not be copied into a node and copied again on dump. The
+ * data URL is base64, whose alphabet is JSON-escape-free, so embedding
+ * it inside the JSON string is exact — that is the raw-node contract
+ * (json.h). */
+static char *build_part_json(const char *data_url, size_t url_len,
+                             size_t *out_len)
+{
+    static const char pre[] =
+        "{\"type\":\"image_url\",\"image_url\":{\"url\":\"";
+    static const char post[] = "\"}}";
+    size_t n = sizeof(pre) - 1 + url_len + sizeof(post) - 1;
+    char *p = malloc(n + 1);
+    if (!p)
+        return NULL;
+    size_t o = 0;
+    memcpy(p + o, pre, sizeof(pre) - 1);
+    o += sizeof(pre) - 1;
+    memcpy(p + o, data_url, url_len);
+    o += url_len;
+    memcpy(p + o, post, sizeof(post) - 1);
+    o += sizeof(post) - 1;
+    p[o] = '\0';
+    if (out_len)
+        *out_len = o;
+    return p;
+}
+
+static NmImage *image_slot(NmSession *s)
+{
+    if (s->n_images == s->image_cap) {
+        size_t ncap = s->image_cap ? s->image_cap * 2 : 4;
+        NmImage *ni = realloc(s->images, ncap * sizeof(*ni));
+        if (!ni)
+            return NULL;
+        memset(ni + s->image_cap, 0, (ncap - s->image_cap) * sizeof(*ni));
+        s->images = ni;
+        s->image_cap = ncap;
+    }
+    return &s->images[s->n_images++];
+}
+
+long nm_session_attach_image(NmSession *s, const char *path, char *reason,
+                             size_t reason_cap)
+{
+    attach_reason(reason, reason_cap, "");
+    if (!s || !path || !*path) {
+        attach_reason(reason, reason_cap, "no path");
+        return -1;
+    }
+    /* The wire cap is the attach cap: these bytes ride EVERY request
+     * (chat/completions has no upload endpoint), so refusing locally
+     * keeps the message ours instead of a provider 400. */
+    NmImageProbe p;
+    NmImageStatus st = nm_image_file_probe(path, NM_IMAGE_MAX_WIRE_BYTES, &p);
+    if (st != NM_IMAGE_OK) {
+        const char *msg;
+        switch (st) {
+        case NM_IMAGE_ERR_UNREADABLE:
+            msg = "source unreadable";
+            break;
+        case NM_IMAGE_ERR_EMPTY:
+            msg = "empty file";
+            break;
+        case NM_IMAGE_ERR_OVERSIZE:
+            msg = "too large";
+            break;
+        case NM_IMAGE_ERR_NOMEM:
+            msg = "no memory";
+            break;
+        case NM_IMAGE_ERR_UNKNOWN:
+        default:
+            msg = "unknown container";
+            break;
+        }
+        nm_image_probe_free(&p);
+        attach_reason(reason, reason_cap, msg);
+        return -1;
+    }
+
+    size_t url_len = 0;
+    char *url = nm_image_data_url(p.format, p.bytes, p.len, &url_len);
+    if (!url) {
+        nm_image_probe_free(&p);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    size_t part_len = 0;
+    char *part = build_part_json(url, url_len, &part_len);
+    if (!part) {
+        free(url);
+        nm_image_probe_free(&p);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+
+    NmImage *img = image_slot(s);
+    if (!img) {
+        free(url);
+        free(part);
+        nm_image_probe_free(&p);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    img->data_url = url;
+    img->data_url_len = url_len;
+    img->part_json = part;
+    img->part_json_len = part_len;
+    img->format = p.format;
+    img->w = p.w;
+    img->h = p.h;
+    img->bytes = p.len;
+    snprintf(img->alt, sizeof(img->alt), "%s", base_name(path));
+    nm_image_probe_free(&p);
+    return (long)(s->n_images - 1);
+}
+
+const NmImage *nm_session_image(const NmSession *s, size_t idx)
+{
+    return (s && idx < s->n_images) ? &s->images[idx] : NULL;
+}
+
+size_t nm_session_image_count(const NmSession *s)
+{
+    return s ? s->n_images : 0;
+}
+
+/* The deterministic text part for an image-only send: the alt names
+ * when they fit, else a count. Never empty, never absent — some
+ * upstreams dislike a textless user message, and the shape has to be
+ * frozen for the prefix cache anyway (VISION-PLAN §5). */
+static void fallback_text(const NmSession *s, const size_t *ids, size_t n,
+                          char *out, size_t cap)
+{
+    if (n == 1) {
+        const NmImage *img = nm_session_image(s, ids[0]);
+        snprintf(out, cap, "%s attached", img ? img->alt : "image");
+        return;
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        const NmImage *img = nm_session_image(s, ids[i]);
+        const char *name = img ? img->alt : "image";
+        size_t len = strlen(name);
+        /* ", " between names, " attached" at the end, NUL */
+        if (o + len + (i ? 2 : 0) + 10 > cap)
+            break;
+        if (i)
+            o += (size_t)snprintf(out + o, cap - o, ", ");
+        o += (size_t)snprintf(out + o, cap - o, "%s", name);
+    }
+    if (o == 0 || o + 10 > cap)
+        snprintf(out, cap, "%zu images attached", n);
+    else
+        snprintf(out + o, cap - o, " attached");
+}
+
+const NmSessionMessage *nm_session_append_user_images(NmSession *s,
+                                                      const char *text,
+                                                      const size_t *image_ids,
+                                                      size_t n_images)
+{
+    if (!s)
+        return NULL;
+    for (size_t i = 0; i < n_images; i++) {
+        if (image_ids[i] >= s->n_images)
+            return NULL; /* caller bug: an id that does not resolve */
+    }
+    char fallback[256];
+    if ((!text || !*text) && n_images > 0) {
+        fallback_text(s, image_ids, n_images, fallback, sizeof(fallback));
+        text = fallback;
+    }
+    size_t *ids = NULL;
+    if (n_images > 0) {
+        ids = malloc(n_images * sizeof(*ids));
+        if (!ids)
+            return NULL;
+        memcpy(ids, image_ids, n_images * sizeof(*ids));
+    }
+    NmSessionMessage *m = push_slot(s);
+    if (!m) {
+        free(ids);
+        return NULL;
+    }
+    m->role = NM_ROLE_USER;
+    m->content = dup_or_null(text);
+    m->images = ids;
+    m->n_images = n_images;
+    return m;
+}
 
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i)
 {
     return (s && i < s->n) ? &s->msgs[i] : NULL;
 }
 
-/* Rough token estimate: 4 chars per token (the quoth convention). */
+size_t nm_session_len(const NmSession *s) { return s ? s->n : 0; }
+
+/* Rough token estimate: 4 chars per token (the quoth convention), plus
+ * a flat allowance per attached image (its token cost is pixel-based
+ * and provider-side — see NM_SESSION_IMAGE_TOKEN_ESTIMATE). */
 static long est_tokens(const NmSessionMessage *m)
 {
     size_t chars = 0;
@@ -151,7 +392,8 @@ static long est_tokens(const NmSessionMessage *m)
         chars += strlen(m->content);
     if (m->tool_calls_json)
         chars += strlen(m->tool_calls_json);
-    return (long)((chars + 3) / 4) + 4; /* +4: per-message framing overhead */
+    return (long)((chars + 3) / 4) + 4 + /* +4: per-message framing */
+           (long)m->n_images * NM_SESSION_IMAGE_TOKEN_ESTIMATE;
 }
 
 NmContextView nm_session_context(const NmSession *s, long budget_tokens)

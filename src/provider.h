@@ -81,6 +81,26 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
+    /* Image content parts (VISION-PLAN §2): a user message that carries
+     * images serializes its `content` as a parts ARRAY — the text part
+     * first, then one image part per entry, in order. Each entry is
+     * pre-serialized JSON of the shape
+     *   {"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}
+     * built ONCE at attach and frozen in the session's image store, so
+     * the client embeds the bytes VERBATIM (nm_json_new_raw) and stays a
+     * dumb serializer. BORROWED: the owner must outlive the request.
+     *
+     * The parts are never re-derived: a prefix that gains, loses or
+     * re-encodes an image part is a different prefix, which would throw
+     * the provider's prompt cache away (and silently swap the image the
+     * conversation is about). n_images == 0 keeps `content` a plain
+     * string — the shape is decided at append and never flipped.
+     *
+     * Only user messages carry images: a `tool` message's content is a
+     * string by wire contract, and hyper silently DROPS images on one
+     * (the tool-result fan-out is the documented future seam). */
+    const char *const *image_parts;
+    size_t n_images;
     /* Assistant reasoning trace. When attached, the client serializes
      * it as "reasoning_content" on the message (the OpenAI-compatible
      * wire shape). Whether one is attached is the caller's decision —

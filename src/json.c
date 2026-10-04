@@ -14,8 +14,12 @@
  * whitespace may follow the value.
  *
  * The writer holds the other half of that contract: it never emits a
- * JSON text a strict reader (this one included) would reject. Raw
- * bytes that are not well-formed UTF-8 become U+FFFD (one replacement
+ * JSON text a strict reader (this one included) would reject — with
+ * one deliberate exception, the raw node (nm_json_new_raw): a
+ * caller-vouched-for pre-serialized value embedded verbatim, whose
+ * whole point is to skip the escape/copy of a large payload (the
+ * image content part). Raw bytes that are not well-formed UTF-8
+ * become U+FFFD (one replacement
  * per ill-formed maximal subpart), control characters are escaped, and
  * a non-finite double dumps as null — the writer has no error channel,
  * so it repairs rather than refuses. Numbers are emitted at maximum
@@ -154,6 +158,11 @@ struct NmJson
             size_t len;
             size_t cap;
         } arr;
+        struct
+        {
+            const char *text; /* BORROWED pre-serialized JSON */
+            size_t len;
+        } raw;
     } u;
     Arena arena; /* root node owns the chunk list for the whole tree */
 };
@@ -949,6 +958,20 @@ NmJson *nm_json_new_bool(int b)
     return v;
 }
 
+/* Pre-serialized JSON, embedded verbatim at dump time. The text is
+ * BORROWED: nothing is copied and nothing is escaped, so the owner
+ * must outlive the document (see json.h). free_built leaves the
+ * pointer alone for the same reason — the node owns only itself. */
+NmJson *nm_json_new_raw(const char *text, size_t len)
+{
+    NmJson *v = build_new(NM_JSON_RAW);
+    if (!v)
+        return NULL;
+    v->u.raw.text = text;
+    v->u.raw.len = len;
+    return v;
+}
+
 /* Writer nodes own individual mallocs (strings, keys, member/item
  * arrays), freed recursively by free_built() via nm_json_free. */
 
@@ -960,6 +983,8 @@ static void free_built(NmJson *v)
     case NM_JSON_STRING:
         free(v->u.string);
         break;
+    case NM_JSON_RAW:
+        break; /* the text is borrowed: the node owns only itself */
     case NM_JSON_OBJECT:
         for (size_t i = 0; i < v->u.obj.len; i++) {
             free(v->u.obj.members[i].key);
@@ -1261,6 +1286,12 @@ static void dump_value(DumpBuf *b, const NmJson *v)
         dump_string(b, s);
         break;
     }
+    case NM_JSON_RAW:
+        /* Verbatim: the caller's vouched-for JSON text, byte for byte.
+         * No escaping, no validation — that is the contract (json.h). */
+        if (v->u.raw.text && v->u.raw.len)
+            db_write(b, v->u.raw.text, v->u.raw.len);
+        break;
     case NM_JSON_ARRAY:
         db_putc(b, '[');
         for (size_t i = 0; i < v->u.arr.len; i++) {

@@ -34,7 +34,7 @@ tools/fake-ollama/fake_ollama.py --scenario prose --port 11434
 | `--port PORT` | bind port; default 11434 (nevermore's local-Ollama default)  |
 | `--host HOST` | bind address; default 127.0.0.1                              |
 | `--both`      | bind 127.0.0.1 **and** ::1 in one process                    |
-| `--scenario`  | `table-fence` (default) or `prose`                           |
+| `--scenario`  | `table-fence` (default), `prose`, or `image`                 |
 
 **Bind both stacks.** `localhost` resolves to `::1` first on some
 boxes; an IPv4-only bind then shows a "connection refused" that looks
@@ -48,6 +48,13 @@ like an app bug. `--both` avoids the whole class.
   in one turn.
 - **`prose`** — paragraphs and a list, for line-granular lookahead and
   loose-list behavior.
+- **`image`** — the vision smoke: a scenario with a wire CONTRACT, so
+  the server checks the request before answering. A user turn carrying
+  an image must send a content-parts array (text part first, then one
+  `image_url` part whose url is a `data:` URI, never `detail`); the
+  verdict is printed to the server's stderr and streamed back as the
+  first content delta, so the transcript shows whether the parts array
+  arrived intact. Pairs with the TUI's `/img` (or `-i` in ask mode).
 
 Deltas are split so markdown arrives incrementally (lines/rows land
 across separate SSE events), as a real stream would.
@@ -77,6 +84,23 @@ terminal emulator and is the screen truth.
 What to check: no staircase (bare LF), no duplicated lines, no stale
 spinner rows, reasoning before the answer, the table box aligned, the
 fence verbatim.
+
+The vision pass reuses the same recipe with the image scenario:
+
+```sh
+tools/fake-ollama/fake_ollama.py --both --scenario image --pace 0.6 &
+# ... start the TUI as above, then:
+tmux send-keys -t smoke "/img /path/to/pic.png" Enter
+tmux send-keys -t smoke "what is in this image?" Enter
+sleep 4
+tmux capture-pane -t smoke -p -S -40
+```
+
+The answer's first line is the server's verdict (`[fake-ollama] check
+ok: 1 image part(s), ...`), the echo above it is the IMAGE marker (the
+tmux pane is not a graphics terminal) or the image itself on a kitty
+terminal, and the resize/scrollback behavior is the same ladder IR
+step 5 already covers.
 
 ## Files
 

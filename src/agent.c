@@ -627,6 +627,35 @@ static int ensure_session(NmAgent *a)
     return a->session ? 0 : -1;
 }
 
+long nm_agent_attach_image(NmAgent *a, const char *path, char *reason,
+                           size_t reason_cap)
+{
+    if (!a) {
+        if (reason && reason_cap)
+            snprintf(reason, reason_cap, "no agent");
+        return -1;
+    }
+    /* Attaching is the first thing a chat can do (the TUI's /img runs
+     * before any submit), so the session — which owns the image store —
+     * is built on demand here exactly as it is on the first turn. */
+    if (ensure_session(a) != 0) {
+        if (reason && reason_cap)
+            snprintf(reason, reason_cap, "out of memory");
+        return -1;
+    }
+    return nm_session_attach_image(a->session, path, reason, reason_cap);
+}
+
+const NmImage *nm_agent_image(const NmAgent *a, size_t id)
+{
+    return a ? nm_session_image(a->session, id) : NULL;
+}
+
+size_t nm_agent_image_count(const NmAgent *a)
+{
+    return a ? nm_session_image_count(a->session) : 0;
+}
+
 /* Reset the per-round accumulation (start of each round). */
 static void round_reset(NmAgent *a)
 {
@@ -700,6 +729,29 @@ static int begin_round(NmAgent *a)
         set_error(a, "out of memory");
         return -1;
     }
+    /* Image parts, in one flat array for the whole round: every entry
+     * borrows the session's frozen part JSON, and each message points at
+     * its slice. One allocation per round (never per token), and no
+     * copy of the payload — that is what the raw node and this array
+     * exist for. */
+    size_t total_parts = 0;
+    for (size_t i = 0; i < view.n; i++) {
+        const NmSessionMessage *sm = view.messages[i];
+        for (size_t k = 0; k < sm->n_images; k++) {
+            if (nm_session_image(a->session, sm->images[k]))
+                total_parts++;
+        }
+    }
+    const char **parts = NULL;
+    if (total_parts) {
+        parts = malloc(total_parts * sizeof(*parts));
+        if (!parts) {
+            free(msgs);
+            set_error(a, "out of memory");
+            return -1;
+        }
+    }
+    size_t pi = 0;
     /* The echo mode this request will use — the store's value, or the
      * mode frozen by an earlier request (nm_agent_reasoning_echo). Each
      * message attaches its trace only when the mode says so; whether
@@ -715,6 +767,30 @@ static int begin_round(NmAgent *a)
         msgs[i].content = sm->content;
         msgs[i].tool_calls_json = sm->tool_calls_json;
         msgs[i].tool_call_id = sm->tool_call_id;
+        /* The user turn's images: the composer turns a non-empty list
+         * into a content-parts array, so the message's shape (string vs
+         * array) follows from what the session froze at append — never
+         * from a decision here. An id that does not resolve (impossible
+         * today: the store only grows) is left out of the slice rather
+         * than emitted as a null part, which keeps the body valid. */
+        msgs[i].image_parts = NULL;
+        msgs[i].n_images = 0;
+        if (sm->n_images && parts) {
+            const char *const *slice = &parts[pi];
+            size_t n = 0;
+            for (size_t k = 0; k < sm->n_images; k++) {
+                const NmImage *img =
+                    nm_session_image(a->session, sm->images[k]);
+                if (img) {
+                    parts[pi++] = img->part_json;
+                    n++;
+                }
+            }
+            if (n) {
+                msgs[i].image_parts = slice;
+                msgs[i].n_images = n;
+            }
+        }
         /* Reasoning echo-back: the session keeps every trace for
          * display either way — the mode decides which ones ride back.
          * A tool-call round is where the upstream replay check
@@ -762,6 +838,7 @@ static int begin_round(NmAgent *a)
         a->provider->chat_begin(a->provider, &req, a->base_url, a->api_key,
                                 &err);
     free(msgs);
+    free(parts);
     if (!a->stream) {
         char msg[NM_CHAT_MSG_MAX + 64];
         chat_failure(a, &err, msg, sizeof(msg));
@@ -962,7 +1039,8 @@ static int tool_step(NmAgent *a)
 /* Step API                                                          */
 /* ---------------------------------------------------------------- */
 
-int nm_agent_start(NmAgent *a, const char *user_input)
+int nm_agent_start(NmAgent *a, const char *user_input,
+                   const size_t *image_ids, size_t n_images)
 {
     if (!a || !a->provider || !user_input)
         return -1;
@@ -974,7 +1052,19 @@ int nm_agent_start(NmAgent *a, const char *user_input)
         return -1;
     }
 
-    nm_session_append(a->session, NM_ROLE_USER, user_input);
+    /* The user message owns this turn's images (ids into the session's
+     * store; the bytes stay there for the rest of the conversation). The
+     * session builds the deterministic text part when the input is empty
+     * but images are pending — the wire shape is frozen either way. */
+    if (n_images > 0) {
+        if (!nm_session_append_user_images(a->session, user_input, image_ids,
+                                           n_images)) {
+            set_error(a, "could not attach the turn's images");
+            return -1;
+        }
+    } else {
+        nm_session_append(a->session, NM_ROLE_USER, user_input);
+    }
     a->round = 0;
     return begin_round(a);
 }
@@ -1109,9 +1199,10 @@ void nm_agent_cancel(NmAgent *a)
 /* Blocking turn (ask mode): start + pump                            */
 /* ---------------------------------------------------------------- */
 
-int nm_agent_turn(NmAgent *a, const char *user_input)
+int nm_agent_turn(NmAgent *a, const char *user_input,
+                  const size_t *image_ids, size_t n_images)
 {
-    if (nm_agent_start(a, user_input) != 0)
+    if (nm_agent_start(a, user_input, image_ids, n_images) != 0)
         return -1;
 
     /* Pump: step until the turn leaves the busy states. PENDING steps

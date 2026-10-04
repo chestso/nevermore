@@ -191,7 +191,7 @@ static void test_measure_data_uri_png_kitty(void)
     m_profile(&m, 1, 0, 10, 20);
     ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
     ASSERT_EQ(m.rs.img.len, sizeof(FIX_PNG));
-    ASSERT_EQ(m.rs.img.format, TUI_IMAGE_PNG);
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_PNG);
     ASSERT_EQ(m.rs.img.w, 64);
     ASSERT_EQ(m.rs.img.h, 32);
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
@@ -228,7 +228,7 @@ static void test_measure_format_tier_matrix(void)
     /* iTerm2 + GIF */
     m_profile(&m, 0, 1, 10, 20);
     ASSERT_TRUE(measure_src(&m, FIX_GIF_URI));
-    ASSERT_EQ(m.rs.img.format, TUI_IMAGE_GIF);
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_GIF);
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
 
     /* kitty alone + GIF: PNG-only */
@@ -589,6 +589,232 @@ static void test_integration_live_placeholder_not_payload(void)
 }
 
 /* ---------------------------------------------------------------- */
+/* The byte half (src/nm_image_bytes.c): base64, data URLs, sniffing, */
+/* the file probe. Pure C — no boba on this path, which is the point  */
+/* (session.c links it too).                                          */
+/* ---------------------------------------------------------------- */
+
+static void test_bytes_sniff_formats(void)
+{
+    int w = 0, h = 0;
+
+    ASSERT_EQ(nm_image_sniff(FIX_PNG, sizeof(FIX_PNG), &w, &h),
+              NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+
+    ASSERT_EQ(nm_image_sniff(FIX_JPEG, sizeof(FIX_JPEG), &w, &h),
+              NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+
+    ASSERT_EQ(nm_image_sniff(FIX_GIF, sizeof(FIX_GIF), &w, &h),
+              NM_IMAGE_FMT_GIF);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+
+    /* not a container we know: unknown, dims untouched */
+    static const unsigned char junk[] = "plain text, not an image at all";
+    w = 7;
+    h = 9;
+    ASSERT_EQ(nm_image_sniff(junk, sizeof(junk) - 1, &w, &h),
+              NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(w, 7);
+    ASSERT_EQ(h, 9);
+}
+
+static void test_bytes_format_names_and_mime(void)
+{
+    ASSERT_STR_EQ(nm_image_format_name(NM_IMAGE_FMT_PNG), "PNG");
+    ASSERT_STR_EQ(nm_image_format_name(NM_IMAGE_FMT_JPEG), "JPEG");
+    ASSERT_STR_EQ(nm_image_format_name(NM_IMAGE_FMT_GIF), "GIF");
+    ASSERT_STR_EQ(nm_image_format_name(NM_IMAGE_FMT_UNKNOWN), "image");
+
+    ASSERT_STR_EQ(nm_image_format_mime(NM_IMAGE_FMT_PNG), "image/png");
+    ASSERT_STR_EQ(nm_image_format_mime(NM_IMAGE_FMT_JPEG), "image/jpeg");
+    ASSERT_STR_EQ(nm_image_format_mime(NM_IMAGE_FMT_GIF), "image/gif");
+    ASSERT_NULL(nm_image_format_mime(NM_IMAGE_FMT_UNKNOWN));
+
+    ASSERT_EQ(nm_image_format_from_mime("image/png", 9), NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(nm_image_format_from_mime("image/jpeg", 10), NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(nm_image_format_from_mime("image/gif", 9), NM_IMAGE_FMT_GIF);
+    ASSERT_EQ(nm_image_format_from_mime("text/plain", 10),
+              NM_IMAGE_FMT_UNKNOWN);
+    /* the length is part of the match: a prefix is not the type */
+    ASSERT_EQ(nm_image_format_from_mime("image/png;charset=x", 9),
+              NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(nm_image_format_from_mime("image/pn", 8), NM_IMAGE_FMT_UNKNOWN);
+}
+
+/* Encode → decode is the identity, and the encoder's output is the
+ * standard alphabet with '=' padding (the data-URL contract). */
+static void test_bytes_b64_roundtrip(void)
+{
+    static const struct
+    {
+        const char *in;
+        const char *want;
+    } cases[] = {
+        { "", "" },
+        { "f", "Zg==" },
+        { "fo", "Zm8=" },
+        { "foo", "Zm9v" },
+        { "foob", "Zm9vYg==" },
+        { "fooba", "Zm9vYmE=" },
+        { "foobar", "Zm9vYmFy" },
+        /* every alphabet edge: '+', '/', and the 62/63 values */
+        { "\xfb\xff\xfe", "+//+" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        size_t n = strlen(cases[i].in);
+        size_t enc_len = 0;
+        char *enc = nm_image_b64_encode((const unsigned char *)cases[i].in, n,
+                                        &enc_len);
+        ASSERT_NOT_NULL(enc);
+        ASSERT_STR_EQ(enc, cases[i].want);
+        ASSERT_EQ(enc_len, strlen(cases[i].want));
+
+        unsigned char back[32];
+        long dn = nm_image_b64_decode(enc, enc_len, back, sizeof(back));
+        ASSERT_EQ((size_t)dn, n);
+        ASSERT_TRUE(memcmp(back, cases[i].in, n) == 0);
+        free(enc);
+    }
+
+    /* the encoder handles bytes a string literal cannot carry */
+    static const unsigned char raw[] = { 0x00, 0x01, 0xFF, 0x80 };
+    size_t enc_len = 0;
+    char *enc = nm_image_b64_encode(raw, sizeof(raw), &enc_len);
+    ASSERT_NOT_NULL(enc);
+    ASSERT_STR_EQ(enc, "AAH/gA==");
+    free(enc);
+
+    /* malformed input is refused, never half-decoded */
+    unsigned char dst[16];
+    ASSERT_EQ(nm_image_b64_decode("iVB", 3, dst, sizeof(dst)), -1);  /* len%4 */
+    ASSERT_EQ(nm_image_b64_decode("iVB?", 4, dst, sizeof(dst)), -1); /* alpha */
+    ASSERT_EQ(nm_image_b64_decode("iV=O", 4, dst, sizeof(dst)), -1); /* pad */
+    ASSERT_EQ(nm_image_b64_decode("AAAA====", 8, dst, sizeof(dst)), -1);
+    /* too small a destination is refused, not overflowed */
+    ASSERT_EQ(nm_image_b64_decode("Zm9vYmFy", 8, dst, 2), -1);
+}
+
+static void test_bytes_data_url(void)
+{
+    size_t url_len = 0;
+    char *url = nm_image_data_url(NM_IMAGE_FMT_PNG, FIX_PNG, sizeof(FIX_PNG),
+                                  &url_len);
+    ASSERT_NOT_NULL(url);
+    ASSERT_EQ(url_len, strlen(url));
+    ASSERT_TRUE(strncmp(url, "data:image/png;base64,", 22) == 0);
+    /* the payload round-trips back to the exact bytes: the data URL IS
+     * the canonical image representation (attach stores this string) */
+    const char *payload = url + 22;
+    unsigned char back[64];
+    long n = nm_image_b64_decode(payload, strlen(payload), back, sizeof(back));
+    ASSERT_EQ((long)sizeof(FIX_PNG), n);
+    ASSERT_TRUE(memcmp(back, FIX_PNG, sizeof(FIX_PNG)) == 0);
+    free(url);
+
+    /* an unknown container has no MIME type, so it has no data URL */
+    ASSERT_NULL(nm_image_data_url(NM_IMAGE_FMT_UNKNOWN, FIX_PNG,
+                                  sizeof(FIX_PNG), NULL));
+}
+
+/* Write a byte blob to a scratch file in the cwd (the suite's usual
+ * temp-file shape: build/tests is the working directory). */
+static void probe_write_file(const char *name, const void *bytes, size_t len)
+{
+    FILE *f = fopen(name, "wb");
+    if (!f)
+        return;
+    if (len)
+        fwrite(bytes, 1, len, f);
+    fclose(f);
+}
+
+static void test_bytes_file_probe(void)
+{
+    char png[128], jpg[128], gif[128], txt[128], empty[128];
+    snprintf(png, sizeof(png), "nm_probe_%ld.png", (long)getpid());
+    snprintf(jpg, sizeof(jpg), "nm_probe_%ld.jpg", (long)getpid());
+    snprintf(gif, sizeof(gif), "nm_probe_%ld.gif", (long)getpid());
+    snprintf(txt, sizeof(txt), "nm_probe_%ld.txt", (long)getpid());
+    snprintf(empty, sizeof(empty), "nm_probe_%ld.empty", (long)getpid());
+    probe_write_file(png, FIX_PNG, sizeof(FIX_PNG));
+    probe_write_file(jpg, FIX_JPEG, sizeof(FIX_JPEG));
+    probe_write_file(gif, FIX_GIF, sizeof(FIX_GIF));
+    probe_write_file(txt, "not an image", 12);
+    probe_write_file(empty, NULL, 0);
+
+    NmImageProbe p;
+
+    /* a readable container: bytes + format + dims, under the cap */
+    ASSERT_EQ(nm_image_file_probe(png, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_OK);
+    ASSERT_EQ(p.len, sizeof(FIX_PNG));
+    ASSERT_EQ(p.file_bytes, sizeof(FIX_PNG));
+    ASSERT_EQ(p.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(p.w, 64);
+    ASSERT_EQ(p.h, 32);
+    ASSERT_TRUE(memcmp(p.bytes, FIX_PNG, sizeof(FIX_PNG)) == 0);
+    nm_image_probe_free(&p);
+    ASSERT_NULL(p.bytes);
+
+    ASSERT_EQ(nm_image_file_probe(jpg, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_OK);
+    ASSERT_EQ(p.format, NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(p.w, 64);
+    ASSERT_EQ(p.h, 32);
+    nm_image_probe_free(&p);
+
+    ASSERT_EQ(nm_image_file_probe(gif, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_OK);
+    ASSERT_EQ(p.format, NM_IMAGE_FMT_GIF);
+    nm_image_probe_free(&p);
+
+    /* not a container: the bytes were read, but the format is unknown */
+    ASSERT_EQ(nm_image_file_probe(txt, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_ERR_UNKNOWN);
+    ASSERT_EQ(p.format, NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(p.len, 12u);
+    nm_image_probe_free(&p);
+
+    /* an empty file has no bytes at all */
+    ASSERT_EQ(nm_image_file_probe(empty, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_ERR_EMPTY);
+    nm_image_probe_free(&p);
+
+    /* missing file: unreadable, no bytes */
+    ASSERT_EQ(nm_image_file_probe("/nonexistent-dir/nm_probe.png",
+                                  NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_ERR_UNREADABLE);
+    ASSERT_NULL(p.bytes);
+    nm_image_probe_free(&p);
+
+    /* over the caller's cap: the HEAD is still held, so the marker can
+     * name the container and dims (this is the display path's case) */
+    ASSERT_EQ(nm_image_file_probe(png, 16, &p), NM_IMAGE_ERR_OVERSIZE);
+    ASSERT_EQ(p.file_bytes, sizeof(FIX_PNG));
+    ASSERT_EQ(p.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(p.w, 64);
+    ASSERT_EQ(p.h, 32);
+    nm_image_probe_free(&p);
+
+    /* the two caps are different facts: an image over the DISPLAY cap
+     * is still a valid wire payload (and vice versa) */
+    ASSERT_TRUE(NM_IMAGE_MAX_WIRE_BYTES > NM_IMAGE_MAX_BYTES);
+    ASSERT_EQ(nm_image_file_probe(png, NM_IMAGE_MAX_BYTES, &p), NM_IMAGE_OK);
+    nm_image_probe_free(&p);
+
+    unlink(png);
+    unlink(jpg);
+    unlink(gif);
+    unlink(txt);
+    unlink(empty);
+}
+
+/* ---------------------------------------------------------------- */
 /* main                                                              */
 /* ---------------------------------------------------------------- */
 
@@ -602,6 +828,11 @@ int main(void)
     RUN_TEST(test_measure_oversize_degrades_before_decode);
     RUN_TEST(test_measure_local_file);
     RUN_TEST(test_slot_reuse_grows_once);
+    RUN_TEST(test_bytes_sniff_formats);
+    RUN_TEST(test_bytes_format_names_and_mime);
+    RUN_TEST(test_bytes_b64_roundtrip);
+    RUN_TEST(test_bytes_data_url);
+    RUN_TEST(test_bytes_file_probe);
     RUN_TEST(test_integration_kitty_commits_apc);
     RUN_TEST(test_integration_dumb_terminal_gets_marker);
     RUN_TEST(test_integration_remote_url_marker);

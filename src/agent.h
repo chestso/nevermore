@@ -13,6 +13,7 @@
 
 #include "nm_config.h"
 #include "provider.h"
+#include "session.h"
 #include "tools.h"
 
 #ifdef __cplusplus
@@ -232,12 +233,14 @@ void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
 /* Run one user turn to completion: the full
  * stream -> tool-call -> execute -> stream cycle. Blocking; UI
  * callbacks fire from inside. Returns 0 on success. */
-int nm_agent_turn(NmAgent *a, const char *user_input);
+int nm_agent_turn(NmAgent *a, const char *user_input,
+                  const size_t *image_ids, size_t n_images);
 
 /* Event-driven split of nm_agent_turn (phase 4; boba owns the loop):
  *
- *   nm_agent_start(a, input)   append the user message, open the
- *                              round-1 stream (blocking connect+send)
+ *   nm_agent_start(a, input, ids, n)  append the user message (with its
+ *                              images, if any), open the round-1 stream
+ *                              (blocking connect+send)
  *   src = nm_agent_source(a)   the active source (object + interest +
  *                              kind), for the event loop's wait set;
  *                              handle -1 when idle
@@ -252,9 +255,34 @@ int nm_agent_turn(NmAgent *a, const char *user_input);
  *                              tears the stream down, state IDLE
  *
  * nm_agent_turn is start + a step pump over this seam; both drives
- * share one implementation. */
-int nm_agent_start(NmAgent *a, const char *user_input);
+ * share one implementation.
+ *
+ * image_ids are handles from nm_agent_attach_image (indices into the
+ * session's image store); the ids are consumed by THIS turn's user
+ * message — the store keeps the bytes for the rest of the
+ * conversation. n_images == 0 (ids may be NULL) is a plain text turn. */
+int nm_agent_start(NmAgent *a, const char *user_input,
+                   const size_t *image_ids, size_t n_images);
 int nm_agent_step(NmAgent *a);
+
+/* Attach a file to the conversation (VISION-PLAN §3: the bytes are read
+ * ONCE here and frozen into the session's image store — later rounds
+ * never re-read the file, so the conversation keeps the image it was
+ * told about and the provider's prefix cache keeps matching). Creates
+ * the session on demand. Returns the image id to hand to
+ * nm_agent_start/nm_agent_turn, or -1 with `reason` filled (a short
+ * user-visible phrase). */
+long nm_agent_attach_image(NmAgent *a, const char *path, char *reason,
+                           size_t reason_cap);
+
+/* Attached image's captured facts (see nm_agent_image). The count is
+ * what the /model warning needs (a text-only model on a conversation
+ * that already carries images). */
+size_t nm_agent_image_count(const NmAgent *a);
+
+/* The attached image's captured facts (alt name, format, dims, byte
+ * count) for the UI's attach line, or NULL when the id is unknown. */
+const NmImage *nm_agent_image(const NmAgent *a, size_t id);
 
 /* What the agent is waiting on right now: the active async tool's
  * source while a tool runs, else the open stream's socket.  `flags` is

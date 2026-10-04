@@ -53,6 +53,13 @@ CATALOG = {
 # content. The markdown pieces are split across deltas so the classifier
 # sees lines/rows arrive incrementally, as a real stream would.
 SCENARIOS = {
+    "image": [
+        {"content": "I can see the attached image.\n\n"},
+        {
+            "content": "It is a 64x32 test pattern, and the parts array "
+            "arrived intact.\n\n"
+        },
+    ],
     "table-fence": [
         {"reasoning": "Let me line up the regions and check the counts.\n"},
         {"reasoning": "The table needs a numeric column, so 2025 it is.\n"},
@@ -86,10 +93,48 @@ def chunk(delta):
     return {"choices": [{"delta": delta, "index": 0}]}
 
 
+# Server-side request checks, one per scenario that has a wire contract
+# to verify (VISION-PLAN section 2's parts array is the first). A check
+# takes the raw request body and returns (problems, summary): an empty
+# problems list means the request was shaped the way the scenario
+# expects. The verdict rides back as the first content delta, so a
+# manual smoke shows it in the transcript itself.
+def check_image_request(raw):
+    """A user turn carrying an image must send a content-PARTS array:
+    the text part first, then one image_url part whose url is a data:
+    URI, and never a `detail` field."""
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return ([f"request body is not JSON: {e}"], "")
+    msgs = doc.get("messages") or []
+    user = [m for m in msgs if m.get("role") == "user"]
+    if not user:
+        return (["no user message"], "")
+    content = user[-1].get("content")
+    if not isinstance(content, list):
+        return ([f"user content is {type(content).__name__}, not a parts array"], "")
+    if not content or content[0].get("type") != "text":
+        return (["the text part is not first"], "")
+    imgs = [p for p in content if p.get("type") == "image_url"]
+    if not imgs:
+        return (["no image_url part"], "")
+    if "detail" in imgs[0]:
+        return (["detail must not be emitted"], "")
+    url = (imgs[0].get("image_url") or {}).get("url", "")
+    if not url.startswith("data:image/"):
+        return ([f"image url is not a data URI: {url[:32]!r}"], "")
+    return ([], f"{len(imgs)} image part(s), {len(url)}-byte data URL")
+
+
+SCENARIO_CHECKS = {"image": check_image_request}
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     pace = 0.15
     deltas = SCENARIOS["table-fence"]
+    scenario = "table-fence"
 
     def log_message(self, *a):
         pass
@@ -107,17 +152,28 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         clen = int(self.headers.get("Content-Length", "0") or 0)
-        if clen:
-            self.rfile.read(clen)
+        body = self.rfile.read(clen) if clen else b""
         if not self.path.startswith("/v1/chat/completions"):
             self.send_error(404)
             return
+        # A scenario with a wire contract checks the request before it
+        # answers, and says so in the stream's first delta.
+        deltas = self.deltas
+        check = SCENARIO_CHECKS.get(self.scenario)
+        if check:
+            problems, summary = check(body)
+            if problems:
+                note = "[fake-ollama] CHECK FAILED: " + "; ".join(problems)
+            else:
+                note = "[fake-ollama] check ok: " + summary
+            print(f"fake-ollama: {note}", file=sys.stderr, flush=True)
+            deltas = [{"content": note + "\n\n"}] + list(deltas)
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
-        for i, d in enumerate(self.deltas):
+        for i, d in enumerate(deltas):
             if i:
                 time.sleep(self.pace)
             try:
@@ -160,6 +216,7 @@ def main():
 
     Handler.pace = args.pace
     Handler.deltas = SCENARIOS[args.scenario]
+    Handler.scenario = args.scenario
 
     bound = []
     if args.both:

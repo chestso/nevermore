@@ -27,11 +27,15 @@
 
 #include <boba/stream.h>
 
+#include "nm_image_bytes.h"
+
 /* Policy cap on a decoded payload: images larger than this degrade
  * to their marker ("too large"). A memory bound, not correctness —
  * it also bounds the transient base64 copy boba's staging carries
  * after the profile resolves. Not a config key (D13): the
- * degradation ladder is the switch, dumb terminals see markers. */
+ * degradation ladder is the switch, dumb terminals see markers. The
+ * WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, nm_image_bytes.h) is a different
+ * fact and the two are allowed to disagree. */
 #define NM_IMAGE_MAX_BYTES (1024 * 1024)
 
 /* The one-slot image state. Owned by the app's render state; zeroing
@@ -44,7 +48,8 @@ typedef struct NmImageSlot
     size_t cap;               /* allocation size of data                      */
     size_t len;               /* decoded byte count                           */
     int w, h;                 /* source pixels (0 = unknown)                  */
-    int format;               /* TuiImageFormat (TUI_IMAGE_PNG/...)           */
+    int format;               /* NmImageFormat (nm_image_bytes.h); boba's
+                               * TuiImageFormat appears only at the spec */
     int transport;            /* TuiImageTransport, -1 = degrade            */
     int disp_cols, disp_rows; /* the committed display size (cells) */
     char reason[48];          /* degradation reason (empty = rendered)     */
@@ -78,8 +83,10 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
                      int col_span, int rows, TuiRowSink *sink,
                      void *user_data);
 
-/* The container's short name for markers ("PNG" / "JPEG" / "GIF");
- * "image" for unknown. */
-const char *nm_image_format_name(int format);
+/* The container's short name for markers ("PNG" / "JPEG" / "GIF";
+ * "image" for unknown) lives in nm_image_bytes.h, with the sniffer
+ * that decides it — re-exported through this header's include so the
+ * renderer pair (nm_markdown_render.c) reads it from the slot's
+ * vocabulary. */
 
 #endif /* NM_IMAGE_H */

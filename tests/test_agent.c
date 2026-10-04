@@ -28,6 +28,7 @@
 
 #include "agent.h"
 #include "nm_config.h"
+#include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "transport.h"
 #include "provider.h"
@@ -451,7 +452,7 @@ static void test_agent_tool_round_then_answer(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "change quick to slow in the fixture");
+    int rc = nm_agent_turn(agent, "change quick to slow in the fixture", NULL, 0);
 
     /* The turn completes with a final answer. */
     ASSERT_EQ(rc, 0);
@@ -512,7 +513,7 @@ static void test_agent_plain_answer_no_tools(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "say something");
+    int rc = nm_agent_turn(agent, "say something", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "just an answer");
@@ -600,7 +601,7 @@ static void test_agent_connect_notice_names_the_family(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_notice(agent, cap_notice);
 
-    int rc = nm_agent_turn(agent, "say something");
+    int rc = nm_agent_turn(agent, "say something", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(g_text, "walked");
 
@@ -682,7 +683,7 @@ static void test_agent_system_message_carries_agents_md(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "what is the rule?");
+    int rc = nm_agent_turn(agent, "what is the rule?", NULL, 0);
     /* Restore best-effort (glibc's chdir is warn_unused_result; the
      * cwd was valid a moment ago, and a test has nothing to do about a
      * failure here anyway). Consume the result into a sink — a (void)
@@ -746,7 +747,7 @@ static void test_agent_unknown_tool_reports_error_result(void)
 
     /* The unknown tool becomes an error result the model can adapt
      * to; the loop continues and the second round answers. */
-    int rc = nm_agent_turn(agent, "call a bogus tool");
+    int rc = nm_agent_turn(agent, "call a bogus tool", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(g_text, "recovered");
     ASSERT_EQ(g_tool_starts, 1);
@@ -858,7 +859,7 @@ static void test_agent_step_driven_full_loop(void)
 
     /* Start: no fd before, an fd while the first round streams. */
     ASSERT_EQ(agent_fd(agent), -1);
-    ASSERT_EQ(nm_agent_start(agent, "change quick to slow"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "change quick to slow", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_STREAMING);
     ASSERT_TRUE(agent_fd(agent) >= 0);
 
@@ -929,7 +930,7 @@ static void test_agent_announces_each_tool_as_it_runs(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_start(agent, "look around"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "look around", NULL, 0), 0);
     ASSERT_EQ(agent_drive(agent, 2000), 0);
 
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -988,7 +989,7 @@ static void test_agent_run_command_is_async(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_start(agent, "poke the shell"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "poke the shell", NULL, 0), 0);
 
     /* Drive the stream round until the tool phase begins (the round's
      * final step announces the call and sets RUNNING_TOOL). */
@@ -1067,7 +1068,7 @@ static void test_agent_turn_runs_async_command(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "poke the shell"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "poke the shell", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "done");
     ASSERT_STR_EQ(g_tool_seq, "SE");
@@ -1123,7 +1124,7 @@ static void test_agent_exec_command_yields_job(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_start(agent, "start the server"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "start the server", NULL, 0), 0);
 
     /* The agent declares the yield deadline while the child is silent —
      * that is what lets the runtime's tick close the window. */
@@ -1229,7 +1230,7 @@ static void test_agent_reasoning_collected_and_echoed(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
 
-    int rc = nm_agent_turn(agent, "read the fixture");
+    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all done"); /* answer only */
@@ -1301,7 +1302,7 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF); /* default */
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
-    int rc = nm_agent_turn(agent, "read the fixture");
+    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
@@ -1379,9 +1380,9 @@ static void test_agent_reasoning_echo_tools_scope(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first question"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "first question", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
     ASSERT_EQ(g_n_requests, 3);
@@ -1463,7 +1464,7 @@ static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture twice"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture twice", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all done");
 
@@ -1535,7 +1536,7 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
     nm_agent_on_state(agent, cap_state);
 
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
-    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     /* Request 1 had no history to replay, so no trace went out. */
     ASSERT_TRUE(strstr(g_requests[0], "reasoning_content") == NULL);
@@ -1544,7 +1545,7 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
     /* Off now — and it applies: nothing on the wire is pinned yet. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
-    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
     ASSERT_TRUE(strstr(g_requests[1], "answer one") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
     ASSERT_TRUE(strstr(g_requests[1], "trace one") == NULL);
@@ -1554,7 +1555,7 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
      * is not latched; `tools` simply has no eligible message yet. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
-    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_TRUE(strstr(g_requests[2], "answer two") != NULL);
     ASSERT_TRUE(strstr(g_requests[2], "reasoning_content") == NULL);
@@ -1618,11 +1619,11 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
     nm_agent_on_state(agent, cap_state);
 
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
-    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
 
     /* Turn 2 replays turn 1's trace: the mode freezes here. */
-    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
     ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "trace one") != NULL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
@@ -1631,7 +1632,7 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
      * prefix — the frozen mode is what the next request uses. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"), 0);
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
-    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_TRUE(strstr(g_requests[2], "trace one") != NULL);
     ASSERT_TRUE(strstr(g_requests[2], "trace two") != NULL);
@@ -1692,7 +1693,7 @@ static void test_agent_cancel_then_next_turn_works(void)
 
     /* Turn 1: start, confirm the stream is open, cancel mid-stream.
      * The server thread's round-1 accept() gets the teardown. */
-    ASSERT_EQ(nm_agent_start(agent, "first, get cancelled"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "first, get cancelled", NULL, 0), 0);
     ASSERT_TRUE(agent_fd(agent) >= 0);
     nm_agent_cancel(agent);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
@@ -1700,7 +1701,7 @@ static void test_agent_cancel_then_next_turn_works(void)
     ASSERT_EQ(g_tool_starts, 0);
 
     /* Turn 2 on the same agent + session: full tool loop works. */
-    ASSERT_EQ(nm_agent_start(agent, "change quick to fast"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "change quick to fast", NULL, 0), 0);
     ASSERT_EQ(agent_drive(agent, 2000), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
@@ -1814,7 +1815,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
     /* Turn 1: stream round 1 to the tool phase (the assistant
      * tool_calls message is now in the session). */
-    ASSERT_EQ(nm_agent_start(agent, "hang for a while"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "hang for a while", NULL, 0), 0);
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
         int fd = agent_fd(agent);
@@ -1842,7 +1843,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
     /* Turn 2 on the same session: the request must be well-formed —
      * the cancelled call has a tool reply. */
-    ASSERT_EQ(nm_agent_start(agent, "carry on"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
     ASSERT_EQ(agent_drive(agent, 2000), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
@@ -1931,7 +1932,7 @@ static void test_agent_error_message_is_informative(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "hello");
+    int rc = nm_agent_turn(agent, "hello", NULL, 0);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -1988,7 +1989,7 @@ static void test_agent_context_usage_accessors(void)
     nm_agent_set_context_limit(agent, 128000);
     ASSERT_EQ(nm_agent_context_limit(agent), 128000);
 
-    int rc = nm_agent_turn(agent, "hi");
+    int rc = nm_agent_turn(agent, "hi", NULL, 0);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
@@ -2038,10 +2039,10 @@ static void test_agent_context_usage_survives_null_usage_round(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
 
-    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
     /* Still turn 1's report: a placeholder is not a report. */
     ASSERT_TRUE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
@@ -2115,13 +2116,13 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), -1);
     ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), -1);
 
-    ASSERT_EQ(nm_agent_turn(agent, "one"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
     ASSERT_EQ(nm_agent_session_rounds(agent), 1);
     ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936);
     ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 0);
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936);
 
-    ASSERT_EQ(nm_agent_turn(agent, "two"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
     ASSERT_EQ(nm_agent_session_rounds(agent), 2);
     ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936 + 11322);
     ASSERT_EQ(nm_agent_session_output_tokens(agent), 153 + 164);
@@ -2129,7 +2130,7 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936 + 11322);
     ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), 2048);
 
-    ASSERT_EQ(nm_agent_turn(agent, "three"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
     ASSERT_EQ(nm_agent_session_rounds(agent), 3);
     /* Input/output grew; the cache operands did NOT (round 3 omitted the
      * key — excluded from the rate, not counted as a miss). */
@@ -2204,7 +2205,7 @@ static void test_agent_context_overflow_reports_provider_error(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "a very long conversation");
+    int rc = nm_agent_turn(agent, "a very long conversation", NULL, 0);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
 
@@ -2249,7 +2250,7 @@ static void test_agent_error_message_hints_env_var(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "hello");
+    int rc = nm_agent_turn(agent, "hello", NULL, 0);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -2290,7 +2291,7 @@ static void test_agent_set_model_changes_wire_model(void)
     /* Change the model on a live agent; the next turn rides the new
      * id and the session survives. */
     nm_agent_set_model(agent, "second-model");
-    ASSERT_EQ(nm_agent_turn(agent, "hello"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "hello", NULL, 0), 0);
     ASSERT_EQ(g_n_requests, 1);
     ASSERT_TRUE(strstr(g_requests[0], "\"model\":\"second-model\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[0], "first-model") == NULL);
@@ -2340,7 +2341,7 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROUNDS, "1");
     ASSERT_EQ(nm_agent_max_rounds(agent), 1);
 
-    int rc = nm_agent_turn(agent, "keep calling tools");
+    int rc = nm_agent_turn(agent, "keep calling tools", NULL, 0);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -2396,7 +2397,7 @@ static void test_agent_stream_stall_times_out(void)
     nm_agent_set_timeout_ms(agent, 200); /* a short budget for the test */
     ASSERT_EQ(nm_agent_timeout_ms(agent), 200);
 
-    ASSERT_EQ(nm_agent_start(agent, "hello?"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "hello?", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_STREAMING);
 
     /* Armed: a positive budget, never over the 200 ms setting. */
@@ -2515,7 +2516,7 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_start(agent, "use the stub"), 0);
+    ASSERT_EQ(nm_agent_start(agent, "use the stub", NULL, 0), 0);
 
     /* Stream round 1 to the tool phase (real bytes are coming, so this
      * is readiness-driven). */
@@ -2552,6 +2553,170 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Images (VISION-PLAN): attach -> parts on the wire, byte-stable     */
+/* ---------------------------------------------------------------- */
+
+/* Occurrences of a literal in a captured request (the "exactly once"
+ * assertions need a count, not a strstr). */
+static int count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(hay, needle); p;
+         p = strstr(p + strlen(needle), needle))
+        n++;
+    return n;
+}
+
+/* A 64x32 PNG header (the sniffer reads headers only). */
+static const unsigned char T_PNG_HDR[] = {
+    0x89,
+    'P',
+    'N',
+    'G',
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a, /* signature */
+    0x00,
+    0x00,
+    0x00,
+    0x0d,
+    'I',
+    'H',
+    'D',
+    'R', /* IHDR      */
+    0x00,
+    0x00,
+    0x00,
+    0x40, /* width 64  */
+    0x00,
+    0x00,
+    0x00,
+    0x20, /* height 32 */
+};
+
+static void test_agent_image_turn_parts_and_prefix_stability(void)
+{
+    reset_capture();
+    write_fixture();
+
+    char img_path[64];
+    snprintf(img_path, sizeof(img_path), "nm-agent-img.png");
+    FILE *f = fopen(img_path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_PNG_HDR, 1, sizeof(T_PNG_HDR), f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    /* Round 1: a tool call (read_file on the fixture). */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 2: the final answer. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"looks like a test "
+        "image\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* Attach: the bytes are read ONCE and frozen (the file is deleted
+     * below, and the wire still carries them). */
+    char reason[64];
+    long id = nm_agent_attach_image(agent, img_path, reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+    ASSERT_STR_EQ(reason, "");
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+    ASSERT_EQ(img->format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(img->w, 64);
+    ASSERT_EQ(img->h, 32);
+    ASSERT_STR_EQ(img->alt, "nm-agent-img.png");
+    ASSERT_TRUE(strncmp(img->data_url, "data:image/png;base64,", 22) == 0);
+    const char *part = img->part_json;
+    ASSERT_NOT_NULL(part);
+
+    /* A refusal leaves the store alone (and names the reason). */
+    ASSERT_EQ(nm_agent_attach_image(agent, "/nonexistent-dir/x.png", reason,
+                                    sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "source unreadable");
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+    ASSERT_NULL(nm_agent_image(agent, 1));
+
+    remove(img_path); /* capture, not reference: the bytes are already ours */
+
+    size_t ids[1] = { 0 };
+    int rc = nm_agent_turn(agent, "what is in this image?", ids, 1);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_n_requests, 2);
+
+    /* Round 1: the user message is a parts array — the text part first,
+     * then the frozen image part, verbatim (unescaped). */
+    ASSERT_TRUE(strstr(g_requests[0],
+                       "\"content\":[{\"type\":\"text\",\"text\":\"what is "
+                       "in this image?\"},{\"type\":\"image_url\",") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], part) != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "\\\"image_url\\\"") == NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "\"detail\"") == NULL);
+    ASSERT_EQ(count_substr(g_requests[0], "\"type\":\"image_url\""), 1);
+
+    /* Round 2 replays the image as history (images in history replay
+     * fine) and adds the tool round trip: the assistant tool_calls
+     * message and the tool message are both plain strings — a tool
+     * message's content is a string by wire contract, and hyper drops
+     * images on one anyway. */
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
+    ASSERT_TRUE(strstr(g_requests[1], part) != NULL);
+    const char *asst = strstr(g_requests[1], "\"role\":\"assistant\"");
+    ASSERT_NOT_NULL(asst);
+    ASSERT_TRUE(strstr(asst, "\"tool_calls\":[") != NULL);
+    const char *tool = strstr(g_requests[1], "\"role\":\"tool\"");
+    ASSERT_NOT_NULL(tool);
+    ASSERT_TRUE(strstr(tool, "\"content\":\"") != NULL);
+    ASSERT_TRUE(strstr(tool, "\"content\":[") == NULL);
+
+    /* THE assertion (VISION-PLAN §5/§11): round 1's serialized messages
+     * are a byte-equal prefix of round 2's. The image turn's cached
+     * prefix rests on exactly this — one canonical data URL, verbatim
+     * embedding, frozen order, and no shape flip. */
+    const char *m1 = strstr(g_requests[0], "\"messages\":[");
+    const char *m2 = strstr(g_requests[1], "\"messages\":[");
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    const char *end1 = strstr(m1, "],\"stream\"");
+    ASSERT_NOT_NULL(end1);
+    size_t n1 = (size_t)(end1 + 1 - m1); /* includes the closing ']' */
+    ASSERT_TRUE(memcmp(m1, m2, n1 - 1) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -2578,6 +2743,7 @@ int main(void)
     }
     nm_config_set_store(g_cfg);
     RUN_TEST(test_agent_tool_round_then_answer);
+    RUN_TEST(test_agent_image_turn_parts_and_prefix_stability);
     RUN_TEST(test_agent_plain_answer_no_tools);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
