@@ -10,6 +10,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "nm_size.h"
+
 /* ---------------------------------------------------------------- */
 /* Container sniffing (headers only)                                 */
 /* ---------------------------------------------------------------- */
@@ -347,23 +349,13 @@ char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
 /* Sizes + the file probe                                            */
 /* ---------------------------------------------------------------- */
 
-void nm_image_size_text(size_t bytes, char *out, size_t cap)
-{
-    if (bytes < 1024)
-        snprintf(out, cap, "%zu B", bytes);
-    else if (bytes < 1024 * 1024)
-        snprintf(out, cap, "%.1f KiB", (double)bytes / 1024.0);
-    else
-        snprintf(out, cap, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
-}
-
 void nm_image_describe(const char *name, int w, int h, size_t bytes, char *out,
                        size_t cap)
 {
     if (!out || cap == 0)
         return;
     char size[32];
-    nm_image_size_text(bytes, size, sizeof(size));
+    nm_size_text(bytes, size, sizeof(size));
     const char *nm = (name && *name) ? name : "image";
     if (w > 0 && h > 0)
         snprintf(out, cap, "%s %dx%d, %s", nm, w, h, size);

@@ -47,6 +47,7 @@ EXTRA_DIST = \
     nm_markdown_render.h \
     nm_process.h \
     nm_process_internal.h \
+    nm_size.h \
     opencode_models_data.h \
     openai_client.h \
     provider.h \
@@ -118,6 +119,7 @@ nevermore_SOURCES = \
     xxh3.h \
     xxh3.c \
     nm_clock.c \
+    nm_size.c \
     agent.c \
     conversation_id.c \
     context.h \

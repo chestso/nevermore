@@ -121,10 +121,6 @@ char *nm_image_b64_encode(const unsigned char *src, size_t len,
 char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
                         size_t *out_len);
 
-/* "24 B" / "812.0 KiB" / "1.2 MiB" — the attach line's size field, in
- * both the TUI and ask mode (one spelling, one place). */
-void nm_image_size_text(size_t bytes, char *out, size_t cap);
-
 /* Worst case for nm_image_describe: a 5-byte name + space + the longest
  * dims ("2147483647x2147483647", 21) + ", " + the longest size text
  * (13) + NUL, with room to spare. */

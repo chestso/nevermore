@@ -198,7 +198,7 @@ test_tls_LDADD = -lpthread $(TEST_TLS_LIBS)
 # Session: transcript + context window (pure C, links session.c +
 # the image byte half, which the attach path shares with the display
 # path — nm_image_bytes.c is boba-free precisely so this stays so).
-test_session_SOURCES = test_session.c ../src/session.c ../src/nm_image_bytes.c
+test_session_SOURCES = test_session.c ../src/session.c ../src/nm_image_bytes.c ../src/nm_size.c
 test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,
@@ -223,7 +223,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
-    ../src/wire_recorder.c ../src/nm_image_bytes.c \
+    ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -237,7 +237,7 @@ test_web_search_SOURCES = test_web_search.c ../src/nm_clock.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
-    ../src/wire_recorder.c ../src/nm_image_bytes.c \
+    ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -252,7 +252,7 @@ test_process_CFLAGS = $(TEST_CFLAGS)
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/nm_clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
-    ../src/nm_image_bytes.c \
+    ../src/nm_image_bytes.c ../src/nm_size.c \
     ../src/context.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
@@ -288,7 +288,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
     ../src/nm_markdown_render.c ../src/nm_highlight.c ../src/nm_image.c \
-    ../src/nm_image_bytes.c
+    ../src/nm_image_bytes.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
 
@@ -297,7 +297,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # TuiRowSink/transport path) and the markdown grammar (the image line
 # is classified + parsed by nm_markdown).
 test_image_SOURCES = test_image.c ../src/nm_image.c \
-    ../src/nm_image_bytes.c \
+    ../src/nm_image_bytes.c ../src/nm_size.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
@@ -317,7 +317,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
-    ../src/nm_image.c ../src/nm_image_bytes.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

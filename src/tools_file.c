@@ -38,6 +38,7 @@
 
 #include "json.h"
 #include "nm_image_bytes.h"
+#include "nm_size.h"
 #include "tools.h"
 
 #include "tools_internal.h"
@@ -445,8 +446,8 @@ static NmToolResult oversize_result(const char *path, const NmImageProbe *p)
 {
     const char *alt = file_base_name(path);
     char big[32], cap[32];
-    nm_image_size_text(p->file_bytes, big, sizeof(big));
-    nm_image_size_text(NM_IMAGE_MAX_WIRE_BYTES, cap, sizeof(cap));
+    nm_size_text(p->file_bytes, big, sizeof(big));
+    nm_size_text(NM_IMAGE_MAX_WIRE_BYTES, cap, sizeof(cap));
     size_t need = strlen(alt) + strlen(big) + strlen(cap) + 64;
     char *msg = malloc(need);
     if (!msg)

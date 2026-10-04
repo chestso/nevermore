@@ -57,6 +57,7 @@
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 #include "nm_image.h"
+#include "nm_size.h"
 #include "nm_process.h"
 #include "spinner.h"
 
@@ -1908,17 +1909,6 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
 #define NM_PS_CMD_COLS 46
 #define NM_PS_CMD_CAP  256
 
-/* Human byte count for /ps. */
-static void ps_size(char *dst, size_t cap, size_t bytes)
-{
-    if (bytes < 1024)
-        snprintf(dst, cap, "%zu B", bytes);
-    else if (bytes < 1024u * 1024u)
-        snprintf(dst, cap, "%.1f KiB", (double)bytes / 1024.0);
-    else
-        snprintf(dst, cap, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
-}
-
 /* One /ps command cell: whitespace runs collapse to a single space and
  * the text is elided at NM_PS_CMD_COLS columns with a trailing "…".
  *
@@ -2008,7 +1998,7 @@ static void print_jobs(NmChatApp *app)
         char state[24];
         int code = nm_proc_exit(p); /* -1 while running (reaps if it just did) */
         ps_join_command(cmd, sizeof(cmd), nm_proc_command(p));
-        ps_size(size, sizeof(size), nm_proc_buffered(p));
+        nm_size_text(nm_proc_buffered(p), size, sizeof(size));
         if (code >= 0)
             snprintf(state, sizeof(state), "exited %d", code);
         else

@@ -36,6 +36,7 @@
 #include "colors.h"
 #include "nm_image.h"
 #include "nm_markdown.h"
+#include "nm_size.h"
 
 #define MAX_COLS      16
 #define MIN_COL_WIDTH 1
@@ -958,7 +959,7 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
      * attach lines use) — the marker's own layout is the separators. */
     char size[24] = "";
     if (slot && slot->src_bytes > 0)
-        nm_image_size_text(slot->src_bytes, size, sizeof(size));
+        nm_size_text(slot->src_bytes, size, sizeof(size));
 
     char dims[40] = "";
     if (slot && slot->w > 0 && slot->h > 0)
@@ -1002,7 +1003,7 @@ static void render_image_placeholder(const TuiBlock *live, const char *text,
     alt[alt_len] = '\0';
 
     char size[24] = "";
-    nm_image_size_text(len, size, sizeof(size));
+    nm_size_text(len, size, sizeof(size));
 
     char line[128];
     snprintf(line, sizeof(line), "\xe2\x96\x92 %s \xe2\x80\x94 %s so far",
