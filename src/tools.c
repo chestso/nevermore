@@ -80,7 +80,7 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
     if (!t) {
         /* An error result the model can adapt to (same convention as
          * quoth's unknown-tool result), never a silent no-op. */
-        r.ok = 0;
+        r.status = NM_TOOL_ERR;
         size_t need = 64 + (name ? strlen(name) : 0);
         r.output = malloc(need);
         if (r.output)
@@ -94,7 +94,7 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
 NmToolResult nm_tool_result_error(const char *message)
 {
     NmToolResult r = { 0 };
-    r.ok = 0;
+    r.status = NM_TOOL_ERR;
     r.output = strdup(message ? message : "error");
     return r;
 }
@@ -102,7 +102,7 @@ NmToolResult nm_tool_result_error(const char *message)
 NmToolResult nm_tool_result_text(const char *text)
 {
     NmToolResult r = { 0 };
-    r.ok = 1;
+    r.status = NM_TOOL_OK;
     r.output = strdup(text ? text : "");
     return r;
 }
@@ -292,7 +292,9 @@ NmToolResult nm_tool_format_result(const char *body, int exit_code)
     snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { .ok = out != NULL && exit_code == 0, .output = out };
+    NmToolResult r = { .status = (out && exit_code == 0) ? NM_TOOL_OK
+                                                         : NM_TOOL_ERR,
+                       .output = out };
     return r;
 }
 

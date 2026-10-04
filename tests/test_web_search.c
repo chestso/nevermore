@@ -233,8 +233,8 @@ static void test_web_search_deadline_ms_seam(void)
     tsleep(250);
     ASSERT_EQ(t->deadline_ms(e), 0);
     NmToolResult out = { 0 };
-    ASSERT_EQ((int)t->step(e, &out), (int)NM_TOOL_DONE);
-    ASSERT_TRUE(!out.ok);
+    ASSERT_EQ((int)t->step(e, &out), (int)NM_TOOL_ERR);
+    ASSERT_EQ(out.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(out.output);
     ASSERT_NOT_NULL(strstr(out.output, "timed out"));
     nm_tool_result_free(&out);
@@ -274,7 +274,7 @@ static void test_web_search_happy_path(void)
         ts, "web_search", "{\"query\":\"hello world\"}", NULL);
     pthread_join(th, NULL);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* Request line: encoded query, format=json. */
     ASSERT_NOT_NULL(strstr(s.req, "GET /search?q=hello%20world&format=json"));
@@ -322,7 +322,7 @@ static void test_web_search_dedup_and_cap(void)
         "{\"query\":\"x\",\"max_results\":2}", NULL);
     pthread_join(th, NULL);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     /* DupHigh (0.7) wins over DupLow (0.2); Two (0.6) is capped out. */
     ASSERT_NOT_NULL(strstr(r.output, "# DupHigh"));
     ASSERT_NULL(strstr(r.output, "# DupLow"));
@@ -359,7 +359,7 @@ static void test_web_search_extra_params(void)
         NULL);
     pthread_join(th, NULL);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(s.req, "&categories=news"));
     ASSERT_NOT_NULL(strstr(s.req, "&engines=duckduckgo"));
     nm_tool_result_free(&r);
@@ -386,7 +386,7 @@ static void test_web_search_http_error_then_cached(void)
                                         NULL);
     pthread_join(th, NULL);
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "HTTP 403"));
     nm_tool_result_free(&r);
 
@@ -395,7 +395,7 @@ static void test_web_search_http_error_then_cached(void)
      * is exactly what the cache short-circuit avoids. */
     NmToolResult r2 = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                          NULL);
-    ASSERT_FALSE(r2.ok);
+    ASSERT_EQ(r2.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r2.output, "cached"));
     nm_tool_result_free(&r2);
     nm_toolset_free(ts);
@@ -420,7 +420,7 @@ static void test_web_search_malformed_json(void)
                                         NULL);
     pthread_join(th, NULL);
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "malformed JSON"));
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
@@ -443,13 +443,13 @@ static void test_web_search_refused_then_cached(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                         NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "unreachable"));
     nm_tool_result_free(&r);
 
     NmToolResult r2 = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                          NULL);
-    ASSERT_FALSE(r2.ok);
+    ASSERT_EQ(r2.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r2.output, "cached"));
     nm_tool_result_free(&r2);
     nm_toolset_free(ts);
@@ -477,7 +477,7 @@ static void test_web_search_timeout(void)
     nm_tool_web_search_set_timeout_ms(0); /* restore the default */
     pthread_join(th, NULL);
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
@@ -491,12 +491,12 @@ static void test_web_search_args_validation(void)
     NmToolset *ts = nm_toolset_new_defaults();
 
     NmToolResult r = nm_toolset_execute(ts, "web_search", "{}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "missing query"));
     nm_tool_result_free(&r);
 
     NmToolResult r2 = nm_toolset_execute(ts, "web_search", "[]", NULL);
-    ASSERT_FALSE(r2.ok);
+    ASSERT_EQ(r2.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r2.output, "JSON object"));
     nm_tool_result_free(&r2);
 

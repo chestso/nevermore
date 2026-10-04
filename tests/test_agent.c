@@ -2456,7 +2456,7 @@ static NmToolStatus stub_step(NmToolExec *e, NmToolResult *out)
 {
     (void)e;
     *out = nm_tool_result_text("stub done");
-    return NM_TOOL_DONE;
+    return out->status;
 }
 
 static int stub_source(NmToolExec *e, NmSource *out)

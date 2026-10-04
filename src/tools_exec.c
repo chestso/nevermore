@@ -178,12 +178,14 @@ static int ms_until(double deadline)
     return (int)left;
 }
 
-/* Hand the terminal result to the caller exactly once. */
+/* Hand the terminal result to the caller exactly once. The step is
+ * finished, so its return value IS the result's outcome (a terminal
+ * result is never NM_TOOL_RUNNING). */
 static NmToolStatus take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
     e->result = (NmToolResult){ 0 };
-    return NM_TOOL_DONE;
+    return out->status;
 }
 
 /* An exec that is done before it starts (bad args, spawn failure): the
@@ -208,18 +210,19 @@ static NmToolResult job_result(const char *status, const char *body)
     char *clamped = body ? nm_clamp_job_output(body) : NULL;
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { .ok = out != NULL, .output = out };
+    NmToolResult r = { .status = out ? NM_TOOL_OK : NM_TOOL_ERR,
+                       .output = out };
     return r;
 }
 
-/* A finished process's report: the exit status is the success flag. */
+/* A finished process's report: the exit status is the outcome. */
 static NmToolResult exited_result(int code, const char *body)
 {
     char status[64];
     snprintf(status, sizeof(status), "Process exited with code %d", code);
     NmToolResult r = job_result(status, body);
     if (r.output)
-        r.ok = (code == 0);
+        r.status = (code == 0) ? NM_TOOL_OK : NM_TOOL_ERR;
     return r;
 }
 
@@ -346,7 +349,7 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
 {
     if (!e) {
         *out = nm_tool_result_error("internal: null exec_command state");
-        return NM_TOOL_DONE;
+        return NM_TOOL_ERR;
     }
     if (e->done)
         return take(e, out);
@@ -453,7 +456,7 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
 {
     if (!e) {
         *out = nm_tool_result_error("internal: null write_stdin state");
-        return NM_TOOL_DONE;
+        return NM_TOOL_ERR;
     }
     if (e->done)
         return take(e, out);
@@ -589,7 +592,7 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
         return nm_tool_result_error(oom_msg);
     for (;;) {
         NmToolResult r = { 0 };
-        if (step(e, &r) == NM_TOOL_DONE) {
+        if (step(e, &r) != NM_TOOL_RUNNING) {
             exec_end(e);
             return r;
         }

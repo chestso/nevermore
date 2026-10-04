@@ -1121,10 +1121,10 @@ static void next_tool(NmAgent *a)
  * tool re-enters this step on every drain.
  *
  * A tool with an async executor (begin) runs across steps — start it,
- * then drain until NM_TOOL_DONE, so the event loop (and the spinner)
- * stays live; everything else runs synchronously. When every call is
- * done, free the round's copies and open the next round. Returns 0 to
- * continue, -1 fatal. */
+ * then drain until the step stops returning NM_TOOL_RUNNING, so the
+ * event loop (and the spinner) stays live; everything else runs
+ * synchronously. When every call is done, free the round's copies and
+ * open the next round. Returns 0 to continue, -1 fatal. */
 static int tool_step(NmAgent *a)
 {
     if (a->tool_exec_idx < a->n_calls) {

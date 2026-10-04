@@ -248,7 +248,7 @@ static int drive_virtual(const NmTool *t, NmToolExec *e, NmToolResult *out,
     long long t0 = wall_ms();
     int spoken = 0; /* the child has produced bytes at least once */
     for (;;) {
-        if (t->step(e, out) == NM_TOOL_DONE)
+        if (t->step(e, out) != NM_TOOL_RUNNING)
             return 0;
         NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
         if (t->source)
@@ -286,7 +286,7 @@ static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
 {
     long long t0 = wall_ms();
     for (;;) {
-        if (t->step(e, out) == NM_TOOL_DONE)
+        if (t->step(e, out) != NM_TOOL_RUNNING)
             return 0;
         NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
         if (t->source)
@@ -402,7 +402,7 @@ static void test_unknown_tool_error(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "bogus_tool", "{}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "bogus_tool") != NULL);
     nm_tool_result_free(&r);
@@ -483,7 +483,7 @@ static void test_read_file_byte_exact(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* Byte-exact: CRLF survives, no trailing newline added. */
     ASSERT_TRUE(strstr(r.output, "alpha\nbeta\r\ngamma") != NULL);
@@ -510,7 +510,7 @@ static void test_read_file_line_numbers_and_window(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     /* Lines 2-3 numbered; true file numbers (offset-relative). */
     ASSERT_TRUE(strstr(r.output, "     2\ttwo") != NULL);
     ASSERT_TRUE(strstr(r.output, "     3\tthree") != NULL);
@@ -525,7 +525,7 @@ static void test_read_file_missing(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r =
         nm_toolset_execute(ts, "read_file", "{\"path\":\"/no/such/file\"}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "cannot read") != NULL);
     nm_tool_result_free(&r);
@@ -580,7 +580,7 @@ static void test_read_file_image_branch(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* the one-line summary names the file, format, dims and size */
     ASSERT_TRUE(strstr(r.output, "shot.png") != NULL);
@@ -626,7 +626,7 @@ static void test_read_file_image_branch_beats_window_args(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.image);
     ASSERT_TRUE(strstr(r.output, "past the last line") == NULL);
     ASSERT_TRUE(strstr(r.output, "PNG 64x32") != NULL);
@@ -658,7 +658,7 @@ static void test_read_file_image_too_large(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "too large to attach") != NULL);
     ASSERT_TRUE(strstr(r.output, "big.png") != NULL);
@@ -693,7 +693,7 @@ static void test_read_file_binary_is_not_an_image(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "not valid UTF-8") != NULL);
     ASSERT_NULL(r.image);
@@ -721,7 +721,7 @@ static void test_read_file_text_has_no_image(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NULL(r.image);
     ASSERT_EQ(r.image_len, 0u);
     ASSERT_STR_EQ(r.image_alt, "");
@@ -753,7 +753,7 @@ static void test_read_file_truncates_with_resume_marker(void)
     NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* Head kept... */
     ASSERT_TRUE(strstr(r.output, "line 0001") != NULL);
@@ -798,7 +798,7 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     nm_json_free(jargs);
     r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "two") != NULL);
     ASSERT_TRUE(strstr(r.output,
@@ -815,7 +815,7 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     nm_json_free(jargs);
     r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "four") != NULL);
     ASSERT_TRUE(strstr(r.output, "five") != NULL);
@@ -829,7 +829,7 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     nm_json_free(jargs);
     r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_TRUE(strstr(r.output, "one") != NULL);
     ASSERT_TRUE(strstr(r.output, "five") != NULL);
     ASSERT_TRUE(strstr(r.output, "omitted") == NULL);
@@ -844,7 +844,7 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     nm_json_free(jargs);
     r = nm_toolset_execute(ts, "read_file", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "offset 6 is past the last line (5)") !=
                 NULL);
@@ -875,7 +875,7 @@ static void test_edit_file_unique_replace(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     /* Verify the file on disk. */
     char *back = scratch_path("edit1.txt");
     FILE *g = fopen(back, "rb");
@@ -922,7 +922,7 @@ static void test_edit_file_writes_astral_escaping(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     nm_tool_result_free(&r);
 
     FILE *g = fopen(path, "rb");
@@ -941,7 +941,7 @@ static void test_edit_file_writes_astral_escaping(void)
     r = nm_toolset_execute(ts, "read_file", rargs, NULL);
     free(rargs);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
@@ -963,7 +963,7 @@ static void test_edit_file_ambiguous_fails_loudly(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     /* Names the match lines; the file is untouched. */
     ASSERT_TRUE(strstr(r.output, "3 times") != NULL);
@@ -999,7 +999,7 @@ static void test_edit_file_replace_all(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
 
     char *back = scratch_path("edit3.txt");
     FILE *g = fopen(back, "rb");
@@ -1031,7 +1031,7 @@ static void test_edit_file_no_match(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_TRUE(strstr(r.output, "no match") != NULL);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
@@ -1055,7 +1055,7 @@ static void test_edit_file_multiline_literal(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
 
     char *back = scratch_path("edit5.txt");
     FILE *g = fopen(back, "rb");
@@ -1107,7 +1107,7 @@ static void test_edit_file_multiline_diff_fits(void)
     NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
     free(args);
     free(path);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* The diff is present and complete: 300 '+' lines. */
     size_t plus = 0;
@@ -1169,7 +1169,7 @@ static void test_write_file_creates_byte_exact(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "Wrote ") != NULL);
     ASSERT_TRUE(strstr(r.output, "(created") != NULL);
@@ -1204,7 +1204,7 @@ static void test_write_file_overwrites_and_reports(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "(overwrote 17 bytes)") != NULL);
     ASSERT_TRUE(strstr(r.output, "10 bytes, 2 lines") != NULL);
@@ -1236,7 +1236,7 @@ static void test_write_file_empty_content_truncates(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "0 bytes, 0 lines") != NULL);
     ASSERT_TRUE(strstr(r.output, "overwrote 10 bytes") != NULL);
@@ -1264,7 +1264,7 @@ static void test_write_file_reports_singular_line(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "3 bytes, 1 line ") != NULL);
     ASSERT_TRUE(strstr(r.output, "; no trailing newline") != NULL);
@@ -1288,7 +1288,7 @@ static void test_write_file_workdir_relative_path(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     nm_tool_result_free(&r);
 
     char *path = scratch_in(dir, "rel.txt");
@@ -1315,7 +1315,7 @@ static void test_write_file_missing_parent_refuses(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "no such directory") != NULL);
     ASSERT_TRUE(strstr(r.output, "no_such_dir_here") != NULL);
@@ -1341,13 +1341,13 @@ static void test_write_file_missing_args(void)
     nm_json_free(jargs);
     NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "missing content") != NULL);
     nm_tool_result_free(&r);
 
     r = nm_toolset_execute(ts, "write_file", "{\"content\":\"x\"}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "missing or empty path") != NULL);
     nm_tool_result_free(&r);
@@ -1386,7 +1386,7 @@ static void test_write_file_failed_write_keeps_original(void)
 
     chmod(dir, 0755); /* restore before asserting so cleanup works */
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "cannot write") != NULL);
     nm_tool_result_free(&r);
@@ -1418,7 +1418,7 @@ static void test_list_dir(void)
     NmToolResult r = nm_toolset_execute(ts, "list_dir", args, NULL);
     free(args);
     free(dir);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "edit1.txt") != NULL);
     nm_tool_result_free(&r);
@@ -1445,7 +1445,7 @@ static void test_search_dir_literal(void)
     free(args);
     free(path);
     free(dir);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "haystack.txt:2:the NEEDLE line") != NULL);
     nm_tool_result_free(&r);
@@ -1477,7 +1477,7 @@ static void test_search_dir_root_must_be_a_directory(void)
     nm_json_free(jargs);
     NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "cannot search") != NULL);
     nm_tool_result_free(&r);
@@ -1487,7 +1487,7 @@ static void test_search_dir_root_must_be_a_directory(void)
         nm_toolset_execute(ts, "search_dir",
                            "{\"path\":\"/no/such/dir\",\"needle\":\"NEEDLE\"}",
                            NULL);
-    ASSERT_FALSE(r2.ok);
+    ASSERT_EQ(r2.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r2.output);
     ASSERT_TRUE(strstr(r2.output, "cannot search") != NULL);
     nm_tool_result_free(&r2);
@@ -1500,7 +1500,7 @@ static void test_search_dir_root_must_be_a_directory(void)
     nm_json_free(jargs2);
     NmToolResult r3 = nm_toolset_execute(ts, "search_dir", args2, NULL);
     free(args2);
-    ASSERT_TRUE(r3.ok);
+    ASSERT_EQ(r3.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r3.output);
     ASSERT_TRUE(strstr(r3.output, "not_a_dir.txt:1:the NEEDLE line") != NULL);
     nm_tool_result_free(&r3);
@@ -1535,7 +1535,7 @@ static void test_search_dir_hit_clamp_is_char_safe(void)
     free(args);
     free(path);
     free(dir);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "wide_hit.txt:1:needle ") != NULL);
     ASSERT_TRUE(utf8_text_ok(r.output));
@@ -1568,7 +1568,7 @@ static void test_search_dir_truncates_with_budget_notice(void)
     free(args);
     free(path);
     free(dir);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "needle") != NULL);
     ASSERT_TRUE(strstr(r.output, "output truncated at the") != NULL);
@@ -1665,7 +1665,7 @@ static void test_run_command_exit_zero(void)
     /* cmd.exe: "echo hi" prints "hi"; no `>&2` on the stderr case. */
     NmToolResult r =
         nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "hi") != NULL);
     nm_tool_result_free(&r);
@@ -1673,7 +1673,7 @@ static void test_run_command_exit_zero(void)
 #else
     NmToolResult r =
         nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "hi") != NULL);
     nm_tool_result_free(&r);
@@ -1692,7 +1692,7 @@ static void test_run_command_exit_nonzero(void)
     NmToolResult r = nm_toolset_execute(
         ts, "run_command", "{\"cmd\":\"echo err >&2; exit 3\"}", NULL);
 #endif
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     /* Combined capture: stderr text rides the same output. */
     ASSERT_TRUE(strstr(r.output, "err") != NULL);
@@ -1847,7 +1847,7 @@ static void test_run_command_async(void)
     }
     t->end(e);
 
-    ASSERT_EQ(r.ok, 0); /* exit 3 is a failure */
+    ASSERT_EQ(r.status, NM_TOOL_ERR); /* exit 3 is a failure */
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "hello async") != NULL);
     nm_tool_result_free(&r);
@@ -1873,7 +1873,7 @@ static void test_run_command_output_is_clamped(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "run_command",
                                         "{\"cmd\":\"seq 1 20000\"}", NULL);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "bytes omitted") != NULL);
     ASSERT_TRUE(strstr(r.output, "1\n2\n3\n") != NULL); /* head kept */
@@ -2167,7 +2167,7 @@ static void test_run_command_stdin_is_dev_null(void)
     stdin_pin_end(&pin);
     nm_toolset_free(ts);
 
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     /* /dev/null: `read` fails at once, so the shell takes the else. */
     ASSERT_TRUE(strstr(r.output, "eof") != NULL);
@@ -2200,7 +2200,7 @@ static void test_run_command_async_stdin_is_dev_null(void)
     struct timeval t0, t1;
     gettimeofday(&t0, NULL);
     NmToolResult r = { 0 };
-    int status = NM_TOOL_RUNNING;
+    NmToolStatus status = NM_TOOL_RUNNING;
     while ((status = t->step(e, &r)) == NM_TOOL_RUNNING) {
         NmSource src = { -1, 0, NM_SRC_FD };
         int fd = t->source(e, &src) ? (int)src.handle : -1;
@@ -2222,7 +2222,7 @@ static void test_run_command_async_stdin_is_dev_null(void)
     stdin_pin_end(&pin);
     nm_toolset_free(ts);
 
-    ASSERT_EQ(status, NM_TOOL_DONE);
+    ASSERT_EQ(status, NM_TOOL_OK);
     ASSERT_TRUE(us < 1500 * 1000);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "eof") != NULL);
@@ -2272,7 +2272,7 @@ static int drive_async(const NmTool *t, NmToolExec *e, NmToolResult *out,
     struct timeval t0, now;
     gettimeofday(&t0, NULL);
     for (;;) {
-        if (t->step(e, out) == NM_TOOL_DONE)
+        if (t->step(e, out) != NM_TOOL_RUNNING)
             return 0;
         NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
         if (t->source)
@@ -2367,7 +2367,7 @@ static void test_run_command_silent_child_is_stopped(void)
     /* The budget is declared on the NmTool.deadline_ms seam — the drive a
      * silent child needs. */
     ASSERT_TRUE(dl >= 0 && dl <= 250);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
     ASSERT_TRUE(strstr(r.output, "never") == NULL); /* the child never got there */
@@ -2386,7 +2386,7 @@ static void test_run_command_output_resets_the_deadline(void)
         "i=0; while [ $i -lt 5 ]; do printf 'tick\\n'; i=$((i+1)); "
         "sleep 0.06; done; exit 0",
         300, NULL, 0);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "tick") != NULL);
     ASSERT_TRUE(strstr(r.output, "timed out") == NULL);
@@ -2422,7 +2422,7 @@ static void test_exec_command_exits_within_window(void)
     char *args = exec_args("printf 'hello exec\\n'; exit 0", 5000);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
     ASSERT_TRUE(strstr(r.output, "hello exec") != NULL);
@@ -2439,7 +2439,7 @@ static void test_exec_command_nonzero_exit(void)
     char *args = exec_args("printf 'boom\\n'; exit 3", 5000);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 3"));
     ASSERT_NOT_NULL(strstr(r.output, "boom"));
     nm_tool_result_free(&r);
@@ -2457,7 +2457,7 @@ static void test_exec_command_is_a_pty_with_merged_streams(void)
         5000);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(r.output, "TTY"));
     /* stderr lands in the same stream (the PTY merges them). */
     ASSERT_NOT_NULL(strstr(r.output, "diagnostics"));
@@ -2493,7 +2493,7 @@ static void test_exec_command_yields_job_id(void)
 
     NmToolResult r = { 0 };
     ASSERT_EQ(drive_virtual(t, e, &r, 5000, 1), 0);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
     ASSERT_NOT_NULL(strstr(r.output, "starting"));
@@ -2527,7 +2527,7 @@ static void test_exec_command_yield_string_form(void)
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
     nm_proc_close_all(); /* the job outlives the call: retire it here */
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
     nm_tool_result_free(&r);
@@ -2545,7 +2545,7 @@ static void test_exec_command_yield_garbage_string_uses_default(void)
     char *args = args_dump(j);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
     ASSERT_NOT_NULL(strstr(r.output, "ok"));
@@ -2564,7 +2564,7 @@ static void test_write_stdin_yield_string_form(void)
     char *args = exec_args("read x; sleep 1; echo done", 300);
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     nm_tool_result_free(&r);
@@ -2581,7 +2581,7 @@ static void test_write_stdin_yield_string_form(void)
     free(args);
     int live = (int)nm_proc_count();
     nm_proc_close_all(); /* never leak a live job into the next test */
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
     ASSERT_NOT_NULL(strstr(r.output, "done"));
@@ -2595,18 +2595,18 @@ static void test_exec_command_missing_cmd(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "exec_command", "{}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "missing cmd"));
     nm_tool_result_free(&r);
 
     r = nm_toolset_execute(ts, "exec_command", "{not json", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "JSON object"));
     nm_tool_result_free(&r);
 
     r = nm_toolset_execute(ts, "exec_command",
                            "{\"cmd\":\"\",\"yield_time_ms\":250}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     nm_tool_result_free(&r);
     ASSERT_EQ(nm_proc_count(), 0);
     nm_toolset_free(ts);
@@ -2624,7 +2624,7 @@ static void test_exec_command_workdir(void)
     char *args = args_dump(j);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     /* Trailing whitespace is trimmed by the job clamp, so the output
      * ends at the path itself. */
     size_t n = strlen(r.output);
@@ -2644,7 +2644,7 @@ static void test_exec_command_output_clamped_head_and_tail(void)
                            10000);
     NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "HEAD"));
     ASSERT_NOT_NULL(strstr(r.output, "TAIL")); /* the tail is kept */
@@ -2686,7 +2686,7 @@ static void test_write_stdin_round_trip(void)
     char *args = exec_args("cat", 300);
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     nm_tool_result_free(&r);
@@ -2701,7 +2701,7 @@ static void test_write_stdin_round_trip(void)
     args = args_dump(j1);
     r = exec_virtual("write_stdin", args, 1); /* the echo must be in it */
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
     ASSERT_NOT_NULL(strstr(r.output, "hello there"));
     nm_tool_result_free(&r);
@@ -2715,7 +2715,7 @@ static void test_write_stdin_round_trip(void)
     args = args_dump(j2);
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 0"));
     nm_tool_result_free(&r);
     ASSERT_NULL(nm_proc_find(sid));
@@ -2732,7 +2732,7 @@ static void test_write_stdin_partial_line_and_eof(void)
     char *args = exec_args("cat; printf 'after:\\n'", 300);
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     nm_tool_result_free(&r);
@@ -2743,7 +2743,7 @@ static void test_write_stdin_partial_line_and_eof(void)
     args = stdin_args(sid, "partial\\x04");
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "partial") != NULL);
     ASSERT_NOT_NULL(strstr(r.output, "after:")); /* the shell survived cat */
@@ -2769,7 +2769,7 @@ static void test_write_stdin_interior_marker_rejected(void)
     args = stdin_args(sid, "before\\x04after");
     r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "end of input"));
     nm_tool_result_free(&r);
 
@@ -2783,13 +2783,13 @@ static void test_write_stdin_unknown_job(void)
     char *args = stdin_args(99999, "hi\n");
     NmToolResult r = nm_toolset_execute(ts, "write_stdin", args, NULL);
     free(args);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "unknown job id"));
     nm_tool_result_free(&r);
 
     /* No job_id at all is its own error. */
     r = nm_toolset_execute(ts, "write_stdin", "{}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "missing job_id"));
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
@@ -2804,7 +2804,7 @@ static void test_write_stdin_reads_progress(void)
                            300);
     NmToolResult r = exec_virtual("exec_command", args, 1);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     ASSERT_NOT_NULL(strstr(r.output, "first"));
@@ -2817,7 +2817,7 @@ static void test_write_stdin_reads_progress(void)
     args = args_dump(jp);
     r = exec_virtual("write_stdin", args, 1);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
     ASSERT_NOT_NULL(strstr(r.output, "second"));
@@ -2873,7 +2873,7 @@ static void test_kill_job_stops_and_reports(void)
         "printf 'before\\n'; sleep 0.5; printf 'after\\n'; sleep 30", 300);
     NmToolResult r = exec_virtual("exec_command", args, 1);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     ASSERT_NOT_NULL(strstr(r.output, "before"));
@@ -2900,7 +2900,7 @@ static void test_kill_job_stops_and_reports(void)
     r = nm_toolset_execute(ts, "kill_job", args, NULL);
     gettimeofday(&t1, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(r.output, "killed"));
     ASSERT_NOT_NULL(strstr(r.output, "after"));
     /* A SIGKILLed group is reaped at once, never waited out. */
@@ -2915,7 +2915,7 @@ static void test_kill_job_unknown(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "kill_job",
                                         "{\"job_id\":42}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "unknown job id"));
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
@@ -2929,7 +2929,7 @@ static void test_exec_job_lifecycle(void)
     char *args = exec_args("while read line; do echo \"got $line\"; done", 300);
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     int sid = reported_job_id(r.output);
     ASSERT_TRUE(sid > 0);
     nm_tool_result_free(&r);
@@ -2937,7 +2937,7 @@ static void test_exec_job_lifecycle(void)
     args = stdin_args(sid, "one\n");
     r = exec_virtual("write_stdin", args, 1); /* the echo must be in it */
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(strstr(r.output, "got one"));
     nm_tool_result_free(&r);
 
@@ -2949,7 +2949,7 @@ static void test_exec_job_lifecycle(void)
     args = args_dump(jp);
     r = exec_virtual("write_stdin", args, 0); /* silent: the window closes */
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
     nm_tool_result_free(&r);
 
@@ -2958,7 +2958,7 @@ static void test_exec_job_lifecycle(void)
     args = args_dump(j);
     r = nm_toolset_execute(ts, "kill_job", args, NULL);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     nm_tool_result_free(&r);
     ASSERT_EQ(nm_proc_count(), 0);
     nm_toolset_free(ts);
@@ -2990,7 +2990,7 @@ static void test_exec_job_roundtrip_on_windows(void)
 
     NmToolResult r = exec_virtual("exec_command", args, 0);
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     const char *p = strstr(r.output, "job ID ");
     ASSERT_NOT_NULL(p);
@@ -3010,7 +3010,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     nm_json_free(j);
     r = exec_virtual("write_stdin", args, 0); /* still live: the window closes */
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
     nm_tool_result_free(&r);
@@ -3026,7 +3026,7 @@ static void test_exec_job_roundtrip_on_windows(void)
     nm_json_free(j);
     r = exec_virtual_done("write_stdin", args); /* the flush at exit */
     free(args);
-    ASSERT_TRUE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "Process exited with code 0") != NULL);
     ASSERT_TRUE(strstr(r.output, "hello there") != NULL);
@@ -3036,7 +3036,7 @@ static void test_exec_job_roundtrip_on_windows(void)
 
     /* kill_job reports an unknown id instead of inventing one. */
     r = nm_toolset_execute(ts, "kill_job", "{\"job_id\":4242}", NULL);
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
@@ -3093,7 +3093,7 @@ static void test_run_command_async_on_windows(void)
     }
     t->end(e);
 
-    ASSERT_EQ(r.ok, 0); /* exit 3 is a failure */
+    ASSERT_EQ(r.status, NM_TOOL_ERR); /* exit 3 is a failure */
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "hello async") != NULL);
     nm_tool_result_free(&r);
@@ -3148,7 +3148,7 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     t->end(e);
     nm_tool_run_command_set_timeout_ms(0); /* restore the default */
 
-    ASSERT_FALSE(r.ok);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
     nm_tool_result_free(&r);

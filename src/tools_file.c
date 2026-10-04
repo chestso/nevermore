@@ -398,7 +398,10 @@ static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
              "[image] %s — %s %dx%d, %s — attached; the image follows as a "
              "user message",
              alt, fmtname, p->w, p->h, size);
-    NmToolResult r = { 1, body, p->bytes, p->len, "" };
+    NmToolResult r = { .status = NM_TOOL_OK,
+                       .output = body,
+                       .image = p->bytes,
+                       .image_len = p->len };
     snprintf(r.image_alt, sizeof(r.image_alt), "%s", alt);
     p->bytes = NULL; /* ownership moved into the result */
     p->len = 0;
@@ -451,7 +454,7 @@ static int read_file_image_branch(const char *path, NmToolResult *out)
                  "image too large to attach: %s — %s over the %s wire cap",
                  alt, big, cap);
     nm_image_probe_free(&full);
-    *out = (NmToolResult){ .output = msg };
+    *out = (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     return 1;
 }
 
@@ -490,7 +493,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         char *msg = malloc(strlen(path) + 64);
@@ -500,7 +503,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
     /* Optional window: offset (1-based first line) + limit (max line
@@ -520,7 +523,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     if (jlim && limit < 1) {
         char *msg = malloc(64);
@@ -530,7 +533,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
     /* Line table walk: advance to the start of line `offset',
@@ -571,7 +574,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
     /* Walk window lines spending the budget on whole rendered lines. */
@@ -717,7 +720,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, strlen(path) + 64, "cannot read %s", path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         free(text);
@@ -759,7 +762,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     if (nhits > 1 && !replace_all) {
         /* Name the match lines so the model can disambiguate. */
@@ -789,7 +792,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
     /* Splice: one pass writes the new text into a single output
@@ -827,7 +830,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     free(out);
 
@@ -976,7 +979,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         free(parent);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     free(parent);
 
@@ -991,7 +994,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, need, "cannot write %s: %s", path, strerror(e));
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
     /* The result is a SUMMARY, never the content (the model knows what
@@ -1104,7 +1107,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     do {
         char name[256];
@@ -1129,7 +1132,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     struct dirent *ent;
     char full[4096];
@@ -1342,7 +1345,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
                      "cannot search %s: not a readable directory", path);
         free(path);
         free(needle);
-        return (NmToolResult){ .output = msg };
+        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     free(path);
     free(needle);

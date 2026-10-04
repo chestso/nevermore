@@ -567,19 +567,21 @@ static void ws_finalize(NmToolExec *e)
     /* A success leaves `searxng_enabled` on (it was on to get here). */
 }
 
-/* Hand the terminal result to the caller exactly once. */
+/* Hand the terminal result to the caller exactly once. The step is
+ * finished, so its return value IS the result's outcome (a terminal
+ * result is never NM_TOOL_RUNNING). */
 static NmToolStatus ws_take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
     e->result = (NmToolResult){ 0 };
-    return NM_TOOL_DONE;
+    return out->status;
 }
 
 static NmToolStatus ws_step(NmToolExec *e, NmToolResult *out)
 {
     if (!e) {
         *out = nm_tool_result_error("internal: null web_search exec");
-        return NM_TOOL_DONE;
+        return NM_TOOL_ERR;
     }
     if (e->done)
         return ws_take(e, out);
@@ -796,7 +798,7 @@ static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("web_search: out of memory");
     for (;;) {
         NmToolResult r = { 0 };
-        if (ws_step(e, &r) == NM_TOOL_DONE) {
+        if (ws_step(e, &r) != NM_TOOL_RUNNING) {
             ws_end(e);
             return r;
         }

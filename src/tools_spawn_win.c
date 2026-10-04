@@ -287,7 +287,8 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    NmToolResult r = { .ok = (int)st == 0, .output = body };
+    NmToolResult r = { .status = ((int)st == 0) ? NM_TOOL_OK : NM_TOOL_ERR,
+                       .output = body };
     return r;
 }
 
@@ -319,12 +320,14 @@ static int run_command_budget_ms(void)
     return ms == 0 ? NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT : ms;
 }
 
-/* Hand the terminal result to the caller exactly once. */
+/* Hand the terminal result to the caller exactly once. The step is
+ * finished, so its return value IS the result's outcome (a terminal
+ * result is never NM_TOOL_RUNNING). */
 static NmToolStatus take(NmToolExec *e, NmToolResult *out)
 {
     *out = e->result;
     e->result = (NmToolResult){ 0 };
-    return NM_TOOL_DONE;
+    return out->status;
 }
 
 static NmToolExec *run_command_begin(const NmTool *tool,
@@ -370,7 +373,7 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
 {
     if (!e) {
         *out = nm_tool_result_error("internal: null run_command state");
-        return NM_TOOL_DONE;
+        return NM_TOOL_ERR;
     }
     if (e->done)
         return take(e, out);
@@ -447,7 +450,10 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     if (!clamped)
         e->result = nm_tool_result_error("out of memory");
     else
-        e->result = (NmToolResult){ .ok = code == 0 && !timed_out, .output = clamped };
+        e->result = (NmToolResult){
+            .status = (code == 0 && !timed_out) ? NM_TOOL_OK : NM_TOOL_ERR,
+            .output = clamped
+        };
     e->done = 1;
     return take(e, out);
 }

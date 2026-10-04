@@ -21,10 +21,32 @@ extern "C" {
 typedef struct NmToolset NmToolset;
 typedef struct NmTool NmTool;
 
+/* How a tool call ended. The step machine's progress and the finished
+ * result's outcome are ONE enum — the shape NmChatStatus and
+ * NmFetchStatus already have (their step's PENDING sits beside OK/ERR):
+ * a step returns NM_TOOL_RUNNING while it works and NM_TOOL_OK /
+ * NM_TOOL_ERR when it hands the result out, and `NmToolResult.status`
+ * carries that same value, so the return and the result can never
+ * disagree. NM_TOOL_RUNNING is the zero value on purpose: a zeroed
+ * NmToolResult means "not finished yet", which is exactly what the
+ * step machine wants of its out-param before the first step. A FINISHED
+ * result is never NM_TOOL_RUNNING. */
+typedef enum
+{
+    NM_TOOL_RUNNING = 0, /* step API: still working; step again when the
+                          * fd is ready */
+    NM_TOOL_OK,          /* the call produced its result (see `output`) */
+    NM_TOOL_ERR          /* it did not; `output` says why */
+} NmToolStatus;
+
 typedef struct NmToolResult
 {
-    int ok;       /* exit status / success flag */
-    char *output; /* text the model sees; heap-owned */
+    NmToolStatus status; /* how the call ended. NM_TOOL_ERR unless it did
+                          * what was asked, and never NM_TOOL_RUNNING once
+                          * finished (that value is the step machine's) */
+    char *output;        /* text the model sees; heap-owned, ALWAYS set — a
+                          * failure names its reason (the always-set contract,
+                          * as NmChatResult.message) */
     /* An image the tool captured, or NULL (the common case: every
      * textual tool). One slot, not a list — read_file reads one file,
      * and a round with several image-producing calls is aggregated by
@@ -64,12 +86,6 @@ typedef void (*NmToolCallback)(const NmTool *tool, const char *args_json,
  * ticking, the child's output pipe is a subscribed source). */
 typedef struct NmToolExec NmToolExec;
 
-typedef enum
-{
-    NM_TOOL_RUNNING = 0, /* still working; step again when the fd is ready */
-    NM_TOOL_DONE = 1     /* *out holds the final result */
-} NmToolStatus;
-
 /* Lead glyph for a tool that omits its own emoji (defensive; every
  * built-in sets one). Presentation-only, like the field itself. */
 #define NM_TOOL_EMOJI_FALLBACK "🔧"
@@ -92,8 +108,9 @@ typedef struct NmTool
     /* Async path (NULL for synchronous tools). begin returns a handle,
      * or NULL to fall back to execute (bad args / spawn failure).
      * source reports what the step is waiting on right now (object +
-     * interest bits + what the object IS); step fills *out and reports
-     * NM_TOOL_DONE when finished; end frees the handle. */
+     * interest bits + what the object IS); step fills *out and returns
+     * NM_TOOL_OK / NM_TOOL_ERR when finished (NM_TOOL_RUNNING while it
+     * is still working); end frees the handle. */
     NmToolExec *(*begin)(const NmTool *tool, const char *args_json,
                          void *userdata);
     NmToolStatus (*step)(NmToolExec *e, NmToolResult *out);
@@ -125,8 +142,8 @@ size_t nm_toolset_len(const NmToolset *ts);
 const NmTool *nm_toolset_get(const NmToolset *ts, size_t i);
 const NmTool *nm_toolset_find(const NmToolset *ts, const char *name);
 
-/* Execute by wire name. Returns ok=0 result with an error message when
- * the tool is unknown. */
+/* Execute by wire name. Returns an NM_TOOL_ERR result with an error
+ * message when the tool is unknown. */
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                                 const char *args_json, void *userdata);
 

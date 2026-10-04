@@ -203,7 +203,9 @@ static NmToolResult run_command_result(const char *output, size_t len,
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
-    NmToolResult r = { .ok = code == 0 && note == NULL, .output = body };
+    NmToolResult r = { .status = (code == 0 && note == NULL) ? NM_TOOL_OK
+                                                             : NM_TOOL_ERR,
+                       .output = body };
     return r;
 }
 
@@ -504,7 +506,7 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     }
     *out = run_command_result(e->buf ? e->buf : "", e->len, e->code,
                               timeout_note);
-    return NM_TOOL_DONE;
+    return out->status;
 }
 
 /* The child's output pipe, readable (a descriptor on every POSIX

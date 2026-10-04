@@ -492,7 +492,8 @@ static void sys_tool_plan(NmChatApp *app, const NmTool *tool,
  * starts in the same column. Built into the app's reused buffer and
  * sent as ONE system message (boba normalizes LF->CRLF). Per-tool-call
  * reuse, never per token. */
-static void sys_tool_result(NmChatApp *app, const char *output, int ok)
+static void sys_tool_result(NmChatApp *app, const char *output,
+                            NmToolStatus status)
 {
     if (!app || !app->tool_body)
         return;
@@ -511,7 +512,7 @@ static void sys_tool_result(NmChatApp *app, const char *output, int ok)
             dynamic_buffer_append_str(b, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT);
         else
             dynamic_buffer_append_str(b, NM_SGR_RESULT "     ");
-        if (first && !ok)
+        if (first && status != NM_TOOL_OK)
             dynamic_buffer_append_str(b, "error: ");
         dynamic_buffer_append(b, p, len);
         dynamic_buffer_append_str(b, NM_SGR_RESET "\r\n");
@@ -546,7 +547,8 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         free(app->current_tool);
         app->current_tool = strdup(name);
     } else {
-        sys_tool_result(app, result ? result->output : "", result && result->ok);
+        sys_tool_result(app, result ? result->output : "",
+                        result ? result->status : NM_TOOL_ERR);
         /* A tool-captured image renders through the SAME pipeline as
          * /img's attach (D9): the one markdown block, the one profile
          * ladder, the same nm_image_supported front door. When the

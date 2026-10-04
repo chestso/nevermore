@@ -167,7 +167,8 @@ static void ask_on_tool(const NmTool *tool, const char *args_json,
 
     /* The result body, verbatim (the tools already budget it). */
     const char *output = result && result->output ? result->output : "";
-    fprintf(stderr, "[tool done ok=%d]\n", result ? result->ok : -1);
+    fprintf(stderr, "[tool done status=%d]\n",
+            result ? (int)result->status : -1);
     if (*output) {
         fputs(output, stderr);
         if (output[strlen(output) - 1] != '\n')
