@@ -456,6 +456,79 @@ static NmToolResult oversize_result(const char *path, const NmImageProbe *p)
     return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
 }
 
+/* Common non-text containers, named for the refusal line below. A tiny
+ * table, not a file(1): these are the ones a model actually asks a text
+ * tool to read. Image containers are NOT here — nm_image_bytes owns
+ * container identity, and the image branch has already had its turn.
+ * Ordered; the first match wins. */
+static const struct
+{
+    const char *magic;
+    size_t off;
+    size_t len;
+    const char *name;
+} BINARY_MAGICS[] = {
+    { "%PDF-", 0, 5, "PDF document" },
+    { "PK\x03\x04", 0, 4, "ZIP archive" },
+    { "PK\x05\x06", 0, 4, "ZIP archive" },
+    { "\x1f\x8b", 0, 2, "gzip stream" },
+    { "\x7f"
+      "ELF",
+      0, 4, "ELF binary" },
+    { "ftyp", 4, 4, "ISO media (MP4/MOV)" },
+    { "OggS", 0, 4, "Ogg stream" },
+    { "SQLite format 3", 0, 15, "SQLite database" },
+    { "RIFF", 0, 4, "RIFF container (WAV/AVI)" },
+};
+
+static const char *binary_kind_name(const unsigned char *b, size_t n)
+{
+    for (size_t i = 0; i < sizeof(BINARY_MAGICS) / sizeof(BINARY_MAGICS[0]);
+         i++) {
+        if (n >= BINARY_MAGICS[i].off + BINARY_MAGICS[i].len &&
+            memcmp(b + BINARY_MAGICS[i].off, BINARY_MAGICS[i].magic,
+                   BINARY_MAGICS[i].len) == 0)
+            return BINARY_MAGICS[i].name;
+    }
+    return NULL;
+}
+
+/* A NUL or a control byte in the head: text files do not carry them, so
+ * "binary file" is a better answer than naming a UTF-8 problem the
+ * reader cannot act on. Only the head is looked at (cheap), and the
+ * precise UTF-8 wording survives for what this misses: a file that is
+ * otherwise text with a stray bad byte. */
+static int looks_binary(const unsigned char *b, size_t n)
+{
+    size_t head = n < 256 ? n : 256;
+    for (size_t i = 0; i < head; i++) {
+        unsigned char c = b[i];
+        if (c == 0)
+            return 1;
+        if (c < 0x20 && c != '\t' && c != '\n' && c != '\r' && c != '\f' &&
+            c != '\v')
+            return 1;
+    }
+    return 0;
+}
+
+static NmToolResult not_text_result(const char *path, const char *text,
+                                    size_t len)
+{
+    const char *kind = binary_kind_name((const unsigned char *)text, len);
+    size_t cap = strlen(path) + (kind ? strlen(kind) : 0) + 64;
+    char *msg = malloc(cap);
+    if (!msg)
+        return nm_tool_result_error("out of memory");
+    if (kind)
+        snprintf(msg, cap, "binary file — %s: %s", kind, path);
+    else if (looks_binary((const unsigned char *)text, len))
+        snprintf(msg, cap, "binary file (not UTF-8 text): %s", path);
+    else
+        snprintf(msg, cap, "file is not valid UTF-8: %s", path);
+    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+}
+
 /* read_file's image branch (docs/TOOL-IMAGE-PLAN.md D2/D3): a two-step
  * probe so the text hot path never pays for a full read. Returns 1 when
  * it handled the call (`out` filled), 0 when the file is not an image
@@ -555,14 +628,16 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
-        char *msg = malloc(strlen(path) + 64);
-        if (msg)
-            snprintf(msg, strlen(path) + 64, "file is not valid UTF-8: %s",
-                     path);
+        /* Not text: say WHAT it is when we can (a container by magic, or
+         * plain "binary file" for a NUL/control head), and keep the
+         * precise UTF-8 wording only for a file that is otherwise text
+         * with a stray bad byte. "file is not valid UTF-8" for a ZIP or
+         * a PDF names a problem the model cannot act on. */
+        NmToolResult r = not_text_result(path, text, len);
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        return r;
     }
 
     /* Optional window: offset (1-based first line) + limit (max line

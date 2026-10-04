@@ -735,34 +735,83 @@ static void test_read_file_image_too_large(void)
 }
 
 /* A binary file with no known container falls through to the text path,
- * which refuses it as non-UTF-8 — the existing behaviour, and no image
- * is carried (the image branch must not claim an unrecognised file). */
-static void test_read_file_binary_is_not_an_image(void)
+ * which refuses it — and NAMES what it can: a common container by magic,
+ * plain "binary file" for a NUL/control head, and the precise UTF-8
+ * wording only for a file that is otherwise text with a stray bad byte.
+ * No image is carried (the image branch must not claim an unrecognised
+ * file). */
+static void test_read_file_binary_names_what_it_is(void)
 {
-    char *path = scratch_path("blob.bin");
+    static const struct
+    {
+        const char *name;
+        const char *bytes;
+        size_t len;
+        const char *want;
+    } cases[] = {
+        /* sizeof, not strlen: a magic can carry NULs (MP4's box size).
+         * Each case carries a stray high byte too, the way the real file
+         * does — the text path only classifies what is not valid UTF-8,
+         * and a short head of ASCII magic can be perfectly valid. */
+        { "doc.pdf", "%PDF-1.7\n%\xe2\xe3\xcf\xd3\n",
+          sizeof("%PDF-1.7\n%\xe2\xe3\xcf\xd3\n") - 1, "PDF document" },
+        { "arch.zip", "PK\x03\x04\x14\x00\x00\x00\xff",
+          sizeof("PK\x03\x04\x14\x00\x00\x00\xff") - 1, "ZIP archive" },
+        { "prog.bin", "\x7f"
+                      "ELF\x02\x01\x01\x00\xff",
+          sizeof("\x7f"
+                 "ELF\x02\x01\x01\x00\xff") -
+              1,
+          "ELF binary" },
+        { "clip.mp4", "\x00\x00\x00\x18"
+                      "ftypmp42\xff",
+          sizeof("\x00\x00\x00\x18"
+                 "ftypmp42\xff") -
+              1,
+          "ISO media (MP4/MOV)" },
+        /* no magic, but a NUL in the head: still not text */
+        { "blob.bin", "\xff\xfe\x00\x01\x80",
+          sizeof("\xff\xfe\x00\x01\x80") - 1, "binary file" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *path = scratch_path(cases[i].name);
+        FILE *f = fopen(path, "wb");
+        ASSERT_NOT_NULL(f);
+        fwrite(cases[i].bytes, 1, cases[i].len, f);
+        fclose(f);
+
+        NmToolResult r = read_file_at(path);
+
+        ASSERT_EQ(r.status, NM_TOOL_ERR);
+        ASSERT_NOT_NULL(r.output);
+        ASSERT_TRUE(strstr(r.output, cases[i].want) != NULL);
+        ASSERT_TRUE(strstr(r.output, path) != NULL);
+        /* the text path's line is not what a reader gets for these */
+        ASSERT_TRUE(strstr(r.output, "not valid UTF-8") == NULL);
+        ASSERT_NULL(r.image);
+
+        nm_tool_result_free(&r);
+        remove(path);
+        free(path);
+    }
+
+    /* ...and a file that IS text with one stray bad byte keeps the
+     * precise wording: the message must not overclaim */
+    char *path = scratch_path("latin1.txt");
     FILE *f = fopen(path, "wb");
     ASSERT_NOT_NULL(f);
-    const unsigned char junk[] = { 0xff, 0xfe, 0x00, 0x01, 0x80 };
-    fwrite(junk, 1, sizeof(junk), f);
+    fputs("hello w\xffrld\n", f);
     fclose(f);
 
-    NmToolset *ts = nm_toolset_new_defaults();
-    NmJson *jargs = nm_json_new_object();
-    nm_json_set(jargs, "path", nm_json_new_string(path));
-    char *args = nm_json_dump(jargs);
-    nm_json_free(jargs);
-    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
-    free(args);
-
+    NmToolResult r = read_file_at(path);
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "not valid UTF-8") != NULL);
-    ASSERT_NULL(r.image);
+    ASSERT_TRUE(strstr(r.output, "binary file") == NULL);
 
     nm_tool_result_free(&r);
     remove(path);
     free(path);
-    nm_toolset_free(ts);
 }
 
 /* A container we RECOGNISE but the wire does not take gets the tool's
@@ -3331,7 +3380,7 @@ int main(void)
     RUN_TEST(test_read_file_image_branch);
     RUN_TEST(test_read_file_image_branch_beats_window_args);
     RUN_TEST(test_read_file_image_too_large);
-    RUN_TEST(test_read_file_binary_is_not_an_image);
+    RUN_TEST(test_read_file_binary_names_what_it_is);
     RUN_TEST(test_read_file_unsupported_container);
     RUN_TEST(test_read_file_jpeg_metadata_before_sof);
     RUN_TEST(test_read_file_image_without_dimensions);

@@ -247,7 +247,9 @@ The model's own `read_file` meets the same three containers, and a file
 it can see is an image but the wire cannot take (a WebP, say) is named
 as such — container, dimensions, size, and what would work — instead of
 being reported as unreadable text. Attachable containers are PNG, JPEG
-and GIF; anything else has to be converted first.
+and GIF; anything else has to be converted first. A file that is not
+text at all is named too (a PDF, a ZIP, an ELF binary, or plainly
+"binary file") rather than reported as a UTF-8 problem.
 
 Sending an image to a text-only model is not an error — the provider
 strips it and the model answers blind — so the catalog's vision flag is
