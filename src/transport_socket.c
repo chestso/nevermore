@@ -542,7 +542,17 @@ int nm_socket_wait_ms(const NmConnection *conn)
         return 0; /* spent: the next step advances the walk */
     if (left > (double)budget)
         return budget; /* clock skew / not armed: never overshoot */
-    return (int)left;
+    /* A sub-millisecond remainder must NOT truncate to 0: 0 means
+     * "due now" to the caller (the tick steps on it), but a step with
+     * 0.9 ms of budget still unspent finds the attempt in flight and
+     * does nothing — and a tick-driven loop waits 0 ms before asking
+     * again, so the budget is never crossed and the walk spins
+     * forever. agent.c's inactivity deadline carries the same guard;
+     * report 1 ms and wake again instead. */
+    int ms = (int)left;
+    if (ms == 0)
+        ms = 1;
+    return ms;
 }
 
 /* Advance from the attempt at conn_addr_idx to the next address.
