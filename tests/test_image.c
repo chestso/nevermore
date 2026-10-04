@@ -249,6 +249,39 @@ static void test_measure_format_tier_matrix(void)
     nm_markdown_render_state_free(&m.rs);
 }
 
+/* The "if supported" front door (nm_image_supported) must answer
+ * exactly what measure does: it is the same tier table, asked before
+ * any bytes exist. */
+static void test_supported_matches_the_tier_table(void)
+{
+    M m;
+    m_init(&m);
+
+    m_profile(&m, 1, 0, 10, 20); /* kitty: PNG only */
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
+
+    m_profile(&m, 0, 1, 10, 20); /* iTerm2: every container */
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_UNKNOWN));
+
+    m_profile(&m, 0, 0, 10, 20); /* no graphics */
+    m.profile.sixel = 1;         /* v1 ignores the pixel tier */
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+
+    /* An unresolved verdict answers no: the UI then leaves the image to
+     * the submit echo, and boba's gate holds the unit until it lands. */
+    m_profile(&m, 1, 0, 10, 20);
+    m.profile.resolved = 0;
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+
+    ASSERT_FALSE(nm_image_supported(NULL, NM_IMAGE_FMT_PNG));
+    nm_markdown_render_state_free(&m.rs);
+}
+
 static void test_measure_display_math(void)
 {
     M m;
@@ -823,6 +856,7 @@ int main(void)
     RUN_TEST(test_image_ref_parses);
     RUN_TEST(test_measure_data_uri_png_kitty);
     RUN_TEST(test_measure_format_tier_matrix);
+    RUN_TEST(test_supported_matches_the_tier_table);
     RUN_TEST(test_measure_display_math);
     RUN_TEST(test_measure_remote_and_malformed);
     RUN_TEST(test_measure_oversize_degrades_before_decode);

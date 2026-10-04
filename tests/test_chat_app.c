@@ -4666,6 +4666,83 @@ static void test_img_pending_dropped_on_provider_switch(void)
     harness_free(h);
 }
 
+/* Count the kitty APC transmissions in the harness output (one per
+ * rendered image). */
+static size_t count_image_apc(const char *out)
+{
+    size_t n = 0;
+    for (const char *p = out; (p = strstr(p, "\x1b_Ga=T,f=100")) != NULL; p++)
+        n++;
+    return n;
+}
+
+/* A terminal that renders images shows the attached image AT THE ATTACH
+ * ("if supported"), and the turn that carries it does not show it a
+ * second time: one image, one transmission. The profile is the
+ * runtime's — resolved by hand here, since the tmpfile terminal never
+ * answers the probe. */
+static void test_img_attach_shows_the_image_when_supported(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"a test "
+                "image\"}}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* The terminal answered the kitty query: images are supported. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+
+    const char *path = chat_png_fixture("chat-img-attach.png");
+    chat_img_cmd(h, path);
+    const char *out = harness_read(h);
+    /* the attach line, then the image itself — not its marker */
+    const char *named = strstr(out, "image: chat-img-attach.png — PNG 64x32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    ASSERT_TRUE(named != NULL);
+    ASSERT_TRUE(apc != NULL);
+    ASSERT_TRUE(named < apc); /* the image lands BELOW the line naming it */
+    ASSERT_TRUE(strstr(out, "no graphics support") == NULL);
+    ASSERT_EQ(count_image_apc(out), 1);
+
+    /* A second /img opens its OWN block: the attach finalizes the first
+     * (its blank is the classifier's prev line), so the second image
+     * renders too instead of continuing the first as a paragraph. */
+    const char *path2 = chat_png_fixture("chat-img-attach2.png");
+    chat_img_cmd(h, path2);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "image: chat-img-attach2.png — PNG 64x32") != NULL);
+    ASSERT_EQ(count_image_apc(out), 2);
+
+    /* Submit: the wire carries the parts, and neither image is re-shown
+     * under the user's line (the attaches' transmissions are the only
+     * ones). */
+    harness_type(h, "what is this?");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_TRUE(strstr(g_request,
+                       "\"content\":[{\"type\":\"text\",\"text\":\"what is "
+                       "this?\"},{\"type\":\"image_url\",") != NULL);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "a test image") != NULL); /* the answer */
+    ASSERT_EQ(count_image_apc(out), 2);
+
+    harness_free(h);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -4769,6 +4846,7 @@ int main(void)
     RUN_TEST(test_img_command_attaches_lists_and_drops);
     RUN_TEST(test_img_command_refusals);
     RUN_TEST(test_img_submit_sends_parts_and_echoes);
+    RUN_TEST(test_img_attach_shows_the_image_when_supported);
     RUN_TEST(test_img_text_only_model_warns);
     RUN_TEST(test_img_pending_dropped_on_provider_switch);
     RUN_TEST(test_job_cap_fits_the_fd_budget);

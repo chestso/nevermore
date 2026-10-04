@@ -203,8 +203,15 @@ struct NmChatApp
      * NOT model-scoped: /model keeps them. A /provider switch rebuilds
      * the agent — and the session, images included — so it drops them
      * and says so (an id into a dead store is worse than a lost
-     * attachment). Grown geometrically, reused across turns. */
+     * attachment). Grown geometrically, reused across turns. The
+     * parallel pending_displayed[] records whether the attach already
+     * DISPLAYED each one in the transcript (the terminal could render
+     * it), so an image is shown exactly once — at the attach, or (the
+     * degraded case) as the marker under the message that carried it.
+     * Two arrays, one growth step: the ids stay contiguous, which is
+     * what makes the submit hand-off to nm_agent_start a plain pass. */
     size_t *pending_images;
+    unsigned char *pending_displayed;
     size_t n_pending;
     size_t pending_cap;
 };
@@ -652,9 +659,19 @@ static int pending_push(NmChatApp *app, size_t id)
         if (!ni)
             return -1;
         app->pending_images = ni;
+        /* The flags grow with the ids. A failure here leaves the id
+         * array larger than cap, which is harmless: n_pending never
+         * passes cap, so the flag array is never indexed out of
+         * bounds. */
+        unsigned char *nd = realloc(app->pending_displayed, ncap);
+        if (!nd)
+            return -1;
+        app->pending_displayed = nd;
         app->pending_cap = ncap;
     }
-    app->pending_images[app->n_pending++] = id;
+    app->pending_images[app->n_pending] = id;
+    app->pending_displayed[app->n_pending] = 0;
+    app->n_pending++;
     return 0;
 }
 
@@ -665,6 +682,8 @@ static void pending_drop(NmChatApp *app, size_t idx)
         return;
     memmove(&app->pending_images[idx], &app->pending_images[idx + 1],
             (app->n_pending - idx - 1) * sizeof(*app->pending_images));
+    memmove(&app->pending_displayed[idx], &app->pending_displayed[idx + 1],
+            app->n_pending - idx - 1);
     app->n_pending--;
 }
 
@@ -691,6 +710,57 @@ static void print_pending(NmChatApp *app)
         sys_line(app, "  %zu  %s — %s %dx%d, %s", i + 1, img->alt,
                  nm_image_format_name(img->format), img->w, img->h, size);
     }
+}
+
+/* The markdown line for one attached image: the SAME bytes the model's
+ * own images arrive as (`![alt](data_url)`), so the classifier makes it
+ * an IMAGE block and the one profile ladder renders or degrades it —
+ * one image pipeline, no second path. The DATA URL is posted, never the
+ * file path: the transcript must show the captured bytes (the file may
+ * already be gone). The stream normalizer holds the line's trailing
+ * blank; the caller flushes it when the block must finalize. */
+static void post_image_block(NmChatApp *app, const NmImage *img)
+{
+    size_t line_len = strlen(img->alt) + img->data_url_len + 8;
+    char *line = malloc(line_len + 1);
+    if (!line)
+        return;
+    int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", img->alt,
+                     img->data_url);
+    stream_text(app, NM_STREAM_ID_CONTENT, line, (size_t)n);
+    free(line);
+}
+
+/* Does the terminal render this image? The "if supported" gate: the
+ * runtime's profile (resolved by the startup probe) through
+ * nm_image.c's tier table, so the answer is exactly what the commit
+ * pass will do. No runtime, an unresolved probe, a terminal without
+ * graphics, or a container the terminal cannot take all answer 0, and
+ * the image is left to the submit-time echo. */
+static int terminal_renders(const NmChatApp *app, const NmImage *img)
+{
+    if (!app->rt || !img)
+        return 0;
+    return nm_image_supported(tui_runtime_terminal_profile(app->rt),
+                              img->format);
+}
+
+/* Display a just-attached image in the transcript, right below its
+ * /img line — the attach is where the user wants to see it. Nothing
+ * else is streaming at attach time, so the block is finalized here: the
+ * held blank is flushed (freezing the IMAGE unit, and leaving the
+ * classifier's previous line a blank, which is what lets a second /img
+ * open its own block instead of continuing this one as a paragraph) and
+ * the run is closed with the separator. Returns 1 when the image was
+ * posted. */
+static int display_attached_image(NmChatApp *app, const NmImage *img)
+{
+    if (!terminal_renders(app, img))
+        return 0;
+    post_image_block(app, img);
+    hold_flush(app, NM_STREAM_ID_CONTENT);
+    emit_separator(app);
+    return 1;
 }
 
 /* /img: attach a file, list the pending set, or drop one. */
@@ -750,33 +820,33 @@ static void img_command(NmChatApp *app, const char *arg)
     sys_line(app, "image: %s — %s %dx%d, %s", img ? img->alt : path,
              nm_image_format_name(img ? img->format : NM_IMAGE_FMT_UNKNOWN),
              img ? img->w : 0, img ? img->h : 0, size);
+    /* Show it, if the terminal can: the image lands in the conversation
+     * right under the line that names it. */
+    if (display_attached_image(app, img))
+        app->pending_displayed[app->n_pending - 1] = 1;
     warn_text_only(app);
 }
 
-/* Echo the turn's images into the transcript. The line is the SAME
- * markdown the model's own images arrive as (`![alt](data_url)`), so the
- * classifier makes each one an IMAGE block and the existing profile
- * ladder renders or degrades it — one image pipeline, no second path.
- * The DATA URL is posted, never the file path: the transcript must show
- * the captured bytes (the file may already be gone). */
+/* Echo the images the attach could NOT display (a terminal that renders
+ * nothing, or a probe still pending) under the user's line: the message
+ * record, as the block's marker. Each image is displayed exactly once —
+ * one shown at attach is skipped here, so its payload never rides the
+ * terminal twice. */
 static void echo_pending_images(NmChatApp *app)
 {
+    int any = 0;
     for (size_t i = 0; i < app->n_pending; i++) {
+        if (app->pending_displayed[i])
+            continue;
         const NmImage *img = nm_agent_image(app->agent, app->pending_images[i]);
         if (!img)
             continue;
-        size_t line_len = strlen(img->alt) + img->data_url_len + 8;
-        char *line = malloc(line_len + 1);
-        if (!line)
-            return;
-        int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", img->alt,
-                         img->data_url);
-        stream_text(app, NM_STREAM_ID_CONTENT, line, (size_t)n);
-        free(line);
+        post_image_block(app, img);
+        any = 1;
     }
     /* The run is closed here: the images are their own speech, and the
      * answer that follows gets its own paragraph. */
-    if (app->n_pending)
+    if (any)
         emit_separator(app);
 }
 
@@ -995,6 +1065,7 @@ void nm_chat_app_free(NmChatApp *app)
     free(app->api_key);
     free(app->current_tool);
     free(app->pending_images);
+    free(app->pending_displayed);
     for (int i = 0; i < NM_STREAM_COUNT; i++)
         free(app->hold[i]);
     if (app->transcript)
@@ -1368,6 +1439,7 @@ static void print_help(NmChatApp *app)
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
                   "  /context           context-window usage (provider-reported)\n"
                   "  /img <path>        attach an image to the next message\n"
+                  "                     (shown here when the terminal can)\n"
                   "  /img               list pending attachments\n"
                   "  /img -<n>          drop pending attachment n\n"
                   "  /ps                process jobs run by exec_command\n"
@@ -2171,10 +2243,10 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     if (saved[0] == '/') {
         run_command(app, saved, cmd_out);
     } else {
-        /* The turn's images are echoed FIRST (the transcript shows the
-         * captured bytes right under the user's line), then handed to
-         * the agent — which copies the ids into the session message, so
-         * the pending set is consumed whatever the send does next. */
+        /* The images the attach could not show are echoed here (right
+         * under the user's line), then the turn is handed to the agent
+         * — which copies the ids into the session message, so the
+         * pending set is consumed whatever the send does next. */
         echo_pending_images(app);
         size_t n_images = app->n_pending;
         const size_t *ids = app->pending_images;

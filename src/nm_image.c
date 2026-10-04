@@ -224,6 +224,27 @@ static void compute_display(NmImageSlot *s, const NmMarkdownRenderState *rs,
 /* Callbacks                                                         */
 /* ---------------------------------------------------------------- */
 
+/* The tier table (D5): kitty takes PNG only (f=100); iTerm2 decodes
+ * its own containers. kitty preferred where both answer (WezTerm). -1
+ * = this profile renders nothing of this format (markers). An
+ * unresolved profile answers -1: the capabilities are all zero before
+ * the verdict, and the UI's attach gate reads the same answer. */
+static int pick_transport(const TuiTerminalProfile *p, int format)
+{
+    if (!p || !p->resolved)
+        return -1;
+    if (p->kitty_graphics && format == NM_IMAGE_FMT_PNG)
+        return (int)TUI_IMAGE_KITTY;
+    if (p->iterm2_images && format != NM_IMAGE_FMT_UNKNOWN)
+        return (int)TUI_IMAGE_ITERM2;
+    return -1;
+}
+
+int nm_image_supported(const TuiTerminalProfile *p, int format)
+{
+    return pick_transport(p, format) >= 0;
+}
+
 int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
                      const TuiTerminalProfile *profile, int *out_rows,
                      void *user_data)
@@ -268,18 +289,16 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
         return 0;
     }
 
-    /* tier (D5): kitty takes PNG only (f=100); iTerm2 decodes its own
-     * containers. kitty preferred where both answer (WezTerm). */
-    if (profile->kitty_graphics && s->format == NM_IMAGE_FMT_PNG) {
-        s->transport = TUI_IMAGE_KITTY;
-    } else if (profile->iterm2_images && s->format != NM_IMAGE_FMT_UNKNOWN) {
-        s->transport = TUI_IMAGE_ITERM2;
-    } else {
-        slot_reason(s, profile->kitty_graphics || profile->iterm2_images
+    /* tier (D5): the one table, shared with the UI's "if supported"
+     * attach gate (nm_image_supported). */
+    int transport = pick_transport(profile, s->format);
+    if (transport < 0) {
+        slot_reason(s, (profile->kitty_graphics || profile->iterm2_images)
                            ? "format not supported here"
                            : "no graphics support");
         return 0;
     }
+    s->transport = transport;
 
     compute_display(s, rs, profile);
     if (out_rows)

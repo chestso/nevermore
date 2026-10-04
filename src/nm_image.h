@@ -64,6 +64,17 @@ void nm_image_slot_reset(NmImageSlot *s);
 /* Release the slot's buffer (app teardown). */
 void nm_image_slot_free(NmImageSlot *s);
 
+/* Would a source in this container render as an image under this
+ * profile? The tier table's front door, asked BEFORE any bytes exist:
+ * 1 = the transcript will render it, 0 = it would degrade to the
+ * marker (no graphics support, a format the terminal cannot take, or
+ * a profile that has not reached its verdict yet). This is the "if
+ * supported" gate chat_app's /img reads when it decides whether to
+ * display an attached image right there at the point of attach; the
+ * same table nm_image_measure picks the transport from, so the answer
+ * cannot drift from what the commit pass will do. */
+int nm_image_supported(const TuiTerminalProfile *p, int format);
+
 /* TuiTranscriptConfig.measure_image: parse the unit's image line,
  * load the source bytes, sniff the dimensions, pick the transport
  * from the profile and compute the display cells. Fills the slot

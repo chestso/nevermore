@@ -225,8 +225,16 @@ session as a canonical `data:` URL, so later rounds never re-read it.
 That is not an optimization — the file can change under you, and the
 provider's prompt cache keys on the serialized request bytes, so a
 re-read would silently swap the image _and_ throw the cached prefix
-away. The transcript echoes the captured bytes (the same IMAGE block
-the model's own images render as), never the path.
+away. The transcript shows the captured bytes (the same IMAGE block the
+model's own images render as), never the path.
+
+A terminal that speaks a graphics protocol (kitty, iTerm2/WezTerm) shows
+the image **right at the attach**, under the line that names it — you
+see what you picked. The image is shown exactly once: the turn that
+carries it does not re-echo it. On a terminal without graphics support
+(or when the probe has not answered yet) the attach stays a text line
+and the message's echo renders the image's marker — alt, format, dims,
+size and the reason — never the payload.
 
 `/img` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or is
 over 8 MiB — the bytes ride **every** request, so the cap bounds the
