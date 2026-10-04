@@ -357,6 +357,41 @@ void nm_image_size_text(size_t bytes, char *out, size_t cap)
         snprintf(out, cap, "%.1f MiB", (double)bytes / (1024.0 * 1024.0));
 }
 
+void nm_image_describe(const char *name, int w, int h, size_t bytes, char *out,
+                       size_t cap)
+{
+    if (!out || cap == 0)
+        return;
+    char size[32];
+    nm_image_size_text(bytes, size, sizeof(size));
+    const char *nm = (name && *name) ? name : "image";
+    if (w > 0 && h > 0)
+        snprintf(out, cap, "%s %dx%d, %s", nm, w, h, size);
+    else
+        snprintf(out, cap, "%s, %s", nm, size);
+}
+
+size_t nm_image_attachable_list(char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    size_t o = 0;
+    /* The wire formats are contiguous from PNG to GIF, and "has a MIME
+     * type" is the wire's own contract (the data URL builder stands on
+     * it) — so this list cannot drift from what the wire takes. */
+    for (int f = NM_IMAGE_FMT_PNG; f <= NM_IMAGE_FMT_GIF; f++) {
+        if (!nm_image_format_mime(f))
+            continue;
+        int w = snprintf(out + o, cap - o, "%s%s", o ? "/" : "",
+                         nm_image_format_name(f));
+        if (w < 0 || (size_t)w >= cap - o)
+            break; /* the caller's buffer is too small: stop, keep it NUL */
+        o += (size_t)w;
+    }
+    return o;
+}
+
 /* Bytes read from an oversize file, so the marker can still name the
  * container and its dims: past every container's dimension fields. */
 #define PROBE_HEAD_BYTES 64

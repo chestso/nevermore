@@ -876,6 +876,41 @@ static void test_bytes_format_names_and_mime(void)
         nm_image_format_from_kind(NM_IMAGE_KIND_WEBP)));
 }
 
+/* The one spelling of an image's facts (the attach lines, read_file's
+ * summary and its refusals, ask mode) and the attachable set as prose
+ * (derived, so a refusal line cannot drift from the wire's answer). */
+static void test_bytes_describe_and_attachable_list(void)
+{
+    char buf[NM_IMAGE_DESC_MAX];
+
+    nm_image_describe("PNG", 64, 32, 24, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "PNG 64x32, 24 B");
+    nm_image_describe("WebP", 1427, 1848, 401672, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "WebP 1427x1848, 392.3 KiB");
+    /* dims unknown: named and sized, never a "0x0" */
+    nm_image_describe("JPEG", 0, 0, 30, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "JPEG, 30 B");
+    /* a NULL or empty name still reads */
+    nm_image_describe(NULL, 0, 0, 0, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "image, 0 B");
+    nm_image_describe("", 8, 8, 1024, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "image 8x8, 1.0 KiB");
+
+    char list[NM_IMAGE_DESC_MAX];
+    ASSERT_EQ(nm_image_attachable_list(list, sizeof(list)), strlen(list));
+    ASSERT_STR_EQ(list, "PNG/JPEG/GIF");
+    /* derived from the MIME contract, not spelled: every wire format is
+     * in it, and the recognition-only one is not */
+    ASSERT_NOT_NULL(strstr(list, nm_image_format_name(NM_IMAGE_FMT_PNG)));
+    ASSERT_NOT_NULL(strstr(list, nm_image_format_name(NM_IMAGE_FMT_JPEG)));
+    ASSERT_NOT_NULL(strstr(list, nm_image_format_name(NM_IMAGE_FMT_GIF)));
+    ASSERT_TRUE(strstr(list, nm_image_kind_name(NM_IMAGE_KIND_WEBP)) == NULL);
+    /* a cap too small truncates rather than overflowing */
+    char tiny[5];
+    nm_image_attachable_list(tiny, sizeof(tiny));
+    ASSERT_TRUE(strlen(tiny) < sizeof(tiny));
+}
+
 /* Encode → decode is the identity, and the encoder's output is the
  * standard alphabet with '=' padding (the data-URL contract). */
 static void test_bytes_b64_roundtrip(void)
@@ -1019,7 +1054,6 @@ static void test_bytes_file_probe(void)
     ASSERT_EQ(p.h, 32);
     ASSERT_EQ(p.file_bytes, sizeof(FIX_WEBP));
     nm_image_probe_free(&p);
-
     /* not a container at all: the bytes were read, the kind is unknown */
     ASSERT_EQ(nm_image_file_probe(txt, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_ERR_UNKNOWN);
@@ -1114,6 +1148,7 @@ int main(void)
     RUN_TEST(test_slot_reuse_grows_once);
     RUN_TEST(test_bytes_sniff_formats);
     RUN_TEST(test_bytes_format_names_and_mime);
+    RUN_TEST(test_bytes_describe_and_attachable_list);
     RUN_TEST(test_bytes_b64_roundtrip);
     RUN_TEST(test_bytes_data_url);
     RUN_TEST(test_bytes_file_probe);

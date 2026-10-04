@@ -513,13 +513,13 @@ int main(int argc, char *argv[])
                 continue;
             }
             const NmImage *img = nm_agent_image(agent, (size_t)id);
-            char size[32];
-            nm_image_size_text(img ? img->bytes : 0, size, sizeof(size));
-            fprintf(stderr, "[image] %s — %s %dx%d, %s\n",
-                    img ? img->alt : image_paths[i],
-                    nm_image_format_name(img ? img->format
-                                             : NM_IMAGE_FMT_UNKNOWN),
-                    img ? img->w : 0, img ? img->h : 0, size);
+            char desc[NM_IMAGE_DESC_MAX];
+            nm_image_describe(nm_image_format_name(img ? img->format
+                                                       : NM_IMAGE_FMT_UNKNOWN),
+                              img ? img->w : 0, img ? img->h : 0,
+                              img ? img->bytes : 0, desc, sizeof(desc));
+            fprintf(stderr, "[image] %s — %s\n",
+                    img ? img->alt : image_paths[i], desc);
             image_ids[n_ids++] = (size_t)id;
         }
 

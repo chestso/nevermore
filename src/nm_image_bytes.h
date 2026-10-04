@@ -125,6 +125,27 @@ char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
  * both the TUI and ask mode (one spelling, one place). */
 void nm_image_size_text(size_t bytes, char *out, size_t cap);
 
+/* Worst case for nm_image_describe: a 5-byte name + space + the longest
+ * dims ("2147483647x2147483647", 21) + ", " + the longest size text
+ * (13) + NUL, with room to spare. */
+#define NM_IMAGE_DESC_MAX 64
+
+/* "PNG 64x32, 24 B" — the ONE spelling of an image's facts for the
+ * lines that name one: read_file's summary and its refusals, /img's
+ * attach and list lines, ask mode's `-i` line. `name` comes from
+ * either vocabulary — the wire's (nm_image_format_name) for an image
+ * that IS attached, the recognition one (nm_image_kind_name) for one
+ * being refused — and the dims are omitted when they are unknown. The
+ * display marker does NOT use this: its separators are its own. */
+void nm_image_describe(const char *name, int w, int h, size_t bytes,
+                       char *out, size_t cap);
+
+/* The attachable containers as prose — "PNG/JPEG/GIF" — derived from
+ * the wire's own answer (a format with a MIME type is one the data URL
+ * builder can carry), so a refusal line that names the set cannot drift
+ * from what the wire takes. Returns the length written, NUL excluded. */
+size_t nm_image_attachable_list(char *out, size_t cap);
+
 /* One file read + sniff, shared by both halves. */
 typedef struct NmImageProbe
 {

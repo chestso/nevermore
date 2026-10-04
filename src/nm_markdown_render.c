@@ -930,17 +930,6 @@ static NmHighlight *hl_for(const TuiBlock *blk, void *user_data)
 /* IMAGE blocks: degradation marker + live placeholder               */
 /* ---------------------------------------------------------------- */
 
-/* Human byte size for markers: "214.3 KiB" / "1.8 MiB" / "912 B". */
-static void format_bytes(char *buf, size_t n, size_t cap)
-{
-    if (n >= 1024 * 1024)
-        snprintf(buf, cap, "%.1f MiB", (double)n / (1024.0 * 1024.0));
-    else if (n >= 1024)
-        snprintf(buf, cap, "%.1f KiB", (double)n / 1024.0);
-    else
-        snprintf(buf, cap, "%zu B", n);
-}
-
 /* The IMAGE block's committed fallback: one row, Comment-styled,
  * carrying what the app knows (alt, format, dims, size) and why it
  * did not render. The payload itself is NEVER the fallback text —
@@ -965,9 +954,11 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
     }
     alt[alt_len] = '\0';
 
+    /* The size text is the image tier's one spelling (the same one the
+     * attach lines use) — the marker's own layout is the separators. */
     char size[24] = "";
     if (slot && slot->src_bytes > 0)
-        format_bytes(size, slot->src_bytes, sizeof(size));
+        nm_image_size_text(slot->src_bytes, size, sizeof(size));
 
     char dims[40] = "";
     if (slot && slot->w > 0 && slot->h > 0)
@@ -1011,7 +1002,7 @@ static void render_image_placeholder(const TuiBlock *live, const char *text,
     alt[alt_len] = '\0';
 
     char size[24] = "";
-    format_bytes(size, len, sizeof(size));
+    nm_image_size_text(len, size, sizeof(size));
 
     char line[128];
     snprintf(line, sizeof(line), "\xe2\x96\x92 %s \xe2\x80\x94 %s so far",

@@ -743,10 +743,10 @@ static void print_pending(NmChatApp *app)
         const NmImage *img = nm_agent_image(app->agent, app->pending_images[i]);
         if (!img)
             continue;
-        char size[32];
-        nm_image_size_text(img->bytes, size, sizeof(size));
-        sys_line(app, "  %zu  %s — %s %dx%d, %s", i + 1, img->alt,
-                 nm_image_format_name(img->format), img->w, img->h, size);
+        char desc[NM_IMAGE_DESC_MAX];
+        nm_image_describe(nm_image_format_name(img->format), img->w, img->h,
+                          img->bytes, desc, sizeof(desc));
+        sys_line(app, "  %zu  %s — %s", i + 1, img->alt, desc);
     }
 }
 
@@ -853,11 +853,12 @@ static void img_command(NmChatApp *app, const char *arg)
         return;
     }
     const NmImage *img = nm_agent_image(app->agent, (size_t)id);
-    char size[32];
-    nm_image_size_text(img ? img->bytes : 0, size, sizeof(size));
-    sys_line(app, "image: %s — %s %dx%d, %s", img ? img->alt : path,
-             nm_image_format_name(img ? img->format : NM_IMAGE_FMT_UNKNOWN),
-             img ? img->w : 0, img ? img->h : 0, size);
+    char desc[NM_IMAGE_DESC_MAX];
+    nm_image_describe(nm_image_format_name(img ? img->format
+                                               : NM_IMAGE_FMT_UNKNOWN),
+                      img ? img->w : 0, img ? img->h : 0,
+                      img ? img->bytes : 0, desc, sizeof(desc));
+    sys_line(app, "image: %s — %s", img ? img->alt : path, desc);
     /* Show it, if the terminal can: the image lands in the conversation
      * right under the line that names it. */
     if (display_attached_image(app, img))

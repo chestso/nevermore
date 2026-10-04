@@ -914,6 +914,20 @@ static void test_read_file_image_without_dimensions(void)
     free(path);
 }
 
+/* read_file's description names the attachable set in prose. It is a
+ * const literal, so it cannot interpolate the runtime list — pin it to
+ * the set the code actually has, so adding a container cannot leave the
+ * model reading a stale list (the refusal line builds its own from the
+ * same source and cannot drift). */
+static void test_read_file_description_names_the_attachable_set(void)
+{
+    char list[NM_IMAGE_DESC_MAX];
+    nm_image_attachable_list(list, sizeof(list));
+    ASSERT_STR_EQ(list, "PNG/JPEG/GIF");
+    ASSERT_NOT_NULL(nm_tool_read_file.description);
+    ASSERT_NOT_NULL(strstr(nm_tool_read_file.description, list));
+}
+
 /* A text file carries no image (the common case: every textual tool). */
 static void test_read_file_text_has_no_image(void)
 {
@@ -3384,6 +3398,7 @@ int main(void)
     RUN_TEST(test_read_file_unsupported_container);
     RUN_TEST(test_read_file_jpeg_metadata_before_sof);
     RUN_TEST(test_read_file_image_without_dimensions);
+    RUN_TEST(test_read_file_description_names_the_attachable_set);
     RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);

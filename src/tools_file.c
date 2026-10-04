@@ -385,19 +385,18 @@ static const char *file_base_name(const char *path)
 static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
 {
     const char *alt = file_base_name(path);
-    char size[32];
-    nm_image_size_text(p->len, size, sizeof(size));
-    const char *fmtname = nm_image_kind_name(p->kind);
-    size_t need = strlen(alt) + strlen(fmtname) + strlen(size) + 128;
+    char desc[NM_IMAGE_DESC_MAX];
+    nm_image_describe(nm_image_kind_name(p->kind), p->w, p->h, p->len, desc,
+                      sizeof(desc));
+    size_t need = strlen(alt) + strlen(desc) + 96;
     char *body = malloc(need);
     if (!body) {
         nm_image_probe_free(p);
         return nm_tool_result_error("out of memory");
     }
     snprintf(body, need,
-             "[image] %s — %s %dx%d, %s — attached; the image follows as a "
-             "user message",
-             alt, fmtname, p->w, p->h, size);
+             "[image] %s — %s — attached; the image follows as a user message",
+             alt, desc);
     NmToolResult r = { .status = NM_TOOL_OK,
                        .output = body,
                        .image = p->bytes,
@@ -419,22 +418,24 @@ static NmToolResult unreadable_image_result(const char *path,
                                             const NmImageProbe *p)
 {
     const char *alt = file_base_name(path);
-    const char *kindname = nm_image_kind_name(p->kind);
-    char size[32];
-    nm_image_size_text(p->file_bytes, size, sizeof(size));
-    char dims[32] = "";
-    if (p->w > 0 && p->h > 0)
-        snprintf(dims, sizeof(dims), " %dx%d", p->w, p->h);
-    const char *why =
-        nm_image_format_from_kind(p->kind) == NM_IMAGE_FMT_UNKNOWN
-            ? "not an attachable container (PNG/JPEG/GIF); convert it first"
-            : "its dimensions could not be read — the file looks truncated";
-    size_t need = strlen(alt) + strlen(kindname) + strlen(size) +
-                  strlen(dims) + strlen(why) + 16;
+    char desc[NM_IMAGE_DESC_MAX];
+    nm_image_describe(nm_image_kind_name(p->kind), p->w, p->h, p->file_bytes,
+                      desc, sizeof(desc));
+    char why[128];
+    if (nm_image_format_from_kind(p->kind) == NM_IMAGE_FMT_UNKNOWN) {
+        char list[NM_IMAGE_DESC_MAX];
+        nm_image_attachable_list(list, sizeof(list));
+        snprintf(why, sizeof(why),
+                 "not an attachable container (%s); convert it first", list);
+    } else {
+        snprintf(why, sizeof(why),
+                 "its dimensions could not be read — the file looks truncated");
+    }
+    size_t need = strlen(alt) + strlen(desc) + strlen(why) + 16;
     char *msg = malloc(need);
     if (!msg)
         return nm_tool_result_error("out of memory");
-    snprintf(msg, need, "%s — %s%s, %s — %s", alt, kindname, dims, size, why);
+    snprintf(msg, need, "%s — %s — %s", alt, desc, why);
     return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
 }
 
