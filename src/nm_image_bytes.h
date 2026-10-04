@@ -33,10 +33,10 @@ typedef enum
 /* Wire cap on an attached image (decoded bytes). The bytes ride EVERY
  * request — chat/completions has no upload/reference endpoint — so this
  * bounds the body, not the display. Not a config key: the degradation
- * ladder is the switch, and a knob without a user is noise. The display
- * cap (NM_IMAGE_MAX_BYTES, nm_image.h) is a DIFFERENT fact — render
- * memory — and the two are allowed to disagree: a 4 MiB photo sends
- * fine and renders as its marker. */
+ * ladder is the switch, and a knob without a user is noise. It is the
+ * ONE cap: there is no display-side cap (nm_image.h), because an image
+ * that is in the conversation has already paid for its bytes — a 4 MiB
+ * photo sends fine and renders. */
 #define NM_IMAGE_MAX_WIRE_BYTES ((size_t)8 * 1024 * 1024)
 
 /* How a byte-source load ended. Typed (not a string) so each side

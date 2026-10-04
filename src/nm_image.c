@@ -59,6 +59,7 @@ void nm_image_slot_reset(NmImageSlot *s)
         return;
     s->image_id = 0;
     s->len = 0;
+    s->src_bytes = 0;
     s->w = s->h = 0;
     s->format = -1;
     s->transport = -1;
@@ -111,23 +112,10 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
         }
         const char *b64 = src + semi + 8;
         size_t b64_len = src_len - (semi + 8);
-        /* refuse oversize BEFORE decoding (b64 length is exact
-         * enough: 4 chars per 3 bytes) — but decode the HEAD (64
-         * chars -> 48 bytes, past every container's dimension fields)
-         * so the marker can still name the format and dims */
-        if (b64_len / 4 * 3 > NM_IMAGE_MAX_BYTES) {
-            slot_reason(s, "too large");
-            if (slot_reserve(s, 64) != 0)
-                return -1;
-            size_t head = b64_len < 64 ? b64_len : 64;
-            head -= head % 4;
-            long n = nm_image_b64_decode(b64, head, s->data, s->cap);
-            if (n > 0) {
-                s->len = (size_t)n;
-                s->format = fmt;
-            }
-            return -1;
-        }
+        /* No size gate: these bytes are already in the conversation
+         * (the attach cap is what let them in), so decode the WHOLE
+         * payload — the marker's size is then the payload's own
+         * (src_bytes), never a probe's. */
         if (slot_reserve(s, b64_len / 4 * 3 + 1) != 0) {
             slot_reason(s, "no memory");
             return -1;
@@ -138,6 +126,7 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
             return -1;
         }
         s->len = (size_t)n;
+        s->src_bytes = (size_t)n;
         s->format = fmt;
         return 0;
     }
@@ -148,19 +137,28 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
         char path[IMG_PATH_MAX];
         memcpy(path, src, src_len);
         path[src_len] = '\0';
-        /* The one file probe (shared with the attach path): it reads the
-         * file bounded by the DISPLAY cap — a bigger image sends fine and
-         * renders as its marker. The slot keeps its own reused buffer, so
-         * the probe's bytes are copied in and released. */
+        /* The one file probe (shared with the attach path), bounded by
+         * the WIRE cap — the same bound the attach enforces, so a file
+         * that could never ride a request (a model NAMED it in prose;
+         * nothing attached it) is not slurped into memory for display
+         * either. It reads at most a 64-byte head in that case, so the
+         * slot's buffer is not grown; the marker names the FILE's size
+         * (src_bytes), which is why that is its own field. */
         NmImageProbe p;
-        NmImageStatus st = nm_image_file_probe(path, NM_IMAGE_MAX_BYTES, &p);
-        if (p.len && slot_reserve(s, p.len) == 0) {
+        NmImageStatus st =
+            nm_image_file_probe(path, NM_IMAGE_MAX_WIRE_BYTES, &p);
+        if (st == NM_IMAGE_OK && p.len > 0 && slot_reserve(s, p.len) != 0)
+            st = NM_IMAGE_ERR_NOMEM;
+        if (st == NM_IMAGE_OK) {
             memcpy(s->data, p.bytes, p.len);
             s->len = p.len;
+        }
+        if (p.format != NM_IMAGE_FMT_UNKNOWN) {
             s->format = p.format;
             s->w = p.w;
             s->h = p.h;
         }
+        s->src_bytes = p.file_bytes;
         switch (st) {
         case NM_IMAGE_OK:
             break;
@@ -283,11 +281,9 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
         return 0;
     }
     if (s->reason[0] != '\0')
-        return 0; /* loaded the header, but the load itself failed */
-    if (s->len == 0 || s->len > NM_IMAGE_MAX_BYTES) {
-        slot_reason(s, "too large");
-        return 0;
-    }
+        return 0; /* the load itself failed; the reason is the marker's */
+    /* no size gate: a load that reached here holds the payload, and the
+     * wire cap already bounded it (revised D7) */
 
     /* tier (D5): the one table, shared with the UI's "if supported"
      * attach gate (nm_image_supported). */

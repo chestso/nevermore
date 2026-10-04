@@ -966,14 +966,14 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
     alt[alt_len] = '\0';
 
     char size[24] = "";
-    if (slot && slot->len > 0)
-        format_bytes(size, slot->len, sizeof(size));
+    if (slot && slot->src_bytes > 0)
+        format_bytes(size, slot->src_bytes, sizeof(size));
 
     char dims[40] = "";
     if (slot && slot->w > 0 && slot->h > 0)
         snprintf(dims, sizeof(dims), "%s %dx%d",
                  nm_image_format_name(slot->format), slot->w, slot->h);
-    else if (slot && slot->len > 0)
+    else if (slot && slot->src_bytes > 0)
         snprintf(dims, sizeof(dims), "%s", nm_image_format_name(slot->format));
 
     const char *reason = slot && slot->reason[0] ? slot->reason

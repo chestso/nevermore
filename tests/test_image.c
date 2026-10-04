@@ -335,32 +335,79 @@ static void test_measure_remote_and_malformed(void)
     nm_markdown_render_state_free(&m.rs);
 }
 
-static void test_measure_oversize_degrades_before_decode(void)
+/* A payload over the former display cap is NOT refused: the bytes are
+ * already in the conversation (the attach cap is what let them in), so
+ * it renders like any other image and the slot's size is the payload's
+ * own (revised D7/D16). */
+static void test_measure_large_data_uri_renders(void)
 {
     M m;
     m_init(&m);
     m_profile(&m, 1, 0, 10, 20);
-    /* > 1 MiB of decoded payload: refused before decoding (the b64
-     * length is the tell); the HEAD is still sniffed for the marker */
-    /* the real PNG header first (so the head sniff yields dims for
-     * the marker), then padding past the cap */
-    size_t nb64 = 4 * (NM_IMAGE_MAX_BYTES / 3 + 2); /* > 3/4 * 1 MiB */
+    /* the real PNG header first (so the head sniff yields dims), then
+     * padding well past the old 1 MiB display cap */
+    size_t pad = 2 * 1024 * 1024; /* base64 chars -> 1.5 MiB decoded */
     size_t total = strlen("data:image/png;base64,") + strlen(FIX_PNG_B64) +
-                   nb64;
+                   pad;
     char *src = malloc(total + 1);
     ASSERT_NOT_NULL(src);
     strcpy(src, "data:image/png;base64,");
     strcat(src, FIX_PNG_B64);
-    memset(src + strlen(src), 'A', nb64);
+    memset(src + strlen(src), 'A', pad);
     src[total] = '\0';
+
     int ok = measure_src(&m, src);
-    const char *reason = m.rs.img.reason;
-    int w = m.rs.img.w;
+    size_t b64_len = strlen(FIX_PNG_B64) + pad;
+    size_t decoded = b64_len / 4 * 3;
     free(src);
-    ASSERT_FALSE(ok);
-    ASSERT_STR_EQ(reason, "too large");
-    /* the head decoded: PNG sig + dims for the marker */
-    ASSERT_EQ(w, 64);
+
+    ASSERT_TRUE(ok);
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(m.rs.img.w, 64);
+    ASSERT_EQ(m.rs.img.h, 32);
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
+    /* the WHOLE payload decoded: the slot's len — and so the marker's
+     * size — is the payload's, never a probe head's */
+    ASSERT_EQ(m.rs.img.len, decoded);
+    ASSERT_EQ(m.rs.img.src_bytes, decoded);
+    ASSERT_TRUE(m.rs.img.src_bytes > 1024 * 1024);
+    nm_markdown_render_state_free(&m.rs);
+}
+
+/* A local path is read bounded by the WIRE cap (the attach's own
+ * bound), and a file over it degrades to a marker whose SIZE is the
+ * FILE's: the probe held only a 64-byte head, and printing that as the
+ * size is exactly the "48 B — too large" bug. */
+static void test_measure_local_file_over_wire_cap_marker(void)
+{
+    M m;
+    m_init(&m);
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd)))
+        strcpy(cwd, ".");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/nm_img_big_%ld.png", cwd,
+             (long)getpid());
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(FIX_PNG, 1, sizeof(FIX_PNG), f);
+    ASSERT_EQ(fseek(f, (long)NM_IMAGE_MAX_WIRE_BYTES, SEEK_SET), 0);
+    fputc('x', f); /* file_bytes == cap + 1 */
+    fclose(f);
+
+    m_profile(&m, 1, 0, 10, 20);
+    ASSERT_FALSE(measure_src(&m, path));
+    ASSERT_STR_EQ(m.rs.img.reason, "too large");
+    /* format and dims come from the probe's head... */
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(m.rs.img.w, 64);
+    ASSERT_EQ(m.rs.img.h, 32);
+    /* ...the size is the FILE's... */
+    ASSERT_EQ(m.rs.img.src_bytes, NM_IMAGE_MAX_WIRE_BYTES + 1);
+    /* ...and the head itself was never kept (nothing to render) */
+    ASSERT_EQ(m.rs.img.len, 0u);
+
+    unlink(path);
     nm_markdown_render_state_free(&m.rs);
 }
 
@@ -595,6 +642,45 @@ static void test_integration_remote_url_marker(void)
     ih_free(h);
 }
 
+/* The marker's size is the SOURCE's byte count, not the probe head's:
+ * an over-the-cap local file (the probe holds 64 bytes) must report the
+ * file's size, never "64 B" — the shape of the "48 B — too large"
+ * report a 2.3 MiB attachment produced. */
+static void test_integration_marker_size_is_the_source_size(void)
+{
+    IH *h = ih_new(1);
+    ASSERT_NOT_NULL(h);
+
+    char cwd[256];
+    if (!getcwd(cwd, sizeof(cwd)))
+        strcpy(cwd, ".");
+    char path[512];
+    snprintf(path, sizeof(path), "%s/nm_img_marker_%ld.png", cwd,
+             (long)getpid());
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(FIX_PNG, 1, sizeof(FIX_PNG), f);
+    ASSERT_EQ(fseek(f, (long)NM_IMAGE_MAX_WIRE_BYTES, SEEK_SET), 0);
+    fputc('x', f); /* file_bytes == cap + 1 */
+    fclose(f);
+
+    char line[600];
+    snprintf(line, sizeof(line), "![big](%s)\n\n", path);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_flush(h);
+
+    const char *out = ih_read(h);
+    ASSERT_TRUE(strstr(out, "big") != NULL);
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "8.0 MiB") != NULL); /* the FILE's size */
+    ASSERT_TRUE(strstr(out, "too large") != NULL);
+    ASSERT_TRUE(strstr(out, "64 B") == NULL); /* never the head's */
+    ASSERT_TRUE(strstr(out, "\x1b_G") == NULL);
+
+    unlink(path);
+    ih_free(h);
+}
+
 static void test_integration_live_placeholder_not_payload(void)
 {
     IH *h = ih_new(1);
@@ -826,18 +912,13 @@ static void test_bytes_file_probe(void)
     nm_image_probe_free(&p);
 
     /* over the caller's cap: the HEAD is still held, so the marker can
-     * name the container and dims (this is the display path's case) */
+     * name the container and dims; file_bytes carries the FILE's size
+     * (the marker's size comes from there, never from the head) */
     ASSERT_EQ(nm_image_file_probe(png, 16, &p), NM_IMAGE_ERR_OVERSIZE);
     ASSERT_EQ(p.file_bytes, sizeof(FIX_PNG));
     ASSERT_EQ(p.format, NM_IMAGE_FMT_PNG);
     ASSERT_EQ(p.w, 64);
     ASSERT_EQ(p.h, 32);
-    nm_image_probe_free(&p);
-
-    /* the two caps are different facts: an image over the DISPLAY cap
-     * is still a valid wire payload (and vice versa) */
-    ASSERT_TRUE(NM_IMAGE_MAX_WIRE_BYTES > NM_IMAGE_MAX_BYTES);
-    ASSERT_EQ(nm_image_file_probe(png, NM_IMAGE_MAX_BYTES, &p), NM_IMAGE_OK);
     nm_image_probe_free(&p);
 
     unlink(png);
@@ -859,8 +940,9 @@ int main(void)
     RUN_TEST(test_supported_matches_the_tier_table);
     RUN_TEST(test_measure_display_math);
     RUN_TEST(test_measure_remote_and_malformed);
-    RUN_TEST(test_measure_oversize_degrades_before_decode);
+    RUN_TEST(test_measure_large_data_uri_renders);
     RUN_TEST(test_measure_local_file);
+    RUN_TEST(test_measure_local_file_over_wire_cap_marker);
     RUN_TEST(test_slot_reuse_grows_once);
     RUN_TEST(test_bytes_sniff_formats);
     RUN_TEST(test_bytes_format_names_and_mime);
@@ -870,6 +952,7 @@ int main(void)
     RUN_TEST(test_integration_kitty_commits_apc);
     RUN_TEST(test_integration_dumb_terminal_gets_marker);
     RUN_TEST(test_integration_remote_url_marker);
+    RUN_TEST(test_integration_marker_size_is_the_source_size);
     RUN_TEST(test_integration_live_placeholder_not_payload);
     TEST_SUMMARY();
 }

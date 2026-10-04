@@ -29,14 +29,18 @@
 
 #include "nm_image_bytes.h"
 
-/* Policy cap on a decoded payload: images larger than this degrade
- * to their marker ("too large"). A memory bound, not correctness —
- * it also bounds the transient base64 copy boba's staging carries
- * after the profile resolves. Not a config key (D13): the
- * degradation ladder is the switch, dumb terminals see markers. The
- * WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, nm_image_bytes.h) is a different
- * fact and the two are allowed to disagree. */
-#define NM_IMAGE_MAX_BYTES (1024 * 1024)
+/* There is NO display-side size cap (revised D7, see the plan's D16):
+ * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, nm_image_bytes.h) is the ONE
+ * cap, and it sits where the bytes are actually committed — the
+ * attach. An image that is in the conversation has already paid for
+ * its bytes (they ride every request), so refusing to RENDER one here
+ * would only make the transcript lie: the front door
+ * (nm_image_supported) answers from the tier table alone, so a size
+ * refusal at measure time posts a block the commit pass then degrades.
+ * Render memory is bounded by that same wire cap — one decoded copy in
+ * the slot plus boba's transient staged base64, both released with the
+ * batch — and a bound beyond that belongs to the renderer that stages
+ * the bytes, not to this policy. */
 
 /* The one-slot image state. Owned by the app's render state; zeroing
  * is a valid empty state (image_id 0 can never match a real unit:
@@ -46,7 +50,10 @@ typedef struct NmImageSlot
     int image_id;             /* the unit this slot holds; 0 = empty          */
     unsigned char *data;      /* grown, reused across images           */
     size_t cap;               /* allocation size of data                      */
-    size_t len;               /* decoded byte count                           */
+    size_t len;               /* decoded byte count (the bytes in data)       */
+    size_t src_bytes;         /* the SOURCE's byte count — what the marker
+                               * prints; equals len except when a bounded
+                               * probe held only the head */
     int w, h;                 /* source pixels (0 = unknown)                  */
     int format;               /* NmImageFormat (nm_image_bytes.h); boba's
                                * TuiImageFormat appears only at the spec */

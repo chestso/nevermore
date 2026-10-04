@@ -239,8 +239,9 @@ size and the reason — never the payload.
 `/img` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or is
 over 8 MiB — the bytes ride **every** request, so the cap bounds the
 body, and a local refusal keeps the message yours instead of a provider
-error. The display cap (1 MiB) is a different fact: a larger image
-still sends fine and renders as its marker.
+error. That is the only cap: an image the attach accepted renders,
+however large, because the transcript does not second-guess a payload
+that is already in the conversation.
 
 Sending an image to a text-only model is not an error — the provider
 strips it and the model answers blind — so the catalog's vision flag is
