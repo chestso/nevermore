@@ -95,6 +95,38 @@ static const unsigned char FIX_GIF[] = {
 #define FIX_GIF_B64 "R0lGODlhQAAgAA=="
 #define FIX_GIF_URI "data:image/gif;base64," FIX_GIF_B64
 
+/* WebP: RIFF + "WEBP" form + the first chunk's canvas size. Three
+ * header shapes, all 64x32 — VP8X (extended), VP8 (lossy), VP8L
+ * (lossless). A container nevermore RECOGNISES but the wire does not
+ * take (the recognition/capability split). */
+static const unsigned char FIX_WEBP[] = {
+    'R', 'I', 'F', 'F',
+    22, 0, 0, 0, /* file size - 8 (not sniffed) */
+    'W', 'E', 'B', 'P',
+    'V', 'P', '8', 'X',
+    10, 0, 0, 0,      /* chunk size */
+    0x00,             /* flags */
+    0x00, 0x00, 0x00, /* reserved */
+    0x3f, 0x00, 0x00, /* canvas width  - 1 = 63 */
+    0x1f, 0x00, 0x00  /* canvas height - 1 = 31 */
+};
+static const unsigned char FIX_WEBP_VP8[] = {
+    'R', 'I', 'F', 'F', 22, 0, 0, 0, 'W', 'E', 'B', 'P',
+    'V', 'P', '8', ' ',
+    10, 0, 0, 0,      /* chunk size */
+    0x00, 0x00, 0x00, /* frame tag */
+    0x9d, 0x01, 0x2a, /* key-frame start code */
+    0x40, 0x00,       /* width  = 64 */
+    0x20, 0x00        /* height = 32 */
+};
+static const unsigned char FIX_WEBP_VP8L[] = {
+    'R', 'I', 'F', 'F', 22, 0, 0, 0, 'W', 'E', 'B', 'P',
+    'V', 'P', '8', 'L',
+    5, 0, 0, 0,            /* chunk size */
+    0x2f,                  /* lossless signature */
+    0x3f, 0xc0, 0x07, 0x00 /* width-1 = 63, height-1 = 31 (14 bits each) */
+};
+
 /* ---------------------------------------------------------------- */
 /* Image-ref parsing (nm_markdown's scanner, pure)                   */
 /* ---------------------------------------------------------------- */
@@ -736,10 +768,33 @@ static void test_bytes_sniff_formats(void)
     static const unsigned char junk[] = "plain text, not an image at all";
     w = 7;
     h = 9;
-    ASSERT_EQ(nm_image_sniff(junk, sizeof(junk) - 1, &w, &h),
-              NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(nm_image_sniff_kind(junk, sizeof(junk) - 1, &w, &h),
+              NM_IMAGE_KIND_UNKNOWN);
     ASSERT_EQ(w, 7);
     ASSERT_EQ(h, 9);
+
+    /* WebP: recognised, with dims from all three chunk shapes... */
+    ASSERT_EQ(nm_image_sniff_kind(FIX_WEBP, sizeof(FIX_WEBP), &w, &h),
+              NM_IMAGE_KIND_WEBP);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+    ASSERT_EQ(nm_image_sniff_kind(FIX_WEBP_VP8, sizeof(FIX_WEBP_VP8), &w, &h),
+              NM_IMAGE_KIND_WEBP);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+    ASSERT_EQ(nm_image_sniff_kind(FIX_WEBP_VP8L, sizeof(FIX_WEBP_VP8L), &w, &h),
+              NM_IMAGE_KIND_WEBP);
+    ASSERT_EQ(w, 64);
+    ASSERT_EQ(h, 32);
+
+    /* ...and recognised is NOT capability: the wire answer for it is
+     * UNKNOWN, which is what keeps it off the attach path */
+    ASSERT_EQ(nm_image_sniff(FIX_WEBP, sizeof(FIX_WEBP), &w, &h),
+              NM_IMAGE_FMT_UNKNOWN);
+
+    /* a truncated RIFF (no room for the canvas) is not a container */
+    ASSERT_EQ(nm_image_sniff_kind(FIX_WEBP, 16, &w, &h),
+              NM_IMAGE_KIND_UNKNOWN);
 }
 
 static void test_bytes_format_names_and_mime(void)
@@ -763,6 +818,27 @@ static void test_bytes_format_names_and_mime(void)
     ASSERT_EQ(nm_image_format_from_mime("image/png;charset=x", 9),
               NM_IMAGE_FMT_PNG);
     ASSERT_EQ(nm_image_format_from_mime("image/pn", 8), NM_IMAGE_FMT_UNKNOWN);
+
+    /* The recognition vocabulary is wider than the wire's, and the ONE
+     * kind → format conversion is where "may it be sent?" is answered:
+     * WebP is named but never attachable. */
+    ASSERT_STR_EQ(nm_image_kind_name(NM_IMAGE_KIND_PNG), "PNG");
+    ASSERT_STR_EQ(nm_image_kind_name(NM_IMAGE_KIND_JPEG), "JPEG");
+    ASSERT_STR_EQ(nm_image_kind_name(NM_IMAGE_KIND_GIF), "GIF");
+    ASSERT_STR_EQ(nm_image_kind_name(NM_IMAGE_KIND_WEBP), "WebP");
+    ASSERT_STR_EQ(nm_image_kind_name(NM_IMAGE_KIND_UNKNOWN), "image");
+    ASSERT_EQ(nm_image_format_from_kind(NM_IMAGE_KIND_PNG), NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(nm_image_format_from_kind(NM_IMAGE_KIND_JPEG), NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(nm_image_format_from_kind(NM_IMAGE_KIND_GIF), NM_IMAGE_FMT_GIF);
+    ASSERT_EQ(nm_image_format_from_kind(NM_IMAGE_KIND_WEBP),
+              NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(nm_image_format_from_kind(NM_IMAGE_KIND_UNKNOWN),
+              NM_IMAGE_FMT_UNKNOWN);
+    /* a container the wire takes always HAS a MIME type (the data URL
+     * builder's contract); a recognised-but-unattachable one has none */
+    ASSERT_NOT_NULL(nm_image_format_mime(NM_IMAGE_FMT_PNG));
+    ASSERT_NULL(nm_image_format_mime(
+        nm_image_format_from_kind(NM_IMAGE_KIND_WEBP)));
 }
 
 /* Encode → decode is the identity, and the encoder's output is the
@@ -854,26 +930,28 @@ static void probe_write_file(const char *name, const void *bytes, size_t len)
 
 static void test_bytes_file_probe(void)
 {
-    char png[128], jpg[128], gif[128], txt[128], empty[128];
+    char png[128], jpg[128], gif[128], webp[128], txt[128], empty[128];
     snprintf(png, sizeof(png), "nm_probe_%ld.png", (long)getpid());
     snprintf(jpg, sizeof(jpg), "nm_probe_%ld.jpg", (long)getpid());
     snprintf(gif, sizeof(gif), "nm_probe_%ld.gif", (long)getpid());
+    snprintf(webp, sizeof(webp), "nm_probe_%ld.webp", (long)getpid());
     snprintf(txt, sizeof(txt), "nm_probe_%ld.txt", (long)getpid());
     snprintf(empty, sizeof(empty), "nm_probe_%ld.empty", (long)getpid());
     probe_write_file(png, FIX_PNG, sizeof(FIX_PNG));
     probe_write_file(jpg, FIX_JPEG, sizeof(FIX_JPEG));
     probe_write_file(gif, FIX_GIF, sizeof(FIX_GIF));
+    probe_write_file(webp, FIX_WEBP, sizeof(FIX_WEBP));
     probe_write_file(txt, "not an image", 12);
     probe_write_file(empty, NULL, 0);
 
     NmImageProbe p;
 
-    /* a readable container: bytes + format + dims, under the cap */
+    /* a readable container: bytes + kind + dims, under the cap */
     ASSERT_EQ(nm_image_file_probe(png, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_OK);
     ASSERT_EQ(p.len, sizeof(FIX_PNG));
     ASSERT_EQ(p.file_bytes, sizeof(FIX_PNG));
-    ASSERT_EQ(p.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_PNG);
     ASSERT_EQ(p.w, 64);
     ASSERT_EQ(p.h, 32);
     ASSERT_TRUE(memcmp(p.bytes, FIX_PNG, sizeof(FIX_PNG)) == 0);
@@ -882,20 +960,32 @@ static void test_bytes_file_probe(void)
 
     ASSERT_EQ(nm_image_file_probe(jpg, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_OK);
-    ASSERT_EQ(p.format, NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
     ASSERT_EQ(p.w, 64);
     ASSERT_EQ(p.h, 32);
     nm_image_probe_free(&p);
 
     ASSERT_EQ(nm_image_file_probe(gif, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_OK);
-    ASSERT_EQ(p.format, NM_IMAGE_FMT_GIF);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_GIF);
     nm_image_probe_free(&p);
 
-    /* not a container: the bytes were read, but the format is unknown */
+    /* a container we RECOGNISE but the wire does not take: ERR_UNKNOWN
+     * (no wire format), with the kind, dims and size all named — this
+     * is what read_file's third answer is built from */
+    ASSERT_EQ(nm_image_file_probe(webp, NM_IMAGE_MAX_WIRE_BYTES, &p),
+              NM_IMAGE_ERR_UNKNOWN);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_WEBP);
+    ASSERT_EQ(nm_image_format_from_kind(p.kind), NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(p.w, 64);
+    ASSERT_EQ(p.h, 32);
+    ASSERT_EQ(p.file_bytes, sizeof(FIX_WEBP));
+    nm_image_probe_free(&p);
+
+    /* not a container at all: the bytes were read, the kind is unknown */
     ASSERT_EQ(nm_image_file_probe(txt, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_ERR_UNKNOWN);
-    ASSERT_EQ(p.format, NM_IMAGE_FMT_UNKNOWN);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_UNKNOWN);
     ASSERT_EQ(p.len, 12u);
     nm_image_probe_free(&p);
 
@@ -916,14 +1006,21 @@ static void test_bytes_file_probe(void)
      * (the marker's size comes from there, never from the head) */
     ASSERT_EQ(nm_image_file_probe(png, 16, &p), NM_IMAGE_ERR_OVERSIZE);
     ASSERT_EQ(p.file_bytes, sizeof(FIX_PNG));
-    ASSERT_EQ(p.format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_PNG);
     ASSERT_EQ(p.w, 64);
     ASSERT_EQ(p.h, 32);
+    nm_image_probe_free(&p);
+
+    /* ...and an over-cap container the wire does not take is still
+     * RECOGNISED (OVERSIZE wins the status; the kind rides along) */
+    ASSERT_EQ(nm_image_file_probe(webp, 16, &p), NM_IMAGE_ERR_OVERSIZE);
+    ASSERT_EQ(p.kind, NM_IMAGE_KIND_WEBP);
     nm_image_probe_free(&p);
 
     unlink(png);
     unlink(jpg);
     unlink(gif);
+    unlink(webp);
     unlink(txt);
     unlink(empty);
 }

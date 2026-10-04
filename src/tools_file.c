@@ -387,7 +387,7 @@ static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
     const char *alt = file_base_name(path);
     char size[32];
     nm_image_size_text(p->len, size, sizeof(size));
-    const char *fmtname = nm_image_format_name(p->format);
+    const char *fmtname = nm_image_kind_name(p->kind);
     size_t need = strlen(alt) + strlen(fmtname) + strlen(size) + 128;
     char *body = malloc(need);
     if (!body) {
@@ -408,18 +408,64 @@ static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
     return r;
 }
 
+/* The refusal for a container we RECOGNISE but the WIRE does not take
+ * (a WebP, a BMP): name what the file IS — container, dims, size — and
+ * what would work. The tool's third answer, so the model is never left
+ * with the text path's "file is not valid UTF-8" on a binary it can
+ * see is an image (observed live: the model shelled out to ImageMagick
+ * and converted, two rounds it did not have to spend). */
+static NmToolResult unsupported_container_result(const char *path,
+                                                 const NmImageProbe *p)
+{
+    const char *alt = file_base_name(path);
+    const char *kindname = nm_image_kind_name(p->kind);
+    char size[32];
+    nm_image_size_text(p->file_bytes, size, sizeof(size));
+    char dims[32] = "";
+    if (p->w > 0 && p->h > 0)
+        snprintf(dims, sizeof(dims), " %dx%d", p->w, p->h);
+    size_t need =
+        strlen(alt) + strlen(kindname) + strlen(size) + strlen(dims) + 128;
+    char *msg = malloc(need);
+    if (!msg)
+        return nm_tool_result_error("out of memory");
+    snprintf(msg, need,
+             "%s — %s%s, %s — not an attachable container (PNG/JPEG/GIF); "
+             "convert it first",
+             alt, kindname, dims, size);
+    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+}
+
+/* Over the wire cap: refuse, naming both sizes. The probe stats the
+ * file, never reads it whole. */
+static NmToolResult oversize_result(const char *path, const NmImageProbe *p)
+{
+    const char *alt = file_base_name(path);
+    char big[32], cap[32];
+    nm_image_size_text(p->file_bytes, big, sizeof(big));
+    nm_image_size_text(NM_IMAGE_MAX_WIRE_BYTES, cap, sizeof(cap));
+    size_t need = strlen(alt) + strlen(big) + strlen(cap) + 64;
+    char *msg = malloc(need);
+    if (!msg)
+        return nm_tool_result_error("out of memory");
+    snprintf(msg, need,
+             "image too large to attach: %s — %s over the %s wire cap", alt,
+             big, cap);
+    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+}
+
 /* read_file's image branch (docs/TOOL-IMAGE-PLAN.md D2/D3): a two-step
  * probe so the text hot path never pays for a full read. Returns 1 when
- * it handled the call (`out` filled), 0 when the file is not a
- * supported image (fall through to the text path UNCHANGED). */
+ * it handled the call (`out` filled), 0 when the file is not an image
+ * the WIRE takes (fall through to the text path UNCHANGED). */
 static int read_file_image_branch(const char *path, NmToolResult *out)
 {
     /* Step 1: a 64-byte header probe. Any file over 64 bytes answers
-     * OVERSIZE with the HEAD held — the format and dims are known
+     * OVERSIZE with the HEAD held — the container and dims are known
      * either way, so the text path costs one 64-byte read. */
     NmImageProbe h;
     NmImageStatus hs = nm_image_file_probe(path, 64, &h);
-    int known = (hs == NM_IMAGE_OK) || (h.format != NM_IMAGE_FMT_UNKNOWN);
+    int known = (hs == NM_IMAGE_OK) || (h.kind != NM_IMAGE_KIND_UNKNOWN);
     if (!known) {
         nm_image_probe_free(&h);
         return 0; /* no container we know: the text path's job */
@@ -441,21 +487,25 @@ static int read_file_image_branch(const char *path, NmToolResult *out)
         nm_image_probe_free(&full);
         return 1;
     }
-    /* Over the cap (or a race that shrank/failed it): refuse, naming
-     * both sizes — the probe stats the file, never reads it whole. */
-    const char *alt = file_base_name(path);
-    char big[32], cap[32];
-    nm_image_size_text(full.file_bytes, big, sizeof(big));
-    nm_image_size_text(NM_IMAGE_MAX_WIRE_BYTES, cap, sizeof(cap));
-    size_t need = strlen(alt) + strlen(big) + strlen(cap) + 64;
-    char *msg = malloc(need);
-    if (msg)
-        snprintf(msg, need,
-                 "image too large to attach: %s — %s over the %s wire cap",
-                 alt, big, cap);
+    /* A recognised container the wire does not take: the third answer,
+     * and it wins over the size refusal because it is the fatal one —
+     * converting is the fix, and shrinking would not help. */
+    if (full.kind != NM_IMAGE_KIND_UNKNOWN &&
+        nm_image_format_from_kind(full.kind) == NM_IMAGE_FMT_UNKNOWN) {
+        *out = unsupported_container_result(path, &full);
+        nm_image_probe_free(&full);
+        return 1;
+    }
+    /* Over the cap: refuse, naming both sizes. */
+    if (fs == NM_IMAGE_ERR_OVERSIZE) {
+        *out = oversize_result(path, &full);
+        nm_image_probe_free(&full);
+        return 1;
+    }
+    /* A race that shrank or removed the file between the two probes: the
+     * text path reports that honestly ("cannot read"). */
     nm_image_probe_free(&full);
-    *out = (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
-    return 1;
+    return 0;
 }
 
 static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
@@ -1439,9 +1489,11 @@ const NmTool nm_tool_read_file = {
     .name = "read_file",
     .description = "Read a UTF-8 text file, byte-exact, optionally "
                    "line-numbered and windowed (offset/limit). If the file "
-                   "is a supported image (PNG/JPEG/GIF), the image is "
+                   "is an attachable image (PNG/JPEG/GIF), the image is "
                    "attached to the conversation so you can see it; the "
-                   "result is a one-line summary",
+                   "result is a one-line summary. Another image container "
+                   "(WebP, BMP, ...) is named but not attached — convert "
+                   "it to PNG/JPEG/GIF first",
     .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,

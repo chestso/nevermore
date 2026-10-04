@@ -67,17 +67,103 @@ static int sniff_gif(const unsigned char *d, size_t n, int *w, int *h)
     return *w > 0 && *h > 0;
 }
 
-NmImageFormat nm_image_sniff(const unsigned char *d, size_t n, int *w, int *h)
+/* WebP: a RIFF container ("RIFF" + size + "WEBP" form) whose first
+ * chunk carries the canvas size. Three shapes, all header-only:
+ *   VP8X  extended — flags(1) reserved(3) canvas_minus_one(3+3 LE)
+ *   VP8   lossy    — frame tag(3) 0x9d012a(3) 16-bit dims (14 bits)
+ *   VP8L  lossless — 0x2f(1) then 14-bit dims packed in 4 bytes */
+static int sniff_webp(const unsigned char *d, size_t n, int *w, int *h)
+{
+    if (n < 20 || memcmp(d, "RIFF", 4) != 0 || memcmp(d + 8, "WEBP", 4) != 0)
+        return 0;
+    const unsigned char *chunk = d + 12; /* 4-byte fourcc + LE32 size */
+    size_t avail = n - 12;
+    if (avail < 8)
+        return 0;
+    size_t size = (size_t)chunk[4] | ((size_t)chunk[5] << 8) |
+                  ((size_t)chunk[6] << 16) | ((size_t)chunk[7] << 24);
+    if (size < 1 || size > avail - 8)
+        return 0; /* truncated chunk: stop guessing */
+    const unsigned char *p = chunk + 8;
+
+    if (memcmp(chunk, "VP8X", 4) == 0) {
+        if (size < 10)
+            return 0;
+        *w = 1 + (p[4] | (p[5] << 8) | (p[6] << 16));
+        *h = 1 + (p[7] | (p[8] << 8) | (p[9] << 16));
+        return *w > 0 && *h > 0;
+    }
+    if (memcmp(chunk, "VP8 ", 4) == 0) {
+        if (size < 10 || p[3] != 0x9d || p[4] != 0x01 || p[5] != 0x2a)
+            return 0; /* a non-key frame has no start code/dims */
+        *w = (p[6] | (p[7] << 8)) & 0x3fff;
+        *h = (p[8] | (p[9] << 8)) & 0x3fff;
+        return *w > 0 && *h > 0;
+    }
+    if (memcmp(chunk, "VP8L", 4) == 0) {
+        if (size < 5 || p[0] != 0x2f)
+            return 0; /* the lossless signature byte */
+        unsigned long bits = (unsigned long)p[1] | ((unsigned long)p[2] << 8) |
+                             ((unsigned long)p[3] << 16) |
+                             ((unsigned long)p[4] << 24);
+        *w = (int)(bits & 0x3fff) + 1;
+        *h = (int)((bits >> 14) & 0x3fff) + 1;
+        return *w > 0 && *h > 0;
+    }
+    return 0; /* an animation/auxiliary first chunk: no canvas here */
+}
+
+NmImageKind nm_image_sniff_kind(const unsigned char *d, size_t n, int *w,
+                                int *h)
 {
     if (!d || !w || !h)
-        return NM_IMAGE_FMT_UNKNOWN;
+        return NM_IMAGE_KIND_UNKNOWN;
     if (sniff_png(d, n, w, h))
-        return NM_IMAGE_FMT_PNG;
+        return NM_IMAGE_KIND_PNG;
     if (sniff_jpeg(d, n, w, h))
-        return NM_IMAGE_FMT_JPEG;
+        return NM_IMAGE_KIND_JPEG;
     if (sniff_gif(d, n, w, h))
+        return NM_IMAGE_KIND_GIF;
+    if (sniff_webp(d, n, w, h))
+        return NM_IMAGE_KIND_WEBP;
+    return NM_IMAGE_KIND_UNKNOWN;
+}
+
+NmImageFormat nm_image_format_from_kind(NmImageKind kind)
+{
+    switch (kind) {
+    case NM_IMAGE_KIND_PNG:
+        return NM_IMAGE_FMT_PNG;
+    case NM_IMAGE_KIND_JPEG:
+        return NM_IMAGE_FMT_JPEG;
+    case NM_IMAGE_KIND_GIF:
         return NM_IMAGE_FMT_GIF;
-    return NM_IMAGE_FMT_UNKNOWN;
+    default:
+        /* Recognised-but-unattachable containers (WebP) and the
+         * unknown case both read "the wire does not take this" */
+        return NM_IMAGE_FMT_UNKNOWN;
+    }
+}
+
+const char *nm_image_kind_name(NmImageKind kind)
+{
+    switch (kind) {
+    case NM_IMAGE_KIND_PNG:
+        return "PNG";
+    case NM_IMAGE_KIND_JPEG:
+        return "JPEG";
+    case NM_IMAGE_KIND_GIF:
+        return "GIF";
+    case NM_IMAGE_KIND_WEBP:
+        return "WebP";
+    default:
+        return "image";
+    }
+}
+
+NmImageFormat nm_image_sniff(const unsigned char *d, size_t n, int *w, int *h)
+{
+    return nm_image_format_from_kind(nm_image_sniff_kind(d, n, w, h));
 }
 
 const char *nm_image_format_name(int format)
@@ -256,8 +342,7 @@ void nm_image_size_text(size_t bytes, char *out, size_t cap)
 NmImageStatus nm_image_file_probe(const char *path, size_t max,
                                   NmImageProbe *out)
 {
-    memset(out, 0, sizeof(*out));
-    out->format = NM_IMAGE_FMT_UNKNOWN;
+    memset(out, 0, sizeof(*out)); /* kind = NM_IMAGE_KIND_UNKNOWN */
     if (!path || !*path)
         return out->status = NM_IMAGE_ERR_UNREADABLE;
 
@@ -296,15 +381,15 @@ NmImageStatus nm_image_file_probe(const char *path, size_t max,
         return out->status = NM_IMAGE_ERR_EMPTY;
 
     int w = 0, h = 0;
-    NmImageFormat fmt = nm_image_sniff(buf, n, &w, &h);
-    if (fmt != NM_IMAGE_FMT_UNKNOWN) {
-        out->format = fmt;
+    NmImageKind kind = nm_image_sniff_kind(buf, n, &w, &h);
+    if (kind != NM_IMAGE_KIND_UNKNOWN) {
+        out->kind = kind;
         out->w = w;
         out->h = h;
     }
     if (oversize)
         return out->status = NM_IMAGE_ERR_OVERSIZE;
-    if (fmt == NM_IMAGE_FMT_UNKNOWN)
+    if (nm_image_format_from_kind(kind) == NM_IMAGE_FMT_UNKNOWN)
         return out->status = NM_IMAGE_ERR_UNKNOWN;
     return out->status = NM_IMAGE_OK;
 }

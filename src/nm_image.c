@@ -153,8 +153,11 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
             memcpy(s->data, p.bytes, p.len);
             s->len = p.len;
         }
-        if (p.format != NM_IMAGE_FMT_UNKNOWN) {
-            s->format = p.format;
+        if (p.kind != NM_IMAGE_KIND_UNKNOWN) {
+            /* the WIRE answer decides the tier: a container the wire does
+             * not take (a WebP) keeps its dims for the marker but gets no
+             * transport below */
+            s->format = nm_image_format_from_kind(p.kind);
             s->w = p.w;
             s->h = p.h;
         }

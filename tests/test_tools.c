@@ -560,6 +560,18 @@ static const unsigned char T_IMG_PNG[] = {
     0x20, /* height 32 */
 };
 
+/* A 64x32 WebP header (VP8X canvas): a container nevermore RECOGNISES
+ * but the wire does not take. */
+static const unsigned char T_IMG_WEBP[] = {
+    'R', 'I', 'F', 'F', 22, 0, 0, 0, 'W', 'E', 'B', 'P',
+    'V', 'P', '8', 'X',
+    10, 0, 0, 0,      /* chunk size */
+    0x00,             /* flags */
+    0x00, 0x00, 0x00, /* reserved */
+    0x3f, 0x00, 0x00, /* width  - 1 = 63 */
+    0x1f, 0x00, 0x00  /* height - 1 = 31 */
+};
+
 /* read_file on a supported image captures the bytes (docs/TOOL-IMAGE-
  * PLAN.md): the result carries the file's bytes byte-equal and a
  * one-line summary (name · format · dims · size), so the agent can fan
@@ -697,6 +709,48 @@ static void test_read_file_binary_is_not_an_image(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "not valid UTF-8") != NULL);
     ASSERT_NULL(r.image);
+
+    nm_tool_result_free(&r);
+    remove(path);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A container we RECOGNISE but the wire does not take gets the tool's
+ * THIRD answer: named (container, dims, size) with what would work, and
+ * never the text path — where a binary reports "not valid UTF-8" and
+ * the model is left to guess its way out (observed live: it shelled out
+ * to ImageMagick). Nothing is attached, and the text path is not
+ * reached. */
+static void test_read_file_unsupported_container(void)
+{
+    char *path = scratch_path("shot.webp");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_IMG_WEBP, 1, sizeof(T_IMG_WEBP), f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    /* what it is: base name, container, dims, size */
+    ASSERT_TRUE(strstr(r.output, "shot.webp") != NULL);
+    ASSERT_TRUE(strstr(r.output, "WebP 64x32") != NULL);
+    ASSERT_TRUE(strstr(r.output, "30 B") != NULL);
+    /* what would work, and the text path's line is NOT it */
+    ASSERT_TRUE(strstr(r.output, "not an attachable container") != NULL);
+    ASSERT_TRUE(strstr(r.output, "convert it first") != NULL);
+    ASSERT_TRUE(strstr(r.output, "not valid UTF-8") == NULL);
+    /* nothing was captured */
+    ASSERT_NULL(r.image);
+    ASSERT_EQ(r.image_len, 0u);
 
     nm_tool_result_free(&r);
     remove(path);
@@ -3171,6 +3225,7 @@ int main(void)
     RUN_TEST(test_read_file_image_branch_beats_window_args);
     RUN_TEST(test_read_file_image_too_large);
     RUN_TEST(test_read_file_binary_is_not_an_image);
+    RUN_TEST(test_read_file_unsupported_container);
     RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);

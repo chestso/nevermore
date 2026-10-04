@@ -30,6 +30,23 @@ typedef enum
     NM_IMAGE_FMT_GIF
 } NmImageFormat;
 
+/* What container the bytes ARE — a WIDER question than what the WIRE
+ * takes (NmImageFormat above). Recognition is not capability: the tool
+ * boundary can name a WebP and refuse it honestly, while nothing about
+ * a non-wire container may reach the attach path. The two questions
+ * are kept apart by TYPE so that adding a member here can never
+ * silently open the wire — nm_image_format_from_kind is the ONE place
+ * a kind becomes a wire format, and it answers NM_IMAGE_FMT_UNKNOWN
+ * for everything the wire does not take. */
+typedef enum
+{
+    NM_IMAGE_KIND_UNKNOWN = 0,
+    NM_IMAGE_KIND_PNG,
+    NM_IMAGE_KIND_JPEG,
+    NM_IMAGE_KIND_GIF,
+    NM_IMAGE_KIND_WEBP
+} NmImageKind;
+
 /* Wire cap on an attached image (decoded bytes). The bytes ride EVERY
  * request — chat/completions has no upload/reference endpoint — so this
  * bounds the body, not the display. Not a config key: the degradation
@@ -48,15 +65,36 @@ typedef enum
     NM_IMAGE_ERR_UNREADABLE, /* open/read failed */
     NM_IMAGE_ERR_EMPTY,      /* the file held no bytes */
     NM_IMAGE_ERR_OVERSIZE,   /* over the caller's cap (a HEAD is held) */
-    NM_IMAGE_ERR_UNKNOWN,    /* no container the sniffer knows */
+    NM_IMAGE_ERR_UNKNOWN,    /* no container the WIRE takes — unrecognised,
+                              * or recognised but unattachable (the probe's
+                              * `kind` says which) */
     NM_IMAGE_ERR_NOMEM
 } NmImageStatus;
 
 /* Sniff the container + dimensions from the head of a buffer: header
  * fields only, no pixel decode (kitty takes PNG containers via f=100,
- * iTerm2 decodes its own). Returns NM_IMAGE_FMT_UNKNOWN when the bytes
- * are not a container we know; w and h (both required, non-NULL)
- * receive the dimensions of the container that matched. */
+ * iTerm2 decodes its own). This is the RECOGNITION answer; w and h
+ * (both required, non-NULL) receive the dimensions of the container
+ * that matched. */
+NmImageKind nm_image_sniff_kind(const unsigned char *d, size_t n, int *w,
+                                int *h);
+
+/* The ONE kind → wire-format conversion. NM_IMAGE_FMT_UNKNOWN for
+ * every container the wire does not take — recognition is not
+ * capability, so this function is where "may it be sent?" is answered,
+ * and the only way a kind reaches the wire gates. */
+NmImageFormat nm_image_format_from_kind(NmImageKind kind);
+
+/* The container's short name for a user-visible line ("PNG" / "JPEG" /
+ * "GIF" / "WebP"; "image" for unknown). The RECOGNITION vocabulary —
+ * nm_image_format_name is the wire's, and is the one the display
+ * marker's slot speaks. */
+const char *nm_image_kind_name(NmImageKind kind);
+
+/* The same sniff, answered as the WIRE's question: NM_IMAGE_FMT_UNKNOWN
+ * for a container we recognise but cannot send. The wire-side consumers
+ * (session.c's attach, nm_image.c's tier) ask this; the tool boundary
+ * asks nm_image_sniff_kind. */
 NmImageFormat nm_image_sniff(const unsigned char *d, size_t n, int *w, int *h);
 
 /* The container's short name ("PNG" / "JPEG" / "GIF"; "image" for
@@ -91,18 +129,22 @@ typedef struct NmImageProbe
 {
     unsigned char *bytes; /* heap: the file's bytes — or a 64-byte HEAD
                            * when the file is over `max`, so the marker
-                           * can still name the format and dims */
+                           * can still name the container and dims */
     size_t len;           /* bytes held */
     size_t file_bytes;    /* the size the OS reported */
-    NmImageFormat format; /* NM_IMAGE_FMT_UNKNOWN when unrecognised */
+    NmImageKind kind;     /* what the bytes ARE; NM_IMAGE_KIND_UNKNOWN
+                           * when unrecognised. The WIRE answer is
+                           * nm_image_format_from_kind(kind) — a
+                           * recognised container the wire does not take
+                           * (WebP) reads NM_IMAGE_FMT_UNKNOWN there */
     int w, h;             /* source pixels (0 = unknown) */
     NmImageStatus status; /* NM_IMAGE_OK only for a readable container
-                           * with positive dims */
+                           * the WIRE takes, with positive dims */
 } NmImageProbe;
 
 /* Read the file ONCE (bounded by `max`) and sniff it. On any failure
- * the probe still carries whatever was learned (a HEAD's format/dims,
- * the file's size), so a marker and a refusal line can both be honest.
+ * the probe still carries whatever was learned (a HEAD's kind/dims, the
+ * file's size), so a marker and a refusal line can both be honest.
  * out->bytes is heap-owned: release it with nm_image_probe_free. */
 NmImageStatus nm_image_file_probe(const char *path, size_t max,
                                   NmImageProbe *out);
