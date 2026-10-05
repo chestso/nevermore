@@ -61,7 +61,7 @@
 /* Static fallback catalog (subset of data/nm-hyper-models.json,
  * which regenerates from the live /v1/models payload). */
 static const NmModel hyper_static_models[] = {
-    { "gpt-oss-120b", "GPT OSS 120b", 0, 131072 },
+    { "gpt-oss-120b", "GPT OSS 120b", 0, 0, 131072 },
     { 0 }
 };
 

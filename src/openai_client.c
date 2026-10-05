@@ -164,7 +164,27 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
     for (size_t i = 0; i < req->n_messages; i++) {
         NmJson *m = nm_json_new_object();
         nm_json_set(m, "role", nm_json_new_string(req->messages[i].role));
-        if (req->messages[i].n_images > 0) {
+        if (req->messages[i].n_images > 0 &&
+            strcmp(req->messages[i].role, "assistant") == 0) {
+            /* The RECEIVE direction (IMAGEGEN-PLAN §4): an assistant
+             * message's images ride a MESSAGE-LEVEL "images" array and
+             * `content` stays a plain string ("" when the round
+             * streamed no text) — the response's own shape, probed on
+             * openrouter (docs/OPENROUTER-API.md §5.1); content-parts
+             * on an assistant message is untested and unguessed. The
+             * parts embed VERBATIM, exactly as a user turn's do. */
+            nm_json_set(m, "content",
+                        nm_json_new_string(req->messages[i].content
+                                               ? req->messages[i].content
+                                               : ""));
+            NmJson *imgs = nm_json_new_array();
+            for (size_t k = 0; k < req->messages[i].n_images; k++) {
+                const char *part = req->messages[i].image_parts[k];
+                if (part)
+                    nm_json_push(imgs, nm_json_new_raw(part, strlen(part)));
+            }
+            nm_json_set(m, "images", imgs);
+        } else if (req->messages[i].n_images > 0) {
             /* A user turn carrying images: `content` is a parts array,
              * text part FIRST then the image parts in attach order (the
              * order every probed provider example uses, and — more to
@@ -308,6 +328,12 @@ struct NmChatStream
     int head_checked; /* SSE/content-type validation done */
     int error_mode;   /* non-SSE response: draining the error body */
     int error_tapped; /* the failure's error line already emitted */
+    /* Byte-activity flag for the step's NmChatResult.traffic (the
+     * agent's inactivity deadline resets on it — keep-alive comments
+     * are bytes, and they are what a minutes-long image generation
+     * bridges its gap with): set by every read that returned bytes,
+     * cleared and published per chat_step. */
+    int traffic;
     /* Assembled tool calls (index-addressed; buffers reused across
      * chunks). Ownership moves to the on_delta receiver at the final
      * NULL-content callback (freed by the receiver with
@@ -455,6 +481,29 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
             if (content && *content && st->on_delta)
                 st->on_delta(NM_STREAM_CONTENT, content, NULL, 0,
                              st->userdata);
+
+            /* Generated images (IMAGEGEN-PLAN §3): an image-output
+             * model delivers the WHOLE image as one `delta.images`
+             * event — an array of content parts, the payload inline
+             * in image_url.url (a single SSE line to ~1.2 MiB; the
+             * parser's buffers grow). One NM_STREAM_IMAGE callback
+             * per element, the full URL as the payload, never
+             * byte-deltas. The "" content that rides alongside is not
+             * a content delta (the rule above already skips it), and
+             * a bare http(s) URL is forwarded as-is — nevermore
+             * fetches no remote source, so the RECEIVER degrades it
+             * (a notice), never a turn failure. Wire truth:
+             * docs/OPENROUTER-API.md §5.1. */
+            NmJson *imgs = nm_json_get(delta, "images");
+            size_t n_imgs = nm_json_len(imgs);
+            for (size_t i = 0; i < n_imgs; i++) {
+                NmJson *part = nm_json_at(imgs, i);
+                const char *url = nm_json_str(
+                    nm_json_get(nm_json_get(part, "image_url"), "url"));
+                if (url && *url && st->on_delta)
+                    st->on_delta(NM_STREAM_IMAGE, url, NULL, 0,
+                                 st->userdata);
+            }
             /* Tool-call deltas: merge fragments by index (port of
              * quoth's sse-merge-tool-calls). Arguments accumulate
              * across chunks; assembled calls are delivered from
@@ -636,6 +685,7 @@ static NmChatStatus stream_one_step(NmChatStream *st)
     /* Body bytes stashed by the head check (their consumer was not
      * known when they arrived): feed them first, then the socket. */
     if (st->preread_len) {
+        st->traffic = 1; /* these bytes moved this stream */
         size_t take = st->preread_len;
         st->preread_len = 0;
         int r = feed_and_dispatch(st, st->preread, take);
@@ -664,6 +714,7 @@ static NmChatStatus stream_one_step(NmChatStream *st)
                                   status check, not a stall) */
 
         int r = feed_and_dispatch(st, st->rbuf, (size_t)n);
+        st->traffic = 1;
         if (r < 0) {
             st->status = NM_CHAT_ERR_PARSE;
             return NM_CHAT_ERR_PARSE;
@@ -694,6 +745,11 @@ static NmChatStatus head_pull_step(NmChatStream *st)
         return NM_CHAT_OK;
     }
     long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
+    /* The head may complete INSIDE a read that then reports
+     * would-block (its bytes were consumed by the transport's head
+     * parser): a fresh head is wire traffic all the same. */
+    if (nm_response(st->conn)->status != 0)
+        st->traffic = 1;
     if (n == NM_READ_WOULD_BLOCK)
         return NM_CHAT_PENDING;
     if (n < 0) {
@@ -706,6 +762,7 @@ static NmChatStatus head_pull_step(NmChatStream *st)
     if (n > 0) {
         /* nm_read_body parses the head transparently: any bytes it
          * returned AFTER the head are body bytes — stash them. */
+        st->traffic = 1;
         memcpy(st->preread, st->rbuf, (size_t)n);
         st->preread_len = (size_t)n;
         return NM_CHAT_OK;
@@ -963,6 +1020,7 @@ static int error_drain_step(NmChatStream *h)
             return 1;
         if (n <= 0)
             return 0;
+        h->traffic = 1;
         if (h->error_len < ERROR_BODY_MAX - 1) {
             size_t take = (size_t)n;
             if (take > ERROR_BODY_MAX - 1 - h->error_len)
@@ -994,7 +1052,7 @@ static NmChatStatus error_result(NmChatStream *h, NmChatResult *result)
     return h->status;
 }
 
-NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
+static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
 {
     if (result) {
         result->status = NM_CHAT_OK;
@@ -1132,6 +1190,21 @@ NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
         result_publish(h, result);
         stream_teardown(h);
     }
+    return s;
+}
+
+/* The step's public half: clears the stream's per-step traffic flag,
+ * runs the impl, publishes the flag into the result (NmChatResult
+ * .traffic — the agent's inactivity deadline resets on wire BYTES,
+ * so a generation gap bridged by keep-alive comments is never cut).
+ * One seam, so the impl's many return points cannot forget it. */
+NmChatStatus nm_openai_chat_step(NmChatStream *h, NmChatResult *result)
+{
+    if (h)
+        h->traffic = 0;
+    NmChatStatus s = chat_step_impl(h, result);
+    if (result)
+        result->traffic = h ? h->traffic : 0;
     return s;
 }
 

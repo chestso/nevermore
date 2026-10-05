@@ -25,14 +25,14 @@
 
 /* Static fallback catalog (data/nm-openai-models.json, curated). */
 static const NmModel openai_static_models[] = {
-    { "gpt-5.2", "GPT-5.2", 1, 400000 },
-    { "gpt-5.2-mini", "GPT-5.2 mini", 1, 400000 },
-    { "gpt-5.1", "GPT-5.1", 1, 400000 },
-    { "gpt-5", "GPT-5", 1, 128000 },
-    { "gpt-4.1", "GPT-4.1", 1, 1047576 },
-    { "gpt-4o", "GPT-4o", 1, 128000 },
-    { "gpt-4o-mini", "GPT-4o mini", 1, 128000 },
-    { "o3", "o3 reasoning", 1, 200000 },
+    { "gpt-5.2", "GPT-5.2", 1, 0, 400000 },
+    { "gpt-5.2-mini", "GPT-5.2 mini", 1, 0, 400000 },
+    { "gpt-5.1", "GPT-5.1", 1, 0, 400000 },
+    { "gpt-5", "GPT-5", 1, 0, 128000 },
+    { "gpt-4.1", "GPT-4.1", 1, 0, 1047576 },
+    { "gpt-4o", "GPT-4o", 1, 0, 128000 },
+    { "gpt-4o-mini", "GPT-4o mini", 1, 0, 128000 },
+    { "o3", "o3 reasoning", 1, 0, 200000 },
     { 0 }
 };
 

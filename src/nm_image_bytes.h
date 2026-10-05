@@ -121,6 +121,16 @@ char *nm_image_b64_encode(const unsigned char *src, size_t len,
 char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
                         size_t *out_len);
 
+/* Split a "data:<mime>;base64,<payload>" URL (a BORROWED range, not
+ * NUL-terminated) into its claims: *fmt is the mime's wire format
+ * (NM_IMAGE_FMT_UNKNOWN when it is not one the wire names), and the
+ * b64 out-params borrow the payload range inside url. 0 on success,
+ * -1 when the shape is not a base64 data URL. The ONE parse of this
+ * shape: the display path (nm_image.c), the session's received-image
+ * attach, and ask mode's file save all stand on it. */
+int nm_image_data_url_split(const char *url, size_t len, NmImageFormat *fmt,
+                            const char **b64, size_t *b64_len);
+
 /* Worst case for nm_image_describe: a 5-byte name + space + the longest
  * dims ("2147483647x2147483647", 21) + ", " + the longest size text
  * (13) + NUL, with room to spare. */

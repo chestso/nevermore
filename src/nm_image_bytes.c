@@ -345,6 +345,25 @@ char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
     return url;
 }
 
+int nm_image_data_url_split(const char *url, size_t len, NmImageFormat *fmt,
+                            const char **b64, size_t *b64_len)
+{
+    if (!url || len < 5 + 8 || memcmp(url, "data:", 5) != 0)
+        return -1;
+    size_t semi = 5;
+    while (semi < len && url[semi] != ';')
+        semi++;
+    if (semi + 8 > len || memcmp(url + semi, ";base64,", 8) != 0)
+        return -1;
+    if (fmt)
+        *fmt = nm_image_format_from_mime(url + 5, semi - 5);
+    if (b64)
+        *b64 = url + semi + 8;
+    if (b64_len)
+        *b64_len = len - (semi + 8);
+    return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /* Sizes + the file probe                                            */
 /* ---------------------------------------------------------------- */

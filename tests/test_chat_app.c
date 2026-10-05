@@ -4914,6 +4914,221 @@ static void test_tool_read_file_image_text_only_model_warns(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Imagegen (IMAGEGEN-PLAN §7): a model-generated image renders        */
+/* through the one IMAGE-block pipeline                                */
+/* ---------------------------------------------------------------- */
+
+/* The received image's data URL (the 64x32 PNG fixture, base64'd). */
+static void chat_recv_image_url(char *out, size_t cap)
+{
+    size_t b64_len = 0;
+    char *b64 = nm_image_b64_encode(CHAT_PNG, sizeof(CHAT_PNG), &b64_len);
+    snprintf(out, cap, "data:image/png;base64,%s", b64 ? b64 : "");
+    free(b64);
+}
+
+/* The whole image arrives as ONE delta.images event, posts the same
+ * markdown block /img posts, and renders through the one profile
+ * ladder (kitty APC here). The editing turn replays it message-level. */
+static void test_recv_image_renders_through_image_block(void)
+{
+    char url[256];
+    chat_recv_image_url(url, sizeof(url));
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"made it\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"now blue\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A graphics terminal: the image renders (kitty APC). Resolve the
+     * probe by hand (the tmpfile terminal never answers it). */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+
+    harness_type(h, "draw one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* ONE transmission (the block commits once), before the answer. */
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    ASSERT_NOT_NULL(apc);
+    ASSERT_EQ(count_image_apc(out), 1);
+    ASSERT_TRUE(apc < strstr(out, "made it"));
+    /* the payload is never the transcript's text */
+    ASSERT_TRUE(strstr(out, "base64,") == NULL);
+
+    /* The editing turn: the assistant message replays the image
+     * message-level (the probed shape), verbatim. */
+    harness_type(h, "make it blue");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_TRUE(strstr(g_request,
+                       "\"role\":\"assistant\",\"content\":\"made it\","
+                       "\"images\":[{\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(g_request, url) != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The same round on a terminal without graphics: the block commits as
+ * the one-line MARKER (alt · format · dims · size), never the
+ * payload — there is no second showing to dedupe against, so the
+ * marker IS the record. */
+static void test_recv_image_marker_on_dumb_terminal(void)
+{
+    char url[256];
+    chat_recv_image_url(url, sizeof(url));
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"made it\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = sse0;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* Resolved, no graphics. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 0;
+    h->rt->profile.iterm2_images = 0;
+
+    harness_type(h, "draw one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "image 1") != NULL); /* the alt */
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "base64,") == NULL); /* never the payload */
+    ASSERT_TRUE(strstr(out, "made it") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The picker marks an image generator (the catalog's image_gen bit)
+ * and compose strips the marker — the wire id is the row's first word. */
+static void test_model_picker_marks_image_generators(void)
+{
+    /* openrouter's static catalog: one plain model, one image_gen. */
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image 🖼") !=
+                NULL);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest 🖼") == NULL);
+
+    /* Down to the image row, Enter composes the BARE id. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model google/gemini-3.1-flash-lite-image");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app),
+                  "google/gemini-3.1-flash-lite-image");
+
+    harness_free(h);
+}
+
+/* The image event may arrive with text already streaming (unobserved
+ * but wire-possible): the content run must END first, or the posted
+ * image line would continue the open paragraph and commit the data URL
+ * as literal text. */
+static void test_recv_image_after_text_opens_its_own_block(void)
+{
+    char url[256];
+    chat_recv_image_url(url, sizeof(url));
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"the "
+             "picture:\"}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = sse0;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1; /* no graphics: the marker is the record */
+
+    harness_type(h, "draw");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "the picture:") != NULL); /* the text committed */
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);    /* as its own block */
+    ASSERT_TRUE(strstr(out, "base64,") == NULL);      /* never literal text */
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -5018,6 +5233,10 @@ int main(void)
     RUN_TEST(test_img_command_refusals);
     RUN_TEST(test_img_submit_sends_parts_and_echoes);
     RUN_TEST(test_img_attach_shows_the_image_when_supported);
+    RUN_TEST(test_recv_image_renders_through_image_block);
+    RUN_TEST(test_recv_image_marker_on_dumb_terminal);
+    RUN_TEST(test_model_picker_marks_image_generators);
+    RUN_TEST(test_recv_image_after_text_opens_its_own_block);
     RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
     RUN_TEST(test_tool_read_file_image_degrades_to_the_panel_line);
     RUN_TEST(test_tool_read_file_image_text_only_model_warns);

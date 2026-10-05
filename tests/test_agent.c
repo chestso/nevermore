@@ -250,6 +250,8 @@ static char g_text[512];
 static size_t g_text_len;
 static char g_reasoning[512];
 static size_t g_reasoning_len;
+static int g_img_count;      /* NM_STREAM_IMAGE events (IMAGEGEN) */
+static char g_img_url[1024]; /* the last one's full payload */
 static int g_tool_starts;
 static int g_tool_ends;
 static char g_tool_args[512];
@@ -268,6 +270,8 @@ static void reset_capture(void)
     g_text_len = 0;
     g_reasoning[0] = '\0';
     g_reasoning_len = 0;
+    g_img_count = 0;
+    g_img_url[0] = '\0';
     g_tool_starts = 0;
     g_tool_ends = 0;
     g_tool_args[0] = '\0';
@@ -292,6 +296,14 @@ static void cap_delta(NmStreamChannel channel, const char *delta_text,
     (void)userdata;
     if (!delta_text)
         return;
+    if (channel == NM_STREAM_IMAGE) {
+        /* Whole-object event: count it and keep the full payload. */
+        if (*delta_text) {
+            g_img_count++;
+            snprintf(g_img_url, sizeof(g_img_url), "%s", delta_text);
+        }
+        return;
+    }
     if (channel == NM_STREAM_REASONING) {
         if (g_reasoning_len + strlen(delta_text) < sizeof(g_reasoning)) {
             memcpy(g_reasoning + g_reasoning_len, delta_text,
@@ -3104,6 +3116,405 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
     remove(img);
 }
 
+/* ---------------------------------------------------------------- */
+/* Imagegen (IMAGEGEN-PLAN): the model's OWN images arrive as one      */
+/* delta.images event, attach verbatim, and replay message-level       */
+/* ---------------------------------------------------------------- */
+
+/* The data URL the scripted rounds carry (the 64x32 PNG header,
+ * base64'd at runtime). */
+static void test_image_url(char *out, size_t cap)
+{
+    size_t b64_len = 0;
+    char *b64 = nm_image_b64_encode(T_PNG_HDR, sizeof(T_PNG_HDR), &b64_len);
+    snprintf(out, cap, "data:image/png;base64,%s", b64 ? b64 : "");
+    free(b64);
+}
+
+/* A generated image arrives whole on NM_STREAM_IMAGE, attaches VERBATIM
+ * to the store, rides the round's assistant message, and replays on the
+ * next request as the message-level "images" array — with round 1's
+ * serialized messages a byte-equal prefix of round 2's (the cache
+ * invariant the whole design rests on). */
+static void test_agent_imagegen_round_replays_message_level(void)
+{
+    reset_capture();
+
+    char url[256];
+    test_image_url(url, sizeof(url));
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"made it\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"now blue\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "made it");
+
+    /* The image event fired ONCE, whole, before the answer text. */
+    ASSERT_EQ(g_img_count, 1);
+    ASSERT_STR_EQ(g_img_url, url);
+
+    /* Attached VERBATIM: the store holds the received URL byte for
+     * byte, and the alt is the round-relative display name. */
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+    ASSERT_STR_EQ(img->data_url, url);
+    ASSERT_STR_EQ(img->alt, "image 1");
+    ASSERT_EQ(img->w, 64);
+    ASSERT_EQ(img->h, 32);
+
+    /* The editing round: the assistant message replays with a plain
+     * string content AND the message-level images array (the probed
+     * shape), the part embedded verbatim. */
+    ASSERT_EQ(nm_agent_turn(agent, "make it blue", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"role\":\"assistant\",\"content\":\"made it\","
+                       "\"images\":[{\"type\":\"image_url\",\"image_url\":"
+                       "{\"url\":\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], img->part_json) != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\\\"image_url\\\"") == NULL);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
+
+    /* THE assertion (IMAGEGEN-PLAN §5): round 1's serialized messages
+     * are a byte-equal prefix of round 2's. */
+    const char *m1 = strstr(g_requests[0], "\"messages\":[");
+    const char *m2 = strstr(g_requests[1], "\"messages\":[");
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    const char *end1 = strstr(m1, "],\"stream\"");
+    ASSERT_NOT_NULL(end1);
+    size_t n1 = (size_t)(end1 + 1 - m1);
+    ASSERT_TRUE(memcmp(m1, m2, n1 - 1) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A bare http(s) image URL is not fetched by design: it degrades to a
+ * notice, attaches nothing, and the turn completes. */
+static void test_agent_imagegen_remote_url_is_a_notice(void)
+{
+    reset_capture();
+    g_notice_calls = 0;
+    g_notice_text[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"images\":[{\"type\":"
+        "\"image_url\",\"image_url\":{\"url\":\"https://example.com/"
+        "x.png\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"tried\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_notice(agent, cap_notice);
+
+    ASSERT_EQ(nm_agent_turn(agent, "draw", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "tried");
+
+    /* The client is a dumb parser (the wire-level forward is covered in
+     * test_openai_client); the AGENT degrades it: a notice, no store
+     * entry, and the UI delta callback never fires for it. */
+    ASSERT_EQ(g_img_count, 0);
+    ASSERT_TRUE(g_notice_calls >= 1);
+    ASSERT_TRUE(strstr(g_notice_text, "not fetched") != NULL);
+    ASSERT_TRUE(strstr(g_notice_text, "https://example.com/x.png") != NULL);
+    ASSERT_EQ(nm_agent_image_count(agent), 0u);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Round 1 sends the image event then STALLS (no [DONE]); the test
+ * cancels mid-stream. Round 2 answers plainly. */
+static void *imagegen_stall_server_thread(void *arg)
+{
+    struct ServerScript *sc = arg;
+    /* Round 1: image event, then hold the connection open. */
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    req[got] = '\0';
+    snprintf(g_requests[0], REQ_CAP, "%s", req);
+    g_n_requests = 1;
+
+    const char *body = sc->sse[0];
+    char head[128];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: text/event-stream\r\n"
+                      "Transfer-Encoding: chunked\r\n\r\n");
+    send(cfd, head, (size_t)hl, 0);
+    size_t bl = strlen(body);
+    char chunk[REQ_CAP];
+    int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
+    memcpy(chunk + cl, body, bl);
+    cl += (int)bl;
+    memcpy(chunk + cl, "\r\n", 2);
+    cl += 2;
+    send(cfd, chunk, (size_t)cl, 0);
+
+    /* Stall: a closed peer is READABLE (EOF) — drain, never spin. */
+    for (;;) {
+        struct timeval tv = { 0, 200 * 1000 };
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(cfd, &rfds);
+        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+            continue;
+        char sink[256];
+        long n = recv(cfd, sink, sizeof(sink), 0);
+        if (n <= 0)
+            break; /* the cancel tore the stream down */
+    }
+    close(cfd);
+
+    /* Round 2: the plain answer to the next turn. */
+    cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    req[got] = '\0';
+    if (got == 0) {
+        close(cfd);
+        return NULL;
+    }
+    snprintf(g_requests[1], REQ_CAP, "%s", req);
+    g_n_requests = 2;
+    body = sc->sse[1];
+    send(cfd, head, (size_t)hl, 0);
+    bl = strlen(body);
+    cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
+    memcpy(chunk + cl, body, bl);
+    cl += (int)bl;
+    memcpy(chunk + cl, "\r\n", 2);
+    cl += 2;
+    send(cfd, chunk, (size_t)cl, 0);
+    send(cfd, "0\r\n\r\n", 5, 0);
+    close(cfd);
+    return NULL;
+}
+
+/* A cancel MID-IMAGE: the image was displayed (the event fired) but the
+ * round never finished, so the assistant message is never appended —
+ * the next turn's request carries no "images" array. The store keeps
+ * the received bytes (harmless leftover). */
+static void test_agent_imagegen_cancel_mid_image_drops_it(void)
+{
+    reset_capture();
+
+    char url[256];
+    test_image_url(url, sizeof(url));
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, imagegen_stall_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "draw", NULL, 0), 0);
+    /* Drive until the image event landed: bounded passes, each waiting
+     * on the fd for real (the wait is I/O, not time). */
+    for (int i = 0; i < 400 && g_img_count == 0; i++) {
+        NmSource src = nm_agent_source(agent);
+        if (src.handle >= 0 && src.flags)
+            wait_source(&src, 50);
+        else
+            usleep(10 * 1000);
+        if (nm_agent_step(agent) != 0)
+            break;
+    }
+    ASSERT_EQ(g_img_count, 1);
+    ASSERT_STR_EQ(g_img_url, url);
+
+    /* Cancel before [DONE]: the round never finishes. */
+    nm_agent_cancel(agent);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
+    /* The store keeps the received bytes (a cancel must not lose what
+     * arrived)... */
+    ASSERT_EQ(nm_agent_image_count(agent), 1u);
+
+    /* ...but the round produced NO assistant message: the next turn's
+     * request carries no "images" array anywhere. */
+    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
+    ASSERT_STR_EQ(g_text, "after");
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"images\"") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The inactivity deadline counts wire BYTES (IMAGEGEN keep-alives):
+ * a stream that produces only comment lines for LONGER than the budget
+ * is alive, not stalled — the turn must not time out. The counter-proof
+ * (silence times out) is test_agent_stream_stall_times_out. */
+static void *keepalive_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n";
+    static const char comment[] = "e\r\n: keep-alive\n\n\r\n";
+    static const char answer[] =
+        "37\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"survived\"}}]}"
+        "\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    send(cfd, head, sizeof(head) - 1, 0);
+    /* ~900 ms of comment-only traffic against the test's 300 ms
+     * budget: a delta-clocked deadline would kill it four times over. */
+    for (int i = 0; i < 15; i++) {
+        usleep(60 * 1000);
+        if (send(cfd, comment, sizeof(comment) - 1, 0) <= 0)
+            break;
+    }
+    send(cfd, answer, sizeof(answer) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_agent_keepalive_comments_reset_the_deadline(void)
+{
+    reset_capture();
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, keepalive_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_set_timeout_ms(agent, 300); /* comment cadence is 60 ms */
+
+    ASSERT_EQ(nm_agent_turn(agent, "draw something slow", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "survived");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* The offline-catalog tripwire: agent construction resolves the active
  * model's vision flag from the provider catalog (the system prompt's
  * capability clause), so a live fetch would both probe a real service
@@ -3152,6 +3563,10 @@ int main(void)
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);
     RUN_TEST(test_agent_cancel_drops_pending_image_fanout);
+    RUN_TEST(test_agent_imagegen_round_replays_message_level);
+    RUN_TEST(test_agent_imagegen_remote_url_is_a_notice);
+    RUN_TEST(test_agent_imagegen_cancel_mid_image_drops_it);
+    RUN_TEST(test_agent_keepalive_comments_reset_the_deadline);
     RUN_TEST(test_agent_unknown_tool_reports_error_result);
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_each_tool_as_it_runs);

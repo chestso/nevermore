@@ -161,5 +161,10 @@ part>]}, user]` is accepted (no 400) and the model edits the image
   (tokenless), static `data/nm-openrouter-models.json` as fallback.
   Vision from `architecture.input_modalities`; context from
   top-level `context_length`; label from `name`.
+  Image GENERATION (§5.1) is consumed too: `delta.images` events ride
+  the shared client's `NM_STREAM_IMAGE` channel (one whole data URL per
+  image), assistant replays go out message-level, and
+  `architecture.output_modalities` maps to `NmModel.image_gen` (the
+  picker's 🖼 marker).
 - Keys live in `~/.authinfo` (`machine openrouter.ai user apikey
 password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.

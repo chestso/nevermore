@@ -334,6 +334,82 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
     return attach_core(s, bytes, len, alt ? alt : "image", reason, reason_cap);
 }
 
+long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
+                                 const char *alt, char *reason,
+                                 size_t reason_cap)
+{
+    attach_reason(reason, reason_cap, "");
+    if (!s || !url || len == 0) {
+        attach_reason(reason, reason_cap, "not a base64 data URL");
+        return -1;
+    }
+    NmImageFormat fmt;
+    const char *b64;
+    size_t b64_len;
+    if (nm_image_data_url_split(url, len, &fmt, &b64, &b64_len) != 0) {
+        attach_reason(reason, reason_cap, "not a base64 data URL");
+        return -1;
+    }
+
+    /* Decode the payload ONCE, into scratch, for the marker facts
+     * (container, dims, decoded size). The store keeps the URL
+     * verbatim, never the decoded bytes — a re-encode would change
+     * the bytes the replay prefix keys on. */
+    unsigned char *scratch = malloc(b64_len / 4 * 3 + 1);
+    if (!scratch) {
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    long n = nm_image_b64_decode(b64, b64_len, scratch, b64_len / 4 * 3 + 1);
+    if (n < 0) {
+        free(scratch);
+        attach_reason(reason, reason_cap, "undecodable payload");
+        return -1;
+    }
+    int w = 0, h = 0;
+    NmImageKind kind = nm_image_sniff_kind(scratch, (size_t)n, &w, &h);
+    free(scratch);
+    /* The MIME's claim and the bytes' own answer usually agree; the
+     * bytes win when they name a container (they are what replays). */
+    NmImageFormat sniffed = nm_image_format_from_kind(kind);
+    if (sniffed != NM_IMAGE_FMT_UNKNOWN)
+        fmt = sniffed;
+
+    /* Freeze the URL VERBATIM (the received bytes are the canonical
+     * part) and pre-serialize the wire part around it. */
+    char *url_copy = malloc(len + 1);
+    if (!url_copy) {
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    memcpy(url_copy, url, len);
+    url_copy[len] = '\0';
+    size_t part_len = 0;
+    char *part = build_part_json(url_copy, len, &part_len);
+    if (!part) {
+        free(url_copy);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    NmImage *img = image_slot(s);
+    if (!img) {
+        free(url_copy);
+        free(part);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
+    img->data_url = url_copy;
+    img->data_url_len = len;
+    img->part_json = part;
+    img->part_json_len = part_len;
+    img->format = fmt;
+    img->w = w;
+    img->h = h;
+    img->bytes = (size_t)n;
+    snprintf(img->alt, sizeof(img->alt), "%s", alt ? alt : "image");
+    return (long)(s->n_images - 1);
+}
+
 const NmImage *nm_session_image(const NmSession *s, size_t idx)
 {
     return (s && idx < s->n_images) ? &s->images[idx] : NULL;
@@ -404,6 +480,41 @@ const NmSessionMessage *nm_session_append_user_images(NmSession *s,
     }
     m->role = NM_ROLE_USER;
     m->content = dup_or_null(text);
+    m->images = ids;
+    m->n_images = n_images;
+    return m;
+}
+
+const NmSessionMessage *nm_session_append_assistant_images(
+    NmSession *s, const char *reasoning, const char *content,
+    const char *tool_calls_json, const size_t *image_ids, size_t n_images)
+{
+    if (!s)
+        return NULL;
+    for (size_t i = 0; i < n_images; i++) {
+        if (image_ids[i] >= s->n_images)
+            return NULL; /* caller bug: an id that does not resolve */
+    }
+    size_t *ids = NULL;
+    if (n_images > 0) {
+        ids = malloc(n_images * sizeof(*ids));
+        if (!ids)
+            return NULL;
+        memcpy(ids, image_ids, n_images * sizeof(*ids));
+    }
+    NmSessionMessage *m = push_slot(s);
+    if (!m) {
+        free(ids);
+        return NULL;
+    }
+    m->role = NM_ROLE_ASSISTANT;
+    /* The wire shape is frozen at append: content stays a plain string
+     * ("" when the round streamed no text — the probed replay shape,
+     * OPENROUTER-API.md §5.1) and the images ride the message-level
+     * array the composer emits for an assistant message. */
+    m->content = dup_or_null(content ? content : "");
+    m->reasoning = dup_or_null(reasoning);
+    m->tool_calls_json = dup_or_null(tool_calls_json);
     m->images = ids;
     m->n_images = n_images;
     return m;

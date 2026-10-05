@@ -145,11 +145,13 @@ long nm_agent_session_cache_read_tokens(const NmAgent *a);
 long nm_agent_session_cache_write_tokens(const NmAgent *a);
 long nm_agent_session_cache_base_tokens(const NmAgent *a);
 
-/* Stream-inactivity timeout (ms). While a round streams, if no delta
- * arrives for this long the step errors the turn ("timed out") instead
- * of waiting forever — a model that connects but never answers, or
- * stalls mid-body. It is an INACTIVITY deadline: every delta resets it,
- * so a long-but-live answer is never cut.
+/* Stream-inactivity timeout (ms). While a round streams, if no wire
+ * bytes arrive for this long the step errors the turn ("timed out")
+ * instead of waiting forever — a model that connects but never answers,
+ * or stalls mid-body. It is an INACTIVITY deadline over BYTES, not
+ * events: every delta resets it, and so does raw traffic (a keep-alive
+ * comment bridging a minutes-long image-generation gap —
+ * docs/OPENROUTER-API.md §5.1), so a long-but-live answer is never cut.
  *
  *   ms > 0   use it
  *   ms == 0  restore the default (NM_AGENT_DEFAULT_TIMEOUT_MS)

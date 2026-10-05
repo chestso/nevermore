@@ -126,6 +126,61 @@ static int resolved_run_command_timeout_ms(void)
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
  * renders as a compact status line (the -P pipeline shape). */
+
+/* Images received in ask mode (IMAGEGEN-PLAN §3): no transcript exists,
+ * so the image lands as a FILE — nevermore-image-N.<ext> in the cwd
+ * (deterministic; the extension is the sniffed container's) — and the
+ * note goes to stderr, keeping stdout clean for piping (a megabyte
+ * data URL on stdout helps no one). */
+static int ask_image_count;
+
+static void ask_save_image(const char *url)
+{
+    NmImageFormat fmt;
+    const char *b64;
+    size_t b64_len;
+    if (nm_image_data_url_split(url, strlen(url), &fmt, &b64, &b64_len) != 0) {
+        fprintf(stderr, "[image] not a base64 data URL — not saved\n");
+        return;
+    }
+    unsigned char *bytes = malloc(b64_len / 4 * 3 + 1);
+    if (!bytes)
+        return;
+    long n = nm_image_b64_decode(b64, b64_len, bytes, b64_len / 4 * 3 + 1);
+    if (n < 0) {
+        fprintf(stderr, "[image] undecodable payload — not saved\n");
+        free(bytes);
+        return;
+    }
+    /* The extension is the BYTES' answer, not the mime's claim. */
+    int w = 0, h = 0;
+    NmImageKind kind = nm_image_sniff_kind(bytes, (size_t)n, &w, &h);
+    const char *ext = kind == NM_IMAGE_KIND_PNG    ? "png"
+                      : kind == NM_IMAGE_KIND_JPEG ? "jpg"
+                      : kind == NM_IMAGE_KIND_GIF  ? "gif"
+                                                   : "img";
+    ask_image_count++;
+    char path[64];
+    snprintf(path, sizeof(path), "nevermore-image-%d.%s", ask_image_count,
+             ext);
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[image] %s — could not write\n", path);
+        free(bytes);
+        return;
+    }
+    fwrite(bytes, 1, (size_t)n, f);
+    fclose(f);
+    free(bytes);
+    char desc[NM_IMAGE_DESC_MAX];
+    NmImageFormat wire_fmt = nm_image_format_from_kind(kind);
+    nm_image_describe(nm_image_format_name(wire_fmt != NM_IMAGE_FMT_UNKNOWN
+                                               ? wire_fmt
+                                               : fmt),
+                      w, h, (size_t)n, desc, sizeof(desc));
+    fprintf(stderr, "[image] %s — %s\n", path, desc);
+}
+
 static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
                          const NmToolCall *calls, size_t n_calls,
                          void *userdata)
@@ -135,6 +190,10 @@ static void ask_on_delta(NmStreamChannel channel, const char *delta_text,
     (void)userdata;
     if (!delta_text)
         return;
+    if (channel == NM_STREAM_IMAGE) {
+        ask_save_image(delta_text);
+        return;
+    }
     /* Headless ask: reasoning goes to stderr (dimmed), the answer to
      * stdout, so piping the answer stays clean. */
     if (channel == NM_STREAM_REASONING)

@@ -70,10 +70,13 @@ typedef struct NmSessionMessage
     char *tool_calls_json; /* NM_ROLE_ASSISTANT: wire tool_calls array, or NULL */
     char *tool_call_id;    /* NM_ROLE_TOOL: answered call id, or NULL */
     char *tool_name;       /* NM_ROLE_TOOL: tool that produced this result */
-    /* NM_ROLE_USER: indices into the session's image store (not copies),
-     * or NULL when the message carries none. Fixed when the message is
-     * appended (append-only: a prefix that gains or loses an image part
-     * is a different prefix, so the list never changes afterwards). */
+    /* NM_ROLE_USER / NM_ROLE_ASSISTANT: indices into the session's
+     * image store (not copies), or NULL when the message carries none.
+     * Fixed when the message is appended (append-only: a prefix that
+     * gains or loses an image part is a different prefix, so the list
+     * never changes afterwards). User images ride the content-parts
+     * array; assistant images (IMAGEGEN — the round's generated
+     * output) ride the message-level "images" array. */
     size_t *images;
     size_t n_images;
     /* NM_ROLE_ASSISTANT: the round's reasoning trace. Kept for
@@ -140,6 +143,24 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
                                    size_t len, const char *alt, char *reason,
                                    size_t reason_cap);
 
+/* Attach a RECEIVED image (IMAGEGEN-PLAN §3): the whole image arrived
+ * as one `delta.images` event whose payload IS this data URL. The URL
+ * is frozen VERBATIM — the received bytes are the canonical part, never
+ * parse-and-rebuilt (a re-encode would change the bytes and break the
+ * replay prefix AND hand the model a different image than the one it
+ * made). No wire cap: the cap bounds what WE choose to send, and a
+ * received image is bounded by the provider's own output size (record,
+ * do not refuse).
+ *
+ * The payload is base64-decoded ONCE here, into scratch, for the
+ * marker facts (container, dims, decoded size); the decoded bytes are
+ * not kept. Refusals: not a base64 `data:` URL ("not a base64 data
+ * URL"), an undecodable payload ("undecodable payload"), OOM ("no
+ * memory"). Returns the new index, or -1 with `reason` filled. */
+long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
+                                 const char *alt, char *reason,
+                                 size_t reason_cap);
+
 /* The store: a borrowed image by index (NULL when out of range), and
  * how many are attached. */
 const NmImage *nm_session_image(const NmSession *s, size_t idx);
@@ -155,6 +176,17 @@ const NmSessionMessage *nm_session_append_user_images(NmSession *s,
                                                       const char *text,
                                                       const size_t *image_ids,
                                                       size_t n_images);
+
+/* Append the ASSISTANT message for a round that produced images
+ * (IMAGEGEN-PLAN §3/§4): the round's content (NULL/"" stays a plain
+ * empty string on the wire), reasoning trace, optional tool_calls
+ * array, and the image ids — one message, so the round's output is
+ * one prefix-stable unit. The wire shape for these is the probed
+ * message-level "images" array (docs/OPENROUTER-API.md §5.1). Returns
+ * NULL without appending when any id is out of range. */
+const NmSessionMessage *nm_session_append_assistant_images(
+    NmSession *s, const char *reasoning, const char *content,
+    const char *tool_calls_json, const size_t *image_ids, size_t n_images);
 
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);

@@ -16,7 +16,7 @@
 # not a silent empty file.
 #
 # Output shape matches data/nm-openai-models.json: a JSON array of
-# {id, label, vision, context_length}, preceded by '#' provenance
+# {id, label, vision, image_gen, context_length}, preceded by '#' provenance
 # lines (the design's "header comment records source entry + date";
 # the file is documentation/regeneration source, never parsed at
 # runtime — the shipped catalog is the static array in the provider).
@@ -64,6 +64,8 @@ emit() {
                 label: (.value.name // .key),
                 vision: (if ((.value.modalities.input // []) | index("image"))
                          then 1 else 0 end),
+                image_gen: (if ((.value.modalities.output // []) | index("image"))
+                            then 1 else 0 end),
                 context_length: (.value.limit.context // -1)
               }
           ] | sort_by(.id)' "$src"
@@ -84,7 +86,7 @@ emit() {
         printf ' * SpacesInContainerLiterals, Cpp11BracedListStyle off). */\n'
         printf 'static const NmModel %s[] = {\n' "$arr"
         printf '%s\n' "$body" |
-            jq -r '.[] | "    { \(.id|@json), \(.label|@json), \(.vision), \(.context_length) },"'
+            jq -r '.[] | "    { \(.id|@json), \(.label|@json), \(.vision), \(.image_gen), \(.context_length) },"'
         printf '    { 0 }\n};\n\n'
     } >> "$c_hdr"
     echo "wrote $out ($label): $count models" >&2

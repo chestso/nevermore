@@ -34,7 +34,7 @@ tools/fake-ollama/fake_ollama.py --scenario prose --port 11434
 | `--port PORT` | bind port; default 11434 (nevermore's local-Ollama default)  |
 | `--host HOST` | bind address; default 127.0.0.1                              |
 | `--both`      | bind 127.0.0.1 **and** ::1 in one process                    |
-| `--scenario`  | `table-fence` (default), `prose`, or `image`                 |
+| `--scenario`  | `table-fence` (default), `prose`, `image`, or `imagegen`         |
 
 **Bind both stacks.** `localhost` resolves to `::1` first on some
 boxes; an IPv4-only bind then shows a "connection refused" that looks
@@ -55,6 +55,15 @@ like an app bug. `--both` avoids the whole class.
   verdict is printed to the server's stderr and streamed back as the
   first content delta, so the transcript shows whether the parts array
   arrived intact. Pairs with the TUI's `/img` (or `-i` in ask mode).
+- **`imagegen`** — the image-GENERATION smoke (the receive direction):
+  the stream's first event is one `delta.images` chunk carrying a real
+  64x32 PNG (built in stdlib) as a `data:` URL, then the answer text.
+  Its contract is the editing round-trip: a later request must replay
+  the assistant message with a MESSAGE-LEVEL `images` array and a plain
+  string `content` (never content-parts on an assistant message). The
+  TUI shows the image through the one IMAGE-block pipeline (the marker
+  under tmux, the picture on a kitty terminal); ask mode saves
+  `nevermore-image-1.png` and keeps stdout clean.
 
 Deltas are split so markdown arrives incrementally (lines/rows land
 across separate SSE events), as a real stream would.

@@ -27,9 +27,13 @@
 
 #define OPENROUTER_DEFAULT_BASE "https://openrouter.ai/api/v1"
 
-/* Static fallback catalog (subset of data/nm-openrouter-models.json). */
+/* Static fallback catalog (subset of data/nm-openrouter-models.json).
+ * The image row is the imagegen probe model (docs/OPENROUTER-API.md
+ * §5.1): image_gen = output_modalities contains "image"; its input
+ * modalities are unprobed, so vision stays 0 (no capability claim). */
 static const NmModel openrouter_static_models[] = {
-    { "~openai/gpt-astra-latest", "GPT Astra", 1, 1050000 },
+    { "~openai/gpt-astra-latest", "GPT Astra", 1, 0, 1050000 },
+    { "google/gemini-3.1-flash-lite-image", "Gemini 3.1 Flash Lite Image", 0, 1, -1 },
     { 0 }
 };
 
@@ -78,11 +82,13 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
 static NmModel *openrouter_live_models;
 static size_t openrouter_live_n;
 
-/* architecture.input_modalities contains "image" (OPENROUTER-API.md
- * §2 — NOT capabilities.vision; character scan, no regex). */
-static int modalities_have_image(NmJson *arch)
+/* architecture.<key>_modalities contains "image" (OPENROUTER-API.md
+ * §2: vision is input_modalities; §5.1: image_gen is
+ * output_modalities — NOT capabilities.vision; character scan, no
+ * regex). */
+static int modalities_have_image(NmJson *arch, const char *key)
 {
-    NmJson *mods = nm_json_get(arch, "input_modalities");
+    NmJson *mods = nm_json_get(arch, key);
     size_t n = nm_json_len(mods);
     for (size_t i = 0; i < n; i++) {
         const char *s = nm_json_str(nm_json_at(mods, i));
@@ -127,7 +133,11 @@ static void openrouter_fetch_catalog(const char *base_url)
         models[out].id = strdup(id);
         const char *name = nm_json_str(nm_json_get(e, "name"));
         models[out].label = strdup(name ? name : id);
-        models[out].vision = modalities_have_image(nm_json_get(e, "architecture"));
+        NmJson *arch = nm_json_get(e, "architecture");
+        models[out].vision = modalities_have_image(arch, "input_modalities");
+        /* The receive direction (IMAGEGEN): output_modalities contains
+         * "image" — the input scanner's twin (OPENROUTER-API.md §5.1). */
+        models[out].image_gen = modalities_have_image(arch, "output_modalities");
         double ctx = nm_json_num(nm_json_get(e, "context_length"));
         models[out].context_length = ctx > 0 ? (long)ctx : -1;
         if (!models[out].id || !models[out].label) {

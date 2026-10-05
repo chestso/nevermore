@@ -1000,11 +1000,16 @@ static void *openrouter_models_server_thread(void *arg)
         "{\"data\":["
         "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
         "\"context_length\":1050000,"
-        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"]}},"
+        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
+        "\"output_modalities\":[\"text\"]}},"
         "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
         "\"context_length\":8192,"
-        "\"architecture\":{\"input_modalities\":[\"text\"]}}"
-        "],\"total_count\":2}";
+        "\"architecture\":{\"input_modalities\":[\"text\"]}},"
+        "{\"id\":\"google/gemini-3.1-flash-lite-image\",\"name\":\"Gemini"
+        " Image\",\"context_length\":65536,"
+        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
+        "\"output_modalities\":[\"image\"]}}"
+        "],\"total_count\":3}";
     char head[256];
     snprintf(head, sizeof(head),
              "HTTP/1.1 200 OK\r\n"
@@ -1095,13 +1100,19 @@ static void test_openrouter_models_fetch(void)
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 2);
+    ASSERT_EQ(n, 3);
     ASSERT_STR_EQ(models[0].id, "~openai/gpt-astra-latest");
     ASSERT_STR_EQ(models[0].label, "GPT Astra");  /* "name", not display_name */
     ASSERT_EQ(models[0].vision, 1);               /* input_modalities has "image" */
+    ASSERT_EQ(models[0].image_gen, 0);            /* output_modalities has none */
     ASSERT_EQ(models[0].context_length, 1050000); /* top-level field */
     ASSERT_STR_EQ(models[1].id, "vendor/text-only");
     ASSERT_EQ(models[1].vision, 0);
+    /* The receive direction (IMAGEGEN): output_modalities contains
+     * "image" — the vision scanner's twin (OPENROUTER-API.md §5.1). */
+    ASSERT_STR_EQ(models[2].id, "google/gemini-3.1-flash-lite-image");
+    ASSERT_EQ(models[2].vision, 1);
+    ASSERT_EQ(models[2].image_gen, 1);
     pthread_join(th, NULL);
 
     /* Tokenless catalog (public — OPENROUTER-API.md §1). */

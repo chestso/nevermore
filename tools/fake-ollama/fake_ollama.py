@@ -25,11 +25,14 @@ README.md for the tmux capture recipe.
 """
 
 import argparse
+import base64
 import json
 import socket
+import struct
 import sys
 import threading
 import time
+import zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CATALOG = {
@@ -49,6 +52,37 @@ CATALOG = {
     ]
 }
 
+
+# A real 64x32 PNG, built in stdlib (a valid container — the manual
+# smoke should show an image, not a marker, on a graphics terminal):
+# vertical RGB gradient, no interlace.
+def make_png(w=64, h=32):
+    def chunk(typ, data):
+        c = struct.pack(">I", len(data)) + typ + data
+        return c + struct.pack(">I", zlib.crc32(typ + data) & 0xFFFFFFFF)
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)  # 8-bit RGB
+    rows = b"".join(
+        b"\x00"
+        + bytes(
+            [
+                ch
+                for x in range(w)
+                for ch in (x * 255 // (w - 1), y * 255 // (h - 1), 128)
+            ]
+        )
+        for y in range(h)
+    )
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+IMAGEGEN_URL = "data:image/png;base64," + base64.b64encode(make_png()).decode()
+
 # Phase-sequential: reasoning deltas first (content absent), then
 # content. The markdown pieces are split across deltas so the classifier
 # sees lines/rows arrive incrementally, as a real stream would.
@@ -59,6 +93,16 @@ SCENARIOS = {
             "content": "It is a 64x32 test pattern, and the parts array "
             "arrived intact.\n\n"
         },
+    ],
+    # The imagegen receive path (docs/OPENROUTER-API.md section 5.1):
+    # the WHOLE image as one delta.images event, content "" alongside,
+    # then the answer text.
+    "imagegen": [
+        {
+            "content": "",
+            "images": [{"type": "image_url", "image_url": {"url": IMAGEGEN_URL}}],
+        },
+        {"content": "Here is the 64x32 gradient you asked for.\n\n"},
     ],
     "table-fence": [
         {"reasoning": "Let me line up the regions and check the counts.\n"},
@@ -127,7 +171,34 @@ def check_image_request(raw):
     return ([], f"{len(imgs)} image part(s), {len(url)}-byte data URL")
 
 
-SCENARIO_CHECKS = {"image": check_image_request}
+def check_imagegen_request(raw):
+    """The editing round-trip (IMAGEGEN): once the model has generated
+    an image, the next request replays it on the ASSISTANT message as a
+    message-level `images` array of image_url parts, with `content` a
+    plain string — never content-parts on an assistant message."""
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return ([f"request body is not JSON: {e}"], "")
+    msgs = doc.get("messages") or []
+    replayed = 0
+    for m in msgs:
+        if m.get("role") != "assistant" or "images" not in m:
+            continue
+        replayed += 1
+        if not isinstance(m.get("content"), str):
+            return (["assistant image message's content is not a string"], "")
+        imgs = m["images"]
+        if not isinstance(imgs, list) or not imgs:
+            return (["assistant images is not a non-empty array"], "")
+        for p in imgs:
+            url = (p.get("image_url") or {}).get("url", "")
+            if p.get("type") != "image_url" or not url.startswith("data:image/"):
+                return (["assistant images carry a non-image_url part"], "")
+    return ([], f"{replayed} assistant image message(s) replayed message-level")
+
+
+SCENARIO_CHECKS = {"image": check_image_request, "imagegen": check_imagegen_request}
 
 
 class Handler(BaseHTTPRequestHandler):

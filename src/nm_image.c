@@ -101,17 +101,14 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
 {
     /* data:image/<kind>;base64,<payload> */
     if (src_len > 5 && memcmp(src, "data:", 5) == 0) {
-        size_t semi = 5;
-        while (semi < src_len && src[semi] != ';')
-            semi++;
-        int fmt = nm_image_format_from_mime(src + 5, semi - 5);
-        if (fmt < 0 || semi + 8 > src_len ||
-            memcmp(src + semi, ";base64,", 8) != 0) {
+        NmImageFormat fmt;
+        const char *b64;
+        size_t b64_len;
+        if (nm_image_data_url_split(src, src_len, &fmt, &b64, &b64_len) != 0 ||
+            fmt < 0) {
             slot_reason(s, "undecodable source");
             return -1;
         }
-        const char *b64 = src + semi + 8;
-        size_t b64_len = src_len - (semi + 8);
         /* No size gate: these bytes are already in the conversation
          * (the attach cap is what let them in), so decode the WHOLE
          * payload — the marker's size is then the payload's own

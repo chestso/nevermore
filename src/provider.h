@@ -65,9 +65,14 @@ typedef enum
 
 typedef struct NmModel
 {
-    const char *id;      /* wire model id, e.g. "qwen3-coder:latest" */
-    const char *label;   /* display label */
-    int vision;          /* accepts image content parts */
+    const char *id;    /* wire model id, e.g. "qwen3-coder:latest" */
+    const char *label; /* display label */
+    int vision;        /* accepts image content parts */
+    /* Emits images (the receive direction, IMAGEGEN): openrouter's
+     * architecture.output_modalities contains "image" (docs/
+     * OPENROUTER-API.md §5.1). Picker UX only — the wire takes whatever
+     * it takes. */
+    int image_gen;
     long context_length; /* -1 = unknown */
 } NmModel;
 
@@ -81,7 +86,7 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
-    /* Image content parts (VISION-PLAN §2): a user message that carries
+    /* Image content parts (VISION-PLAN §2): a USER message that carries
      * images serializes its `content` as a parts ARRAY — the text part
      * first, then one image part per entry, in order. Each entry is
      * pre-serialized JSON of the shape
@@ -90,15 +95,22 @@ typedef struct NmMessage
      * the client embeds the bytes VERBATIM (nm_json_new_raw) and stays a
      * dumb serializer. BORROWED: the owner must outlive the request.
      *
+     * An ASSISTANT message with images (the receive direction,
+     * IMAGEGEN-PLAN — a generated image the round produced) serializes
+     * differently, and the asymmetry is the providers' own (probed, not
+     * chosen: docs/OPENROUTER-API.md §5.1): `content` stays a plain
+     * string ("" when the round streamed no text) and the parts ride a
+     * MESSAGE-LEVEL "images" array. Same parts, same raw embed.
+     *
      * The parts are never re-derived: a prefix that gains, loses or
      * re-encodes an image part is a different prefix, which would throw
      * the provider's prompt cache away (and silently swap the image the
      * conversation is about). n_images == 0 keeps `content` a plain
      * string — the shape is decided at append and never flipped.
      *
-     * Only user messages carry images: a `tool` message's content is a
-     * string by wire contract, and hyper silently DROPS images on one
-     * (the tool-result fan-out is the documented future seam). */
+     * Only user and assistant messages carry images: a `tool` message's
+     * content is a string by wire contract, and hyper silently DROPS
+     * images on one (the tool-result fan-out answers that). */
     const char *const *image_parts;
     size_t n_images;
     /* Assistant reasoning trace. When attached, the client serializes
@@ -147,11 +159,21 @@ typedef struct NmToolCall
  * text, NM_STREAM_REASONING for chain-of-thought (providers stream
  * it phase-sequentially before the answer; the app's renderer dims
  * it). A reasoning delta carries text on the reasoning channel and
- * never any answer bytes. */
+ * never any answer bytes.
+ *
+ * NM_STREAM_IMAGE is a whole-object event, not a byte stream: one
+ * callback per image, delta_text the COMPLETE data URL the provider
+ * sent (image-generation models deliver `delta.images` as one event
+ * per image, payload inline — docs/OPENROUTER-API.md §5.1). The
+ * payload is never a partial fragment and never a file path; a URL
+ * that is not a `data:` URL is forwarded as-is and degrades at the
+ * receiver (nevermore fetches no remote source), never a turn
+ * failure. */
 typedef enum
 {
     NM_STREAM_CONTENT = 0, /* the assistant answer */
-    NM_STREAM_REASONING    /* CoT / thinking trace */
+    NM_STREAM_REASONING,   /* CoT / thinking trace */
+    NM_STREAM_IMAGE        /* a whole generated image (data URL) */
 } NmStreamChannel;
 
 typedef void (*NmStreamCallback)(NmStreamChannel channel,
@@ -230,11 +252,20 @@ typedef enum
 /* A chat call's outcome. message is ALWAYS set when status is an
  * NM_CHAT_ERR_* (the always-set contract: every failure carries a
  * human-readable reason, so callers never guess a fallback string).
- * Inline, plain-data: results live on the stack, no free function. */
+ * Inline, plain-data: results live on the stack, no free function.
+ *
+ * traffic is the step API's byte-activity report: nonzero when this
+ * step moved ANY response bytes (a keep-alive comment counts — it is
+ * what a minutes-long image generation bridges its gap with, docs/
+ * OPENROUTER-API.md §5.1), zero when the step only waited. The agent's
+ * stream-inactivity deadline resets on traffic, not just on deltas, so
+ * a live-but-silent-at-the-event-level stream is never cut. The
+ * blocking nm_openai_chat pump does not consume it. */
 typedef struct NmChatResult
 {
     NmChatStatus status;
     int http_status; /* HTTP status code when the wire answered */
+    int traffic;     /* step API: this step moved response bytes */
     char message[NM_CHAT_MSG_MAX];
 } NmChatResult;
 

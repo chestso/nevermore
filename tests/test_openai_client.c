@@ -119,6 +119,11 @@ typedef struct Capture
     char reasoning[256];
     size_t reasoning_len;
     int n_reasoning;
+    /* NM_STREAM_IMAGE events (IMAGEGEN): whole data URLs, one callback
+     * per image. n_images counts; last_image is a heap copy of the last
+     * payload (freed by the test). */
+    int n_images;
+    char *last_image;
     /* Tool calls delivered by the final NULL-content callback;
      * OWNERSHIP moves here (free with nm_tool_calls_free). */
     NmToolCall *tool_calls;
@@ -144,6 +149,14 @@ static void capture_delta(NmStreamChannel channel, const char *delta_text,
         /* Final callback: take ownership of the delivered array. */
         cap->tool_calls = (NmToolCall *)tool_calls;
         cap->n_tool_calls = n_tool_calls;
+        return;
+    }
+    if (channel == NM_STREAM_IMAGE) {
+        if (delta_text && *delta_text) {
+            cap->n_images++;
+            free(cap->last_image);
+            cap->last_image = strdup(delta_text);
+        }
         return;
     }
     if (channel == NM_STREAM_REASONING) {
@@ -723,6 +736,316 @@ static void test_chat_image_large_body_growth(void)
     ASSERT_TRUE(strstr(last_request, part) != NULL);
     ASSERT_TRUE(last_request_len > b64_len);
     free(part);
+}
+
+/* ---------------------------------------------------------------- */
+/* Generated images on the wire (IMAGEGEN-PLAN §3/§4/§5)             */
+/* ---------------------------------------------------------------- */
+
+/* The receive direction: one `delta.images` event fires ONE
+ * NM_STREAM_IMAGE callback carrying the full data URL, the "" content
+ * alongside is not a content delta, and the answer streams as usual. */
+static void test_chat_image_delta_fires_whole_url(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+        "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;"
+        "base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg\"}}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0 };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_images, 1);
+    ASSERT_NOT_NULL(cap.last_image);
+    ASSERT_STR_EQ(cap.last_image,
+                  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg");
+    /* The "" content that rode the image event is NOT a content delta. */
+    ASSERT_EQ(cap.n_deltas, 1);
+    ASSERT_STR_EQ(cap.text, "done");
+    free(cap.last_image);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* A bare http(s) URL is forwarded as-is: the client is a dumb parser
+ * and nevermore fetches no remote source (the FETCH-tier deferral), so
+ * the RECEIVER degrades it. Never a turn failure. */
+static void test_chat_image_delta_bare_url_is_forwarded(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"images\":[{\"type\":"
+        "\"image_url\",\"image_url\":{\"url\":\"https://example.com/"
+        "x.png\"}}]}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0 };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_images, 1);
+    ASSERT_NOT_NULL(cap.last_image);
+    ASSERT_STR_EQ(cap.last_image, "https://example.com/x.png");
+    ASSERT_EQ(cap.n_deltas, 0);
+    free(cap.last_image);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The observed wire really does send one ~1.2 MiB SSE line per image
+ * (OPENROUTER-API.md §5.1): a single event far past READ_BUF_CAP must
+ * survive the parser's buffer growth and arrive whole. */
+static void test_chat_image_single_huge_event(void)
+{
+    /* ~2 MiB of base64 payload in one data: URL. */
+    size_t b64_len = 2 * 1024 * 1024;
+    size_t url_len = strlen("data:image/png;base64,") + b64_len;
+    char *url = malloc(url_len + 1);
+    ASSERT_NOT_NULL(url);
+    snprintf(url, url_len + 1, "data:image/png;base64,");
+    memset(url + strlen(url), 'A', b64_len);
+    url[url_len] = '\0';
+
+    size_t body_len = url_len + 256;
+    char *body = malloc(body_len + 1);
+    ASSERT_NOT_NULL(body);
+    int bn = snprintf(body, body_len + 1,
+                      "data: {\"choices\":[{\"delta\":{\"images\":"
+                      "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s"
+                      "\"}}]}}]}\n\ndata: [DONE]\n\n",
+                      url);
+    ASSERT_TRUE(bn > 0 && (size_t)bn <= body_len);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = { lfd, body };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0 };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    pthread_join(th, NULL);
+    close(lfd);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_images, 1);
+    ASSERT_NOT_NULL(cap.last_image);
+    /* The URL arrived WHOLE, byte for byte. */
+    ASSERT_EQ(strlen(cap.last_image), url_len);
+    ASSERT_STR_EQ(cap.last_image, url);
+    free(cap.last_image);
+    free(body);
+    free(url);
+}
+
+/* The compose side of an editing round (IMAGEGEN-PLAN §4): an
+ * ASSISTANT message's images ride a message-level "images" array and
+ * content stays a plain string — the probed replay shape, not
+ * content-parts (that asymmetry is the providers' own). */
+static void test_chat_assistant_images_message_level(void)
+{
+    const char *parts[1] = { IMG_PART };
+    NmMessage msgs[3] = {
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
+        { "assistant", "here you go", NULL, NULL, parts, 1, NULL },
+        /* A round that produced ONLY an image: content is "" (present,
+         * empty) — the probed replay shape. */
+        { "assistant", NULL, NULL, NULL, parts, 1, NULL },
+    };
+    char body[8192];
+    capture_round(body, sizeof(body), msgs, 3, NULL);
+
+    ASSERT_TRUE(strstr(body,
+                       "\"role\":\"assistant\",\"content\":\"here you go\","
+                       "\"images\":[{\"type\":\"image_url\",\"image_url\":"
+                       "{\"url\":\"data:image/png;base64,"
+                       "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg\"}}]") != NULL);
+    /* The image-less-content round emits "content":"" — present. */
+    ASSERT_TRUE(strstr(body,
+                       "\"role\":\"assistant\",\"content\":\"\",\"images\":["
+                       "{\"type\":\"image_url\"") != NULL);
+    /* Verbatim embed, not a JSON string copy. */
+    ASSERT_TRUE(strstr(body, "\\\"image_url\\\"") == NULL);
+    /* The user message stays a plain string: parts arrays are the
+     * USER shape only. */
+    ASSERT_TRUE(strstr(body, "\"content\":\"draw a square\"") != NULL);
+}
+
+/* The editing round-trip's prefix invariant (IMAGEGEN-PLAN §5, the
+ * shared assertion): a later round replays the assistant images array
+ * BYTE-IDENTICAL — round 1's serialized messages are a byte-equal
+ * prefix of round 2's. */
+static void test_chat_assistant_image_prefix_is_byte_stable(void)
+{
+    const char *parts[1] = { IMG_PART };
+    NmMessage r1[1] = {
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
+    };
+    char body1[8192];
+    capture_round(body1, sizeof(body1), r1, 1, "be terse");
+
+    NmMessage r2[3] = {
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
+        { "assistant", "", NULL, NULL, parts, 1, NULL },
+        { "user", "make it blue", NULL, NULL, NULL, 0, NULL },
+    };
+    char body2[8192];
+    capture_round(body2, sizeof(body2), r2, 3, "be terse");
+
+    const char *m1 = strstr(body1, "\"messages\":[");
+    const char *m2 = strstr(body2, "\"messages\":[");
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    const char *end1 = strstr(m1, "],\"stream\"");
+    ASSERT_NOT_NULL(end1);
+    size_t n1 = (size_t)(end1 + 1 - m1); /* includes the closing ']' */
+    ASSERT_TRUE(memcmp(m1, m2, n1 - 1) == 0);
+    /* ...and the assistant message's images array is verbatim in the
+     * later round. */
+    ASSERT_TRUE(strstr(body2,
+                       "\"role\":\"assistant\",\"content\":\"\",\"images\":["
+                       "{\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(body2, IMG_PART) != NULL);
+}
+
+/* Comment-keepalive server: head, then a pause, then ONLY SSE comment
+ * lines (no events), then a pause, then the answer — so a step in the
+ * middle phase moved comment bytes and nothing else. */
+static void *comment_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    size_t got = 0;
+    while (got < sizeof(drain) - 1) {
+        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(drain, "\r\n\r\n") && drain[got - 1] == '}')
+            break;
+    }
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n";
+    static const char comments[] =
+        "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
+        "19\r\n: OPENROUTER PROCESSING\n\n\r\n";
+    static const char answer[] =
+        "32\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    send(cfd, head, sizeof(head) - 1, 0);
+    usleep(150 * 1000);
+    send(cfd, comments, sizeof(comments) - 1, 0);
+    usleep(150 * 1000);
+    send(cfd, answer, sizeof(answer) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
+/* The inactivity deadline resets on wire BYTES, not events (IMAGEGEN
+ * keep-alives): a step that moved only comment bytes reports
+ * result.traffic while staying PENDING, so the agent can tell a live
+ * generation gap from a dead stream. */
+static void test_chat_step_traffic_counts_comment_bytes(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, comment_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0 };
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "m", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL, &cap
+    };
+
+    NmChatResult err = { 0 };
+    NmChatStream *h = nm_openai_chat_begin(&ep, &req, &err);
+    ASSERT_NOT_NULL(h);
+
+    int fd = nm_openai_stream_fd(h);
+    ASSERT_TRUE(fd >= 0);
+    int traffic_no_delta = 0, saw_quiet_pending = 0;
+    NmChatStatus st = NM_CHAT_PENDING;
+    NmChatResult result = { 0 };
+    for (int spin = 0; spin < 500 && st == NM_CHAT_PENDING; spin++) {
+        fd_set fds;
+        struct timeval tv = { 0, 10 * 1000 };
+        FD_ZERO(&fds);
+        FD_SET(fd, &fds);
+        select(fd + 1, &fds, NULL, NULL, &tv);
+        st = nm_openai_chat_step(h, &result);
+        /* Bytes moved but NO delta exists yet: exactly two such steps —
+         * the head read, and the comment read (the pauses keep them
+         * apart, so a coalesced read is not possible). */
+        if (st == NM_CHAT_PENDING && result.traffic && cap.n_deltas == 0)
+            traffic_no_delta++;
+        if (st == NM_CHAT_PENDING && !result.traffic)
+            saw_quiet_pending = 1; /* a wait that moved nothing */
+    }
+    ASSERT_EQ(st, NM_CHAT_OK);
+    ASSERT_TRUE(traffic_no_delta >= 2); /* head + the comment burst */
+    ASSERT_TRUE(saw_quiet_pending);
+    ASSERT_STR_EQ(cap.text, "done");
+    nm_openai_chat_end(h);
+    pthread_join(th, NULL);
+    close(lfd);
 }
 
 /* Dribbling server: three SSE events with stalls between them, so
@@ -2367,6 +2690,12 @@ int main(int argc, char *argv[])
     RUN_TEST(test_chat_image_parts_shape);
     RUN_TEST(test_chat_image_prefix_is_byte_stable);
     RUN_TEST(test_chat_image_large_body_growth);
+    RUN_TEST(test_chat_image_delta_fires_whole_url);
+    RUN_TEST(test_chat_image_delta_bare_url_is_forwarded);
+    RUN_TEST(test_chat_image_single_huge_event);
+    RUN_TEST(test_chat_assistant_images_message_level);
+    RUN_TEST(test_chat_assistant_image_prefix_is_byte_stable);
+    RUN_TEST(test_chat_step_traffic_counts_comment_bytes);
     RUN_TEST(test_chat_step_pending_between_events);
     RUN_TEST(test_chat_step_drains_everything_available);
     RUN_TEST(test_chat_step_whole_response_in_first_read_delivers_tools);

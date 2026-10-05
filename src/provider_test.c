@@ -38,9 +38,9 @@
  * dump (opencode:go); the rest cover the other recorded sessions
  * (minimax-m3 = ollama cloud) and the fake-ollama fixtures. */
 static const NmModel test_replay_static_models[] = {
-    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash (replay)", 0, 1000000 },
-    { "minimax-m3", "MiniMax M3 (replay)", 0, 262144 },
-    { "gpt-oss:20b", "gpt-oss:20b (replay)", 0, 131072 },
+    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash (replay)", 0, 0, 1000000 },
+    { "minimax-m3", "MiniMax M3 (replay)", 0, 0, 262144 },
+    { "gpt-oss:20b", "gpt-oss:20b (replay)", 0, 0, 131072 },
     { 0 }
 };
 

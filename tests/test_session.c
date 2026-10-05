@@ -572,6 +572,126 @@ static void test_session_context_view_carries_images(void)
     remove(png);
 }
 
+/* A RECEIVED image (IMAGEGEN-PLAN §3): the data URL is frozen VERBATIM
+ * (never re-encoded), the marker facts come from one scratch decode,
+ * and there is no wire cap (a received image is the provider's output,
+ * bounded by it). */
+static void test_session_attach_image_url(void)
+{
+    NmSession *s = nm_session_new("sys");
+    ASSERT_NOT_NULL(s);
+
+    char url[256];
+    snprintf(url, sizeof(url), "data:image/png;base64,%s", T_PNG_B64);
+    char reason[64];
+    long id =
+        nm_session_attach_image_url(s, url, strlen(url), "image 1", reason,
+                                    sizeof(reason));
+    ASSERT_EQ(id, 0);
+    ASSERT_STR_EQ(reason, "");
+    const NmImage *img = nm_session_image(s, 0);
+    ASSERT_NOT_NULL(img);
+    /* VERBATIM: the stored URL is byte-equal to what arrived, and the
+     * wire part is built around exactly those bytes. */
+    ASSERT_STR_EQ(img->data_url, url);
+    ASSERT_EQ(img->data_url_len, strlen(url));
+    char want_part[512];
+    snprintf(want_part, sizeof(want_part),
+             "{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}", url);
+    ASSERT_STR_EQ(img->part_json, want_part);
+    /* The facts are the BYTES' (one scratch decode), not the mime's. */
+    ASSERT_EQ(img->format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(img->w, 64);
+    ASSERT_EQ(img->h, 32);
+    ASSERT_EQ(img->bytes, sizeof(T_PNG));
+    ASSERT_STR_EQ(img->alt, "image 1");
+
+    /* A received image over the wire cap is RECORDED, not refused
+     * (the cap bounds what we choose to send; this is the provider's
+     * output). */
+    size_t big_b64 = ((NM_IMAGE_MAX_WIRE_BYTES + 3) / 4) * 4 + 4;
+    size_t pre = strlen("data:image/png;base64,");
+    char *big = malloc(pre + big_b64 + 1);
+    ASSERT_NOT_NULL(big);
+    memcpy(big, "data:image/png;base64,", pre);
+    memset(big + pre, 'A', big_b64);
+    big[pre + big_b64] = '\0';
+    /* Patch the payload's head to the real PNG header so the sniff
+     * answers (the rest stays 'A'-fill). */
+    {
+        size_t plen = 0;
+        char *p64 = nm_image_b64_encode(T_PNG, sizeof(T_PNG), &plen);
+        ASSERT_NOT_NULL(p64);
+        memcpy(big + pre, p64, plen);
+        free(p64);
+    }
+    id = nm_session_attach_image_url(s, big, strlen(big), "image 2", reason,
+                                     sizeof(reason));
+    ASSERT_EQ(id, 1); /* no cap on the receive side */
+    ASSERT_EQ(nm_session_image(s, 1)->w, 64);
+    free(big);
+
+    /* Refusals: a non-data URL, and a payload that does not decode. */
+    ASSERT_EQ(nm_session_attach_image_url(s, "https://x/y.png",
+                                          strlen("https://x/y.png"), "x",
+                                          reason, sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "not a base64 data URL");
+    ASSERT_EQ(nm_session_attach_image_url(s, "data:image/png;base64,!!!",
+                                          strlen("data:image/png;base64,!!!"),
+                                          "x", reason, sizeof(reason)),
+              -1);
+    ASSERT_STR_EQ(reason, "undecodable payload");
+    ASSERT_EQ(nm_session_image_count(s), 2u);
+
+    nm_session_free(s);
+}
+
+/* The assistant image message (IMAGEGEN-PLAN §3/§4): content, trace
+ * and image ids ride ONE message; an image-only round's content is ""
+ * (the probed replay shape), and the ids are copied at append. */
+static void test_session_append_assistant_images(void)
+{
+    NmSession *s = nm_session_new("sys");
+    ASSERT_NOT_NULL(s);
+
+    char url[256];
+    snprintf(url, sizeof(url), "data:image/png;base64,%s", T_PNG_B64);
+    char reason[64];
+    long id = nm_session_attach_image_url(s, url, strlen(url), "image 1",
+                                          reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+
+    size_t ids[1] = { (size_t)id };
+    const NmSessionMessage *m = nm_session_append_assistant_images(
+        s, "a trace", NULL, NULL, ids, 1);
+    ASSERT_NOT_NULL(m);
+    ASSERT_EQ(m->role, NM_ROLE_ASSISTANT);
+    ASSERT_STR_EQ(m->content, ""); /* present, empty — the probed shape */
+    ASSERT_STR_EQ(m->reasoning, "a trace");
+    ASSERT_EQ(m->n_images, 1u);
+    ASSERT_EQ(m->images[0], (size_t)id);
+    ids[0] = 99; /* the message keeps its own copy */
+    ASSERT_EQ(m->images[0], (size_t)id);
+
+    /* The tool-call flavor: same message, carrying the calls array. */
+    const NmSessionMessage *t = nm_session_append_assistant_images(
+        s, NULL, NULL, "[{\"id\":\"c1\"}]", ids, 0);
+    ASSERT_NOT_NULL(t);
+    ASSERT_EQ(t->role, NM_ROLE_ASSISTANT);
+    ASSERT_NOT_NULL(t->tool_calls_json);
+    ASSERT_EQ(t->n_images, 0u);
+
+    /* An id that does not resolve appends nothing. */
+    size_t bad[1] = { 7 };
+    size_t before = nm_session_len(s);
+    ASSERT_NULL(nm_session_append_assistant_images(s, NULL, "x", NULL, bad,
+                                                   1));
+    ASSERT_EQ(nm_session_len(s), before);
+
+    nm_session_free(s);
+}
+
 int main(void)
 {
     printf("test_session:\n");
@@ -589,5 +709,7 @@ int main(void)
     RUN_TEST(test_session_attach_image_bytes);
     RUN_TEST(test_session_append_user_images);
     RUN_TEST(test_session_context_view_carries_images);
+    RUN_TEST(test_session_attach_image_url);
+    RUN_TEST(test_session_append_assistant_images);
     TEST_SUMMARY();
 }

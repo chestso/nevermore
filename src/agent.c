@@ -90,9 +90,9 @@ struct NmAgent
     int round; /* rounds started this turn */
     /* Stream-inactivity timeout (nm_agent_set_timeout_ms): 0 = follow
      * NM_AGENT_DEFAULT_TIMEOUT_MS, >0 = this value, <0 = disabled.
-     * last_activity is the monotonic timestamp of the last streaming
-     * delta (or the round's start); the deadline seam compares it
-     * against the effective timeout. (The tool-round cap is NOT a
+     * last_activity is the monotonic timestamp of the last wire byte
+     * (a delta, a keep-alive comment, or the round's start); the
+     * deadline seam compares it against the effective timeout. (The tool-round cap is NOT a
      * field: it is a config value the agent resolves from the store at
      * the point of use — nm_agent_max_rounds. The reasoning echo IS a
      * field, by necessity: the store is read until a request actually
@@ -142,6 +142,16 @@ struct NmAgent
     NmToolImage *tool_images;
     size_t n_tool_images;
     size_t tool_images_cap;
+
+    /* Images the MODEL generated this round (IMAGEGEN-PLAN §3):
+     * NM_STREAM_IMAGE events, attached VERBATIM into the session store
+     * as they arrive (the received data URL is the canonical part);
+     * the ids ride the round's assistant message at finish_round, so
+     * the round's content + reasoning + tool calls + images are one
+     * append. Reset per round; grown geometrically, never per token. */
+    size_t *round_images;
+    size_t n_round_images;
+    size_t round_images_cap;
 
     /* Provider-reported token usage: the LAST usage object seen this
      * round (sentinels -1 when a field was not reported). has_usage is
@@ -265,6 +275,7 @@ void nm_agent_free(NmAgent *a)
     nm_tool_calls_free(a->calls, a->n_calls);
     nm_context_free(a->context);
     nm_session_free(a->session);
+    free(a->round_images);
     free(a);
 }
 
@@ -577,6 +588,58 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
     /* Any delta is progress: the inactivity deadline resets on the wire
      * activity that produced it (a live answer is never cut). */
     a->last_activity = nm_monotonic_seconds();
+
+    /* A generated image: the WHOLE data URL in one event (IMAGEGEN-PLAN
+     * §3). The received bytes are attached VERBATIM into the session
+     * store (they are the canonical part — a re-encode would break the
+     * replay prefix) and ride the round's assistant message at
+     * finish_round. A bare http(s) URL is not fetched by design (the
+     * FETCH tier is deferred): it degrades to a notice, never a turn
+     * failure. */
+    if (channel == NM_STREAM_IMAGE && delta_text && *delta_text) {
+        if (strncmp(delta_text, "data:", 5) != 0) {
+            if (a->on_notice) {
+                char msg[160];
+                snprintf(msg, sizeof(msg),
+                         "image: the model sent a remote URL — not fetched "
+                         "(%.80s%s)",
+                         delta_text, strlen(delta_text) > 80 ? "…" : "");
+                a->on_notice(msg, a->userdata);
+            }
+            return;
+        }
+        char alt[32];
+        snprintf(alt, sizeof(alt), "image %zu", a->n_round_images + 1);
+        char reason[64];
+        long id = nm_session_attach_image_url(a->session, delta_text,
+                                              strlen(delta_text), alt, reason,
+                                              sizeof(reason));
+        if (id < 0) {
+            /* OOM-class or a payload that does not decode: the image is
+             * not in the conversation — say so, never silently. */
+            if (a->on_notice) {
+                char msg[160];
+                snprintf(msg, sizeof(msg), "image: %s — dropped: %s", alt,
+                         reason);
+                a->on_notice(msg, a->userdata);
+            }
+            return;
+        }
+        if (a->n_round_images == a->round_images_cap) {
+            size_t ncap = a->round_images_cap ? a->round_images_cap * 2 : 4;
+            size_t *ni = realloc(a->round_images, ncap * sizeof(*ni));
+            if (!ni)
+                return; /* attached but unrecorded: the cancel case's
+                         * harmless leftover (the store still holds it) */
+            a->round_images = ni;
+            a->round_images_cap = ncap;
+        }
+        a->round_images[a->n_round_images++] = (size_t)id;
+        if (a->on_delta)
+            a->on_delta(NM_STREAM_IMAGE, delta_text, NULL, 0, a->userdata);
+        return;
+    }
+
     if (delta_text && *delta_text) {
         if (channel == NM_STREAM_REASONING) {
             /* Keep it with the round's assistant message (display now,
@@ -728,6 +791,9 @@ static void round_reset(NmAgent *a)
     for (size_t i = 0; i < a->n_tool_images; i++)
         free(a->tool_images[i].tool);
     a->n_tool_images = 0;
+    /* Same for images the model generated this round: the store keeps
+     * the bytes (harmless), the round's id list goes with the round. */
+    a->n_round_images = 0;
     /* A fresh round has not reported usage yet: the session ledger must
      * not re-add the previous round's last_usage (see finish_round). */
     a->round_usage_seen = 0;
@@ -973,7 +1039,13 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
      * wire sees it again only when the echo mode says so
      * (nm_agent_reasoning_echo / the store's `reasoning_echo` key). */
     if (a->n_calls == 0) {
-        if (a->text && *a->text)
+        if (a->n_round_images > 0)
+            /* The round generated images: content (possibly ""), trace
+             * and image ids are ONE append (IMAGEGEN-PLAN §3). */
+            nm_session_append_assistant_images(
+                a->session, a->reasoning, a->text, NULL, a->round_images,
+                a->n_round_images);
+        else if (a->text && *a->text)
             nm_session_append_reasoning(a->session, a->reasoning, a->text);
         else if (a->reasoning && *a->reasoning)
             nm_session_append_reasoning(a->session, a->reasoning, NULL);
@@ -990,7 +1062,17 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
      * bookkeeping (tool_exec_idx / tool_announced) is round_reset's
      * job, already run when this round opened. */
     char *calls_json = calls_to_json(a->calls, a->n_calls);
-    nm_session_append_tool_call(a->session, calls_json, a->reasoning);
+    if (a->n_round_images > 0)
+        /* A tool round that ALSO produced images (rare, unprobed
+         * upstream): one message carries the round's whole output —
+         * the images ride the message-level array beside tool_calls,
+         * and if an upstream rejects the shape the next round errors
+         * loudly (never a silent strip). */
+        nm_session_append_assistant_images(a->session, a->reasoning, NULL,
+                                           calls_json, a->round_images,
+                                           a->n_round_images);
+    else
+        nm_session_append_tool_call(a->session, calls_json, a->reasoning);
     free(calls_json);
 
     set_state(a, NM_AGENT_RUNNING_TOOL);
@@ -1246,10 +1328,13 @@ int nm_agent_step(NmAgent *a)
         return -1;
 
     /* Inactivity deadline: the event loop drove us here (or a plain
-     * poll) but no delta has arrived for too long — the peer accepted
-     * the connection and went silent, or stalled mid-body. Error the
-     * turn instead of waiting forever. nm_agent_next_timeout_ms is what
-     * tells the loop when to make this call. */
+     * poll) but no wire bytes have arrived for too long — the peer
+     * accepted the connection and went silent, or stalled mid-body.
+     * Error the turn instead of waiting forever. Deltas reset it (via
+     * round_on_delta) and so does raw traffic (a keep-alive comment:
+     * NmChatResult.traffic, folded in below).
+     * nm_agent_next_timeout_ms is what tells the loop when to make
+     * this call. */
     int to = nm_agent_timeout_ms(a);
     if (budget_spent(a->last_activity, to)) {
         a->provider->chat_end(a->stream);
@@ -1265,8 +1350,14 @@ int nm_agent_step(NmAgent *a)
 
     NmChatResult r = { 0 };
     NmChatStatus s = a->provider->chat_step(a->stream, &r);
-    if (s == NM_CHAT_PENDING)
+    if (s == NM_CHAT_PENDING) {
+        /* Wire bytes moved (a keep-alive comment bridging a generation
+         * gap counts — NmChatResult.traffic): the inactivity deadline
+         * resets, so a live-but-eventless stream is never cut. */
+        if (r.traffic)
+            a->last_activity = nm_monotonic_seconds();
         return 0; /* more bytes later; fd stays live */
+    }
 
     /* Stream over (complete or fatal): the handle's connection is
      * already torn down inside chat_step; drop our reference. */

@@ -192,6 +192,16 @@ struct NmChatApp
      * repeated stream ends in one turn cannot stack blank lines. */
     int pending_sep;
 
+    /* 1 while CONTENT text (not an image block) is mid-run: the
+     * received-image guard reads it (a posted image line must open its
+     * own block — continuing an open paragraph would commit the data
+     * URL as literal text). Cleared by stream_end_all and by the guard
+     * itself. content_line_closed records whether the content stream's
+     * raw tail ends at a line boundary, so the guard knows how many
+     * newlines the block boundary still needs. */
+    int content_open;
+    int content_line_closed;
+
     /* 1 for the ONE frame submit finalizes. The status line is live
      * chrome (spinner/gauge/rule), not history, so it is dropped before
      * the frame finish_inline persists — otherwise the chrome row lands
@@ -215,6 +225,13 @@ struct NmChatApp
     unsigned char *pending_displayed;
     size_t n_pending;
     size_t pending_cap;
+
+    /* Received images (IMAGEGEN): a chat-scoped counter for the
+     * display-only alt of a generated image's block ("image 1",
+     * "image 2", …) — deterministic, and never re-sent (the store's
+     * own alt is round-relative; the transcript's numbering is this
+     * one). Reset with the session on a provider switch. */
+    size_t n_recv_images;
 };
 
 /* The singleton (see file header). */
@@ -231,6 +248,8 @@ static void chat_app_free(TuiModel *model);
  * image (TOOL-IMAGE-PLAN D9). */
 static int terminal_renders(const NmChatApp *app, const NmImage *img);
 static void post_image_block(NmChatApp *app, const NmImage *img);
+static void post_image_line(NmChatApp *app, const char *alt,
+                            const char *data_url, size_t url_len);
 static int model_vision(const NmChatApp *app, const NmProvider *p);
 
 /* ---------------------------------------------------------------- */
@@ -340,6 +359,11 @@ static void hold_flush(NmChatApp *app, int stream_id)
     send_msg(app, tui_msg_stream_delta(stream_id, app->hold[stream_id],
                                        app->hold_len[stream_id]));
     app->hold_len[stream_id] = 0;
+    /* The held run is all newlines: the tail now ends at (past) a line
+     * boundary — the received-image guard reads this on the content
+     * stream. */
+    if (stream_id == NM_STREAM_ID_CONTENT)
+        app->content_line_closed = 1;
 }
 
 /* Drop a held run (stream end). */
@@ -385,6 +409,8 @@ static void stream_text(NmChatApp *app, int stream_id, const char *s,
     hold_flush(app, stream_id); /* interior now, not trailing */
     send_msg(app, tui_msg_stream_delta(stream_id, s, body + term));
     app->pending_sep = 1;
+    if (stream_id == NM_STREAM_ID_CONTENT)
+        app->content_line_closed = term > 0; /* tail at a line boundary */
     hold_append(app, stream_id, s + body + term, tail - term);
 }
 
@@ -412,6 +438,7 @@ static void stream_end_all(NmChatApp *app)
     if (!app)
         return;
     app->reasoning_open = 0;
+    app->content_open = 0;
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_CONTENT));
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
     hold_discard(app, NM_STREAM_ID_CONTENT);
@@ -433,6 +460,40 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
     NmChatApp *app = s_app;
     if (!app || !text || !*text)
         return;
+
+    /* A generated image (IMAGEGEN): the agent has already attached the
+     * received data URL to the session store verbatim; here it becomes
+     * the SAME markdown block /img posts — one pipeline, and the commit
+     * pass's profile ladder renders it or degrades it to the marker.
+     * No "if supported" gate: there is no second showing to dedupe
+     * against (unlike the attach), so the marker IS the record on a
+     * terminal without graphics. The held blank is flushed so the block
+     * finalizes NOW — content that follows it must open its own block,
+     * not continue this one as a paragraph (the /img attach rule). */
+    if (channel == NM_STREAM_IMAGE) {
+        close_reasoning_phase(app); /* phase-sequential, like content */
+        if (app->content_open) {
+            /* Text streamed BEFORE the image event (unobserved, but
+             * wire-possible): the image line must open its own block,
+             * or it would continue the open paragraph and commit the
+             * data URL as literal text. A block boundary is a blank
+             * line: pad the tail out to one (the held run rides ahead
+             * of the image line via stream_text's interior flush). */
+            if (app->hold_len[NM_STREAM_ID_CONTENT] == 0)
+                stream_text(app, NM_STREAM_ID_CONTENT,
+                            app->content_line_closed ? "\n" : "\n\n",
+                            app->content_line_closed ? 1 : 2);
+            app->content_open = 0;
+        }
+        app->n_recv_images++;
+        char alt[32];
+        snprintf(alt, sizeof(alt), "image %zu", app->n_recv_images);
+        post_image_line(app, alt, text, strlen(text));
+        hold_flush(app, NM_STREAM_ID_CONTENT);
+        tui_runtime_wakeup(app->rt);
+        return;
+    }
+
     /* Content rides stream 0, reasoning stream 1; the renderer dims
      * stream 1 (nm_markdown_render.c reads blk->stream), so the phase
      * boundary below also fixes commit order. */
@@ -440,8 +501,10 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
                                                    : NM_STREAM_ID_CONTENT;
     /* Phase transition: content starting finalizes the reasoning
      * stream first (see close_reasoning_phase). */
-    if (stream_id == NM_STREAM_ID_CONTENT)
+    if (stream_id == NM_STREAM_ID_CONTENT) {
         close_reasoning_phase(app);
+        app->content_open = 1; /* a text run is open (image guard) */
+    }
     stream_text(app, stream_id, text, strlen(text));
     /* A delta is a view change: wake the loop so the live region
      * repaints now, not on the next spinner tick. */
@@ -751,23 +814,28 @@ static void print_pending(NmChatApp *app)
     }
 }
 
-/* The markdown line for one attached image: the SAME bytes the model's
- * own images arrive as (`![alt](data_url)`), so the classifier makes it
- * an IMAGE block and the one profile ladder renders or degrades it —
- * one image pipeline, no second path. The DATA URL is posted, never the
- * file path: the transcript must show the captured bytes (the file may
+/* The markdown line for one image: the SAME bytes the model's own
+ * images arrive as (`![alt](data_url)`), so the classifier makes it an
+ * IMAGE block and the one profile ladder renders or degrades it — one
+ * image pipeline, no second path. The DATA URL is posted, never a file
+ * path: the transcript must show the captured bytes (the file may
  * already be gone). The stream normalizer holds the line's trailing
  * blank; the caller flushes it when the block must finalize. */
-static void post_image_block(NmChatApp *app, const NmImage *img)
+static void post_image_line(NmChatApp *app, const char *alt,
+                            const char *data_url, size_t url_len)
 {
-    size_t line_len = strlen(img->alt) + img->data_url_len + 8;
+    size_t line_len = strlen(alt) + url_len + 8;
     char *line = malloc(line_len + 1);
     if (!line)
         return;
-    int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", img->alt,
-                     img->data_url);
+    int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", alt, data_url);
     stream_text(app, NM_STREAM_ID_CONTENT, line, (size_t)n);
     free(line);
+}
+
+static void post_image_block(NmChatApp *app, const NmImage *img)
+{
+    post_image_line(app, img->alt, img->data_url, img->data_url_len);
 }
 
 /* Does the terminal render this image? The "if supported" gate: the
@@ -1617,7 +1685,11 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
 
 /* Open the models popup over the catalog source, pre-filtered by
  * `query` (NULL = no filter). Popups are modal: one fetch in
- * flight; reopening cancels nothing here (sync source). */
+ * flight; reopening cancels nothing here (sync source). An image-
+ * generating model's row carries a " 🖼" marker (the catalog's
+ * image_gen bit — the vision flag's receive-direction twin); the
+ * compose path strips everything from the first space, so the marker
+ * never reaches the wire id. */
 static void open_models_popup(NmChatApp *app, const char *query)
 {
     size_t n = 0;
@@ -1627,11 +1699,30 @@ static void open_models_popup(NmChatApp *app, const char *query)
         sys_line(app, "no models in the catalog");
         return;
     }
+    /* Rows: the bare id, or "id 🖼" for an image generator. Model ids
+     * are far under 96 chars; a longer one would simply be cut by
+     * snprintf (cosmetic, never a correctness issue — the wire id is
+     * re-validated at submit). */
+    char rows[128][96];
     const char *ids[128];
     size_t cap = n < 128 ? n : 128;
-    for (size_t i = 0; i < cap; i++)
-        ids[i] = models[i].id;
-    if (!popup_show_with_active(app, POPUP_MODELS, "models", app->model, ids,
+    const char *active = app->model;
+    char active_row[96];
+    for (size_t i = 0; i < cap; i++) {
+        if (models[i].image_gen)
+            snprintf(rows[i], sizeof(rows[i]), "%s 🖼", models[i].id);
+        else
+            snprintf(rows[i], sizeof(rows[i]), "%s", models[i].id);
+        ids[i] = rows[i];
+        /* The active entry is prepended by the popup helper; suffix it
+         * the same way or the two forms dedup as different rows. */
+        if (app->model && models[i].image_gen &&
+            strcmp(models[i].id, app->model) == 0) {
+            snprintf(active_row, sizeof(active_row), "%s", rows[i]);
+            active = active_row;
+        }
+    }
+    if (!popup_show_with_active(app, POPUP_MODELS, "models", active, ids,
                                 (int)cap, query)) {
         sys_line(app, "no models match '%s'", query);
     }
@@ -1690,11 +1781,13 @@ static int switch_provider(NmChatApp *app, const char *name)
      * state reset with the transcript. */
     size_t dropped = app->n_pending;
     pending_clear(app);
+    app->n_recv_images = 0; /* image numbering is chat-scoped */
     send_msg(app, tui_msg_transcript_clear());
     hold_discard(app, NM_STREAM_ID_CONTENT);
     hold_discard(app, NM_STREAM_ID_REASONING);
     app->pending_sep = 0;
     app->reasoning_open = 0;
+    app->content_open = 0;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
     if (dropped)
@@ -2342,8 +2435,15 @@ static void popup_compose_command(NmChatApp *app, const char *noun)
 {
     const char *sel = tui_list_popup_selected_text(app->popup);
     if (sel && *sel) {
+        /* The row may carry a display suffix (an image generator's
+         * " 🖼" marker): the id is the row's first word — model ids
+         * and provider names never contain a space. */
+        size_t idlen = 0;
+        while (sel[idlen] && sel[idlen] != ' ')
+            idlen++;
         char composed[128];
-        snprintf(composed, sizeof(composed), "/%s %s", noun, sel);
+        snprintf(composed, sizeof(composed), "/%s %.*s", noun, (int)idlen,
+                 sel);
         tui_textinput_clear(app->input);
         tui_textinput_set_text(app->input, composed);
     }

@@ -256,6 +256,29 @@ strips it and the model answers blind — so the catalog's vision flag is
 a **warning**, never a refusal: `/img` notes it, and `/model` notes it
 when the conversation already carries images.
 
+## Generated images (image models)
+
+The `/model` picker marks image-output models with 🖼 (the catalog's
+`image_gen` flag — openrouter's `architecture.output_modalities`). Pick
+one and just ask: the model's image arrives as one stream event, is
+stored **verbatim** (the received bytes are the canonical part — a
+re-encode would change the replay prefix), and renders through the same
+pipeline as an attachment: the picture on a graphics terminal, the
+one-line marker (alt · format · dims · size) elsewhere. In ask mode
+there is no transcript, so the image is saved to a file —
+`nevermore-image-N.png` in the cwd, noted on stderr — and stdout stays
+clean.
+
+Editing is the next turn ("make it blue"): the assistant message
+replays with its images at message level — the providers' own shape,
+not content-parts — and the prefix-cache byte-stability invariant the
+sending side keeps applies unchanged. A model answering with a remote
+URL instead of inline bytes gets a notice, not a fetch: nevermore
+downloads nothing. Image output tokens are completion tokens (never
+cacheable — the ⚡ rate is input-only by definition), and a received
+image is never refused for size: the wire cap bounds what _you_ send,
+not what the model made.
+
 ## Long-running commands
 
 `exec_command` starts a command that outlives the tool call: a dev
