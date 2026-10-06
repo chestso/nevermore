@@ -35,10 +35,13 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the image tier's kitty transport —
-          # a=T with s/v, without which an IMAGE unit reserves its rows
-          # and places nothing — plus the earlier APIs this repo already
-          # depends on: the input's status line
+          # new boba API (currently the list popup's metadata column —
+          # tui_list_popup_set_items_meta / set_meta_color, the model
+          # picker's capability badges + context window — plus the
+          # image tier's kitty transport — a=T with s/v, without which
+          # an IMAGE unit reserves its rows and places nothing — and the
+          # earlier APIs this repo already depends on: the input's
+          # status line
           # (components/textinput.h's TuiSpan +
           # tui_textinput_set_status_line, nevermore's spinner/context
           # gauge/separator rule), the explicit image unit message
@@ -51,7 +54,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 5b91dfc3c0fa803950db0f4fcc92d4ec58a0d9eb
+          ref: e986611115c05405f12570db9d80b50e00c2d57f
           path: boba
           fetch-depth: 0
 

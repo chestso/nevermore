@@ -164,6 +164,15 @@ static inline TuiColor nm_color_popup_item(void)
     return tui_color_rgb(NM_DRACULA_FG_R, NM_DRACULA_FG_G, NM_DRACULA_FG_B);
 }
 
+/* Completion popup metadata column (the model picker's capability
+ * badges and context window): muted Comment, so the id stays the
+ * primary text and the metadata recedes. */
+static inline TuiColor nm_color_popup_meta(void)
+{
+    return tui_color_rgb(NM_DRACULA_COMMENT_R, NM_DRACULA_COMMENT_G,
+                         NM_DRACULA_COMMENT_B);
+}
+
 /* The input row's gutter (P2): the status chrome left of the prompt —
  * the spinner glyph and the context gauge. The gauge takes its tier from
  * how full the window is: Comment at rest, Orange at ~85 %, Red at

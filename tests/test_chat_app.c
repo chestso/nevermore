@@ -5123,22 +5123,27 @@ static void test_recv_image_marker_on_dumb_terminal(void)
     close(sc.fd);
 }
 
-/* The picker marks an image generator (the catalog's image_gen bit)
- * and compose strips the marker — the wire id is the row's first word. */
-static void test_model_picker_marks_image_generators(void)
+/* The picker row carries a right-aligned metadata column: the context
+ * window and the capability badges (vision 👀, imagegen 🖼). Vision
+ * was previously invisible; both badges are POSITIVE claims only. The
+ * item VALUE stays the bare id (the metadata is a separate column), so
+ * compose yields the wire id unchanged. */
+static void test_model_picker_shows_capability_metadata(void)
 {
-    /* openrouter's static catalog: one plain model, one image_gen. */
+    /* openrouter's static catalog: a vision model (1050000 → 1M ctx)
+     * and an image_gen model. */
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image 🖼") !=
-                NULL);
-    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest 🖼") == NULL);
+    ASSERT_TRUE(strstr(frame, "👀") != NULL); /* vision badge */
+    ASSERT_TRUE(strstr(frame, "🖼") != NULL); /* imagegen badge */
+    ASSERT_TRUE(strstr(frame, "1M") != NULL); /* context window */
 
-    /* Down to the image row, Enter composes the BARE id. */
+    /* Down to the image row, Enter composes the BARE id (the meta is a
+     * separate column, never part of the value). */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
@@ -5146,6 +5151,59 @@ static void test_model_picker_marks_image_generators(void)
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app),
                   "google/gemini-3.1-flash-lite-image");
+
+    harness_free(h);
+}
+
+/* "/model @img" opens the picker filtered to image generators. The
+ * active vision model does NOT carry the capability, so it is not
+ * prepended — the answer is only the models that claim it. */
+static void test_model_picker_capability_query_img(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @img");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") != NULL);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
+
+    /* The sole match: Enter composes it. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model google/gemini-3.1-flash-lite-image");
+
+    harness_free(h);
+}
+
+/* "/model @vision" opens the picker filtered to vision models: the
+ * image generator is filtered out, the active vision model remains. */
+static void test_model_picker_capability_query_vision(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @vision");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") != NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+
+    harness_free(h);
+}
+
+/* An unknown capability token is refused with the vocabulary, never a
+ * silent id query. */
+static void test_model_picker_capability_query_unknown(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @bogus");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "unknown capability") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
 
     harness_free(h);
 }
@@ -5306,7 +5364,10 @@ int main(void)
     RUN_TEST(test_img_attach_shows_the_image_when_supported);
     RUN_TEST(test_recv_image_renders_through_image_block);
     RUN_TEST(test_recv_image_marker_on_dumb_terminal);
-    RUN_TEST(test_model_picker_marks_image_generators);
+    RUN_TEST(test_model_picker_shows_capability_metadata);
+    RUN_TEST(test_model_picker_capability_query_img);
+    RUN_TEST(test_model_picker_capability_query_vision);
+    RUN_TEST(test_model_picker_capability_query_unknown);
     RUN_TEST(test_recv_image_after_text_opens_its_own_block);
     RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
     RUN_TEST(test_tool_image_after_streamed_text_never_commits_payload);

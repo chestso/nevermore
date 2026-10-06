@@ -1090,6 +1090,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
                               nm_color_popup_selected_fg(),        /* sel fg */
                               nm_color_popup_marker(),             /* marker */
                               nm_color_popup_item());              /* item */
+    tui_list_popup_set_meta_color(app->popup, nm_color_popup_meta());
 
     if (build_agent(app, provider) != 0)
         goto oom;
@@ -1499,6 +1500,7 @@ static void print_help(NmChatApp *app)
     sys_text(app, "commands:\n"
                   "  /help              this list\n"
                   "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
+                  "  /model @vision     pick among vision models (@img for image-gen)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
                   "  /config            every setting, its value + source\n"
@@ -1600,20 +1602,30 @@ static void print_context(NmChatApp *app)
 }
 
 /* Show a picker whose first entry is the currently active one: the
- * parent passes the active value so the popup can prepend it when the
- * catalog omits it (a user-set id, or a query that filters it out).
- * boba's show() resets selection to the first item, so the active
- * entry is selected whenever the (prepended) list starts with it.
+ * parent passes the active value (and its metadata) so the popup can
+ * prepend it when the catalog omits it (a user-set id, or a query
+ * that filters it out). boba's show() resets selection to the first
+ * item, so the active entry is selected whenever the (prepended) list
+ * starts with it. `metas`, when non-NULL, is parallel to `items` and
+ * builds the popup's right-aligned metadata column (the model
+ * picker's capability badges + context window); NULL keeps the plain
+ * single-column list (commands, providers).
  * Returns 1 when shown, 0 when the filtered view was empty. */
 static int popup_show_with_active(NmChatApp *app, PopupKind kind,
                                   const char *title, const char *active,
-                                  const char *const *items, int n_items,
+                                  const char *active_meta,
+                                  const char *const *items,
+                                  const char *const *metas, int n_items,
                                   const char *query)
 {
     const char *seen[128];
+    const char *seen_meta[128];
     int n = 0;
-    if (active && *active && n < 128)
-        seen[n++] = active; /* active first: its absence is the reason */
+    if (active && *active && n < 128) {
+        seen[n] = active; /* active first: its absence is the reason */
+        seen_meta[n] = active_meta;
+        n++;
+    }
     for (int i = 0; i < n_items && n < 128; i++) {
         const char *it = items[i];
         if (!it || !*it)
@@ -1625,10 +1637,16 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
                 break;
             }
         }
-        if (!dup)
-            seen[n++] = it;
+        if (!dup) {
+            seen[n] = it;
+            seen_meta[n] = metas ? metas[i] : NULL;
+            n++;
+        }
     }
-    tui_list_popup_set_items(app->popup, seen, n);
+    if (metas)
+        tui_list_popup_set_items_meta(app->popup, seen, seen_meta, n);
+    else
+        tui_list_popup_set_items(app->popup, seen, n);
     tui_list_popup_set_title(app->popup, title);
     tui_list_popup_set_filter(app->popup, query);
     if (tui_list_popup_filtered_count(app->popup) == 0) {
@@ -1642,14 +1660,66 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
     return 1;
 }
 
+/* Capability query bits for the model picker (`/model @vision`,
+ * `/model @img`): a catalog-side filter, distinct from the popup's
+ * text filter over ids. */
+#define NM_CAP_VISION 1u
+#define NM_CAP_IMAGE  2u
+
+/* Parse the text after a picker `@` (the capability token). Known
+ * spellings map to a bit; 0 when unknown. */
+static unsigned capability_token(const char *tok)
+{
+    if (strcmp(tok, "vision") == 0)
+        return NM_CAP_VISION;
+    if (strcmp(tok, "img") == 0 || strcmp(tok, "image") == 0 ||
+        strcmp(tok, "imagegen") == 0 || strcmp(tok, "image_gen") == 0)
+        return NM_CAP_IMAGE;
+    return 0;
+}
+
+/* Append `s` to a meta column buffer, space-separated. */
+static void meta_append(char *buf, size_t cap, size_t *off, const char *s)
+{
+    if (*off >= cap)
+        return;
+    int r = snprintf(buf + *off, cap - *off, "%s%s", *off ? " " : "", s);
+    if (r > 0)
+        *off += (size_t)r;
+}
+
+/* Right-column metadata for a model-picker row: the context window
+ * (compact), then the capability badges — `ctx 👀 🖼`. Every field is
+ * a POSITIVE claim only: vision/image_gen are 0 when the catalog says
+ * nothing (an ids-only live catalog, an uncurated model) and that is
+ * NOT "known absent", so no badge is shown for either; an unknown
+ * context window (-1) is omitted too. Text only — the popup styles
+ * the whole column (nm_color_popup_meta). */
+static void format_model_meta(const NmModel *m, char *buf, size_t cap)
+{
+    if (cap == 0)
+        return;
+    buf[0] = '\0';
+    size_t off = 0;
+    if (m->context_length > 0) {
+        char ctx[16];
+        format_tokens(m->context_length, ctx, sizeof(ctx));
+        meta_append(buf, cap, &off, ctx);
+    }
+    if (m->vision)
+        meta_append(buf, cap, &off, "👀");
+    if (m->image_gen)
+        meta_append(buf, cap, &off, "🖼");
+}
+
 /* Open the models popup over the catalog source, pre-filtered by
- * `query` (NULL = no filter). Popups are modal: one fetch in
- * flight; reopening cancels nothing here (sync source). An image-
- * generating model's row carries a " 🖼" marker (the catalog's
- * image_gen bit — the vision flag's receive-direction twin); the
- * compose path strips everything from the first space, so the marker
- * never reaches the wire id. */
-static void open_models_popup(NmChatApp *app, const char *query)
+ * `query` (NULL = no filter) and by `cap` (0 = every model, else the
+ * NM_CAP_* capability filter). Popups are modal: one fetch in
+ * flight; reopening cancels nothing here (sync source). Each row
+ * carries a right-aligned metadata column (format_model_meta) — the
+ * id is the item's value, the metadata is display-only, so compose
+ * never sees it and nothing needs stripping. */
+static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
 {
     size_t n = 0;
     const NmModel *models = app->provider->models(
@@ -1658,31 +1728,51 @@ static void open_models_popup(NmChatApp *app, const char *query)
         sys_line(app, "no models in the catalog");
         return;
     }
-    /* Rows: the bare id, or "id 🖼" for an image generator. Model ids
-     * are far under 96 chars; a longer one would simply be cut by
-     * snprintf (cosmetic, never a correctness issue — the wire id is
-     * re-validated at submit). */
-    char rows[128][96];
-    const char *ids[128];
-    size_t cap = n < 128 ? n : 128;
-    const char *active = app->model;
-    for (size_t i = 0; i < cap; i++) {
-        if (models[i].image_gen)
-            snprintf(rows[i], sizeof(rows[i]), "%s 🖼", models[i].id);
-        else
-            snprintf(rows[i], sizeof(rows[i]), "%s", models[i].id);
-        ids[i] = rows[i];
-        /* The active entry is prepended by the popup helper; point it
-         * at the ROW, not app->model — an image generator's row carries
-         * the " 🖼" suffix, and the unsuffixed id would dedup as a
-         * second, different row. */
-        if (app->model && models[i].image_gen &&
-            strcmp(models[i].id, app->model) == 0)
-            active = rows[i];
+    /* Rows: the bare id (the item's value), plus a metadata column.
+     * Model ids are far under 96 chars; a longer one would simply be
+     * cut by snprintf (cosmetic, never a correctness issue — the wire
+     * id is re-validated at submit). */
+    char ids[128][96];
+    char metas[128][40];
+    const char *rows[128];
+    const char *merows[128];
+    size_t cap_n = n < 128 ? n : 128;
+    const char *active = NULL;
+    const char *active_meta = NULL;
+    int count = 0;
+    for (size_t i = 0; i < cap_n; i++) {
+        const NmModel *m = &models[i];
+        if ((cap & NM_CAP_VISION) && !m->vision)
+            continue;
+        if ((cap & NM_CAP_IMAGE) && !m->image_gen)
+            continue;
+        snprintf(ids[count], sizeof(ids[count]), "%s", m->id);
+        format_model_meta(m, metas[count], sizeof(metas[count]));
+        rows[count] = ids[count];
+        merows[count] = metas[count];
+        /* The active entry is the caller's prepend; the item VALUE is
+         * the bare id (the metadata is a separate column, so there is
+         * nothing to strip and no row-vs-id dedup mismatch). A
+         * capability-filtered view omits the active model when it does
+         * not carry the capability (the answer is about the filter). */
+        if (app->model && strcmp(m->id, app->model) == 0) {
+            active = ids[count];
+            active_meta = metas[count];
+        }
+        count++;
     }
-    if (!popup_show_with_active(app, POPUP_MODELS, "models", active, ids,
-                                (int)cap, query)) {
-        sys_line(app, "no models match '%s'", query);
+    if (count == 0) {
+        if (cap == NM_CAP_VISION)
+            sys_line(app, "no vision models in the catalog");
+        else if (cap == NM_CAP_IMAGE)
+            sys_line(app, "no image-generating models in the catalog");
+        else
+            sys_line(app, "no models match '%s'", query ? query : "");
+        return;
+    }
+    if (!popup_show_with_active(app, POPUP_MODELS, "models", active,
+                                active_meta, rows, merows, count, query)) {
+        sys_line(app, "no models match '%s'", query ? query : "");
     }
 }
 
@@ -1701,7 +1791,7 @@ static void open_providers_popup(NmChatApp *app, const char *query)
         ids[i] = providers[i]->name;
     if (!popup_show_with_active(app, POPUP_PROVIDERS, "providers",
                                 app->provider ? app->provider->name : NULL,
-                                ids, (int)n, query)) {
+                                NULL, ids, NULL, (int)n, query)) {
         sys_line(app, "no providers match '%s'", query);
     }
 }
@@ -2131,7 +2221,21 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
     if (NAME_IS("model")) {
         if (!*arg) {
             /* Bare /model: the picker (catalog source, active first). */
-            open_models_popup(app, NULL);
+            open_models_popup(app, NULL, 0);
+            return;
+        }
+        /* Capability query: "/model @vision" / "/model @img" opens the
+         * picker filtered to models that CLAIM the capability (the
+         * same claim the row badges show). */
+        if (arg[0] == '@') {
+            unsigned cap = capability_token(arg + 1);
+            if (!cap) {
+                sys_line(app, NM_SGR_ERROR "model: unknown capability '%s' "
+                                           "— one of @vision, @img" NM_SGR_RESET,
+                         arg);
+                return;
+            }
+            open_models_popup(app, NULL, cap);
             return;
         }
         /* Exact-set escape hatch: "! <id>" sets any id without catalog
@@ -2167,7 +2271,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         if (!found) {
             /* Not an exact id: a query into the picker (pre-filtered
              * view); a typo can never silently switch anything. */
-            open_models_popup(app, arg);
+            open_models_popup(app, arg, 0);
             return;
         }
         nm_agent_set_model(app->agent, arg);
