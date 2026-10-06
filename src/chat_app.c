@@ -192,16 +192,6 @@ struct NmChatApp
      * repeated stream ends in one turn cannot stack blank lines. */
     int pending_sep;
 
-    /* 1 while CONTENT text (not an image block) is mid-run: the
-     * received-image guard reads it (a posted image line must open its
-     * own block — continuing an open paragraph would commit the data
-     * URL as literal text). Cleared by stream_end_all and by the guard
-     * itself. content_line_closed records whether the content stream's
-     * raw tail ends at a line boundary, so the guard knows how many
-     * newlines the block boundary still needs. */
-    int content_open;
-    int content_line_closed;
-
     /* 1 for the ONE frame submit finalizes. The status line is live
      * chrome (spinner/gauge/rule), not history, so it is dropped before
      * the frame finish_inline persists — otherwise the chrome row lands
@@ -359,11 +349,6 @@ static void hold_flush(NmChatApp *app, int stream_id)
     send_msg(app, tui_msg_stream_delta(stream_id, app->hold[stream_id],
                                        app->hold_len[stream_id]));
     app->hold_len[stream_id] = 0;
-    /* The held run is all newlines: the tail now ends at (past) a line
-     * boundary — the received-image guard reads this on the content
-     * stream. */
-    if (stream_id == NM_STREAM_ID_CONTENT)
-        app->content_line_closed = 1;
 }
 
 /* Drop a held run (stream end). */
@@ -409,8 +394,6 @@ static void stream_text(NmChatApp *app, int stream_id, const char *s,
     hold_flush(app, stream_id); /* interior now, not trailing */
     send_msg(app, tui_msg_stream_delta(stream_id, s, body + term));
     app->pending_sep = 1;
-    if (stream_id == NM_STREAM_ID_CONTENT)
-        app->content_line_closed = term > 0; /* tail at a line boundary */
     hold_append(app, stream_id, s + body + term, tail - term);
 }
 
@@ -438,7 +421,6 @@ static void stream_end_all(NmChatApp *app)
     if (!app)
         return;
     app->reasoning_open = 0;
-    app->content_open = 0;
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_CONTENT));
     send_msg(app, tui_msg_stream_end(NM_STREAM_ID_REASONING));
     hold_discard(app, NM_STREAM_ID_CONTENT);
@@ -463,33 +445,19 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
 
     /* A generated image (IMAGEGEN): the agent has already attached the
      * received data URL to the session store verbatim; here it becomes
-     * the SAME markdown block /img posts — one pipeline, and the commit
-     * pass's profile ladder renders it or degrades it to the marker.
-     * No "if supported" gate: there is no second showing to dedupe
-     * against (unlike the attach), so the marker IS the record on a
-     * terminal without graphics. The held blank is flushed so the block
-     * finalizes NOW — content that follows it must open its own block,
-     * not continue this one as a paragraph (the /img attach rule). */
+     * the SAME explicit image unit /img posts — one pipeline, and the
+     * commit pass's profile ladder renders it or degrades it to the
+     * marker. No "if supported" gate: there is no second showing to
+     * dedupe against (unlike the attach), so the marker IS the record
+     * on a terminal without graphics. Boba's image-unit handler
+     * finalizes any live text into its own block first, so the unit
+     * opens its own block instead of continuing the open paragraph. */
     if (channel == NM_STREAM_IMAGE) {
         close_reasoning_phase(app); /* phase-sequential, like content */
-        if (app->content_open) {
-            /* Text streamed BEFORE the image event (unobserved, but
-             * wire-possible): the image line must open its own block,
-             * or it would continue the open paragraph and commit the
-             * data URL as literal text. A block boundary is a blank
-             * line: pad the tail out to one (the held run rides ahead
-             * of the image line via stream_text's interior flush). */
-            if (app->hold_len[NM_STREAM_ID_CONTENT] == 0)
-                stream_text(app, NM_STREAM_ID_CONTENT,
-                            app->content_line_closed ? "\n" : "\n\n",
-                            app->content_line_closed ? 1 : 2);
-            app->content_open = 0;
-        }
         app->n_recv_images++;
         char alt[32];
         snprintf(alt, sizeof(alt), "image %zu", app->n_recv_images);
         post_image_line(app, alt, text, strlen(text));
-        hold_flush(app, NM_STREAM_ID_CONTENT);
         tui_runtime_wakeup(app->rt);
         return;
     }
@@ -501,10 +469,8 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
                                                    : NM_STREAM_ID_CONTENT;
     /* Phase transition: content starting finalizes the reasoning
      * stream first (see close_reasoning_phase). */
-    if (stream_id == NM_STREAM_ID_CONTENT) {
+    if (stream_id == NM_STREAM_ID_CONTENT)
         close_reasoning_phase(app);
-        app->content_open = 1; /* a text run is open (image guard) */
-    }
     stream_text(app, stream_id, text, strlen(text));
     /* A delta is a view change: wake the loop so the live region
      * repaints now, not on the next spinner tick. */
@@ -614,18 +580,18 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         sys_tool_result(app, result ? result->output : "",
                         result ? result->status : NM_TOOL_ERR);
         /* A tool-captured image renders through the SAME pipeline as
-         * /img's attach (D9): the one markdown block, the one profile
-         * ladder, the same nm_image_supported front door. When the
-         * terminal cannot render it nothing is posted — the panel's
-         * result line already names the image (alt · format · dims ·
-         * size) and IS the record, with no marker duplication (there is
-         * no later submit echo here, and there need not be). */
+         * /img's attach (D9): the one explicit image unit, the one
+         * profile ladder, the same nm_image_supported front door.
+         * When the terminal cannot render it nothing is posted — the
+         * panel's result line already names the image (alt · format ·
+         * dims · size) and IS the record, with no marker duplication
+         * (there is no later submit echo here, and there need not
+         * be). */
         int posted = 0;
         if (image_id >= 0) {
             const NmImage *img = nm_agent_image(app->agent, (size_t)image_id);
             if (img && terminal_renders(app, img)) {
                 post_image_block(app, img);
-                hold_flush(app, NM_STREAM_ID_CONTENT);
                 posted = 1;
             }
         }
@@ -814,22 +780,20 @@ static void print_pending(NmChatApp *app)
     }
 }
 
-/* The markdown line for one image: the SAME bytes the model's own
- * images arrive as (`![alt](data_url)`), so the classifier makes it an
- * IMAGE block and the one profile ladder renders or degrades it — one
- * image pipeline, no second path. The DATA URL is posted, never a file
+/* The explicit image unit for one image: the SAME bytes the model's own
+ * images arrive as ("![alt](data_url)"), so the measure/render and marker
+ * ladder work through one path. The DATA URL is posted, never a file
  * path: the transcript must show the captured bytes (the file may
- * already be gone). The stream normalizer holds the line's trailing
- * blank; the caller flushes it when the block must finalize. */
+ * already be gone). */
 static void post_image_line(NmChatApp *app, const char *alt,
                             const char *data_url, size_t url_len)
 {
-    size_t line_len = strlen(alt) + url_len + 8;
+    size_t line_len = strlen(alt) + url_len + 6;
     char *line = malloc(line_len + 1);
     if (!line)
         return;
-    int n = snprintf(line, line_len + 1, "![%s](%s)\n\n", alt, data_url);
-    stream_text(app, NM_STREAM_ID_CONTENT, line, (size_t)n);
+    int n = snprintf(line, line_len + 1, "![%s](%s)", alt, data_url);
+    send_msg(app, tui_msg_stream_image(NM_STREAM_ID_CONTENT, line, (size_t)n));
     free(line);
 }
 
@@ -853,19 +817,14 @@ static int terminal_renders(const NmChatApp *app, const NmImage *img)
 }
 
 /* Display a just-attached image in the transcript, right below its
- * /img line — the attach is where the user wants to see it. Nothing
- * else is streaming at attach time, so the block is finalized here: the
- * held blank is flushed (freezing the IMAGE unit, and leaving the
- * classifier's previous line a blank, which is what lets a second /img
- * open its own block instead of continuing this one as a paragraph) and
- * the run is closed with the separator. Returns 1 when the image was
- * posted. */
+ * /img line — the attach is where the user wants to see it. The image
+ * is an explicit unit, so it opens its own block and the separator
+ * closes the run. Returns 1 when the image was posted. */
 static int display_attached_image(NmChatApp *app, const NmImage *img)
 {
     if (!terminal_renders(app, img))
         return 0;
     post_image_block(app, img);
-    hold_flush(app, NM_STREAM_ID_CONTENT);
     emit_separator(app);
     return 1;
 }
@@ -1787,7 +1746,6 @@ static int switch_provider(NmChatApp *app, const char *name)
     hold_discard(app, NM_STREAM_ID_REASONING);
     app->pending_sep = 0;
     app->reasoning_open = 0;
-    app->content_open = 0;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
     if (dropped)
@@ -2639,6 +2597,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
      * agent's per-SSE-batch callback. */
     case TUI_MSG_STREAM_DELTA:
     case TUI_MSG_STREAM_TEXT:
+    case TUI_MSG_STREAM_IMAGE:
     case TUI_MSG_STREAM_END:
     case TUI_MSG_TRANSCRIPT_SUBMIT:
         tui_transcript_update(app->transcript, msg);

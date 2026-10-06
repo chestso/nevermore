@@ -32,7 +32,8 @@ jobs:
           # depends on: the input's status line
           # (components/textinput.h's TuiSpan +
           # tui_textinput_set_status_line, nevermore's spinner/context
-          # gauge/separator rule), the display-column metrics fix that
+          # gauge/separator rule), the explicit image unit message
+          # (tui_msg_stream_image), the display-column metrics fix that
           # lands the cursor on the right cell when a prompt is two
           # cells wide, the inline-frame reflow-erase fix so a terminal
           # resize no longer strands the frame's top rows, and the
@@ -41,7 +42,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: ae588a0ef72f88b0f5392851fd314639fcba01be
+          ref: 5b91dfc3c0fa803950db0f4fcc92d4ec58a0d9eb
           path: boba
           fetch-depth: 0
 

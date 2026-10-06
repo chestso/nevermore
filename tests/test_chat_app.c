@@ -4805,6 +4805,77 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
     close(sc.fd);
 }
 
+/* The draft §4 repro: the model streams content text, THEN calls
+ * read_file on a PNG. The image must reach the terminal as its own
+ * explicit unit. Before the image-unit seam the image line was posted
+ * as TEXT after a non-blank content line: the classifier saw a
+ * paragraph in progress and committed ~the whole base64 payload into
+ * the scrollback as literal text. */
+static void test_tool_image_after_streamed_text_never_commits_payload(void)
+{
+    const char *png = chat_png_fixture("nm-chat-tool-img-after-text.png");
+
+    char sse0[1400];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"Let me read "
+             "that.\"}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             png);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A graphics terminal: the image renders (kitty APC). */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 1;
+
+    harness_type(h, "look at this");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    /* the model's text committed as its own block ... */
+    const char *text = strstr(out, "Let me read that.");
+    ASSERT_NOT_NULL(text);
+    /* ... the image rendered exactly once, BELOW that text ... */
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    ASSERT_NOT_NULL(apc);
+    ASSERT_TRUE(text < apc);
+    ASSERT_EQ(count_image_apc(out), 1);
+    /* ... and the payload NEVER reached the transcript as the markdown
+     * data URL (the old failure committed it as paragraph text). The
+     * kitty APC legitimately carries base64, so the check is the
+     * data-URL text form, not a bare base64 substring. */
+    ASSERT_TRUE(strstr(out, "data:image/png;base64,") == NULL);
+    ASSERT_TRUE(strstr(out, "![") == NULL);
+    ASSERT_TRUE(strstr(out, "i see it") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The same round on a terminal that cannot take the image: nothing is
  * posted, the panel's result line IS the record, and there is no marker
  * duplication (unlike /img, there is no later submit echo to carry
@@ -5238,6 +5309,7 @@ int main(void)
     RUN_TEST(test_model_picker_marks_image_generators);
     RUN_TEST(test_recv_image_after_text_opens_its_own_block);
     RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
+    RUN_TEST(test_tool_image_after_streamed_text_never_commits_payload);
     RUN_TEST(test_tool_read_file_image_degrades_to_the_panel_line);
     RUN_TEST(test_tool_read_file_image_text_only_model_warns);
     RUN_TEST(test_img_text_only_model_warns);
