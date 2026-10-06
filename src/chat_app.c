@@ -1666,20 +1666,19 @@ static void open_models_popup(NmChatApp *app, const char *query)
     const char *ids[128];
     size_t cap = n < 128 ? n : 128;
     const char *active = app->model;
-    char active_row[96];
     for (size_t i = 0; i < cap; i++) {
         if (models[i].image_gen)
             snprintf(rows[i], sizeof(rows[i]), "%s 🖼", models[i].id);
         else
             snprintf(rows[i], sizeof(rows[i]), "%s", models[i].id);
         ids[i] = rows[i];
-        /* The active entry is prepended by the popup helper; suffix it
-         * the same way or the two forms dedup as different rows. */
+        /* The active entry is prepended by the popup helper; point it
+         * at the ROW, not app->model — an image generator's row carries
+         * the " 🖼" suffix, and the unsuffixed id would dedup as a
+         * second, different row. */
         if (app->model && models[i].image_gen &&
-            strcmp(models[i].id, app->model) == 0) {
-            snprintf(active_row, sizeof(active_row), "%s", rows[i]);
-            active = active_row;
-        }
+            strcmp(models[i].id, app->model) == 0)
+            active = rows[i];
     }
     if (!popup_show_with_active(app, POPUP_MODELS, "models", active, ids,
                                 (int)cap, query)) {
