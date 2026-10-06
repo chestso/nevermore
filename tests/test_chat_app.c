@@ -5208,6 +5208,110 @@ static void test_model_picker_capability_query_unknown(void)
     harness_free(h);
 }
 
+/* Regression: the picker once capped its rows at 128, silently
+ * truncating a live catalog — with OpenRouter's (464 entries,
+ * Sep 2026) that surfaced as "only one image_gen model", the sole
+ * one before the cut; the other ten sat past it. Serve a 200-entry
+ * catalog whose ONLY image generator is the last entry: the picker
+ * must see past the old cap, filtered or not. Registered AFTER the
+ * static-fallback openrouter picker tests above: a canned fetch
+ * populates the provider's process-global live cache. */
+#define BIG_CATALOG_FILLERS 199
+static char big_catalog_body[64 * 1024];
+
+static void *big_catalog_server_thread(void *arg)
+{
+    int lfd = *(int *)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    /* Drain the GET: headers only, to the blank line. */
+    char req[2048];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        req[got] = '\0';
+        if (strstr(req, "\r\n\r\n"))
+            break;
+    }
+    char head[160];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %zu\r\n\r\n",
+                      strlen(big_catalog_body));
+    send(cfd, head, (size_t)hl, 0);
+    size_t off = 0, bl = strlen(big_catalog_body);
+    while (off < bl) {
+        long n = send(cfd, big_catalog_body + off, bl - off, 0);
+        if (n <= 0)
+            break;
+        off += (size_t)n;
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_model_picker_sees_past_the_old_row_cap(void)
+{
+    /* The openrouter wire shape (OPENROUTER-API.md §2/§5.1): text-only
+     * fillers, then ONE image generator beyond the old 128-row cap. */
+    size_t off = 0;
+    off += (size_t)snprintf(big_catalog_body + off,
+                            sizeof(big_catalog_body) - off, "{\"data\":[");
+    for (int i = 0; i < BIG_CATALOG_FILLERS; i++) {
+        off += (size_t)snprintf(
+            big_catalog_body + off, sizeof(big_catalog_body) - off,
+            "{\"id\":\"filler-%03d\",\"name\":\"Filler %d\","
+            "\"context_length\":8192,"
+            "\"architecture\":{\"input_modalities\":[\"text\"],"
+            "\"output_modalities\":[\"text\"]}},",
+            i, i);
+    }
+    off += (size_t)snprintf(
+        big_catalog_body + off, sizeof(big_catalog_body) - off,
+        "{\"id\":\"vendor/deep-image\",\"name\":\"Deep Image\","
+        "\"context_length\":65536,"
+        "\"architecture\":{\"input_modalities\":[\"text\"],"
+        "\"output_modalities\":[\"image\",\"text\"]}}]}");
+    ASSERT_TRUE(off < sizeof(big_catalog_body));
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, big_catalog_server_thread, &lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("openrouter", "filler-000", base);
+    ASSERT_NOT_NULL(h);
+
+    /* /model @img: the deep generator is the ONLY match — past the
+     * cap it was invisible and the answer was "none in the catalog".
+     * The active filler carries no image_gen, so nothing prepends. */
+    harness_type(h, "/model @img");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
+    ASSERT_TRUE(strstr(frame, "🖼") != NULL);
+    ASSERT_TRUE(strstr(frame, "filler-000") == NULL);
+
+    /* The unfiltered cut: a plain query must find a deep row too. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    harness_type(h, "/model deep");
+    harness_enter(h);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+}
+
 /* The image event may arrive with text already streaming (unobserved
  * but wire-possible): the content run must END first, or the posted
  * image line would continue the open paragraph and commit the data URL
@@ -5368,6 +5472,7 @@ int main(void)
     RUN_TEST(test_model_picker_capability_query_img);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
+    RUN_TEST(test_model_picker_sees_past_the_old_row_cap);
     RUN_TEST(test_recv_image_after_text_opens_its_own_block);
     RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
     RUN_TEST(test_tool_image_after_streamed_text_never_commits_payload);

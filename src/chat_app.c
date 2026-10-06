@@ -1618,15 +1618,28 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
                                   const char *const *metas, int n_items,
                                   const char *query)
 {
-    const char *seen[128];
-    const char *seen_meta[128];
+    /* The prepend needs one contiguous pointer pair, sized by the
+     * source (+1 for the active entry): a fixed bound silently
+     * truncates a live catalog the same way the caller's row cap did.
+     * boba copies every string at set_items, so the scratch block dies
+     * on return (a popup open is a user action, never a hot path). */
+    size_t slots = (size_t)n_items + 1;
+    const char **seen;
+    const char **seen_meta;
+    char *block = malloc(slots * 2 * sizeof *seen);
+    if (!block) {
+        sys_line(app, NM_SGR_ERROR "out of memory" NM_SGR_RESET);
+        return 1; /* reported; the caller has nothing to add */
+    }
+    seen = (const char **)block;
+    seen_meta = seen + slots;
     int n = 0;
-    if (active && *active && n < 128) {
+    if (active && *active) {
         seen[n] = active; /* active first: its absence is the reason */
         seen_meta[n] = active_meta;
         n++;
     }
-    for (int i = 0; i < n_items && n < 128; i++) {
+    for (int i = 0; i < n_items; i++) {
         const char *it = items[i];
         if (!it || !*it)
             continue;
@@ -1647,6 +1660,7 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
         tui_list_popup_set_items_meta(app->popup, seen, seen_meta, n);
     else
         tui_list_popup_set_items(app->popup, seen, n);
+    free(block); /* boba strdups at set_items: the scratch is dead */
     tui_list_popup_set_title(app->popup, title);
     tui_list_popup_set_filter(app->popup, query);
     if (tui_list_popup_filtered_count(app->popup) == 0) {
@@ -1728,27 +1742,35 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
         sys_line(app, "no models in the catalog");
         return;
     }
-    /* Rows: the bare id (the item's value), plus a metadata column.
-     * Model ids are far under 96 chars; a longer one would simply be
-     * cut by snprintf (cosmetic, never a correctness issue — the wire
-     * id is re-validated at submit). */
-    char ids[128][96];
-    char metas[128][40];
-    const char *rows[128];
-    const char *merows[128];
-    size_t cap_n = n < 128 ? n : 128;
+    /* Rows point at the catalog's own ids (boba copies every string at
+     * set_items, so no row storage is needed); only the formatted meta
+     * column is fresh. Everything is sized by the catalog — a fixed
+     * bound silently truncates a live one (OpenRouter's ran to 464
+     * entries, Sep 2026; a 128-row cap hid every model past the cut,
+     * which surfaced as "only one image_gen model": the other ten sat
+     * beyond it). One block per popup open, freed on return. */
+    const char **rows;
+    const char **merows;
+    char (*metas)[40];
+    char *block = malloc(n * (2 * sizeof *rows + sizeof *metas));
+    if (!block) {
+        sys_line(app, NM_SGR_ERROR "out of memory" NM_SGR_RESET);
+        return;
+    }
+    rows = (const char **)block;
+    merows = rows + n;
+    metas = (char (*)[40])(merows + n);
     const char *active = NULL;
     const char *active_meta = NULL;
     int count = 0;
-    for (size_t i = 0; i < cap_n; i++) {
+    for (size_t i = 0; i < n; i++) {
         const NmModel *m = &models[i];
         if ((cap & NM_CAP_VISION) && !m->vision)
             continue;
         if ((cap & NM_CAP_IMAGE) && !m->image_gen)
             continue;
-        snprintf(ids[count], sizeof(ids[count]), "%s", m->id);
+        rows[count] = m->id;
         format_model_meta(m, metas[count], sizeof(metas[count]));
-        rows[count] = ids[count];
         merows[count] = metas[count];
         /* The active entry is the caller's prepend; the item VALUE is
          * the bare id (the metadata is a separate column, so there is
@@ -1756,12 +1778,13 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
          * capability-filtered view omits the active model when it does
          * not carry the capability (the answer is about the filter). */
         if (app->model && strcmp(m->id, app->model) == 0) {
-            active = ids[count];
-            active_meta = metas[count];
+            active = rows[count];
+            active_meta = merows[count];
         }
         count++;
     }
     if (count == 0) {
+        free(block);
         if (cap == NM_CAP_VISION)
             sys_line(app, "no vision models in the catalog");
         else if (cap == NM_CAP_IMAGE)
@@ -1774,6 +1797,7 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
                                 active_meta, rows, merows, count, query)) {
         sys_line(app, "no models match '%s'", query ? query : "");
     }
+    free(block);
 }
 
 /* Open the providers popup over the registry source (the same
