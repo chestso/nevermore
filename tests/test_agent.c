@@ -545,6 +545,85 @@ static void test_agent_plain_answer_no_tools(void)
     close(sc.fd);
 }
 
+/* The catalog's tool-use claim gates the toolset (NmModel.tools): a
+ * model whose openrouter entry lists supported_parameters WITHOUT
+ * "tools" (every image generator but three — the live 404 that
+ * motivated the field) gets a request carrying neither "tools" nor
+ * "tool_choice", while a model the catalog says nothing about keeps
+ * both. The provider is openrouter against its static fallback
+ * (NM_NO_LIVE_CATALOG is pinned in main), so the claim under test is
+ * the shipped table's own. */
+static void test_agent_omits_tools_when_the_catalog_says_so(void)
+{
+    const char *sse =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+
+    /* (a) The image generator (tools == -1): no toolset rides, and
+     * the turn still completes — the request is valid without them. */
+    reset_capture();
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = sse;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent =
+        nm_agent_new(p, "google/gemini-3.1-flash-lite-image", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    int rc = nm_agent_turn(agent, "draw the stormy ocean", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "\"tools\":[") == NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "\"tool_choice\"") == NULL);
+    /* The model id still rides (the gate touches the toolset only). */
+    ASSERT_TRUE(strstr(g_requests[0],
+                       "\"model\":\"google/gemini-3.1-flash-lite-image\"") !=
+                NULL);
+    nm_agent_free(agent);
+    pthread_join(th, NULL);
+    close(sc.fd);
+
+    /* (b) A model the catalog says nothing about (tools == 0) keeps
+     * the toolset: the default behavior, so a catalog without the
+     * claim can never silently disarm the agent. */
+    reset_capture();
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = sse;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    agent = nm_agent_new(p, "~openai/gpt-astra-latest", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    rc = nm_agent_turn(agent, "say hi", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "\"tools\":[") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "read_file") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "\"tool_choice\":\"auto\"") != NULL);
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The connect-walk notice reaches the agent's callback and names the
  * abandoned attempt's FAMILY — the user-visible line the app turns into
  * a system-stream notice, and the end of the "one family vocabulary"
@@ -3557,6 +3636,7 @@ int main(void)
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_image_turn_parts_and_prefix_stability);
     RUN_TEST(test_agent_plain_answer_no_tools);
+    RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);

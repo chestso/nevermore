@@ -1001,14 +1001,16 @@ static void *openrouter_models_server_thread(void *arg)
         "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
         "\"context_length\":1050000,"
         "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
-        "\"output_modalities\":[\"text\"]}},"
+        "\"output_modalities\":[\"text\"]},"
+        "\"supported_parameters\":[\"tools\",\"tool_choice\",\"reasoning\"]},"
         "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
         "\"context_length\":8192,"
         "\"architecture\":{\"input_modalities\":[\"text\"]}},"
         "{\"id\":\"google/gemini-3.1-flash-lite-image\",\"name\":\"Gemini"
         " Image\",\"context_length\":65536,"
         "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
-        "\"output_modalities\":[\"image\"]}}"
+        "\"output_modalities\":[\"image\"]},"
+        "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]}"
         "],\"total_count\":3}";
     char head[256];
     snprintf(head, sizeof(head),
@@ -1108,6 +1110,15 @@ static void test_openrouter_models_fetch(void)
     ASSERT_EQ(models[0].context_length, 1050000); /* top-level field */
     ASSERT_STR_EQ(models[1].id, "vendor/text-only");
     ASSERT_EQ(models[1].vision, 0);
+    /* The tool-use claim (NmModel.tools): supported_parameters is the
+     * authority, and the KEY's presence decides whether the claim is
+     * definite. Listed WITH "tools" = claimed (1); listed without it =
+     * a definite no (-1, the image model — the 404 that motivated the
+     * field); absent entirely = the catalog says nothing (0, and the
+     * model keeps the toolset). */
+    ASSERT_EQ(models[0].tools, 1);
+    ASSERT_EQ(models[1].tools, 0);
+    ASSERT_EQ(models[2].tools, -1);
     /* The receive direction (IMAGEGEN): output_modalities contains
      * "image" — the vision scanner's twin (OPENROUTER-API.md §5.1). */
     ASSERT_STR_EQ(models[2].id, "google/gemini-3.1-flash-lite-image");

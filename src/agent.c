@@ -228,6 +228,30 @@ static int model_vision(const NmProvider *p, const char *model)
     return -1;
 }
 
+/* The active model's tool-use claim, from the provider catalog (the
+ * one authority): NmModel.tools — 1 claimed, 0 the catalog says
+ * nothing, -1 the catalog lists the parameters and does NOT claim
+ * "tools". A provider that cannot answer (no catalog, the model not
+ * in it) says NOTHING, which keeps the toolset: an unknown model must
+ * not silently lose its tools. Resolved at the point of use
+ * (begin_round), not at construction, because /model switches the
+ * model on a live agent without rebuilding it — the same reason the
+ * round cap and the echo mode are store lookups, not pushed copies. */
+static int model_tools(const NmProvider *p, const char *model)
+{
+    if (!p || !p->models || !model)
+        return 0;
+    size_t n = 0;
+    const NmModel *models = p->models(p, NULL, NULL, &n);
+    if (!models)
+        return 0;
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, model) == 0)
+            return models[i].tools;
+    }
+    return 0;
+}
+
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata)
 {
@@ -836,8 +860,15 @@ static int begin_round(NmAgent *a)
     }
 
     round_reset(a);
+    /* A model whose catalog positively does not claim tools gets no
+     * toolset — and no tool_choice: OpenRouter 404s the whole request
+     * otherwise ("no endpoints found that support tool use"), which is
+     * how every image-output model without the claim becomes unusable.
+     * A catalog that says nothing (0) keeps today's behavior. */
     const char *tools_json =
-        a->tools ? nm_toolset_to_json(a->tools) : NULL;
+        (a->tools && model_tools(a->provider, a->model) >= 0)
+            ? nm_toolset_to_json(a->tools)
+            : NULL;
 
     /* Build the request from the session's context view. Rolling
      * window OFF (the default) means no trim: the whole transcript is

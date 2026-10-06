@@ -31,10 +31,10 @@
 /* Static fallback catalog (subset of data/nm-ollama-models.json;
  * used when the daemon/cloud is unreachable). */
 static const NmModel ollama_static_models[] = {
-    { "gpt-oss:20b", "GPT-OSS 20b", 0, 0, 131072 },
-    { "gpt-oss:120b", "GPT-OSS 120b", 0, 0, 131072 },
-    { "llama3.2", "Llama 3.2", 0, 0, 131072 },
-    { "qwen3-coder", "Qwen3 Coder", 0, 0, 262144 },
+    { "gpt-oss:20b", "GPT-OSS 20b", 0, 0, 131072, 0 },
+    { "gpt-oss:120b", "GPT-OSS 120b", 0, 0, 131072, 0 },
+    { "llama3.2", "Llama 3.2", 0, 0, 131072, 0 },
+    { "qwen3-coder", "Qwen3 Coder", 0, 0, 262144, 0 },
     { 0 }
 };
 

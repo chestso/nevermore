@@ -50,6 +50,21 @@ usable; always consume the full `/models` list.
 Vision detection: `architecture.input_modalities` contains `"image"`
 (64+ models incl. video/audio/file modalities, Sep 2026).
 
+**Tool use is ROUTING, not tolerance**: OpenRouter filters a request's
+candidate endpoints by the parameters it carries, so sending `tools`
+(and `tool_choice`) to a model whose `supported_parameters` omits
+`"tools"` fails the WHOLE request with `404` — `{"error":{"message":
+"No endpoints found that support tool use..."}}`, observed live on
+`google/gemini-3.1-flash-lite-image` (its list is
+`include_reasoning, max_tokens, reasoning, reasoning_effort,
+response_format, seed, temperature, top_p`). 8 of the 11
+image-output models in the Sep 2026 catalog are in that state; only
+`google/gemini-3-pro-image`, `openrouter/auto` and `openrouter/auto-beta`
+claim tools.
+nevermore therefore gates the toolset on the claim (`NmModel.tools`;
+see provider.h): listed without `"tools"` = omit tools + tool_choice,
+absent list = the catalog says nothing = send them.
+
 ## 3. Chat streaming (live test, authenticated)
 
 SSE framing is OpenAI-shaped `chat.completion.chunk` with these

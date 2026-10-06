@@ -74,6 +74,21 @@ typedef struct NmModel
      * it takes. */
     int image_gen;
     long context_length; /* -1 = unknown */
+    /* Does the catalog claim this model takes tools? OpenRouter's
+     * supported_parameters carries "tools" (docs/OPENROUTER-API.md §2),
+     * and its routing REJECTS the whole request (404, "No endpoints
+     * found that support tool use") when a toolset rides along for a
+     * model whose endpoints accept none — so this claim is ACTIONABLE
+     * wire truth, not picker decoration, and it is tri-state (unlike
+     * the positive-only vision/image_gen badges above):
+     *    1 = the catalog claims tool use;
+     *    0 = the catalog says nothing (an ids-only list; every other
+     *        provider's catalog today) — the zero value, and the
+     *        behavior every model had before this field: send them;
+     *   -1 = the catalog lists the parameters and does NOT claim
+     *        "tools" — the agent sends neither tools nor tool_choice.
+     * agent.c's model_tools resolves it at the point of use. */
+    int tools;
 } NmModel;
 
 typedef struct NmMessage

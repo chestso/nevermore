@@ -30,10 +30,13 @@
 /* Static fallback catalog (subset of data/nm-openrouter-models.json).
  * The image row is the imagegen probe model (docs/OPENROUTER-API.md
  * §5.1): image_gen = output_modalities contains "image"; its input
- * modalities are unprobed, so vision stays 0 (no capability claim). */
+ * modalities are unprobed, so vision stays 0 (no capability claim).
+ * Its tools claim is -1 (the catalog's supported_parameters lists no
+ * "tools"): a request carrying a toolset 404s ("no endpoints found
+ * that support tool use"), so the agent must send none. */
 static const NmModel openrouter_static_models[] = {
-    { "~openai/gpt-astra-latest", "GPT Astra", 1, 0, 1050000 },
-    { "google/gemini-3.1-flash-lite-image", "Gemini 3.1 Flash Lite Image", 0, 1, -1 },
+    { "~openai/gpt-astra-latest", "GPT Astra", 1, 0, 1050000, 0 },
+    { "google/gemini-3.1-flash-lite-image", "Gemini 3.1 Flash Lite Image", 0, 1, -1, -1 },
     { 0 }
 };
 
@@ -82,17 +85,18 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
 static NmModel *openrouter_live_models;
 static size_t openrouter_live_n;
 
-/* architecture.<key>_modalities contains "image" (OPENROUTER-API.md
- * §2: vision is input_modalities; §5.1: image_gen is
- * output_modalities — NOT capabilities.vision; character scan, no
- * regex). */
-static int modalities_have_image(NmJson *arch, const char *key)
+/* Does the string array at `arr` carry `want`? The scanner's one
+ * membership test — architecture.<key>_modalities carrying "image"
+ * (OPENROUTER-API.md §2: vision is input_modalities; §5.1: image_gen
+ * is output_modalities — NOT capabilities.vision) and
+ * supported_parameters carrying "tools" (the tool-use claim) are the
+ * same character scan, no regex. */
+static int array_has(NmJson *arr, const char *want)
 {
-    NmJson *mods = nm_json_get(arch, key);
-    size_t n = nm_json_len(mods);
+    size_t n = nm_json_len(arr);
     for (size_t i = 0; i < n; i++) {
-        const char *s = nm_json_str(nm_json_at(mods, i));
-        if (s && strcmp(s, "image") == 0)
+        const char *s = nm_json_str(nm_json_at(arr, i));
+        if (s && strcmp(s, want) == 0)
             return 1;
     }
     return 0;
@@ -134,10 +138,23 @@ static void openrouter_fetch_catalog(const char *base_url)
         const char *name = nm_json_str(nm_json_get(e, "name"));
         models[out].label = strdup(name ? name : id);
         NmJson *arch = nm_json_get(e, "architecture");
-        models[out].vision = modalities_have_image(arch, "input_modalities");
+        models[out].vision =
+            array_has(nm_json_get(arch, "input_modalities"), "image");
         /* The receive direction (IMAGEGEN): output_modalities contains
          * "image" — the input scanner's twin (OPENROUTER-API.md §5.1). */
-        models[out].image_gen = modalities_have_image(arch, "output_modalities");
+        models[out].image_gen =
+            array_has(nm_json_get(arch, "output_modalities"), "image");
+        /* Tool use: supported_parameters carrying "tools" is the
+         * claim (OPENROUTER-API.md §2), and the KEY's presence is what
+         * makes the claim definite — an entry that lists parameters
+         * without "tools" takes none (omit the toolset; OpenRouter
+         * 404s otherwise), while a catalog that says nothing at all
+         * keeps the toolset (0). */
+        NmJson *params = nm_json_get(e, "supported_parameters");
+        models[out].tools =
+            params && nm_json_type(params) == NM_JSON_ARRAY
+                ? (array_has(params, "tools") ? 1 : -1)
+                : 0;
         double ctx = nm_json_num(nm_json_get(e, "context_length"));
         models[out].context_length = ctx > 0 ? (long)ctx : -1;
         if (!models[out].id || !models[out].label) {

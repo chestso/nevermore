@@ -16,9 +16,9 @@
 # not a silent empty file.
 #
 # Output shape matches data/nm-openai-models.json: a JSON array of
-# {id, label, vision, image_gen, context_length}, preceded by '#' provenance
-# lines (the design's "header comment records source entry + date";
-# the file is documentation/regeneration source, never parsed at
+# {id, label, vision, image_gen, context_length, tools}, preceded by '#'
+# provenance lines (the design's "header comment records source entry +
+# date"; the file is documentation/regeneration source, never parsed at
 # runtime — the shipped catalog is the static array in the provider).
 
 set -eu
@@ -50,6 +50,13 @@ c_hdr="$root/src/opencode_models_data.h"
 # SHIPPED catalog: the live GET {base}/models carries ids only
 # (docs/OPENCODE-API.md §5), so the provider enriches each live id
 # from this table by id and falls back to it offline.
+#
+# `tools` is a constant 0 (NmModel.tools' "the catalog says nothing"):
+# models.dev is not the authority for the tool-use claim, and it is
+# only actionable on OpenRouter, whose routing rejects a toolset for a
+# model whose supported_parameters omits "tools" (provider_openrouter.c
+# is the one scanner that sets the field). OpenCode's own endpoint
+# takes a toolset whatever its catalog says, so 0 — keep sending.
 emit() {
     entry="$1"; out="$2"; arr="$3"; label="$4"
     jq -e --arg e "$entry" '.[$e].models | length > 0' "$src" >/dev/null || {
@@ -66,7 +73,8 @@ emit() {
                          then 1 else 0 end),
                 image_gen: (if ((.value.modalities.output // []) | index("image"))
                             then 1 else 0 end),
-                context_length: (.value.limit.context // -1)
+                context_length: (.value.limit.context // -1),
+                tools: 0
               }
           ] | sort_by(.id)' "$src"
     )"
@@ -86,7 +94,7 @@ emit() {
         printf ' * SpacesInContainerLiterals, Cpp11BracedListStyle off). */\n'
         printf 'static const NmModel %s[] = {\n' "$arr"
         printf '%s\n' "$body" |
-            jq -r '.[] | "    { \(.id|@json), \(.label|@json), \(.vision), \(.image_gen), \(.context_length) },"'
+            jq -r '.[] | "    { \(.id|@json), \(.label|@json), \(.vision), \(.image_gen), \(.context_length), \(.tools) },"'
         printf '    { 0 }\n};\n\n'
     } >> "$c_hdr"
     echo "wrote $out ($label): $count models" >&2
@@ -107,7 +115,8 @@ emit() {
     printf ' * label/context/modality (docs/OPENCODE-API.md §5) — so a live\n'
     printf ' * fetch keeps these rows metadata-bearing by id lookup\n'
     printf ' * (opencode_meta_find), and the same tables are the offline\n'
-    printf ' * fallback. -1 context_length = models.dev had none.\n'
+    printf ' * fallback. -1 context_length = models.dev had none; 0 tools =\n'
+    printf ' * models.dev is not the tool-use authority (see emit()).\n'
     printf ' */\n\n'
     printf '#ifndef NM_OPENCODE_MODELS_DATA_H\n#define NM_OPENCODE_MODELS_DATA_H\n\n'
     printf '#include "provider.h"\n\n'
