@@ -280,7 +280,13 @@ static int drive_virtual(const NmTool *t, NmToolExec *e, NmToolResult *out,
 /* Drive to DONE on REAL readiness alone, with the clock frozen: the call
  * ends when the child speaks or exits, never because a window closed.
  * This is the shape for a result that IS the child's exit (closing its
- * stdin and reading the flush) — nothing may cut it short. */
+ * stdin and reading the flush) — nothing may cut it short.
+ *
+ * Windows-only, with exec_virtual_done below: their one caller is the
+ * Windows job round-trip (the POSIX lifecycle test ends on the job
+ * going away, not on a flush), and a static helper that only one
+ * platform's test uses is an unused-function warning on the other. */
+#ifdef _WIN32
 static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
                             int budget_ms)
 {
@@ -296,6 +302,7 @@ static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
             return -1;
     }
 }
+#endif /* _WIN32 */
 
 /* nm_toolset_execute's synchronous pump (the `execute` vtable entry)
  * waits a yield window out on the REAL clock, so a live child would hang
@@ -326,6 +333,7 @@ static NmToolResult exec_virtual(const char *name, const char *args_json,
 
 /* exec_virtual's sibling for a call whose result is the child's EXIT
  * (nothing may close its window first) — see drive_until_done. */
+#ifdef _WIN32
 static NmToolResult exec_virtual_done(const char *name, const char *args_json)
 {
     NmToolset *ts = nm_toolset_new_defaults();
@@ -345,6 +353,7 @@ static NmToolResult exec_virtual_done(const char *name, const char *args_json)
     nm_toolset_free(ts);
     return r;
 }
+#endif /* _WIN32 */
 
 /* ---------------------------------------------------------------- */
 /* Registry                                                          */
