@@ -1312,24 +1312,39 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
 /* search_dir                                                        */
 /* ---------------------------------------------------------------- */
 
-/* Recursive literal-string search, character-level scan, no regex.
- * Reports path:line:content for every line containing the needle,
- * under the output budget. */
+/* Literal-string search, character-level scan, no regex. The root is
+ * a directory (recursively walked) or a single file (searched on its
+ * own) — the model often already knows the file it wants. Reports
+ * path:line:content for every line containing the needle, under the
+ * output budget. */
 
 /* Bytes of a matching line's content shown for one hit (the rest of
  * the line is dropped — the model greps for the line, then reads it). */
 #define SEARCH_LINE_CLAMP 200
 
-static void search_file(const char *path, const char *needle,
-                        char *body, size_t *bo)
+/* How one file's scan ended. The recursive walk only cares WHETHER the
+ * file was searched (a binary blob inside a tree is skipped silently),
+ * but an explicit FILE root must tell "searched, no hits" apart from
+ * "never searched" — the whole reason a path that is not a directory
+ * is an error instead of a silent miss — so the reason survives to the
+ * caller's message. */
+typedef enum
+{
+    SEARCH_FILE_UNREADABLE = 0, /* could not be read at all */
+    SEARCH_FILE_NOT_TEXT,       /* read, but not UTF-8 text */
+    SEARCH_FILE_SEARCHED        /* scanned (zero hits is still searched) */
+} SearchFileOutcome;
+
+static SearchFileOutcome search_file(const char *path, const char *needle,
+                                     char *body, size_t *bo)
 {
     size_t len = 0;
     char *text = read_file_bytes(path, &len);
     if (!text)
-        return;
+        return SEARCH_FILE_UNREADABLE;
     if (!utf8_valid((const unsigned char *)text, len)) {
         free(text);
-        return;
+        return SEARCH_FILE_NOT_TEXT;
     }
     long lineno = 1;
     size_t line_start = 0;
@@ -1368,6 +1383,7 @@ static void search_file(const char *path, const char *needle,
         }
     }
     free(text);
+    return SEARCH_FILE_SEARCHED;
 }
 
 /* Returns nonzero when `dir' was actually searched. Only the ROOT's
@@ -1466,19 +1482,42 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         return nm_tool_result_error("out of memory");
     }
     size_t bo = 0;
-    /* A root that cannot be opened is this call FAILING, never "no
-     * hits": the empty body used to shape into an ok result with a
-     * bare "(empty)" Output section, indistinguishable from a real
-     * miss, so an agent that passed a file path got "no matches" for
-     * a file it never searched (and re-issued the same search).
-     * search_dir is directory-only by design — a single file is
-     * read_file's job. */
-    if (!search_dir_walk(path, needle, body, &bo, 0)) {
+    /* The root is a DIRECTORY (walk it) or a single FILE (search just
+     * it) — the model often already knows the file it wants. The stat
+     * picks between them: a non-ASCII directory path on Windows fails
+     * stat but still takes the walk's wide-API path, so the
+     * fall-through is the directory case and never a single-file
+     * attempt on a directory (fopen on a directory SUCCEEDS on POSIX
+     * and would read back as an empty "no hits").
+     *
+     * A root that is NEITHER is this call FAILING, never "no hits":
+     * the empty body used to shape into an ok result with a bare
+     * "(empty)" Output section, indistinguishable from a real miss,
+     * so an agent that passed a bad path read the silence as a miss
+     * and re-issued the same search. */
+    struct stat rst;
+    const char *why = NULL;
+    if (stat(path, &rst) == 0 && S_ISREG(rst.st_mode)) {
+        switch (search_file(path, needle, body, &bo)) {
+        case SEARCH_FILE_SEARCHED:
+            break;
+        case SEARCH_FILE_NOT_TEXT:
+            why = "not a UTF-8 text file";
+            break;
+        default:
+            why = "not a readable file";
+            break;
+        }
+    } else if (!search_dir_walk(path, needle, body, &bo, 0)) {
+        why = "not a readable file or directory";
+    }
+    if (why) {
         free(body);
-        char *msg = malloc(strlen(path) + 64);
+        /* "cannot search " (14) + path + ": " (2) + why + NUL. */
+        size_t need = strlen(path) + strlen(why) + 18;
+        char *msg = malloc(need);
         if (msg)
-            snprintf(msg, strlen(path) + 64,
-                     "cannot search %s: not a readable directory", path);
+            snprintf(msg, need, "cannot search %s: %s", path, why);
         free(path);
         free(needle);
         return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
@@ -1563,8 +1602,9 @@ static const char list_dir_schema[] =
 static const char search_dir_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"path\":{\"type\":\"string\",\"description\":\"Directory to search "
-    "recursively (VCS and build noise skipped); a path that is not a "
-    "readable directory is an error, not a single-file search.\"},"
+    "recursively (VCS and build noise skipped), or a single file to search "
+    "on its own; a path that is neither is an error, not a silent "
+    "miss.\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Base directory for "
     "a relative path.\"},"
     "\"needle\":{\"type\":\"string\",\"description\":\"Literal string to "
@@ -1613,7 +1653,8 @@ const NmTool nm_tool_list_dir = {
 const NmTool nm_tool_search_dir = {
     .name = "search_dir",
     .description = "Search files recursively for a literal string (no "
-                   "regex); reports path:line:content",
+                   "regex), or a single file when the path names one; "
+                   "reports path:line:content",
     .emoji = "🔍",
     .params_schema = search_dir_schema,
     .execute = search_dir_exec,

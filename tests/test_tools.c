@@ -1676,24 +1676,24 @@ static void test_search_dir_literal(void)
     nm_toolset_free(ts);
 }
 
-/* A root that is not a readable directory is a hard error, not "no
- * hits": the walk used to return an ok result with a bare "(empty)"
- * Output section for a path it never opened, so an agent that passed
- * a FILE path read the silence as a miss and re-ran the same search
- * (the 2026-09-20 draft). The same needle pointed at the directory
- * still hits — the error is about the root, not the content. */
-static void test_search_dir_root_must_be_a_directory(void)
+/* The root may be a DIRECTORY (recursive walk) or a single FILE (just
+ * that file): the model often knows the file it wants, so a file path
+ * is a legal target, not a misuse. A path that is NEITHER is a hard
+ * error, not "no hits": the walk used to return an ok result with a
+ * bare "(empty)" Output section for a path it never opened, so an
+ * agent read the silence as a miss and re-ran the same search. */
+static void test_search_dir_file_or_directory_root(void)
 {
-    char *dir = scratch_sub_dir("bad_root_dir");
-    char *file = scratch_in(dir, "not_a_dir.txt");
+    char *dir = scratch_sub_dir("file_root_dir");
+    char *file = scratch_in(dir, "haystack.txt");
     FILE *f = fopen(file, "wb");
     ASSERT_NOT_NULL(f);
-    fputs("the NEEDLE line\n", f);
+    fputs("nothing here\nthe NEEDLE line\n", f);
     fclose(f);
 
     NmToolset *ts = nm_toolset_new_defaults();
 
-    /* The file path: refused. */
+    /* The file path: searched directly, same path:line:content shape. */
     NmJson *jargs = nm_json_new_object();
     nm_json_set(jargs, "path", nm_json_new_string(file));
     nm_json_set(jargs, "needle", nm_json_new_string("NEEDLE"));
@@ -1701,12 +1701,26 @@ static void test_search_dir_root_must_be_a_directory(void)
     nm_json_free(jargs);
     NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
     free(args);
-    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
-    ASSERT_TRUE(strstr(r.output, "cannot search") != NULL);
+    ASSERT_TRUE(strstr(r.output, "haystack.txt:2:the NEEDLE line") != NULL);
     nm_tool_result_free(&r);
 
-    /* ... and a path that exists nowhere, same shape. */
+    /* A needle the file does not contain: searched, zero hits — an OK
+     * empty answer, never the not-a-target error. */
+    NmJson *jmiss = nm_json_new_object();
+    nm_json_set(jmiss, "path", nm_json_new_string(file));
+    nm_json_set(jmiss, "needle", nm_json_new_string("absent-needle"));
+    char *amiss = nm_json_dump(jmiss);
+    nm_json_free(jmiss);
+    NmToolResult rm = nm_toolset_execute(ts, "search_dir", amiss, NULL);
+    free(amiss);
+    ASSERT_EQ(rm.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(rm.output);
+    ASSERT_TRUE(strstr(rm.output, "NEEDLE") == NULL);
+    nm_tool_result_free(&rm);
+
+    /* A path that exists nowhere: an error, not a silent miss. */
     NmToolResult r2 =
         nm_toolset_execute(ts, "search_dir",
                            "{\"path\":\"/no/such/dir\",\"needle\":\"NEEDLE\"}",
@@ -1716,7 +1730,7 @@ static void test_search_dir_root_must_be_a_directory(void)
     ASSERT_TRUE(strstr(r2.output, "cannot search") != NULL);
     nm_tool_result_free(&r2);
 
-    /* The directory itself: the hit. */
+    /* The directory itself: the same hit, through the walk. */
     NmJson *jargs2 = nm_json_new_object();
     nm_json_set(jargs2, "path", nm_json_new_string(dir));
     nm_json_set(jargs2, "needle", nm_json_new_string("NEEDLE"));
@@ -1726,9 +1740,39 @@ static void test_search_dir_root_must_be_a_directory(void)
     free(args2);
     ASSERT_EQ(r3.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r3.output);
-    ASSERT_TRUE(strstr(r3.output, "not_a_dir.txt:1:the NEEDLE line") != NULL);
+    ASSERT_TRUE(strstr(r3.output, "haystack.txt:2:the NEEDLE line") != NULL);
     nm_tool_result_free(&r3);
 
+    nm_toolset_free(ts);
+    free(file);
+    free(dir);
+}
+
+/* A single-file root that is not UTF-8 text: the file WAS read, so the
+ * refusal names that (never the "not a readable file or directory" of
+ * a path that does not exist). A search that never ran must never read
+ * as a miss. */
+static void test_search_dir_file_root_not_text(void)
+{
+    char *dir = scratch_sub_dir("file_root_bin");
+    char *file = scratch_in(dir, "blob.bin");
+    FILE *f = fopen(file, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite("\x00\x01NEEDLE\xff\xfe", 1, 10, f);
+    fclose(f);
+
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(file));
+    nm_json_set(jargs, "needle", nm_json_new_string("NEEDLE"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "not a UTF-8 text file") != NULL);
+    nm_tool_result_free(&r);
     nm_toolset_free(ts);
     free(file);
     free(dir);
@@ -3421,7 +3465,8 @@ int main(void)
 #endif
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
-    RUN_TEST(test_search_dir_root_must_be_a_directory);
+    RUN_TEST(test_search_dir_file_or_directory_root);
+    RUN_TEST(test_search_dir_file_root_not_text);
     RUN_TEST(test_search_dir_hit_clamp_is_char_safe);
     RUN_TEST(test_search_dir_truncates_with_budget_notice);
     RUN_TEST(test_truncate_tail_fits_and_caps);
