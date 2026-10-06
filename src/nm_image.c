@@ -1,8 +1,10 @@
 /* nm_image.c - the transcript IMAGE tier's policy half.
- * See nm_image.h; the plan is docs/TRANSCRIPT-IMAGE-PLAN.md
- * (git-excluded). Character-level scans only, no regex; no pixel
- * decode ever (headers only: kitty takes PNG containers via f=100,
- * iTerm2 decodes its own).
+ * See nm_image.h; the plans are docs/TRANSCRIPT-IMAGE-PLAN.md and
+ * docs/IMAGE-TRANSCODE-PLAN.md (both git-excluded). Character-level
+ * scans only, no regex. Header-only sniffing for every container the
+ * terminal already takes (PNG via kitty's f=100, any of them via
+ * iTerm2); the ONE decode is the kitty-vs-JPEG lane, where a JPEG is
+ * transcoded to PNG through nm_image_codec (the vendored stb).
  */
 
 #include "nm_image.h"
@@ -12,6 +14,7 @@
 #include <string.h>
 
 #include "nm_image_bytes.h"
+#include "nm_image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 
@@ -49,10 +52,11 @@ void nm_image_slot_free(NmImageSlot *s)
     if (!s)
         return;
     free(s->data);
+    free(s->enc);
     memset(s, 0, sizeof(*s));
 }
 
-/* Drop the held unit but keep the buffer (it is the reuse). */
+/* Drop the held unit but keep the buffers (they are the reuse). */
 void nm_image_slot_reset(NmImageSlot *s)
 {
     if (!s)
@@ -65,6 +69,8 @@ void nm_image_slot_reset(NmImageSlot *s)
     s->transport = -1;
     s->disp_cols = s->disp_rows = 0;
     s->reason[0] = '\0';
+    s->enc_len = 0;
+    s->render_format = -1;
 }
 
 /* Grow the slot's buffer geometrically; 0 ok, -1 OOM. */
@@ -83,6 +89,25 @@ static int slot_reserve(NmImageSlot *s, size_t need)
         return -1;
     s->data = nd;
     s->cap = ncap;
+    return 0;
+}
+
+/* The same growth for the derived PNG (the transcode's output). */
+static int slot_reserve_enc(NmImageSlot *s, size_t need)
+{
+    if (s->enc_cap >= need)
+        return 0;
+    size_t ncap = s->enc_cap ? s->enc_cap : 4096;
+    while (ncap < need) {
+        if (ncap > (size_t)1 << 30)
+            return -1;
+        ncap *= 2;
+    }
+    unsigned char *nd = realloc(s->enc, ncap);
+    if (!nd)
+        return -1;
+    s->enc = nd;
+    s->enc_cap = ncap;
     return 0;
 }
 
@@ -222,25 +247,89 @@ static void compute_display(NmImageSlot *s, const NmMarkdownRenderState *rs,
 /* Callbacks                                                         */
 /* ---------------------------------------------------------------- */
 
-/* The tier table (D5): kitty takes PNG only (f=100); iTerm2 decodes
- * its own containers. kitty preferred where both answer (WezTerm). -1
- * = this profile renders nothing of this format (markers). An
- * unresolved profile answers -1: the capabilities are all zero before
- * the verdict, and the UI's attach gate reads the same answer. */
-static int pick_transport(const TuiTerminalProfile *p, int format)
+/* The tier table (D5). A transport that takes the source container
+ * NATIVELY is chosen first — kitty f=100 for PNG, iTerm2 1337 for any
+ * container it decodes — so a decode runs only where nothing else can
+ * carry the source: a kitty-only terminal and a JPEG (kitty's f=100 is
+ * PNG-only; kitty/graphics.c takes PNG + raw pixels, and a JPEG rides
+ * neither). kitty still wins the PNG case (WezTerm answers both). A
+ * GIF on kitty is the deferred case (D12): no tier, so it keeps its
+ * marker. An unresolved profile answers no tier — the capabilities are
+ * all zero before the verdict, and the UI's attach gate reads the same
+ * answer. */
+typedef struct
 {
+    int transport;      /* TuiImageTransport, -1 = no tier */
+    int payload_format; /* what the spec hands boba (an NmImageFormat) */
+    int transcode;      /* 1 = decode + re-encode to payload_format */
+} NmImageTier;
+
+static void pick_tier(const TuiTerminalProfile *p, int src_format,
+                      NmImageTier *out)
+{
+    out->transport = -1;
+    out->payload_format = src_format;
+    out->transcode = 0;
     if (!p || !p->resolved)
-        return -1;
-    if (p->kitty_graphics && format == NM_IMAGE_FMT_PNG)
-        return (int)TUI_IMAGE_KITTY;
-    if (p->iterm2_images && format != NM_IMAGE_FMT_UNKNOWN)
-        return (int)TUI_IMAGE_ITERM2;
-    return -1;
+        return;
+    if (p->kitty_graphics && src_format == NM_IMAGE_FMT_PNG) {
+        out->transport = (int)TUI_IMAGE_KITTY;
+        return;
+    }
+    if (p->iterm2_images && src_format != NM_IMAGE_FMT_UNKNOWN) {
+        out->transport = (int)TUI_IMAGE_ITERM2;
+        return;
+    }
+    if (p->kitty_graphics && src_format == NM_IMAGE_FMT_JPEG) {
+        out->transport = (int)TUI_IMAGE_KITTY;
+        out->payload_format = NM_IMAGE_FMT_PNG; /* the transcode target */
+        out->transcode = 1;
+    }
 }
 
 int nm_image_supported(const TuiTerminalProfile *p, int format)
 {
-    return pick_transport(p, format) >= 0;
+    NmImageTier tier;
+    pick_tier(p, format, &tier);
+    return tier.transport >= 0;
+}
+
+/* Decode the source and re-encode it as PNG into the slot (the kitty
+ * JPEG lane). 0 ok; -1 with the slot's reason set, which the marker
+ * then prints. The RGBA stb hands back is ONE allocation per image
+ * event, freed here (not a per-token churn); the derived PNG persists
+ * in the slot for render_image (D6). */
+static int image_transcode(NmImageSlot *s)
+{
+    int dw = 0, dh = 0;
+    unsigned char *rgba = NULL;
+    NmCodecStatus st = nm_image_decode_rgba(s->data, s->len, &dw, &dh, &rgba);
+    if (st != NM_CODEC_OK) {
+        /* D9: the tier took the container, these bytes did not decode
+         * (corrupt, truncated, or past the pixel screen) — the same
+         * rung a corrupt PNG already gets. */
+        slot_reason(s, "undecodable source");
+        return -1;
+    }
+    size_t bound = nm_png_encode_bound(dw, dh);
+    if (bound == 0 || slot_reserve_enc(s, bound) != 0) {
+        free(rgba);
+        slot_reason(s, "no memory");
+        return -1;
+    }
+    long n = nm_png_encode(rgba, dw, dh, s->enc, s->enc_cap);
+    free(rgba);
+    if (n <= 0) {
+        slot_reason(s, "no memory");
+        return -1;
+    }
+    s->enc_len = (size_t)n;
+    /* the display size is the SOURCE's — the PNG has the same pixels */
+    if (s->w <= 0 || s->h <= 0) {
+        s->w = dw;
+        s->h = dh;
+    }
+    return 0;
 }
 
 int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
@@ -287,14 +376,19 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
 
     /* tier (D5): the one table, shared with the UI's "if supported"
      * attach gate (nm_image_supported). */
-    int transport = pick_transport(profile, s->format);
-    if (transport < 0) {
+    NmImageTier tier;
+    pick_tier(profile, s->format, &tier);
+    if (tier.transport < 0) {
         slot_reason(s, (profile->kitty_graphics || profile->iterm2_images)
                            ? "format not supported here"
                            : "no graphics support");
         return 0;
     }
-    s->transport = transport;
+    if (tier.transcode && image_transcode(s) != 0)
+        return 0; /* the reason transcode set is the marker's */
+
+    s->transport = tier.transport;
+    s->render_format = tier.payload_format;
 
     compute_display(s, rs, profile);
     if (out_rows)
@@ -311,15 +405,20 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
     if (!rs || !sink || !blk)
         return;
     NmImageSlot *s = &rs->img;
-    if (s->image_id != blk->image_id || s->transport < 0 || !s->data ||
-        s->len == 0)
+    if (s->image_id != blk->image_id || s->transport < 0)
         return; /* stale slot: the marker path owns the fallback */
+    /* the payload is the derived PNG when a transcode happened, the
+     * source bytes otherwise (D6) */
+    const unsigned char *payload = s->enc_len ? s->enc : s->data;
+    size_t payload_len = s->enc_len ? s->enc_len : s->len;
+    if (!payload || payload_len == 0)
+        return;
 
     TuiImageSpec spec;
     tui_image_spec_init(&spec, (TuiImageTransport)s->transport,
-                        to_tui_format(s->format), s->data, s->len, s->w,
-                        s->h, s->disp_cols, rows > 0 ? rows : s->disp_rows,
-                        blk->image_id);
+                        to_tui_format(s->render_format), payload, payload_len,
+                        s->w, s->h, s->disp_cols,
+                        rows > 0 ? rows : s->disp_rows, blk->image_id);
     (void)col_span; /* the display size was fixed at measure time */
     tui_row_image(sink, &spec);
     tui_row_end(sink);

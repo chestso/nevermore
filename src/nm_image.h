@@ -5,17 +5,23 @@
  * image markdown line's source, obtaining the bytes (data URIs and
  * local paths - the two sources whose bytes are already ours; remote
  * URLs degrade by design, see TRANSCRIPT-IMAGE-PLAN), sniffing
- * dimensions from the container headers (NO pixel decode: kitty
- * takes PNG via f=100 and iTerm2 decodes its own containers),
- * choosing the transport from the terminal profile, and sizing the
- * display in cells.
+ * dimensions from the container headers, choosing the transport from
+ * the terminal profile, sizing the display in cells, and - when the
+ * terminal cannot take the source container - TRANSCODING it to one it
+ * can (JPEG -> PNG for kitty's f=100) through nm_image_codec.
+ *
+ * No pixel decode happens for a container the terminal already takes
+ * (kitty takes PNG via f=100; iTerm2 decodes its own PNG/JPEG/GIF);
+ * only the kitty-vs-JPEG lane decodes, and the derived PNG is
+ * display-local (the wire bytes are never touched — see
+ * docs/IMAGE-TRANSCODE-PLAN.md D7).
  *
  * The state is a ONE-SLOT cache reached through
  * TuiTranscriptConfig.user_data (NmMarkdownRenderState.img): boba
  * renders emission units synchronously one at a time, calling
  * measure_image then render_image back-to-back for each IMAGE unit,
- * so a single slot keyed by TuiBlock.image_id suffices - the buffer
- * is grown geometrically and reused across images, never reallocated
+ * so a single slot keyed by TuiBlock.image_id suffices - the buffers
+ * are grown geometrically and reused across images, never reallocated
  * per image (memory-reuse principle; one allocation per image event
  * is the event, not churn).
  */
@@ -55,11 +61,22 @@ typedef struct NmImageSlot
                                * prints; equals len except when a bounded
                                * probe held only the head */
     int w, h;                 /* source pixels (0 = unknown)                  */
-    int format;               /* NmImageFormat (nm_image_bytes.h); boba's
-                               * TuiImageFormat appears only at the spec */
+    int format;               /* NmImageFormat of the SOURCE
+                               * (nm_image_bytes.h); boba's TuiImageFormat
+                               * appears only at the spec */
     int transport;            /* TuiImageTransport, -1 = degrade            */
     int disp_cols, disp_rows; /* the committed display size (cells) */
     char reason[48];          /* degradation reason (empty = rendered)     */
+
+    /* The DISPLAY payload when a transcode was needed (D6): a PNG
+     * derived from the source by nm_image_codec, owned by the slot and
+     * reused across images (grown geometrically like `data`). enc ==
+     * NULL means the source rides as-is; otherwise the spec takes
+     * `enc`/`enc_len` and render_format (the wire bytes are never
+     * touched — the derived PNG is display-local). */
+    unsigned char *enc;
+    size_t enc_cap, enc_len;
+    int render_format; /* the format handed to boba (an NmImageFormat) */
 } NmImageSlot;
 
 /* Drop the held unit but KEEP the buffer (it is the reuse); used by
@@ -74,21 +91,25 @@ void nm_image_slot_free(NmImageSlot *s);
 /* Would a source in this container render as an image under this
  * profile? The tier table's front door, asked BEFORE any bytes exist:
  * 1 = the transcript will render it, 0 = it would degrade to the
- * marker (no graphics support, a format the terminal cannot take, or
- * a profile that has not reached its verdict yet). This is the "if
- * supported" gate chat_app's /img reads when it decides whether to
- * display an attached image right there at the point of attach; the
- * same table nm_image_measure picks the transport from, so the answer
- * cannot drift from what the commit pass will do. */
+ * marker (no graphics support, a container neither a native transport
+ * nor a transcode can carry, or a profile that has not reached its
+ * verdict yet). This is the "if supported" gate chat_app's /img reads
+ * when it decides whether to display an attached image right there at
+ * the point of attach; the same table nm_image_measure picks the
+ * transport from, so the answer cannot drift from what the commit pass
+ * will do. It answers the TIER, not "these bytes decode": a corrupt
+ * payload (or one past nm_image_codec's pixel screen) still degrades
+ * at commit, exactly as a PNG always could. */
 int nm_image_supported(const TuiTerminalProfile *p, int format);
 
 /* TuiTranscriptConfig.measure_image: parse the unit's image line,
- * load the source bytes, sniff the dimensions, pick the transport
- * from the profile and compute the display cells. Fills the slot
- * (user_data: NmMarkdownRenderState). Returns 1 with *out_rows >= 1
- * when the unit will render as an image, 0 to degrade to the
- * render_block marker (the slot still carries what it learned -
- * dims, format, reason - for the marker's text). */
+ * load the source bytes, sniff the dimensions, pick the tier from the
+ * profile (transcoding a JPEG to PNG when the terminal needs it) and
+ * compute the display cells. Fills the slot (user_data:
+ * NmMarkdownRenderState). Returns 1 with *out_rows >= 1 when the unit
+ * will render as an image, 0 to degrade to the render_block marker
+ * (the slot still carries what it learned - dims, format, reason -
+ * for the marker's text). */
 int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
                      const TuiTerminalProfile *profile, int *out_rows,
                      void *user_data);

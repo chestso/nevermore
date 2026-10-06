@@ -79,6 +79,28 @@ static const unsigned char FIX_JPEG[] = {
 #define FIX_JPEG_B64 "/9j/wAARCAAgAEA="
 #define FIX_JPEG_URI "data:image/jpeg;base64," FIX_JPEG_B64
 
+/* A REAL 16x16 baseline JPEG (four quadrants: red | blue / green |
+ * near-white). The stub headers above satisfy the sniffer; this one
+ * also satisfies the DECODER, so the transcode lane can be exercised
+ * for real (the same blob test_image_codec decodes). */
+#define FIX_JPEG_REAL_B64                                                              \
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAIBAQEBAQIBAQECAgICAgQDAgICAgUEBAMEBgUGBgYF"     \
+    "BgYGBwkIBgcJBwYGCAsICQoKCgoKBggLDAsKDAkKCgr/2wBDAQICAgICAgUDAwUKBwYHCgoKCgoK"     \
+    "CgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgoKCgr/wAARCAAQABADAREA" \
+    "AhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAAAgEDAwIEAwUFBAQA"     \
+    "AAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3"     \
+    "ODk6Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWm"     \
+    "p6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEA"     \
+    "AwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREAAgECBAQDBAcFBAQAAQJ3AAECAxEEBSEx"     \
+    "BhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5OkNERUZHSElK"     \
+    "U1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3"     \
+    "uLm6wsPExcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwD5br+f"     \
+    "z/Xw+c6/38P8Rz9OK/5oz+Hz9kK/uA/0cP/Z"
+#define FIX_JPEG_REAL_URI "data:image/jpeg;base64," FIX_JPEG_REAL_B64
+/* The PNG header (mime + 8-byte signature), for asserting a transcoded
+ * payload in the committed bytes. */
+#define PNG_MAGIC "\x89PNG\r\n\x1a\n"
+
 /* GIF: header + little-endian logical screen size. */
 static const unsigned char FIX_GIF[] = {
     'G',
@@ -276,16 +298,35 @@ static void test_measure_format_tier_matrix(void)
     M m;
     m_init(&m);
 
-    /* kitty + JPEG: f=100 is PNG-only — degrade unless iTerm2 answers */
+    /* kitty alone + JPEG: kitty's f=100 is PNG-only, so the tier picks
+     * the kitty transport and TRANSCODES — and the stub JPEG (a header
+     * with no scan data) then fails the decode, which is the honest
+     * "undecodable source" rung (the tier took the container, these
+     * bytes did not decode) */
     m_profile(&m, 1, 0, 10, 20);
     ASSERT_FALSE(measure_src(&m, FIX_JPEG_URI));
-    ASSERT_STR_EQ(m.rs.img.reason, "format not supported here");
+    ASSERT_STR_EQ(m.rs.img.reason, "undecodable source");
     ASSERT_EQ(m.rs.img.w, 64); /* the header still sniffed, for the marker */
 
-    /* kitty + JPEG + iTerm2: the 1337 tier takes it */
+    /* kitty alone + a REAL JPEG: transcoded to PNG and rendered */
+    m_profile(&m, 1, 0, 10, 20);
+    ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_JPEG);       /* the SOURCE */
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG); /* what boba gets */
+    ASSERT_TRUE(m.rs.img.enc_len > 0);
+    ASSERT_TRUE(strncmp((const char *)m.rs.img.enc, PNG_MAGIC, 8) == 0);
+    ASSERT_EQ(m.rs.img.w, 16);
+    ASSERT_EQ(m.rs.img.h, 16);
+
+    /* kitty + JPEG + iTerm2 (WezTerm): iTerm2 takes the source NATIVELY,
+     * so no decode happens — the natural transport wins (a PNG is not
+     * re-encoded either) */
     m_profile(&m, 1, 1, 10, 20);
-    ASSERT_TRUE(measure_src(&m, FIX_JPEG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_JPEG);
+    ASSERT_EQ(m.rs.img.enc_len, 0u);
 
     /* iTerm2 + PNG (no kitty) */
     m_profile(&m, 0, 1, 10, 20);
@@ -298,7 +339,7 @@ static void test_measure_format_tier_matrix(void)
     ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_GIF);
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
 
-    /* kitty alone + GIF: PNG-only */
+    /* kitty alone + GIF: PNG-only, and GIF -> PNG is deferred (D12) */
     m_profile(&m, 1, 0, 10, 20);
     ASSERT_FALSE(measure_src(&m, FIX_GIF_URI));
     ASSERT_STR_EQ(m.rs.img.reason, "format not supported here");
@@ -324,10 +365,11 @@ static void test_supported_matches_the_tier_table(void)
     M m;
     m_init(&m);
 
-    m_profile(&m, 1, 0, 10, 20); /* kitty: PNG only */
+    m_profile(&m, 1, 0, 10, 20); /* kitty: PNG direct, JPEG transcoded */
     ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
-    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
-    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF)); /* D12 */
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_UNKNOWN));
 
     m_profile(&m, 0, 1, 10, 20); /* iTerm2: every container */
     ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
@@ -565,7 +607,7 @@ static const char *ih_view(IH *h)
     return h->view->data;
 }
 
-static IH *ih_new(int kitty)
+static IH *ih_new_prof(int kitty, int iterm2)
 {
     IH *h = calloc(1, sizeof(*h));
     if (!h)
@@ -611,16 +653,17 @@ static IH *ih_new(int kitty)
     tui_runtime_set_transcript(h->rt, h->t);
     tui_runtime_send(h->rt, tui_msg_window_size(60, 10));
 
-    /* a resolved profile: kitty or conservative */
+    /* a resolved profile: kitty and/or iTerm2 */
     h->rt->probe_state = 3;
     h->rt->profile.resolved = 1;
-    if (kitty) {
-        h->rt->profile.kitty_graphics = 1;
-        h->rt->profile.cell_w_px = 10;
-        h->rt->profile.cell_h_px = 20;
-    }
+    h->rt->profile.cell_w_px = 10;
+    h->rt->profile.cell_h_px = 20;
+    h->rt->profile.kitty_graphics = kitty;
+    h->rt->profile.iterm2_images = iterm2;
     return h;
 }
+
+static IH *ih_new(int kitty) { return ih_new_prof(kitty, 0); }
 
 static void ih_free(IH *h)
 {
@@ -667,6 +710,54 @@ static void test_integration_kitty_commits_apc(void)
     const char *img = strstr(out, "\x1b_G");
     const char *after = strstr(out, "after");
     ASSERT_TRUE(img && after && after > img);
+
+    ih_free(h);
+}
+
+/* A JPEG on a kitty-only terminal commits as a kitty APC whose payload
+ * is a DERIVED PNG — never the source JPEG bytes, and never a marker.
+ * The transcode is display-local; the wire bytes are untouched. */
+static void test_integration_kitty_transcodes_jpeg(void)
+{
+    IH *h = ih_new(1);
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_JPEG_REAL_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_flush(h);
+
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
+    const char *out = ih_read(h);
+    /* a kitty f=100 APC... */
+    ASSERT_TRUE(strstr(out, "\x1b_Ga=T,f=100,") != NULL);
+    /* ...carrying PNG magic (the base64 of "\x89PNG\r\n" leads the
+     * payload) — the DERIVED container, not the source JPEG */
+    ASSERT_TRUE(strstr(out, "iVBORw0K") != NULL);
+    /* never the JPEG source, and never a marker */
+    ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) == NULL);
+    ASSERT_TRUE(strstr(out, "undecodable") == NULL);
+    ASSERT_TRUE(strstr(out, "format not supported") == NULL);
+
+    ih_free(h);
+}
+
+/* On iTerm2 the source JPEG rides NATIVELY (no decode): the 1337
+ * payload is the source bytes verbatim. */
+static void test_integration_iterm2_carries_jpeg_source(void)
+{
+    IH *h = ih_new_prof(0, 1);
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_JPEG_REAL_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_flush(h);
+
+    const char *out = ih_read(h);
+    ASSERT_TRUE(strstr(out, "1337;File=inline=1") != NULL);
+    ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) != NULL); /* the SOURCE */
+    ASSERT_TRUE(strstr(out, "\x1b_G") == NULL);
 
     ih_free(h);
 }
@@ -1157,6 +1248,8 @@ int main(void)
     RUN_TEST(test_bytes_data_url);
     RUN_TEST(test_bytes_file_probe);
     RUN_TEST(test_integration_kitty_commits_apc);
+    RUN_TEST(test_integration_kitty_transcodes_jpeg);
+    RUN_TEST(test_integration_iterm2_carries_jpeg_source);
     RUN_TEST(test_integration_dumb_terminal_gets_marker);
     RUN_TEST(test_integration_remote_url_marker);
     RUN_TEST(test_integration_marker_size_is_the_source_size);
