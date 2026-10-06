@@ -1000,13 +1000,17 @@ static void probe_write_file(const char *name, const void *bytes, size_t len)
 
 static void test_bytes_file_probe(void)
 {
-    char png[128], jpg[128], gif[128], webp[128], far[128], nosof[128];
+    /* NOT named `far': MinGW's legacy windows.h spells that an empty
+     * macro (the old 16-bit near/far pointer qualifiers), so
+     * `unlink(far)' compiles to `unlink()' and the Windows job fails
+     * on a name, not on a bug. */
+    char png[128], jpg[128], gif[128], webp[128], farjpg[128], nosof[128];
     char txt[128], empty[128];
     snprintf(png, sizeof(png), "nm_probe_%ld.png", (long)getpid());
     snprintf(jpg, sizeof(jpg), "nm_probe_%ld.jpg", (long)getpid());
     snprintf(gif, sizeof(gif), "nm_probe_%ld.gif", (long)getpid());
     snprintf(webp, sizeof(webp), "nm_probe_%ld.webp", (long)getpid());
-    snprintf(far, sizeof(far), "nm_probe_%ld_far.jpg", (long)getpid());
+    snprintf(farjpg, sizeof(farjpg), "nm_probe_%ld_far.jpg", (long)getpid());
     snprintf(nosof, sizeof(nosof), "nm_probe_%ld_nosof.jpg", (long)getpid());
     snprintf(txt, sizeof(txt), "nm_probe_%ld.txt", (long)getpid());
     snprintf(empty, sizeof(empty), "nm_probe_%ld.empty", (long)getpid());
@@ -1096,15 +1100,15 @@ static void test_bytes_file_probe(void)
     unsigned char far_buf[128];
     size_t far_len = make_jpeg_far(far_buf, sizeof(far_buf));
     ASSERT_TRUE(far_len > 64);
-    probe_write_file(far, far_buf, far_len);
+    probe_write_file(farjpg, far_buf, far_len);
 
-    ASSERT_EQ(nm_image_file_probe(far, 64, &p), NM_IMAGE_ERR_OVERSIZE);
+    ASSERT_EQ(nm_image_file_probe(farjpg, 64, &p), NM_IMAGE_ERR_OVERSIZE);
     ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
     ASSERT_EQ(p.w, 0); /* not in the head we read */
     ASSERT_EQ(p.h, 0);
     nm_image_probe_free(&p);
 
-    ASSERT_EQ(nm_image_file_probe(far, NM_IMAGE_MAX_WIRE_BYTES, &p),
+    ASSERT_EQ(nm_image_file_probe(farjpg, NM_IMAGE_MAX_WIRE_BYTES, &p),
               NM_IMAGE_OK);
     ASSERT_EQ(p.kind, NM_IMAGE_KIND_JPEG);
     ASSERT_EQ(p.w, 64);
@@ -1124,7 +1128,7 @@ static void test_bytes_file_probe(void)
     unlink(jpg);
     unlink(gif);
     unlink(webp);
-    unlink(far);
+    unlink(farjpg);
     unlink(nosof);
     unlink(txt);
     unlink(empty);
