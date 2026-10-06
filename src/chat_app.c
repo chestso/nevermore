@@ -1536,7 +1536,8 @@ static void print_help(NmChatApp *app)
     sys_text(app, "commands:\n"
                   "  /help              this list\n"
                   "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
-                  "  /model @vision     pick among vision models (@img for image-gen)\n"
+                  "  /model @vision     pick among vision models (@img = image-gen,\n"
+                  "                     @tool = tool use)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
                   "  /config            every setting, its value + source\n"
@@ -1714,10 +1715,11 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
 }
 
 /* Capability query bits for the model picker (`/model @vision`,
- * `/model @img`): a catalog-side filter, distinct from the popup's
- * text filter over ids. */
+ * `/model @img`, `/model @tool`): a catalog-side filter, distinct from
+ * the popup's text filter over ids. */
 #define NM_CAP_VISION 1u
 #define NM_CAP_IMAGE  2u
+#define NM_CAP_TOOL   4u
 
 /* Parse the text after a picker `@` (the capability token). Known
  * spellings map to a bit; 0 when unknown. */
@@ -1728,6 +1730,8 @@ static unsigned capability_token(const char *tok)
     if (strcmp(tok, "img") == 0 || strcmp(tok, "image") == 0 ||
         strcmp(tok, "imagegen") == 0 || strcmp(tok, "image_gen") == 0)
         return NM_CAP_IMAGE;
+    if (strcmp(tok, "tool") == 0 || strcmp(tok, "tools") == 0)
+        return NM_CAP_TOOL;
     return 0;
 }
 
@@ -1742,12 +1746,16 @@ static void meta_append(char *buf, size_t cap, size_t *off, const char *s)
 }
 
 /* Right-column metadata for a model-picker row: the context window
- * (compact), then the capability badges — `ctx 👀 🖼`. Every field is
- * a POSITIVE claim only: vision/image_gen are 0 when the catalog says
- * nothing (an ids-only live catalog, an uncurated model) and that is
- * NOT "known absent", so no badge is shown for either; an unknown
- * context window (-1) is omitted too. Text only — the popup styles
- * the whole column (nm_color_popup_meta). */
+ * (compact), then the capability badges — `ctx 👀 🖼 🔧`. Every field
+ * is a POSITIVE claim only: vision/image_gen are 0 when the catalog
+ * says nothing (an ids-only live catalog, an uncurated model) and that
+ * is NOT "known absent", so no badge is shown for either; an unknown
+ * context window (-1) is omitted too. Tools is tri-state (the
+ * actionable wire truth the agent gates on — see NmModel), but the
+ * badge reads the same way: 🔧 shows only for the positive claim
+ * (tools == 1), never for 0 ("the catalog says nothing") nor -1 ("a
+ * definite no" — a badge must never assert the negative). Text only —
+ * the popup styles the whole column (nm_color_popup_meta). */
 static void format_model_meta(const NmModel *m, char *buf, size_t cap)
 {
     if (cap == 0)
@@ -1759,16 +1767,21 @@ static void format_model_meta(const NmModel *m, char *buf, size_t cap)
         format_tokens(m->context_length, ctx, sizeof(ctx));
         meta_append(buf, cap, &off, ctx);
     }
-    /* The VS16 after U+1F5BC is load-bearing: an EAW-Neutral base (this
-     * one, like the tool badges' U+1F5A5/U+270F) sizes one cell in the
-     * width table while the terminal presents the emoji two cells
-     * wide, and the selector is what makes the two agree — without it
-     * the right-aligned column is a cell off on every image_gen row.
-     * 👀 (U+1F440) is Wide by itself and needs nothing. */
+    /* Badge width: 👀 (U+1F440) and 🔧 (U+1F527) are EAW=Wide, so
+     * boba's table already measures them two cells and the terminal
+     * agrees — no selector needed. 🖼️ (U+1F5BC) is EAW=Neutral: bare,
+     * the table sizes it ONE cell while the terminal presents the
+     * emoji two, so its VS16 is LOAD-BEARING (without it the
+     * right-aligned column is a cell off on every image_gen row,
+     * exactly like the tool badges' U+1F5A5/U+270F). 🔧️ carries the
+     * same selector as 🖼️ — belt and braces for a terminal whose text
+     * default wins (the table is already right either way). */
     if (m->vision)
         meta_append(buf, cap, &off, "👀");
     if (m->image_gen)
         meta_append(buf, cap, &off, "🖼️");
+    if (m->tools == 1)
+        meta_append(buf, cap, &off, "🔧️");
 }
 
 /* Open the models popup over the catalog source, pre-filtered by
@@ -1814,6 +1827,12 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
             continue;
         if ((cap & NM_CAP_IMAGE) && !m->image_gen)
             continue;
+        /* The tool filter matches the 🔧 badge's own claim (tools == 1),
+         * so the view, the badge and the wire gate agree: 0 ("says
+         * nothing") and -1 ("listed without tools") both fail it —
+         * a query answers with models that CLAIM the capability. */
+        if ((cap & NM_CAP_TOOL) && m->tools != 1)
+            continue;
         rows[count] = m->id;
         format_model_meta(m, metas[count], sizeof(metas[count]));
         merows[count] = metas[count];
@@ -1834,6 +1853,8 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
             sys_line(app, "no vision models in the catalog");
         else if (cap == NM_CAP_IMAGE)
             sys_line(app, "no image-generating models in the catalog");
+        else if (cap == NM_CAP_TOOL)
+            sys_line(app, "no tool-capable models in the catalog");
         else
             sys_line(app, "no models match '%s'", query ? query : "");
         return;
@@ -2394,14 +2415,14 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             open_models_popup(app, NULL, 0);
             return;
         }
-        /* Capability query: "/model @vision" / "/model @img" opens the
-         * picker filtered to models that CLAIM the capability (the
-         * same claim the row badges show). */
+        /* Capability query: "/model @vision" / "/model @img" /
+         * "/model @tool" opens the picker filtered to models that CLAIM
+         * the capability (the same claim the row badges show). */
         if (arg[0] == '@') {
             unsigned cap = capability_token(arg + 1);
             if (!cap) {
                 sys_line(app, NM_SGR_ERROR "model: unknown capability '%s' "
-                                           "— one of @vision, @img" NM_SGR_RESET,
+                                           "— one of @vision, @img, @tool" NM_SGR_RESET,
                          arg);
                 return;
             }

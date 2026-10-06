@@ -5252,8 +5252,8 @@ static void test_save_without_images(void)
  * compose yields the wire id unchanged. */
 static void test_model_picker_shows_capability_metadata(void)
 {
-    /* openrouter's static catalog: a vision model (1050000 → 1M ctx)
-     * and an image_gen model. */
+    /* openrouter's static catalog: a vision model (1050000 → 1M ctx),
+     * an image_gen model, and a tool-capable one (tools == 1). */
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
@@ -5264,6 +5264,10 @@ static void test_model_picker_shows_capability_metadata(void)
     /* imagegen badge, VS16 included: the selector is what the width
      * table reads as two cells (see format_model_meta). */
     ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
+    /* tool badge (tools == 1, VS16 included): only the model whose
+     * catalog claims tool use carries it — the vision model (tools ==
+     * 0, "says nothing") and the image model (tools == -1) do not. */
+    ASSERT_TRUE(strstr(frame, "🔧️") != NULL);
     ASSERT_TRUE(strstr(frame, "1M") != NULL); /* context window */
 
     /* Down to the image row, Enter composes the BARE id (the meta is a
@@ -5297,6 +5301,51 @@ static void test_model_picker_capability_query_img(void)
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
                   "/model google/gemini-3.1-flash-lite-image");
+
+    harness_free(h);
+}
+
+/* "/model @tool" opens the picker filtered to the models whose catalog
+ * CLAIMS tool use (tools == 1) — the same claim the 🔧 badge shows. The
+ * vision model (tools == 0, "the catalog says nothing") and the image
+ * generator (tools == -1, "listed without tools") both drop out, and
+ * neither is a "no tools" answer either (a query answers with claims).
+ * Alias `@tools` maps to the same bit. */
+static void test_model_picker_capability_query_tool(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @tool");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
+    ASSERT_TRUE(strstr(frame, "🔧️") != NULL);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+
+    /* The sole match: Enter composes the bare id (no meta in the value). */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model meta-llama/llama-3.3-70b-instruct");
+
+    harness_free(h);
+}
+
+/* The `@tools` alias resolves to the tool filter; a catalog with no
+ * tool claim at all answers with the empty-catalog note, never a
+ * silent empty modal. */
+static void test_model_picker_capability_query_tools_alias_and_empty(void)
+{
+    /* ollama's static catalog claims no tools (all 0 = "says
+     * nothing"), so the tool filter finds nothing. */
+    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @tools");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "no tool-capable models") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
 
     harness_free(h);
 }
@@ -5596,6 +5645,8 @@ int main(void)
     RUN_TEST(test_save_without_images);
     RUN_TEST(test_model_picker_shows_capability_metadata);
     RUN_TEST(test_model_picker_capability_query_img);
+    RUN_TEST(test_model_picker_capability_query_tool);
+    RUN_TEST(test_model_picker_capability_query_tools_alias_and_empty);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
     RUN_TEST(test_model_picker_sees_past_the_old_row_cap);
