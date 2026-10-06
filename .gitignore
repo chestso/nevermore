@@ -30,3 +30,9 @@ compile_commands.json
 __pycache__/
 AGENTS.md
 *~
+
+# Auto-fetched third-party headers (scripts/fetch-stb.sh, pinned
+# commit). Never committed — see configure.ac and ../coffer, which
+# vendors stb the same way.
+third_party/stb/stb_image.h
+third_party/stb/stb_image_write.h

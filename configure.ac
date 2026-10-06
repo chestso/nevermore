@@ -163,11 +163,29 @@ if test "x$host_windows" = "xyes"; then
 fi
 AM_CONDITIONAL([HAVE_WINDRES], [test "x$host_windows" = "xyes" && test "x$WINDRES" != "xno"])
 
+dnl ------------------------------------------------------------------
+dnl stb — single-file, public-domain image codecs: stb_image.h (decode
+dnl to RGBA) and stb_image_write.h (encode RGBA to PNG). Vendored
+dnl unmodified and auto-fetched at configure time by
+dnl scripts/fetch-stb.sh (pinned commit), exactly as ../coffer does it:
+dnl the two headers are gitignored, not committed. Used by
+dnl src/nm_image_codec.c for the kitty-vs-JPEG transcode.
+dnl ------------------------------------------------------------------
+STB_DIR="$srcdir/third_party/stb"
+STB_HEADERS="$STB_DIR/stb_image.h $STB_DIR/stb_image_write.h"
+stb_missing=no
+for h in $STB_HEADERS; do
+  test -f "$h" || stb_missing=yes
+done
+AS_IF([test "x$stb_missing" = "xyes"],
+  [AC_MSG_NOTICE([stb headers missing, fetching via scripts/fetch-stb.sh])
+   AS_IF([sh "$srcdir/scripts/fetch-stb.sh" "$STB_DIR"],
+     [AC_MSG_NOTICE([stb headers fetched successfully])],
+     [AC_MSG_ERROR([Failed to fetch stb headers. Run scripts/fetch-stb.sh manually or check network access.])])])
+
 # Record the C compiler version for --version output
 BUILD_CC_VERSION=$($CC --version 2>/dev/null | head -1 || echo "$CC")
-AC_DEFINE_UNQUOTED([BUILD_CC], ["$BUILD_CC_VERSION"], [C compiler version string])
-
-AC_TYPE_SIZE_T
+AC_DEFINE_UNQUOTED([BUILD_CC], ["$BUILD_CC_VERSION"], [C compiler version string])AC_TYPE_SIZE_T
 
 AC_CONFIG_FILES([
     Makefile

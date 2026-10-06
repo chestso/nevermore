@@ -14,7 +14,9 @@ EXTRA_DIST = \
     scripts \
     tools \
     docs \
-    data
+    data \
+    third_party/stb/stb_image.h \
+    third_party/stb/stb_image_write.h
 
 # dist hygiene: tools/ ships wholesale, so strip Python bytecode caches
 # (regenerated whenever the tools run in-tree; never part of the dist).

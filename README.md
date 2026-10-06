@@ -38,6 +38,13 @@ Or from the chestso monorepo root: `make nevermore`.
 Dependencies:
 
 - **boba** (required) — TUI runtime, textinput, styles
+- **stb** (required) — `stb_image.h` + `stb_image_write.h` (public
+  domain, single-file) decode/encode the image-transcode lane
+  (JPEG → PNG for kitty-graphics terminals). Not committed:
+  `configure` auto-fetches them into `third_party/stb/` via
+  `scripts/fetch-stb.sh` (pinned commit, needs network on the first
+  configure — same as the `coffer` sibling). See
+  `docs/VISION-PLAN.md`.
 - **TLS** (optional, per-OS, never libcurl) — Schannel on Windows,
   Secure Transport on macOS, mbedTLS (≥ 2.28) or OpenSSL on Linux;
   `--with-tls=none` builds a plain-HTTP-only client (fine against a
