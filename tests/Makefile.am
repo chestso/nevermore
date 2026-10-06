@@ -24,10 +24,12 @@ check_PROGRAMS = \
     test_markdown \
     test_highlight \
     test_image \
+    test_image_codec \
     test_chat_app
 
 AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
+    -I$(top_srcdir)/third_party/stb \
     -I$(top_builddir) \
     $(BOBA_CFLAGS)
 
@@ -288,7 +290,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
     ../src/nm_markdown_render.c ../src/nm_highlight.c ../src/nm_image.c \
-    ../src/nm_image_bytes.c ../src/nm_size.c
+    ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
 
@@ -297,10 +299,18 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # TuiRowSink/transport path) and the markdown grammar (the image line
 # is classified + parsed by nm_markdown).
 test_image_SOURCES = test_image.c ../src/nm_image.c \
-    ../src/nm_image_bytes.c ../src/nm_size.c \
+    ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
+
+# Image codec: the vendored stb decode/encode wrapper (src/nm_image_codec.c).
+# Pure C, NO boba — it links the codec + the byte half only, which is
+# the point (the codec must be usable without boba, exactly as
+# nm_image_bytes is for the session/agent tests).
+test_image_codec_SOURCES = test_image_codec.c ../src/nm_image_codec.c \
+    ../src/nm_image_bytes.c ../src/nm_size.c
+test_image_codec_CFLAGS = $(TEST_CFLAGS)
 
 # Fence token highlighter: pure C (no boba, no I/O) — the resumable
 # per-line tokenizer behind the labeled-fence body styling (IR step
@@ -317,7 +327,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
-    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

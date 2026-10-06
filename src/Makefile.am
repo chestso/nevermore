@@ -43,6 +43,7 @@ EXTRA_DIST = \
     nm_highlight.h \
     nm_image.h \
     nm_image_bytes.h \
+    nm_image_codec.h \
     nm_markdown.h \
     nm_markdown_render.h \
     nm_process.h \
@@ -143,6 +144,8 @@ nevermore_SOURCES = \
     nm_image.h \
     nm_image_bytes.h \
     nm_image_bytes.c \
+    nm_image_codec.h \
+    nm_image_codec.c \
     nm_image.c \
     nm_highlight.h \
     nm_highlight.c \
@@ -159,6 +162,7 @@ nevermore_SOURCES = \
 nevermore_CPPFLAGS = \
     -I$(top_builddir) \
     -I$(top_srcdir)/src \
+    -I$(top_srcdir)/third_party/stb \
     -DNM_WIRE_HAS_VERSION_HEADER \
     $(BOBA_CFLAGS) \
     $(OPENSSL_CFLAGS) \
