@@ -57,7 +57,9 @@ typedef struct NmImage
     size_t data_url_len;
     char *part_json; /* the image_url content part, pre-serialized */
     size_t part_json_len;
-    char alt[64]; /* the file's base name (marker/alt text) */
+    char alt[64]; /* the display name: the file's base name for an
+                   * attached image, "image" for a received one (a
+                   * generated picture has no file) */
     int format;   /* NmImageFormat (nm_image_bytes.h) */
     int w, h;     /* source pixels (0 = unknown) */
     size_t bytes; /* decoded byte count (the attach line) */
@@ -156,10 +158,14 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
  * marker facts (container, dims, decoded size); the decoded bytes are
  * not kept. Refusals: not a base64 `data:` URL ("not a base64 data
  * URL"), an undecodable payload ("undecodable payload"), OOM ("no
- * memory"). Returns the new index, or -1 with `reason` filled. */
+ * memory"). Returns the new index, or -1 with `reason` filled.
+ *
+ * A received image has no name of its own, so the store gives it the
+ * noun ("image") and the ID returned here — the CHAT-scoped index —
+ * is the handle: the UI prints it as the block's caption and /save
+ * takes it. */
 long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
-                                 const char *alt, char *reason,
-                                 size_t reason_cap);
+                                 char *reason, size_t reason_cap);
 
 /* The store: a borrowed image by index (NULL when out of range), and
  * how many are attached. */

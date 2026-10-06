@@ -216,12 +216,15 @@ struct NmChatApp
     size_t n_pending;
     size_t pending_cap;
 
-    /* Received images (IMAGEGEN): a chat-scoped counter for the
-     * display-only alt of a generated image's block ("image 1",
-     * "image 2", …) — deterministic, and never re-sent (the store's
-     * own alt is round-relative; the transcript's numbering is this
-     * one). Reset with the session on a provider switch. */
-    size_t n_recv_images;
+    /* Received images (IMAGEGEN) are identified by their session-store
+     * index + 1 — a CHAT-scoped number, printed as the block's caption
+     * ("image #3") and taken by /save. It needs no counter here: the
+     * store is append-only for the chat's life and is wiped with the
+     * transcript on a provider switch, so the id a caption shows is
+     * the id /save resolves. This flag is the one-time /save
+     * discoverability hint (the first image a chat receives names the
+     * command once, and never again). */
+    int save_hinted;
 };
 
 /* The singleton (see file header). */
@@ -240,6 +243,7 @@ static int terminal_renders(const NmChatApp *app, const NmImage *img);
 static void post_image_block(NmChatApp *app, const NmImage *img);
 static void post_image_line(NmChatApp *app, const char *alt,
                             const char *data_url, size_t url_len);
+static void show_received_image(NmChatApp *app, const NmImage *img, size_t id);
 static int model_vision(const NmChatApp *app, const NmProvider *p);
 
 /* ---------------------------------------------------------------- */
@@ -444,8 +448,10 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
         return;
 
     /* A generated image (IMAGEGEN): the agent has already attached the
-     * received data URL to the session store verbatim; here it becomes
-     * the SAME explicit image unit /img posts — one pipeline, and the
+     * received data URL to the session store VERBATIM — the store's
+     * last slot IS this image, and its index + 1 is the CHAT-scoped id
+     * the caption prints and /save takes. One pipeline from here on:
+     * the block is the same explicit image unit /img posts, and the
      * commit pass's profile ladder renders it or degrades it to the
      * marker. No "if supported" gate: there is no second showing to
      * dedupe against (unlike the attach), so the marker IS the record
@@ -454,10 +460,12 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
      * opens its own block instead of continuing the open paragraph. */
     if (channel == NM_STREAM_IMAGE) {
         close_reasoning_phase(app); /* phase-sequential, like content */
-        app->n_recv_images++;
-        char alt[32];
-        snprintf(alt, sizeof(alt), "image %zu", app->n_recv_images);
-        post_image_line(app, alt, text, strlen(text));
+        size_t n = nm_agent_image_count(app->agent);
+        const NmImage *img = n ? nm_agent_image(app->agent, n - 1) : NULL;
+        if (img)
+            show_received_image(app, img, n); /* n == its id (index + 1) */
+        else                                  /* the store did not take it: the raw block, no id */
+            post_image_line(app, "image", text, strlen(text));
         tui_runtime_wakeup(app->rt);
         return;
     }
@@ -827,6 +835,34 @@ static int display_attached_image(NmChatApp *app, const NmImage *img)
     post_image_block(app, img);
     emit_separator(app);
     return 1;
+}
+
+/* One model-generated image reaches the transcript: its caption first,
+ * then the block through the one image pipeline. The caption is what
+ * makes the picture ADDRESSABLE — a rendered image carries no text of
+ * its own. `id` is the image's CHAT-scoped number (its session-store
+ * index + 1): appended in the order the pictures arrived, and exactly
+ * what /save takes. Where the terminal cannot draw the image, the
+ * block's own marker already names the container, the size and the
+ * reason, so the caption adds only the id; where it can, the caption
+ * IS that record (there is no marker to read). The first image of a
+ * chat spells the command out once; later ones just carry the id. */
+static void show_received_image(NmChatApp *app, const NmImage *img, size_t id)
+{
+    if (terminal_renders(app, img)) {
+        char desc[NM_IMAGE_DESC_MAX];
+        nm_image_describe(nm_image_format_name(img->format), img->w, img->h,
+                          img->bytes, desc, sizeof(desc));
+        sys_line(app, "image #%zu — %s", id, desc);
+    } else {
+        sys_line(app, "image #%zu", id);
+    }
+    post_image_block(app, img);
+    if (!app->save_hinted) {
+        sys_line(app, "note: /save writes an image to a file — "
+                      "/save list names them all");
+        app->save_hinted = 1;
+    }
 }
 
 /* /img: attach a file, list the pending set, or drop one. */
@@ -1511,6 +1547,9 @@ static void print_help(NmChatApp *app)
                   "                     (shown here when the terminal can)\n"
                   "  /img               list pending attachments\n"
                   "  /img -<n>          drop pending attachment n\n"
+                  "  /save [n] [path]   write image n (default: the newest)\n"
+                  "                     to a file (default: nevermore-image-<n>)\n"
+                  "  /save list         every image in this conversation\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
@@ -1859,7 +1898,7 @@ static int switch_provider(NmChatApp *app, const char *name)
      * state reset with the transcript. */
     size_t dropped = app->n_pending;
     pending_clear(app);
-    app->n_recv_images = 0; /* image numbering is chat-scoped */
+    app->save_hinted = 0; /* the hint is chat-scoped, like the ids */
     send_msg(app, tui_msg_transcript_clear());
     hold_discard(app, NM_STREAM_ID_CONTENT);
     hold_discard(app, NM_STREAM_ID_REASONING);
@@ -2227,6 +2266,107 @@ static void kill_job_command(NmChatApp *app, const char *arg)
         sys_line(app, "closed job %d (%s, already exited)", id, cmd);
 }
 
+/* ---------------------------------------------------------------- */
+/* /save — persistence for the image that has no file of its own     */
+/* ---------------------------------------------------------------- */
+
+/* A received (model-generated) image exists only in the session: the
+ * providers have no upload/reference endpoint and nothing ever wrote
+ * it to disk, so keeping one is a command, not the model's errand. The
+ * number both commands take is the image's session-store index + 1 —
+ * the same one the received-image captions print — so a long chat is
+ * read back by scrolling to the picture and reading its caption, or by
+ * asking for the list. */
+
+/* Every image in the conversation, in the order they arrived. */
+static void save_list(NmChatApp *app)
+{
+    size_t n = nm_agent_image_count(app->agent);
+    if (n == 0) {
+        sys_line(app, "images: none in this conversation yet");
+        return;
+    }
+    sys_line(app, "images: %zu in this conversation — /save <n> writes one "
+                  "to a file here",
+             n);
+    for (size_t i = 0; i < n; i++) {
+        const NmImage *img = nm_agent_image(app->agent, i);
+        if (!img)
+            continue;
+        char desc[NM_IMAGE_DESC_MAX];
+        nm_image_describe(nm_image_format_name(img->format), img->w, img->h,
+                          img->bytes, desc, sizeof(desc));
+        sys_line(app, "  #%zu  %s — %s", i + 1, img->alt, desc);
+    }
+}
+
+/* /save [n] [path]: write an image's bytes to a file EXACTLY as the
+ * conversation holds them — a re-encode would hand back a different
+ * file than the one the model produced (and the one the wire replays).
+ * Bare, it writes the newest image; with <n>, the image the listing
+ * numbered. The default name is deterministic —
+ * nevermore-image-<n>.<ext>, the shape ask mode drops (a same-named
+ * file is overwritten, as there); an explicit path is taken verbatim,
+ * spaces included, trailing blanks trimmed (the /img rule). */
+static void save_command(NmChatApp *app, const char *arg)
+{
+    const char *p = arg;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (strncmp(p, "list", 4) == 0 &&
+        (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
+        save_list(app);
+        return;
+    }
+    size_t count = nm_agent_image_count(app->agent);
+    if (count == 0) {
+        sys_line(app, NM_SGR_ERROR
+                 "save: no images in this conversation" NM_SGR_RESET);
+        return;
+    }
+    size_t id = count; /* bare /save: the newest image */
+    if (*p >= '0' && *p <= '9') {
+        size_t v = 0;
+        const char *q = p;
+        while (*q >= '0' && *q <= '9' && v <= 1000000) {
+            v = v * 10 + (size_t)(*q - '0');
+            q++;
+        }
+        if (v < 1 || v > count) {
+            sys_line(app, NM_SGR_ERROR "save: '%.*s' is not an image in this chat (1..%zu; "
+                                       "/save list names them)" NM_SGR_RESET,
+                     (int)(q - p), p, count);
+            return;
+        }
+        id = v;
+        p = q;
+        while (*p == ' ' || *p == '\t')
+            p++;
+    }
+    const NmImage *img = nm_agent_image(app->agent, id - 1);
+    if (!img) {
+        sys_line(app, NM_SGR_ERROR "save: no image #%zu" NM_SGR_RESET, id);
+        return;
+    }
+    char path[1024];
+    if (*p) {
+        snprintf(path, sizeof(path), "%s", p);
+        size_t len = strlen(path);
+        while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t'))
+            path[--len] = '\0';
+    } else {
+        snprintf(path, sizeof(path), "nevermore-image-%zu.%s", id,
+                 nm_image_format_ext(img->format));
+    }
+    char err[48];
+    if (nm_image_write_data_url(img->data_url, img->data_url_len, path, err,
+                                sizeof(err)) < 0) {
+        sys_line(app, NM_SGR_ERROR "save: %s — %s" NM_SGR_RESET, path, err);
+        return;
+    }
+    sys_line(app, "saved image #%zu → %s", id, path);
+}
+
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
 {
     const char *rest = text + 1; /* past '/' */
@@ -2395,6 +2535,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         img_command(app, arg);
         return;
     }
+    if (NAME_IS("save")) {
+        save_command(app, arg);
+        return;
+    }
     if (NAME_IS("ps")) {
         print_jobs(app);
         return;
@@ -2483,8 +2627,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/context", "/img", "/ps",
-        "/kill", "/quit", NULL
+        "/help", "/model", "/provider", "/config", "/context", "/img", "/save",
+        "/ps", "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

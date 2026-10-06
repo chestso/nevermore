@@ -335,8 +335,7 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
 }
 
 long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
-                                 const char *alt, char *reason,
-                                 size_t reason_cap)
+                                 char *reason, size_t reason_cap)
 {
     attach_reason(reason, reason_cap, "");
     if (!s || !url || len == 0) {
@@ -406,7 +405,12 @@ long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
     img->w = w;
     img->h = h;
     img->bytes = (size_t)n;
-    snprintf(img->alt, sizeof(img->alt), "%s", alt ? alt : "image");
+    /* A received image has no name of its own (a generated picture did
+     * not come from a file): the store calls it what it is, and the
+     * handle a person uses is the CHAT-scoped index this call returns,
+     * which the UI prints as the block's caption (`image #<id>`) and
+     * /save takes. */
+    memcpy(img->alt, "image", sizeof("image"));
     return (long)(s->n_images - 1);
 }
 

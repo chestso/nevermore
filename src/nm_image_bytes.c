@@ -382,6 +382,68 @@ void nm_image_describe(const char *name, int w, int h, size_t bytes, char *out,
         snprintf(out, cap, "%s, %s", nm, size);
 }
 
+const char *nm_image_format_ext(int format)
+{
+    switch (format) {
+    case NM_IMAGE_FMT_PNG:
+        return "png";
+    case NM_IMAGE_FMT_JPEG:
+        return "jpg";
+    case NM_IMAGE_FMT_GIF:
+        return "gif";
+    default:
+        return "img";
+    }
+}
+
+long nm_image_write_data_url(const char *url, size_t len, const char *path,
+                             char *err, size_t errcap)
+{
+    if (err && errcap)
+        err[0] = '\0';
+    if (!url || !path)
+        return -1;
+    NmImageFormat fmt;
+    const char *b64;
+    size_t b64_len;
+    if (nm_image_data_url_split(url, len, &fmt, &b64, &b64_len) != 0) {
+        if (err && errcap)
+            snprintf(err, errcap, "not a base64 data URL");
+        return -1;
+    }
+    /* The overflow guard is the decoder's own contract: a well-formed
+     * payload needs at most 3 bytes per 4 base64 characters. */
+    unsigned char *bytes = malloc(b64_len / 4 * 3 + 1);
+    if (!bytes) {
+        if (err && errcap)
+            snprintf(err, errcap, "no memory");
+        return -1;
+    }
+    long n = nm_image_b64_decode(b64, b64_len, bytes, b64_len / 4 * 3 + 1);
+    if (n < 0) {
+        free(bytes);
+        if (err && errcap)
+            snprintf(err, errcap, "undecodable payload");
+        return -1;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) {
+        free(bytes);
+        if (err && errcap)
+            snprintf(err, errcap, "could not write");
+        return -1;
+    }
+    size_t wrote = fwrite(bytes, 1, (size_t)n, f);
+    int bad = (wrote != (size_t)n) || (fclose(f) != 0);
+    free(bytes);
+    if (bad) {
+        if (err && errcap)
+            snprintf(err, errcap, "could not write");
+        return -1;
+    }
+    return n;
+}
+
 size_t nm_image_attachable_list(char *out, size_t cap)
 {
     if (!out || cap == 0)

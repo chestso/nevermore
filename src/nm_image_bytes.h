@@ -146,6 +146,22 @@ int nm_image_data_url_split(const char *url, size_t len, NmImageFormat *fmt,
 void nm_image_describe(const char *name, int w, int h, size_t bytes,
                        char *out, size_t cap);
 
+/* The canonical file extension for a wire format — "png"/"jpg"/"gif",
+ * and "img" for a container the wire does not name. The ONE spelling
+ * of the name a saved image lands under: ask mode's `-i` drop and the
+ * chat's /save both stand on it. */
+const char *nm_image_format_ext(int format);
+
+/* Write a base64 data URL's payload to `path`, byte-exact — the bytes
+ * AS THEY ARRIVED, never a re-encode (a re-encode would hand the user
+ * a different file than the conversation holds, and re-mint the bytes
+ * the replay prefix keys on). The caller owns the naming and nothing
+ * else. Returns the number of bytes written, or -1 with a short reason
+ * in `err` ("not a base64 data URL", "undecodable payload",
+ * "no memory", "could not write"). */
+long nm_image_write_data_url(const char *url, size_t len, const char *path,
+                             char *err, size_t errcap);
+
 /* The attachable containers as prose — "PNG/JPEG/GIF" — derived from
  * the wire's own answer (a format with a MIME type is one the data URL
  * builder can carry), so a refusal line that names the set cannot drift

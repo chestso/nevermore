@@ -1225,6 +1225,56 @@ static void test_bytes_file_probe(void)
     unlink(empty);
 }
 
+/* The saved-image extension and the one writer: the bytes that land on
+ * disk are the payload's own, byte for byte (never a re-encode), and
+ * nothing that is not a base64 data URL names a file at all. */
+static void test_bytes_ext_and_write(void)
+{
+    ASSERT_STR_EQ(nm_image_format_ext(NM_IMAGE_FMT_PNG), "png");
+    ASSERT_STR_EQ(nm_image_format_ext(NM_IMAGE_FMT_JPEG), "jpg");
+    ASSERT_STR_EQ(nm_image_format_ext(NM_IMAGE_FMT_GIF), "gif");
+    ASSERT_STR_EQ(nm_image_format_ext(NM_IMAGE_FMT_UNKNOWN), "img");
+
+    size_t url_len = 0;
+    char *url = nm_image_data_url(NM_IMAGE_FMT_PNG, FIX_PNG, sizeof(FIX_PNG),
+                                  &url_len);
+    ASSERT_NOT_NULL(url);
+    char path[128];
+    snprintf(path, sizeof(path), "nm_write_%ld.png", (long)getpid());
+    char err[48];
+    long n = nm_image_write_data_url(url, url_len, path, err, sizeof(err));
+    ASSERT_EQ(n, (long)sizeof(FIX_PNG));
+    ASSERT_STR_EQ(err, "");
+
+    unsigned char back[128];
+    FILE *f = fopen(path, "rb");
+    ASSERT_NOT_NULL(f);
+    size_t got = fread(back, 1, sizeof(back), f);
+    fclose(f);
+    ASSERT_EQ(got, sizeof(FIX_PNG));
+    ASSERT_TRUE(memcmp(back, FIX_PNG, sizeof(FIX_PNG)) == 0);
+    unlink(path);
+
+    /* Refusals, each naming its own reason — and none of them writes. */
+    const char *not_url = "https://x/y.png";
+    ASSERT_EQ(nm_image_write_data_url(not_url, strlen(not_url), path, err,
+                                      sizeof(err)),
+              -1);
+    ASSERT_STR_EQ(err, "not a base64 data URL");
+    const char *bad = "data:image/png;base64,!!!";
+    ASSERT_EQ(nm_image_write_data_url(bad, strlen(bad), path, err,
+                                      sizeof(err)),
+              -1);
+    ASSERT_STR_EQ(err, "undecodable payload");
+    ASSERT_EQ(nm_image_write_data_url(url, url_len, "/nonexistent-dir/nm_x.png",
+                                      err, sizeof(err)),
+              -1);
+    ASSERT_STR_EQ(err, "could not write");
+    FILE *absent = fopen(path, "rb");
+    ASSERT_NULL(absent); /* the refused writes left nothing behind */
+    free(url);
+}
+
 /* ---------------------------------------------------------------- */
 /* main                                                              */
 /* ---------------------------------------------------------------- */
@@ -1247,6 +1297,7 @@ int main(void)
     RUN_TEST(test_bytes_b64_roundtrip);
     RUN_TEST(test_bytes_data_url);
     RUN_TEST(test_bytes_file_probe);
+    RUN_TEST(test_bytes_ext_and_write);
     RUN_TEST(test_integration_kitty_commits_apc);
     RUN_TEST(test_integration_kitty_transcodes_jpeg);
     RUN_TEST(test_integration_iterm2_carries_jpeg_source);

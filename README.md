@@ -271,10 +271,29 @@ one and just ask: the model's image arrives as one stream event, is
 stored **verbatim** (the received bytes are the canonical part — a
 re-encode would change the replay prefix), and renders through the same
 pipeline as an attachment: the picture on a graphics terminal, the
-one-line marker (alt · format · dims · size) elsewhere. In ask mode
+one-line marker (alt · format · dims · size) elsewhere. Each received
+image prints a caption with its number (`image #3`) — a picture carries
+no text of its own, so that line is how it is named again. In ask mode
 there is no transcript, so the image is saved to a file —
 `nevermore-image-N.png` in the cwd, noted on stderr — and stdout stays
 clean.
+
+Keeping one is `/save`:
+
+```
+/save            # the newest image -> nevermore-image-<n>.<ext> here
+/save 3          # the image the caption called #3
+/save 3 ~/a.png  # ...where you say
+/save list       # every image in the conversation, with its number
+```
+
+The numbers are the chat's image order (attachments and generated
+images share it), and `/save` writes the conversation's own bytes —
+exactly what the wire replays, never a re-encode. This exists because
+the model cannot do it: an image-output model's catalog row usually
+lists no tool support, so the request carries no toolset at all, and
+"save this image" can only be answered with another picture. The
+command is the honest path; the caption is what makes it addressable.
 
 Editing is the next turn ("make it blue"): the assistant message
 replays with its images at message level — the providers' own shape,

@@ -136,13 +136,19 @@ static int ask_image_count;
 
 static void ask_save_image(const char *url)
 {
+    size_t url_len = strlen(url);
     NmImageFormat fmt;
     const char *b64;
     size_t b64_len;
-    if (nm_image_data_url_split(url, strlen(url), &fmt, &b64, &b64_len) != 0) {
+    if (nm_image_data_url_split(url, url_len, &fmt, &b64, &b64_len) != 0) {
         fprintf(stderr, "[image] not a base64 data URL — not saved\n");
         return;
     }
+    /* The extension is the BYTES' answer, not the mime's claim, and the
+     * name has to be chosen before the write — so the container and the
+     * dims come from one scratch decode here, and the shared writer
+     * decodes its own copy (a one-shot cost; /save has the facts
+     * already and pays nothing). */
     unsigned char *bytes = malloc(b64_len / 4 * 3 + 1);
     if (!bytes)
         return;
@@ -152,26 +158,18 @@ static void ask_save_image(const char *url)
         free(bytes);
         return;
     }
-    /* The extension is the BYTES' answer, not the mime's claim. */
     int w = 0, h = 0;
     NmImageKind kind = nm_image_sniff_kind(bytes, (size_t)n, &w, &h);
-    const char *ext = kind == NM_IMAGE_KIND_PNG    ? "png"
-                      : kind == NM_IMAGE_KIND_JPEG ? "jpg"
-                      : kind == NM_IMAGE_KIND_GIF  ? "gif"
-                                                   : "img";
+    free(bytes);
     ask_image_count++;
     char path[64];
     snprintf(path, sizeof(path), "nevermore-image-%d.%s", ask_image_count,
-             ext);
-    FILE *f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "[image] %s — could not write\n", path);
-        free(bytes);
+             nm_image_format_ext(nm_image_format_from_kind(kind)));
+    char err[48];
+    if (nm_image_write_data_url(url, url_len, path, err, sizeof(err)) < 0) {
+        fprintf(stderr, "[image] %s — %s\n", path, err);
         return;
     }
-    fwrite(bytes, 1, (size_t)n, f);
-    fclose(f);
-    free(bytes);
     char desc[NM_IMAGE_DESC_MAX];
     NmImageFormat wire_fmt = nm_image_format_from_kind(kind);
     nm_image_describe(nm_image_format_name(wire_fmt != NM_IMAGE_FMT_UNKNOWN

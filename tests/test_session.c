@@ -584,9 +584,8 @@ static void test_session_attach_image_url(void)
     char url[256];
     snprintf(url, sizeof(url), "data:image/png;base64,%s", T_PNG_B64);
     char reason[64];
-    long id =
-        nm_session_attach_image_url(s, url, strlen(url), "image 1", reason,
-                                    sizeof(reason));
+    long id = nm_session_attach_image_url(s, url, strlen(url), reason,
+                                          sizeof(reason));
     ASSERT_EQ(id, 0);
     ASSERT_STR_EQ(reason, "");
     const NmImage *img = nm_session_image(s, 0);
@@ -604,7 +603,10 @@ static void test_session_attach_image_url(void)
     ASSERT_EQ(img->w, 64);
     ASSERT_EQ(img->h, 32);
     ASSERT_EQ(img->bytes, sizeof(T_PNG));
-    ASSERT_STR_EQ(img->alt, "image 1");
+    /* A received image has no name of its own: the store calls it what
+     * it is, and the CHAT-scoped id (this call's return, + 1) is the
+     * handle /save takes. */
+    ASSERT_STR_EQ(img->alt, "image");
 
     /* A received image over the wire cap is RECORDED, not refused
      * (the cap bounds what we choose to send; this is the provider's
@@ -625,7 +627,7 @@ static void test_session_attach_image_url(void)
         memcpy(big + pre, p64, plen);
         free(p64);
     }
-    id = nm_session_attach_image_url(s, big, strlen(big), "image 2", reason,
+    id = nm_session_attach_image_url(s, big, strlen(big), reason,
                                      sizeof(reason));
     ASSERT_EQ(id, 1); /* no cap on the receive side */
     ASSERT_EQ(nm_session_image(s, 1)->w, 64);
@@ -633,13 +635,13 @@ static void test_session_attach_image_url(void)
 
     /* Refusals: a non-data URL, and a payload that does not decode. */
     ASSERT_EQ(nm_session_attach_image_url(s, "https://x/y.png",
-                                          strlen("https://x/y.png"), "x",
-                                          reason, sizeof(reason)),
+                                          strlen("https://x/y.png"), reason,
+                                          sizeof(reason)),
               -1);
     ASSERT_STR_EQ(reason, "not a base64 data URL");
     ASSERT_EQ(nm_session_attach_image_url(s, "data:image/png;base64,!!!",
                                           strlen("data:image/png;base64,!!!"),
-                                          "x", reason, sizeof(reason)),
+                                          reason, sizeof(reason)),
               -1);
     ASSERT_STR_EQ(reason, "undecodable payload");
     ASSERT_EQ(nm_session_image_count(s), 2u);
@@ -658,8 +660,8 @@ static void test_session_append_assistant_images(void)
     char url[256];
     snprintf(url, sizeof(url), "data:image/png;base64,%s", T_PNG_B64);
     char reason[64];
-    long id = nm_session_attach_image_url(s, url, strlen(url), "image 1",
-                                          reason, sizeof(reason));
+    long id = nm_session_attach_image_url(s, url, strlen(url), reason,
+                                          sizeof(reason));
     ASSERT_EQ(id, 0);
 
     size_t ids[1] = { (size_t)id };

@@ -1638,6 +1638,8 @@ static void test_help_command_lists_commands(void)
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
     ASSERT_TRUE(strstr(out, "/config") != NULL);
     ASSERT_TRUE(strstr(out, "/context") != NULL);
+    ASSERT_TRUE(strstr(out, "/img") != NULL);
+    ASSERT_TRUE(strstr(out, "/save") != NULL);
     ASSERT_TRUE(strstr(out, "/ps") != NULL);
     ASSERT_TRUE(strstr(out, "/kill") != NULL);
     ASSERT_TRUE(strstr(out, "/quit") != NULL);
@@ -5051,6 +5053,9 @@ static void test_recv_image_renders_through_image_block(void)
     ASSERT_NOT_NULL(apc);
     ASSERT_EQ(count_image_apc(out), 1);
     ASSERT_TRUE(apc < strstr(out, "made it"));
+    /* The caption a rendered picture needs (a picture carries no text
+     * of its own): the id /save takes, and the facts. */
+    ASSERT_TRUE(strstr(out, "image #1 — PNG 64x32, 24 B") != NULL);
     /* the payload is never the transcript's text */
     ASSERT_TRUE(strstr(out, "base64,") == NULL);
 
@@ -5113,7 +5118,12 @@ static void test_recv_image_marker_on_dumb_terminal(void)
     tui_runtime_flush(h->rt);
 
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "image 1") != NULL); /* the alt */
+    /* The caption names the image — the id /save takes — and the first
+     * image of a chat spells the command out once. */
+    ASSERT_TRUE(strstr(out, "image #1") != NULL);
+    ASSERT_TRUE(strstr(out, "/save") != NULL);
+    /* The block's own marker: the alt, the format, the dims. */
+    ASSERT_TRUE(strstr(out, "\xe2\x96\x92 image") != NULL);
     ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
     ASSERT_TRUE(strstr(out, "base64,") == NULL); /* never the payload */
     ASSERT_TRUE(strstr(out, "made it") != NULL);
@@ -5121,6 +5131,118 @@ static void test_recv_image_marker_on_dumb_terminal(void)
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* ---------------------------------------------------------------- */
+/* /save — the image that has no file of its own                     */
+/* ---------------------------------------------------------------- */
+
+/* Read a whole file; its byte count, or -1. */
+static long chat_slurp(const char *path, unsigned char *buf, size_t cap)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    size_t n = fread(buf, 1, cap, f);
+    fclose(f);
+    return (long)n;
+}
+
+/* A received image is persisted by the APP, byte for byte: /save takes
+ * the id its caption printed, writes the conversation's own bytes (no
+ * re-encode), and /save list reads a chat back by the same number. */
+static void test_save_writes_the_received_image(void)
+{
+    char url[256];
+    chat_recv_image_url(url, sizeof(url));
+    char sse0[1200];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"made it\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = sse0;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* A terminal without graphics: the caption is the image's only
+     * name — exactly the case /save exists for. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kitty_graphics = 0;
+    h->rt->profile.iterm2_images = 0;
+
+    harness_type(h, "draw one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    /* /save list: the chat read back, by the number the caption gave. */
+    harness_type(h, "/save list");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "images: 1 in this conversation") != NULL);
+    ASSERT_TRUE(strstr(out, "#1  image — PNG 64x32, 24 B") != NULL);
+
+    /* Bare /save writes the newest image under the deterministic name
+     * (ask mode's shape) and says what it wrote. */
+    harness_type(h, "/save");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "saved image #1 → nevermore-image-1.png") != NULL);
+    unsigned char got[512];
+    long n = chat_slurp("nevermore-image-1.png", got, sizeof(got));
+    ASSERT_EQ(n, (long)sizeof(CHAT_PNG));
+    ASSERT_TRUE(memcmp(got, CHAT_PNG, sizeof(CHAT_PNG)) == 0);
+
+    /* An explicit path is taken verbatim (spaces included). */
+    harness_type(h, "/save 1 nm-chat-saved.png");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "saved image #1 → nm-chat-saved.png") != NULL);
+    n = chat_slurp("nm-chat-saved.png", got, sizeof(got));
+    ASSERT_EQ(n, (long)sizeof(CHAT_PNG));
+    ASSERT_TRUE(memcmp(got, CHAT_PNG, sizeof(CHAT_PNG)) == 0);
+
+    /* An id that is not in this chat is refused by name, never by a
+     * file. */
+    harness_type(h, "/save 2");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "save: '2' is not an image in this chat") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* With nothing received (or attached), both commands say so rather
+ * than invent a file. */
+static void test_save_without_images(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    harness_type(h, "/save");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "save: no images in this conversation") != NULL);
+    harness_type(h, "/save list");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "none in this conversation") != NULL);
+    harness_free(h);
 }
 
 /* The picker row carries a right-aligned metadata column: the context
@@ -5470,6 +5592,8 @@ int main(void)
     RUN_TEST(test_img_attach_shows_the_image_when_supported);
     RUN_TEST(test_recv_image_renders_through_image_block);
     RUN_TEST(test_recv_image_marker_on_dumb_terminal);
+    RUN_TEST(test_save_writes_the_received_image);
+    RUN_TEST(test_save_without_images);
     RUN_TEST(test_model_picker_shows_capability_metadata);
     RUN_TEST(test_model_picker_capability_query_img);
     RUN_TEST(test_model_picker_capability_query_vision);

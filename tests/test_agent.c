@@ -3264,12 +3264,13 @@ static void test_agent_imagegen_round_replays_message_level(void)
     ASSERT_STR_EQ(g_img_url, url);
 
     /* Attached VERBATIM: the store holds the received URL byte for
-     * byte, and the alt is the round-relative display name. */
+     * byte. The image has no name of its own, and the number a person
+     * references it by is CHAT-scoped — the UI's, not the store's. */
     ASSERT_EQ(nm_agent_image_count(agent), 1u);
     const NmImage *img = nm_agent_image(agent, 0);
     ASSERT_NOT_NULL(img);
     ASSERT_STR_EQ(img->data_url, url);
-    ASSERT_STR_EQ(img->alt, "image 1");
+    ASSERT_STR_EQ(img->alt, "image");
     ASSERT_EQ(img->w, 64);
     ASSERT_EQ(img->h, 32);
 

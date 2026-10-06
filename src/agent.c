@@ -632,19 +632,21 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
             }
             return;
         }
-        char alt[32];
-        snprintf(alt, sizeof(alt), "image %zu", a->n_round_images + 1);
+        /* The store's name for the image is a plain noun. The number a
+         * person references it by is CHAT-scoped (the store index + 1)
+         * and belongs to the UI, which prints it as the block's
+         * caption; a round-relative name here would collide with
+         * itself in every later round's marker. */
         char reason[64];
         long id = nm_session_attach_image_url(a->session, delta_text,
-                                              strlen(delta_text), alt, reason,
+                                              strlen(delta_text), reason,
                                               sizeof(reason));
         if (id < 0) {
             /* OOM-class or a payload that does not decode: the image is
              * not in the conversation — say so, never silently. */
             if (a->on_notice) {
                 char msg[160];
-                snprintf(msg, sizeof(msg), "image: %s — dropped: %s", alt,
-                         reason);
+                snprintf(msg, sizeof(msg), "image: dropped: %s", reason);
                 a->on_notice(msg, a->userdata);
             }
             return;
