@@ -1720,10 +1720,16 @@ static void format_model_meta(const NmModel *m, char *buf, size_t cap)
         format_tokens(m->context_length, ctx, sizeof(ctx));
         meta_append(buf, cap, &off, ctx);
     }
+    /* The VS16 after U+1F5BC is load-bearing: an EAW-Neutral base (this
+     * one, like the tool badges' U+1F5A5/U+270F) sizes one cell in the
+     * width table while the terminal presents the emoji two cells
+     * wide, and the selector is what makes the two agree — without it
+     * the right-aligned column is a cell off on every image_gen row.
+     * 👀 (U+1F440) is Wide by itself and needs nothing. */
     if (m->vision)
         meta_append(buf, cap, &off, "👀");
     if (m->image_gen)
-        meta_append(buf, cap, &off, "🖼");
+        meta_append(buf, cap, &off, "🖼️");
 }
 
 /* Open the models popup over the catalog source, pre-filtered by

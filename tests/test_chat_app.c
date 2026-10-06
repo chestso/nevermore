@@ -5139,7 +5139,9 @@ static void test_model_picker_shows_capability_metadata(void)
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "👀") != NULL); /* vision badge */
-    ASSERT_TRUE(strstr(frame, "🖼") != NULL); /* imagegen badge */
+    /* imagegen badge, VS16 included: the selector is what the width
+     * table reads as two cells (see format_model_meta). */
+    ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
     ASSERT_TRUE(strstr(frame, "1M") != NULL); /* context window */
 
     /* Down to the image row, Enter composes the BARE id (the meta is a
@@ -5298,7 +5300,7 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
-    ASSERT_TRUE(strstr(frame, "🖼") != NULL);
+    ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
     ASSERT_TRUE(strstr(frame, "filler-000") == NULL);
 
     /* The unfiltered cut: a plain query must find a deep row too. */
