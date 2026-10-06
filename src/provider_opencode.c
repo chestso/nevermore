@@ -198,6 +198,12 @@ static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
         models[out].label = strdup(meta ? meta->label : id);
         models[out].vision = meta ? meta->vision : 0;
         models[out].context_length = meta ? meta->context_length : -1;
+        /* EVERY table field the picker/agent read must be copied here:
+         * image_gen and tools were silently dropped (a live row showed
+         * 0 while the table claimed otherwise), which the badges make
+         * visible. */
+        models[out].image_gen = meta ? meta->image_gen : 0;
+        models[out].tools = meta ? meta->tools : 0;
         if (!models[out].id || !models[out].label) {
             free((void *)models[out].id);
             free((void *)models[out].label);

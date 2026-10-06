@@ -371,6 +371,27 @@ first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
   (`"image"` ⇒ vision), `tool_call`, `reasoning`, `cost`.
   Covers every live catalog id except Go's `omen-alpha` (the
   mixed-case `glm-5`…`glm-5.3` variants are present).
+
+  **models.dev is OpenCode's own model database** (its README: "We
+  also use it internally in opencode"; OpenCode's docs: "OpenCode uses
+  the AI SDK and Models.dev"; its Model Registry is sourced from
+  models.dev), which is why it — not OpenCode's membership-only
+  `/models` — is nevermore's metadata authority. `tool_call` **is**
+  read (`tools`, 1/0, never -1: the endpoint takes a toolset whatever
+  the catalog says, so omitting is never warranted); probed
+  2026-10-06 it is `true` for **every** row (116/116 Zen, 34/34 Go —
+  OpenCode only lists models it can drive with tools), so the whole
+  tier claims tools and the picker badges every row. models.dev also
+  carries fields nevermore does not use: `structured_output`,
+  `attachment`, `reasoning`/`reasoning_options`, `temperature`,
+  `open_weights`, `cost` (incl. `cache_read` and tiers),
+  `limit.output`, `canonical_model_id`, `family`, `description`,
+  `release_date`, `last_updated`. It is served as one monolithic
+  `/api.json` (5.3 MB, 226 providers); there is no per-provider path
+  (302). It drifts too: 10 live Go ids and 2 live Zen ids were absent
+  from the 2026-10-06 snapshot (`omen-alpha` among them), so the live
+  `/models` list stays the authority for membership.
+
 - **OpenCode's own source** (`packages/web/src/content/docs/…` and
   the provider registry) is the upstream of both the endpoint
   table and the model ids, and is the long-term authority if

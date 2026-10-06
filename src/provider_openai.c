@@ -194,6 +194,12 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
         models[out].label = meta ? meta->label : models[out].id;
         models[out].vision = meta ? meta->vision : 0;
         models[out].context_length = meta ? meta->context_length : -1;
+        /* The curated table carries no image_gen/tools claim today
+         * (both 0), but copy them like the fields above: a table row
+         * that ever claims one must survive the live fetch instead of
+         * being silently dropped (the opencode twin). */
+        models[out].image_gen = meta ? meta->image_gen : 0;
+        models[out].tools = meta ? meta->tools : 0;
         out++;
     }
     if (out == 0) {

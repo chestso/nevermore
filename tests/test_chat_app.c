@@ -5350,6 +5350,31 @@ static void test_model_picker_capability_query_tools_alias_and_empty(void)
     harness_free(h);
 }
 
+/* The tool claim reaches the picker for the two providers whose whole
+ * catalog claims it: hyper by a PROVIDER-level rule (its wire carries
+ * no per-model tool field; every model takes tools) and opencode by
+ * models.dev's `tool_call` (true for every row). So both badge every
+ * row with the 🔧, not just OpenRouter's `supported_parameters` rows. */
+static void test_model_picker_tool_badge_for_hyper_and_opencode(void)
+{
+    /* hyper: the offline pin keeps the lookup on the shipped one-row
+     * static catalog, whose row carries the provider rule. */
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    ASSERT_NOT_NULL(h);
+    harness_type(h, "/model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "🔧️") != NULL);
+    harness_free(h);
+
+    /* opencode:go: the generated table claims tools on every row. */
+    h = harness_new("opencode:go", "deepseek-v4-flash", NULL);
+    ASSERT_NOT_NULL(h);
+    harness_type(h, "/model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "🔧️") != NULL);
+    harness_free(h);
+}
+
 /* "/model @vision" opens the picker filtered to vision models: the
  * image generator is filtered out, the active vision model remains. */
 static void test_model_picker_capability_query_vision(void)
@@ -5647,6 +5672,7 @@ int main(void)
     RUN_TEST(test_model_picker_capability_query_img);
     RUN_TEST(test_model_picker_capability_query_tool);
     RUN_TEST(test_model_picker_capability_query_tools_alias_and_empty);
+    RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
     RUN_TEST(test_model_picker_sees_past_the_old_row_cap);

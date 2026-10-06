@@ -51,12 +51,19 @@ c_hdr="$root/src/opencode_models_data.h"
 # (docs/OPENCODE-API.md §5), so the provider enriches each live id
 # from this table by id and falls back to it offline.
 #
-# `tools` is a constant 0 (NmModel.tools' "the catalog says nothing"):
-# models.dev is not the authority for the tool-use claim, and it is
-# only actionable on OpenRouter, whose routing rejects a toolset for a
-# model whose supported_parameters omits "tools" (provider_openrouter.c
-# is the one scanner that sets the field). OpenCode's own endpoint
-# takes a toolset whatever its catalog says, so 0 — keep sending.
+# `tools` maps models.dev's `tool_call` (1 claimed / 0 not), NEVER -1:
+# the tri-state's negative means "omit the toolset", and OpenCode's
+# endpoint takes one whatever its catalog says (probed 2026-10-06), so
+# omitting would be a needless behavior change. The claim is
+# models.dev's own, which is the authority here because it IS OpenCode's
+# model database (models.dev's README: "we also use it internally in
+# opencode") — OpenCode's first-party `/models` is membership-only, so
+# models.dev is the only metadata source there is. Today `tool_call` is
+# true for every opencode row (probed: 116/116 Zen, 34/34 Go), so the
+# whole tier shows the tool badge; the mapping stays honest if that
+# ever changes. On OpenRouter the field is actionable routing truth
+# (a toolset 404s a model whose supported_parameters omits "tools") and
+# provider_openrouter.c is that one scanner.
 emit() {
     entry="$1"; out="$2"; arr="$3"; label="$4"
     jq -e --arg e "$entry" '.[$e].models | length > 0' "$src" >/dev/null || {
@@ -74,7 +81,7 @@ emit() {
                 image_gen: (if ((.value.modalities.output // []) | index("image"))
                             then 1 else 0 end),
                 context_length: (.value.limit.context // -1),
-                tools: 0
+                tools: (if .value.tool_call == true then 1 else 0 end)
               }
           ] | sort_by(.id)' "$src"
     )"
@@ -115,8 +122,8 @@ emit() {
     printf ' * label/context/modality (docs/OPENCODE-API.md §5) — so a live\n'
     printf ' * fetch keeps these rows metadata-bearing by id lookup\n'
     printf ' * (opencode_meta_find), and the same tables are the offline\n'
-    printf ' * fallback. -1 context_length = models.dev had none; 0 tools =\n'
-    printf ' * models.dev is not the tool-use authority (see emit()).\n'
+    printf ' * fallback. -1 context_length = models.dev had none; tools =\n'
+    printf ' * models.dev tool_call (1 claimed / 0 not, never -1, see emit()).\n'
     printf ' */\n\n'
     printf '#ifndef NM_OPENCODE_MODELS_DATA_H\n#define NM_OPENCODE_MODELS_DATA_H\n\n'
     printf '#include "provider.h"\n\n'

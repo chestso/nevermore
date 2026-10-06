@@ -543,6 +543,20 @@ Each model entry:
 | `reasoning`         | object? | **Absent** for models that reason implicitly with no effort selection. Present for effort-selectable models: `effort_levels` is a `{value, display}` array (`low`, `medium`, `high`, `max`, `xhigh`, ...), `default_effort_level` the effort used when unset.            |
 | `pricing`           | object  | Per-1M-token prices: `input` (uncached input), `output`, `cache_create` (cache-**write** cost — the price of writing a prefix into the upstream cache, 0 = free writes), `cache_hit` (cache-**hit** read cost — what replaying cached _input_ bills, not cached output). |
 
+**No per-model tool-use claim exists** (probed 2026-10-06). `capabilities` is
+`{"vision": bool}` only — the union of keys across all 23 live entries is
+exactly `{vision}` — and Crush's own `/v1/provider` model entries carry
+`supports_attachments` (the vision signal) and `can_reason`, but nothing about
+tools; `/v1/models/{id}`, `/v1/model/{id}` and `/v1/capabilities` are 404, and
+both catalog endpoints answer byte-identically with and without a Bearer token.
+The wire accepts a toolset regardless: **all 23 live models answered 200 to a
+request carrying `tools` + `tool_choice`** (one of them returning a real
+`tool_calls` block), consistent with §3.3's "tools are announced on every
+request". nevermore therefore claims tool use for **every** hyper model by a
+provider-level rule (`tools = 1` in `provider_hyper.c`, both the static table
+and the live scanner) rather than reading a field that does not exist — the
+honest claim, and one that changes no wire behavior (`1` still means "send").
+
 ---
 
 ## 6. Gotchas & caching behavior

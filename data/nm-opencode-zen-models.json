@@ -9,7 +9,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-3-5-haiku",
@@ -17,7 +17,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-fable-5",
@@ -25,7 +25,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-fable-5-1",
@@ -33,7 +33,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-haiku-4-5",
@@ -41,7 +41,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-4-1",
@@ -49,7 +49,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-4-5",
@@ -57,7 +57,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-4-6",
@@ -65,7 +65,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-4-7",
@@ -73,7 +73,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-4-8",
@@ -81,7 +81,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-5",
@@ -89,7 +89,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-opus-5-5",
@@ -97,7 +97,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-sonnet-4",
@@ -105,7 +105,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-sonnet-4-5",
@@ -113,7 +113,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-sonnet-4-6",
@@ -121,7 +121,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-sonnet-5",
@@ -129,7 +129,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "claude-sonnet-5-5",
@@ -137,7 +137,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "deepseek-v4-flash",
@@ -145,7 +145,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "deepseek-v4-flash-free",
@@ -153,7 +153,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "deepseek-v4-flash-vision-exp",
@@ -161,7 +161,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "deepseek-v4-pro",
@@ -169,7 +169,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "deepseek-v4.1-flash",
@@ -177,7 +177,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "fledge-alpha-free",
@@ -185,7 +185,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3-flash",
@@ -193,7 +193,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3-pro",
@@ -201,7 +201,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.1-pro",
@@ -209,7 +209,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.5-flash",
@@ -217,7 +217,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.5-flash-lite",
@@ -225,7 +225,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.6-flash",
@@ -233,7 +233,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.7-flash",
@@ -241,7 +241,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gemini-3.8-flash",
@@ -249,7 +249,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-4.6",
@@ -257,7 +257,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-4.7",
@@ -265,7 +265,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-4.7-free",
@@ -273,7 +273,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5",
@@ -281,7 +281,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5-free",
@@ -289,7 +289,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5.1",
@@ -297,7 +297,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5.2",
@@ -305,7 +305,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5.3",
@@ -313,7 +313,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "glm-5.3-flash",
@@ -321,7 +321,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5",
@@ -329,7 +329,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5-codex",
@@ -337,7 +337,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5-nano",
@@ -345,7 +345,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.1",
@@ -353,7 +353,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.1-codex",
@@ -361,7 +361,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.1-codex-max",
@@ -369,7 +369,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.1-codex-mini",
@@ -377,7 +377,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.2",
@@ -385,7 +385,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.2-codex",
@@ -393,7 +393,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.3-codex",
@@ -401,7 +401,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.3-codex-spark",
@@ -409,7 +409,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 128000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.4",
@@ -417,7 +417,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.4-mini",
@@ -425,7 +425,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.4-nano",
@@ -433,7 +433,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 400000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.4-pro",
@@ -441,7 +441,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.5",
@@ -449,7 +449,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.5-pro",
@@ -457,7 +457,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.6-luna",
@@ -465,7 +465,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.6-sol",
@@ -473,7 +473,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-5.6-terra",
@@ -481,7 +481,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-6-astra",
@@ -489,7 +489,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-6-luna",
@@ -497,7 +497,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-6-sol",
@@ -505,7 +505,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "gpt-6.1-sol",
@@ -513,7 +513,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1050000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "grok-4.5",
@@ -521,7 +521,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 500000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "grok-4.6",
@@ -529,7 +529,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 500000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "grok-4.7",
@@ -537,7 +537,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 500000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "grok-build-0.1",
@@ -545,7 +545,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 256000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "grok-code",
@@ -553,7 +553,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 256000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "hy3-free",
@@ -561,7 +561,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 190000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "hy3-preview-free",
@@ -569,7 +569,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 256000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2",
@@ -577,7 +577,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2-thinking",
@@ -585,7 +585,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2.5",
@@ -593,7 +593,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2.5-free",
@@ -601,7 +601,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2.6",
@@ -609,7 +609,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k2.7-code",
@@ -617,7 +617,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "kimi-k3",
@@ -625,7 +625,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "laguna-s-2.1-free",
@@ -633,7 +633,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 256000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ling-2.6-flash-free",
@@ -641,7 +641,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262100,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ling-3.0-flash-fin-free",
@@ -649,7 +649,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ling-3.0-flash-free",
@@ -657,7 +657,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ling-3.0-tiny-free",
@@ -665,7 +665,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ling-3.1-flash-free",
@@ -673,7 +673,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "longcat-2.0-free",
@@ -681,7 +681,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "longcat-2.5-preview-free",
@@ -689,7 +689,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "mimo-v2-flash-free",
@@ -697,7 +697,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "mimo-v2-omni-free",
@@ -705,7 +705,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "mimo-v2-pro-free",
@@ -713,7 +713,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "mimo-v2.5-free",
@@ -721,7 +721,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "mimo-v2.6-flash-free",
@@ -729,7 +729,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m2.1",
@@ -737,7 +737,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m2.1-free",
@@ -745,7 +745,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m2.5",
@@ -753,7 +753,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m2.5-free",
@@ -761,7 +761,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m2.7",
@@ -769,7 +769,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m3",
@@ -777,7 +777,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 512000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "minimax-m3-free",
@@ -785,7 +785,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "muse-spark-1.2",
@@ -793,7 +793,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "muse-spark-1.2-contributor-free",
@@ -801,7 +801,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "muse-spark-1.3",
@@ -809,7 +809,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "muse-spark-1.3-contributor-free",
@@ -817,7 +817,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "nemotron-3-super-free",
@@ -825,7 +825,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 204800,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "nemotron-3-ultra-free",
@@ -833,7 +833,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "nemotron-3.5-lightning-free",
@@ -841,7 +841,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "north-mini-code-free",
@@ -849,7 +849,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 256000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3-coder",
@@ -857,7 +857,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3.5-plus",
@@ -865,7 +865,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3.6-plus",
@@ -873,7 +873,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3.6-plus-free",
@@ -881,7 +881,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3.8-flash",
@@ -889,7 +889,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "qwen3.8-max",
@@ -897,7 +897,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 262144,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "ring-2.6-1t-free",
@@ -905,7 +905,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262000,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "space-bunny-free",
@@ -913,7 +913,7 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "trinity-large-preview-free",
@@ -921,7 +921,7 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 131072,
-    "tools": 0
+    "tools": 1
   },
   {
     "id": "x-preview-f-free",
@@ -929,6 +929,6 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
-    "tools": 0
+    "tools": 1
   }
 ]

@@ -58,10 +58,20 @@
 
 #define HYPER_DEFAULT_BASE "https://hyper.charm.land/v1"
 
-/* Static fallback catalog (subset of data/nm-hyper-models.json,
- * which regenerates from the live /v1/models payload). */
+/* Hyper exposes NO per-model tool-use claim, so its catalog carries a
+ * PROVIDER-level rule instead of a read field: every hyper model takes
+ * tools, hence `tools = 1` on every row (the static table below and the
+ * live scanner). Evidence (probed 2026-10-06): /v1/models' `capabilities`
+ * is `{"vision": bool}` only, /v1/provider (Crush's catalog) has
+ * `supports_attachments`/`can_reason` but nothing about tools, and no
+ * per-model endpoint exists; the gateway is a coding gateway where Crush
+ * announces its tool catalogue on EVERY request (HYPER-API.md §3.3); and
+ * all 23 live models accepted a toolset on the wire (23/23, one of them
+ * returning a real tool_call). `1` still means "send", so the rule
+ * changes no wire behavior — it is the picker's claim, and the honest
+ * one: hyper is never a model you cannot use tools with. */
 static const NmModel hyper_static_models[] = {
-    { "gpt-oss-120b", "GPT OSS 120b", 0, 0, 131072, 0 },
+    { "gpt-oss-120b", "GPT OSS 120b", 0, 0, 131072, 1 },
     { 0 }
 };
 
@@ -257,6 +267,9 @@ static void hyper_fetch_catalog(const char *base_url)
             nm_json_get(e, "capabilities"), "vision"));
         double ctx = nm_json_num(nm_json_get(e, "context_window"));
         models[out].context_length = ctx > 0 ? (long)ctx : -1;
+        /* The provider-level rule (see hyper_static_models): the wire
+         * carries no tool-use claim, and every model takes tools. */
+        models[out].tools = 1;
         if (!models[out].id || !models[out].label) {
             free((void *)models[out].id);
             free((void *)models[out].label);

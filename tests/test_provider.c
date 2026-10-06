@@ -650,6 +650,10 @@ static void test_hyper_models_live_then_fallback(void)
     ASSERT_NOT_NULL(models);
     ASSERT_TRUE(n > 0);
     ASSERT_STR_EQ(models[0].id, "gpt-oss-120b");
+    /* The provider-level rule: hyper's catalog claims tools for every
+     * model (the wire carries no per-model tool signal — see
+     * hyper_static_models). */
+    ASSERT_EQ(models[0].tools, 1);
 
     /* Note: the live-catalog path can't be exercised in-process after
      * the fallback test (the cache is process-global by design), so
@@ -680,8 +684,13 @@ static void test_hyper_models_fetch(void)
     ASSERT_STR_EQ(models[0].label, "GPT OSS 120b");
     ASSERT_EQ(models[0].context_length, 131072);
     ASSERT_EQ(models[0].vision, 0);
+    /* The live scanner applies the same provider-level tools rule: the
+     * catalog's `capabilities` object carries only `vision`, so tools
+     * is never read from the wire (see hyper_static_models). */
+    ASSERT_EQ(models[0].tools, 1);
     ASSERT_STR_EQ(models[1].id, "vision-test");
     ASSERT_EQ(models[1].vision, 1);
+    ASSERT_EQ(models[1].tools, 1);
     pthread_join(th, NULL);
 
     /* GET /v1/models, and tokenless (no Authorization header —
@@ -1395,15 +1404,23 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_EQ(n, 2);
     ASSERT_STR_EQ(models[0].id, "glm-5.3");
     /* Enriched from the shipped models.dev table, NOT id-only: this is
-     * the whole point (the ids-only wire carries no context/vision). */
+     * the whole point (the ids-only wire carries no context/vision).
+     * EVERY table field is copied — tools and image_gen included, or a
+     * live row would read 0 while the table claimed otherwise (the
+     * silent drop the badges made visible). */
     ASSERT_STR_EQ(models[0].label, "GLM-5.3");
     ASSERT_EQ(models[0].vision, 0);
     ASSERT_EQ(models[0].context_length, 1000000);
-    /* An id models.dev does not know: id-only, unknown context. */
+    ASSERT_EQ(models[0].tools, 1); /* models.dev tool_call, via the table */
+    ASSERT_EQ(models[0].image_gen, 0);
+    /* An id models.dev does not know: id-only, unknown context, no
+     * capability claim (0 = "says nothing", not a negative). */
     ASSERT_STR_EQ(models[1].id, "future-model-9");
     ASSERT_STR_EQ(models[1].label, "future-model-9");
     ASSERT_EQ(models[1].vision, 0);
     ASSERT_EQ(models[1].context_length, -1);
+    ASSERT_EQ(models[1].tools, 0);
+    ASSERT_EQ(models[1].image_gen, 0);
     pthread_join(th, NULL);
     close(lfd);
 
@@ -1469,11 +1486,16 @@ static void test_openai_models_fetch_keeps_curated_capabilities(void)
     ASSERT_STR_EQ(models[0].label, "GPT-4o");
     ASSERT_EQ(models[0].vision, 1);
     ASSERT_EQ(models[0].context_length, 128000);
+    /* The curated table makes no tool-use claim (0 = "says nothing" —
+     * OpenAI's wire has no such field and the table does not assert
+     * one), so a live row keeps sending the toolset. */
+    ASSERT_EQ(models[0].tools, 0);
     /* An id the curated table has not seen: id-only, unknown window. */
     ASSERT_STR_EQ(models[1].id, "future-model-9");
     ASSERT_STR_EQ(models[1].label, "future-model-9");
     ASSERT_EQ(models[1].vision, 0);
     ASSERT_EQ(models[1].context_length, -1);
+    ASSERT_EQ(models[1].tools, 0);
     pthread_join(th, NULL);
     close(lfd);
 
@@ -1512,6 +1534,14 @@ static void test_opencode_models_static_fallback_per_tier(void)
     ASSERT_EQ(opencode_meta_context(g, gn, "glm-5.3"), 1000000);
     ASSERT_EQ(opencode_meta_context(g, gn, "grok-4.5"), 500000);
     ASSERT_EQ(opencode_meta_context(z, zn, "big-pickle"), 200000);
+    /* Tools: models.dev's tool_call is true for EVERY opencode row
+     * (probed 2026-10-06: 116/116 Zen, 34/34 Go — OpenCode only lists
+     * models it can drive with tools), so the whole tier claims it and
+     * the picker badges every row. */
+    for (size_t i = 0; i < gn; i++)
+        ASSERT_EQ(g[i].tools, 1);
+    for (size_t i = 0; i < zn; i++)
+        ASSERT_EQ(z[i].tools, 1);
 }
 
 /* The offline-catalog tripwire: several tests here read a provider
