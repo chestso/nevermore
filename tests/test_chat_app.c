@@ -941,6 +941,10 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("openai", "test-model", base);
     ASSERT_NOT_NULL(h);
+    /* The startup preflight note (a keyed provider with no key) is a
+     * committed unit from BEFORE the stream: baseline it. */
+    unsigned committed0 =
+        tui_transcript_commit_count(nm_chat_app_transcript(h->app));
 
     harness_type(h, "go");
     harness_enter(h);
@@ -969,10 +973,10 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
 
     /* The tail is live-region content: nothing has committed to the
-     * scrollback mid-stream. This is a real state assertion (the
-     * transcript's own commit count), not a byte-scan proxy. */
+     * scrollback since the turn began. This is a real state assertion
+     * (the transcript's own commit count), not a byte-scan proxy. */
     ASSERT_EQ(tui_transcript_commit_count(nm_chat_app_transcript(h->app)),
-              0u);
+              committed0);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "\r\nstreaming tail without newline yet\r\n") == NULL);
 
@@ -2039,10 +2043,12 @@ static void test_error_line_endings_are_crnl(void)
     for (const char *p = out; *p; p++)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
     /* The hint follows the body in the error's own output block (both
-     * come from the one sys_line), with no second error line between. */
+     * come from the one sys_line), with no second error line between.
+     * Searched FROM the body: the startup preflight note carries the
+     * same env-var name earlier in the scrollback. */
     const char *msg = strstr(out, "chat failed:");
     ASSERT_NOT_NULL(msg);
-    const char *hint = strstr(out, "export HYPER_API_KEY");
+    const char *hint = strstr(msg, "export HYPER_API_KEY");
     ASSERT_NOT_NULL(hint);
     ASSERT_TRUE(msg < hint);
 
@@ -3676,6 +3682,40 @@ static void test_send_without_model_is_refused(void)
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "m1");
 
     harness_free(h);
+}
+
+/* A provider that needs a key and has none configured warns BEFORE the
+ * turn — the post-401 hint's preflight twin. The test is the key seam
+ * (nm_provider_api_key), so a ~/.authinfo entry counts as configured. */
+static void test_missing_key_preflight_warns(void)
+{
+    test_unsetenv("OPENAI_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
+    test_unsetenv("OLLAMA_API_KEY");
+    test_unsetenv("HYPER_API_KEY");
+
+    /* A keyless provider (the local daemon) never warns. */
+    AppHarness *h0 = harness_new("ollama:local", "m", NULL);
+    ASSERT_NOT_NULL(h0);
+    ASSERT_TRUE(strstr(harness_read(h0), "needs an API key") == NULL);
+
+    /* Switching to a keyed provider with no key: the note names the env
+     * var and the authinfo machine. */
+    harness_type(h0, "/provider openai");
+    harness_enter(h0);
+    const char *out = harness_read(h0);
+    ASSERT_TRUE(strstr(out, "needs an API key") != NULL);
+    ASSERT_TRUE(strstr(out, "OPENAI_API_KEY") != NULL);
+    ASSERT_TRUE(strstr(out, "openai.com") != NULL);
+    harness_free(h0);
+
+    /* With the key configured, the same provider is quiet. */
+    test_setenv("OPENAI_API_KEY", "sk-x");
+    AppHarness *h1 = harness_new("openai", "m", NULL);
+    ASSERT_NOT_NULL(h1);
+    ASSERT_TRUE(strstr(harness_read(h1), "needs an API key") == NULL);
+    harness_free(h1);
+    test_unsetenv("OPENAI_API_KEY");
 }
 
 /* /config lists the provider-scoped keys that are set, after the plain
@@ -5720,6 +5760,7 @@ int main(void)
     RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_model_memory_is_per_provider);
     RUN_TEST(test_send_without_model_is_refused);
+    RUN_TEST(test_missing_key_preflight_warns);
     RUN_TEST(test_config_lists_scoped_model_keys);
     RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_connect_knobs_via_config_command);

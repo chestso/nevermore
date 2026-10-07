@@ -982,6 +982,31 @@ static const char *endpoint_key(const NmChatApp *app, const NmProvider *p)
     return nm_provider_api_key(p);
 }
 
+/* A provider that needs a key and has none configured: say so BEFORE
+ * the turn, not after a wasted 401 — the preflight twin of agent.c's
+ * post-mortem hint ("no API key set — export X"). The test is the key
+ * SEAM (nm_provider_api_key, via endpoint_key), never getenv, so a
+ * ~/.authinfo entry counts as configured. */
+static void warn_missing_key(NmChatApp *app, const NmProvider *p)
+{
+    if (!p || !p->needs_auth || !p->needs_auth(p, app->base_url))
+        return;
+    if (endpoint_key(app, p))
+        return;
+    const char *ek = p->env_key ? p->env_key(p) : NULL;
+    if (ek && p->authinfo_machine)
+        sys_line(app, "note: %s needs an API key and none is configured — "
+                      "export %s, or add a '%s' line to ~/.authinfo",
+                 p->name, ek, p->authinfo_machine);
+    else if (ek)
+        sys_line(app, "note: %s needs an API key and none is configured — "
+                      "export %s",
+                 p->name, ek);
+    else
+        sys_line(app, "note: %s needs an API key and none is configured",
+                 p->name);
+}
+
 /* The active model's context window, from the provider catalog (the
  * one authority). NULL base_url/api_key on purpose: a base_url would
  * make a wire-catalog provider (ollama, opencode) issue a BLOCKING
@@ -1236,6 +1261,8 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt)
         tui_runtime_set_transcript(rt, app->transcript);
     /* No model for this provider: say so once, now that the transcript
      * can be written. The send path refuses until /model sets one. */
+    if (rt && app->provider)
+        warn_missing_key(app, app->provider);
     if (rt && !app->model)
         no_model_notice(app);
 }
@@ -1959,6 +1986,7 @@ static int switch_provider(NmChatApp *app, const char *name)
     app->model = next_model;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
+    warn_missing_key(app, p);
     if (!app->model)
         no_model_notice(app);
     if (dropped)

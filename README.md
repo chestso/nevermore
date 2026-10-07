@@ -79,6 +79,12 @@ Environment variables win over the file. Point elsewhere with
 `NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
 default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
+Starting (or switching to) a provider that needs a key with none
+configured says so up front — `export OPENAI_API_KEY`, or add the
+`~/.authinfo` line — instead of failing on the first turn. The check
+runs through the same key lookup as the request, so a `~/.authinfo`
+entry counts.
+
 The input row is always on screen, busy or not: it gathers the next
 prompt while a turn runs (keys edit it; Enter is a no-op until the turn
 ends; Ctrl+C interrupts). Above the prompt its status line carries the
