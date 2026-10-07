@@ -2850,6 +2850,185 @@ static void test_exec_command_yield_garbage_string_uses_default(void)
     nm_toolset_free(ts);
 }
 
+/* The window a call declares, read straight off the tool's deadline_ms
+ * seam — the yield window the agent folds into its tick — without
+ * waiting it out (this binary's clock is virtual, see fake_clock.c). The
+ * job a write_stdin call needs must already exist; the call's own state
+ * is ended, the job is left to the caller. -2 when begin declined. */
+static int declared_window_ms(const char *name, const char *args_json)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, name);
+    NmToolExec *e = t->begin(t, args_json, NULL);
+    int dl = e && t->deadline_ms ? t->deadline_ms(e) : -2;
+    if (e)
+        t->end(e);
+    nm_toolset_free(ts);
+    return dl;
+}
+
+/* exec_command's window is Codex's 250-30000 (a Windows floor of 10 s):
+ * a request above the ceiling is clamped DOWN to it, never honored. This
+ * is the window the models trip over — they ask for minutes and are
+ * bounced at 30 s. */
+static void test_exec_command_yield_window_clamped(void)
+{
+    /* Minutes asked for, 30 s declared. */
+    char *args = exec_args("sleep 30", 600000);
+    int dl = declared_window_ms("exec_command", args);
+    free(args);
+    nm_proc_close_all();
+    ASSERT_TRUE(dl > 29000 && dl <= 30000);
+
+    /* An instant ask is raised to the floor. */
+    args = exec_args("sleep 30", 10);
+    dl = declared_window_ms("exec_command", args);
+    free(args);
+    nm_proc_close_all();
+    ASSERT_TRUE(dl >= 200 && dl <= 250);
+}
+
+/* A clamped window is REPORTED in the result, not silently swallowed: a
+ * model that asked for minutes learns the real window instead of reading
+ * the early yield as the tool ignoring it (the Codex #22541 papercut).
+ * The clock is virtual, so the window closes without being waited out. */
+static void test_exec_command_yield_clamp_is_reported(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "exec_command");
+    char *args = exec_args("sleep 30", 600000);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+
+    NmToolResult r = { 0 };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+    nm_test_clock_advance_ms(30000); /* close the declared 30 s window */
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
+    ASSERT_NOT_NULL(strstr(r.output,
+                           "yield window clamped from 600000 to 30000 ms"));
+    nm_tool_result_free(&r);
+    t->end(e);
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
+/* A window that was honored says nothing extra: the note is a
+ * correction, not decoration. */
+static void test_exec_command_yield_in_range_not_annotated(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "exec_command");
+    char *args = exec_args("sleep 30", 1000);
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+
+    NmToolResult r = { 0 };
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
+    nm_test_clock_advance_ms(1000);
+    ASSERT_EQ(t->step(e, &r), NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Process running with job ID"));
+    ASSERT_NULL(strstr(r.output, "clamped"));
+    nm_tool_result_free(&r);
+    t->end(e);
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
+/* write_stdin's window is PER MODE (Codex's split): an empty poll is a
+ * background wait — 5 s up to the `poll_timeout` ceiling (300 s by
+ * default) — while a non-empty write keeps the 30 s cap the initial exec
+ * uses. Polling a long build is the case the old flat 30 s ceiling made
+ * miserable (a bounce every half-minute, forever). */
+static void test_write_stdin_yield_window_by_mode(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("sleep 30", 300);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    int sid = reported_job_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    /* An empty poll takes the background ceiling, not 30 s. */
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(600000));
+    args = args_dump(j);
+    int dl = declared_window_ms("write_stdin", args);
+    free(args);
+    ASSERT_TRUE(dl > 290000 && dl <= 300000);
+
+    /* Its floor: a sub-5 s ask is raised to 5 s. */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(10));
+    args = args_dump(j);
+    dl = declared_window_ms("write_stdin", args);
+    free(args);
+    ASSERT_TRUE(dl > 4000 && dl <= 5000);
+
+    /* A non-empty write keeps the 30 s cap. */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "input", nm_json_new_string("x"));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(600000));
+    args = args_dump(j);
+    dl = declared_window_ms("write_stdin", args);
+    free(args);
+    ASSERT_TRUE(dl > 29000 && dl <= 30000);
+
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
+/* The empty-poll ceiling is the store's `poll_timeout` key, resolved at
+ * the point of use. */
+static void test_write_stdin_poll_ceiling_is_configurable(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *args = exec_args("sleep 30", 300);
+    NmToolResult r = exec_virtual("exec_command", args, 0);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    int sid = reported_job_id(r.output);
+    ASSERT_TRUE(sid > 0);
+    nm_tool_result_free(&r);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_POLL_TIMEOUT, "60000"),
+              0);
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(600000));
+    args = args_dump(j);
+    int dl = declared_window_ms("write_stdin", args);
+    free(args);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_TRUE(dl > 59000 && dl <= 60000);
+
+    /* A ceiling below the 5 s floor is raised to it (Codex's
+     * `max(MIN_EMPTY_YIELD_TIME_MS)`), never honored as-is — and never
+     * silently swapped for the 300 s default. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_POLL_TIMEOUT, "1000"),
+              0);
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(sid));
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(600000));
+    args = args_dump(j);
+    dl = declared_window_ms("write_stdin", args);
+    free(args);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_TRUE(dl > 4000 && dl <= 5000);
+
+    nm_proc_close_all();
+    nm_toolset_free(ts);
+}
+
 /* write_stdin reads the same either-form value: a long string window
  * waits for the child to finish instead of falling back to its 1 s
  * default (the child stays asleep well past that default). */
@@ -3532,12 +3711,17 @@ int main(void)
     RUN_TEST(test_exec_command_yields_job_id);
     RUN_TEST(test_exec_command_yield_string_form);
     RUN_TEST(test_exec_command_yield_garbage_string_uses_default);
+    RUN_TEST(test_exec_command_yield_window_clamped);
+    RUN_TEST(test_exec_command_yield_clamp_is_reported);
+    RUN_TEST(test_exec_command_yield_in_range_not_annotated);
     RUN_TEST(test_exec_command_missing_cmd);
     RUN_TEST(test_exec_command_workdir);
     RUN_TEST(test_exec_command_output_clamped_head_and_tail);
     RUN_TEST(test_clamp_job_output_trims_and_marks_empty);
     RUN_TEST(test_write_stdin_round_trip);
     RUN_TEST(test_write_stdin_yield_string_form);
+    RUN_TEST(test_write_stdin_yield_window_by_mode);
+    RUN_TEST(test_write_stdin_poll_ceiling_is_configurable);
     RUN_TEST(test_write_stdin_partial_line_and_eof);
     RUN_TEST(test_write_stdin_interior_marker_rejected);
     RUN_TEST(test_write_stdin_unknown_job);

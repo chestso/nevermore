@@ -239,6 +239,16 @@ int nm_tool_web_search_timeout_ms(void);
  * or no store is installed. */
 int nm_tool_run_command_timeout_ms(void);
 
+/* The write_stdin EMPTY-POLL ceiling in ms: how long a pure background
+ * poll (write_stdin with nothing to write) may wait. Codex splits the
+ * write_stdin window by mode — a non-empty write caps at 30 s, an empty
+ * poll waits 5 s up to this ceiling — so a long build is polled
+ * patiently instead of being bounced every half-minute. The ceiling is
+ * the store's `poll_timeout` key, resolved at the point of use by the
+ * tool; a poll is never unbounded (the job's own exit is the other way
+ * out). */
+#define NM_POLL_TIMEOUT_MS_DEFAULT 300000
+
 /* Portable process spawn: run a command, capture stdout+stderr, report
  * exit status. Used by tests too. (Long-lived process jobs live in
  * nm_process.h.) */

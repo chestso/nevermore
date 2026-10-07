@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 14
+#define NM_CFG_NKEYS 15
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -140,6 +140,8 @@ static const struct
       NM_STR(NM_WEBSEARCH_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_RUN_COMMAND_TIMEOUT, "NEVERMORE_RUN_COMMAND_TIMEOUT_MS",
       NM_STR(NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT) },
+    { NM_CFG_KEY_POLL_TIMEOUT, "NEVERMORE_POLL_TIMEOUT_MS",
+      NM_STR(NM_POLL_TIMEOUT_MS_DEFAULT) },
     { NM_CFG_KEY_ROLLING_WINDOW, "NEVERMORE_ROLLING_WINDOW", "off" },
     { NM_CFG_KEY_CONTEXT_BUDGET, "NEVERMORE_CONTEXT_BUDGET",
       NM_STR(NM_AGENT_DEFAULT_CONTEXT_BUDGET) },
@@ -577,6 +579,12 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0) {
         /* The duration keys: a positive decimal (ms) or `off`. */
         return nm_config_duration_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_POLL_TIMEOUT) == 0) {
+        /* A duration shape too, but `off` is refused: a poll is bounded
+         * by its ceiling or by the job's exit, never left unbounded
+         * (which the clamp it feeds cannot express). */
+        return nm_config_duration_canon(raw, out, cap) &&
+               strcmp(out, "off") != 0;
     } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {

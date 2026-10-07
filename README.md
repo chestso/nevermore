@@ -342,7 +342,10 @@ not what the model made.
 
 `exec_command` starts a command that outlives the tool call: a dev
 server, a REPL, `ssh`, a test watcher. It reports either the exit
-status (the command finished inside its yield window) or a job id.
+status (the command finished inside its yield window) or a job id — and
+when the requested window was clamped to the 30 s cap, the report says
+so (`yield window clamped from 120000 to 30000 ms`), so a model that
+asked for minutes is never left guessing why it was bounced early.
 
 `run_command` is the sibling for the other case: one short,
 non-interactive command, one result — no job, no terminal, no stdin.
@@ -352,7 +355,10 @@ might still be running, or that expects a terminal, is an
 
 The job keeps running between turns, and the model drives it on its
 own: `write_stdin` feeds it input and reports what it has printed since,
-`kill_job` stops it. Output produced between calls is buffered for
+`kill_job` stops it. The `write_stdin` window is per mode: a non-empty
+write caps at 30 s, while an empty poll waits 5 s up to the
+`poll_timeout` ceiling (5 min by default) — the patient way to wait out
+a build. Output produced between calls is buffered for
 the model to poll. Its output is deliberately **not** streamed
 into the transcript — it is the model's to poll, so a build log does
 not scroll by unasked.

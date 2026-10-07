@@ -577,9 +577,10 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG_ENABLED);
     ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_ROLLING_WINDOW);
-    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_NULL(nm_config_key_at(14));
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(15));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -590,6 +591,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_RUN_COMMAND_TIMEOUT),
                   "NEVERMORE_RUN_COMMAND_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_POLL_TIMEOUT),
+                  "NEVERMORE_POLL_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
@@ -712,6 +715,18 @@ static void test_duration_keys(void)
                                             -1),
               3600000);
 
+    /* The empty-poll ceiling (`poll_timeout`) shares the duration shape,
+     * but `off` is refused: a poll is bounded by its ceiling or by the
+     * job's exit, never left unbounded. A decimal round-trips at the
+     * full width (5 minutes is the default). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_POLL_TIMEOUT, "600000"), 0);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_POLL_TIMEOUT, -1),
+              600000);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_POLL_TIMEOUT, "off"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_POLL_TIMEOUT, "0"), -1);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_POLL_TIMEOUT, -1),
+              600000);
+
     /* The env layer speaks the same vocabulary, normalized the same. */
     test_setenv("NEVERMORE_TIMEOUT_MS", "OFF");
     nm_config_set_env(c);
@@ -769,6 +784,10 @@ static void test_defaults_and_resolve(void)
               NM_AGENT_DEFAULT_TIMEOUT_MS);
     ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
                                             -1),
+              300000);
+    /* The write_stdin empty-poll ceiling is a key with a built-in
+     * default too (Codex's background window). */
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_POLL_TIMEOUT, -1),
               300000);
 
     /* The default table is queryable without a config handle. */

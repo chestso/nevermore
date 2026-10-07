@@ -164,6 +164,18 @@ extern "C" {
  * default NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT; the tool resolves it at
  * the point of use. Env spelling: NEVERMORE_RUN_COMMAND_TIMEOUT_MS. */
 #define NM_CFG_KEY_RUN_COMMAND_TIMEOUT "run_command_timeout"
+/* write_stdin's EMPTY-POLL ceiling, in ms: a pure background poll
+ * (write_stdin with no input) waits 5 s up to this. Codex's shape
+ * splits the write_stdin window by mode — a non-empty write caps at
+ * 30 s, an empty poll gets a configurable background ceiling (its
+ * `background_terminal_max_timeout`, default 300 s) — so a long build
+ * is polled patiently instead of being bounced every 30 s. A positive
+ * decimal, the same shape as the duration keys; `off` is REFUSED,
+ * because a poll is bounded by its ceiling or by the job's exit, never
+ * left unbounded. Built-in default NM_POLL_TIMEOUT_MS_DEFAULT; the tool
+ * resolves it at the point of use. Env spelling:
+ * NEVERMORE_POLL_TIMEOUT_MS. */
+#define NM_CFG_KEY_POLL_TIMEOUT "poll_timeout"
 /* Rolling context window: whether the agent trims the stored
  * conversation to a token budget before each request. `on`/`off` (a
  * bool, default OFF). OFF — the default — sends the whole transcript

@@ -43,6 +43,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "nm_config.h" /* the store the empty-poll ceiling resolves from */
 #include "nm_process.h"
 #include "tools.h"
 #include "tools_internal.h"
@@ -50,13 +51,23 @@
 
 #include "nm_clock.h"
 
-/* Codex's yield window for exec_command, and quoth's read window for
- * write_stdin; an explicit yield_time_ms is clamped to the same
- * 250-30000 range Codex applies. */
+/* Codex's yield windows — PER CALL SITE, not one flat range (see
+ * docs/PROCESS-PLAN.md §2). The initial exec_command window is
+ * 250-30000 ms (a Windows floor of 10 s, Codex's
+ * WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS); a NON-EMPTY write_stdin
+ * write caps at the same 30 s; and an EMPTY write_stdin poll waits 5 s
+ * up to the configurable background ceiling (`poll_timeout`, default
+ * NM_POLL_TIMEOUT_MS_DEFAULT — Codex calls it
+ * `background_terminal_max_timeout`). The 30 s ceiling that bounces a
+ * long build every half-minute belongs to the initial exec, never to a
+ * poll: polling is how the model waits patiently. */
 #define NM_EXEC_YIELD_DEFAULT_MS       10000
 #define NM_EXEC_WRITE_YIELD_DEFAULT_MS 1000
 #define NM_EXEC_YIELD_MIN_MS           250
 #define NM_EXEC_YIELD_MAX_MS           30000
+#define NM_EXEC_WIN_EXEC_FLOOR_MS      10000 /* Windows: Codex's 10 s floor */
+/* Codex's MIN_EMPTY_YIELD_TIME_MS. */
+#define NM_EXEC_EMPTY_POLL_MIN_MS 5000
 
 /* The literal close-stdin marker (four characters: backslash, x, 0,
  * 4 — Codex's convention). The model writes that TEXT; a real 0x04
@@ -106,20 +117,46 @@ static int arg_int(NmJson *args, const char *key, long *out)
     return -1;
 }
 
-/* The yield window: the caller's yield_time_ms — a JSON number or a
- * decimal string (models emit both for numeric args, the same either-form
- * read arg_int gives job_id) — clamped to Codex's range, else the tool's
- * default. A malformed value is ignored, never read as an instant yield. */
-static int resolve_yield_ms(NmJson *args, int dflt)
+/* The caller's yield_time_ms — a JSON number or a decimal string (models
+ * emit both for numeric args, the same either-form read arg_int gives
+ * job_id). `*provided` is 1 when the caller supplied a usable value;
+ * absent or malformed keeps `dflt`, and a malformed value is never read
+ * as an instant yield. */
+static long requested_yield_ms(NmJson *args, int dflt, int *provided)
 {
     long ms = 0;
-    if (arg_int(args, "yield_time_ms", &ms) != 0)
+    if (arg_int(args, "yield_time_ms", &ms) != 0) {
+        *provided = 0;
         return dflt;
-    if (ms < NM_EXEC_YIELD_MIN_MS)
-        ms = NM_EXEC_YIELD_MIN_MS;
-    if (ms > NM_EXEC_YIELD_MAX_MS)
-        ms = NM_EXEC_YIELD_MAX_MS;
-    return (int)ms;
+    }
+    *provided = 1;
+    return ms;
+}
+
+/* Clamp `v` into [lo, hi]. */
+static int clamp_ms(long v, int lo, int hi)
+{
+    if (v < lo)
+        return lo;
+    if (v > hi)
+        return hi;
+    return (int)v;
+}
+
+/* The empty-poll ceiling (the `poll_timeout` key), resolved at the point
+ * of use: the built-in default when the key is unset or no store is
+ * installed. The store refuses `off`, and a configured value below the
+ * 5 s floor is raised to it (Codex's own
+ * `max_write_stdin_yield_time_ms.max(MIN_EMPTY_YIELD_TIME_MS)`), so the
+ * clamp it feeds can never invert. */
+static int poll_timeout_ms(void)
+{
+    NmConfig *c = nm_config_store();
+    if (!c)
+        return NM_POLL_TIMEOUT_MS_DEFAULT;
+    int v = nm_config_resolve_duration_ms(c, NM_CFG_KEY_POLL_TIMEOUT,
+                                          NM_POLL_TIMEOUT_MS_DEFAULT);
+    return v < NM_EXEC_EMPTY_POLL_MIN_MS ? NM_EXEC_EMPTY_POLL_MIN_MS : v;
 }
 
 /* Does `input` end with the close-stdin marker? */
@@ -157,7 +194,10 @@ static int has_interior_eof_marker(const char *input, size_t n)
 struct NmToolExec
 {
     int job_id;
-    double deadline; /* yield-window end (monotonic seconds) */
+    double deadline;   /* yield-window end (monotonic seconds) */
+    int yield_ms;      /* the effective window (ms) */
+    long requested_ms; /* what the caller asked for (the clamp note) */
+    int requested_ok;  /* 1 when the caller supplied a usable window */
     char *outbox;
     size_t outbox_len, outbox_off;
     int close_stdin; /* the trailing marker asked for end-of-input */
@@ -227,12 +267,24 @@ static NmToolResult exited_result(int code, const char *body)
 }
 
 /* A still-running job's report: the id is the handle the model
- * echoes into write_stdin. */
-static NmToolResult running_result(int job_id, const char *body)
+ * echoes into write_stdin. When the caller's requested window had to be
+ * clamped, the report says so, in-band where the model reads it — Codex
+ * clamps the same way but stays silent, which is the upstream papercut
+ * ("exec_command yield_time_ms is capped around 30s on initial
+ * command"): a model that asked for minutes reads the early yield as the
+ * tool ignoring it and abandons the command. One clause turns that into
+ * a fact the model can plan around. */
+static NmToolResult running_result(const NmToolExec *e, const char *body)
 {
-    char status[64];
-    snprintf(status, sizeof(status), "Process running with job ID %d",
-             job_id);
+    char status[160];
+    if (e->requested_ok && e->requested_ms != e->yield_ms)
+        snprintf(status, sizeof(status),
+                 "Process running with job ID %d (yield window clamped from "
+                 "%ld to %d ms)",
+                 e->job_id, e->requested_ms, e->yield_ms);
+    else
+        snprintf(status, sizeof(status), "Process running with job ID %d",
+                 e->job_id);
     return job_result(status, body);
 }
 
@@ -320,7 +372,13 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
     const char *cwd = nm_json_str(nm_json_get(args, "workdir"));
     if (!cwd || !*cwd)
         cwd = (const char *)userdata;
-    int yield_ms = resolve_yield_ms(args, NM_EXEC_YIELD_DEFAULT_MS);
+    int provided = 0;
+    long req = requested_yield_ms(args, NM_EXEC_YIELD_DEFAULT_MS, &provided);
+    int lo = NM_EXEC_YIELD_MIN_MS;
+#ifdef _WIN32
+    lo = NM_EXEC_WIN_EXEC_FLOOR_MS; /* Codex's Windows floor */
+#endif
+    int yield_ms = clamp_ms(req, lo, NM_EXEC_YIELD_MAX_MS);
 
     char err[256];
     int id = -1;
@@ -341,6 +399,9 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
         return NULL;
     }
     e->job_id = id;
+    e->yield_ms = yield_ms;
+    e->requested_ms = req;
+    e->requested_ok = provided;
     e->deadline = nm_monotonic_seconds() + (double)yield_ms / 1000.0;
     return e;
 }
@@ -378,7 +439,7 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
     /* Still running at the deadline: hand the model the job id. */
     if (ms_until(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
-        e->result = running_result(e->job_id, body);
+        e->result = running_result(e, body);
         e->done = 1;
         return take(e, out);
     }
@@ -417,7 +478,19 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
     int close_stdin = ends_with_eof_marker(input, ilen);
     if (close_stdin)
         ilen -= NM_EXEC_EOF_MARKER_LEN; /* send the body, not the marker */
-    int yield_ms = resolve_yield_ms(args, NM_EXEC_WRITE_YIELD_DEFAULT_MS);
+    int provided = 0;
+    long req = requested_yield_ms(args, NM_EXEC_WRITE_YIELD_DEFAULT_MS,
+                                  &provided);
+    /* Codex's per-mode window: an EMPTY poll is a background wait (5 s
+     * up to the `poll_timeout` ceiling), a non-empty write the same 30 s
+     * cap the initial exec uses. `ilen` is the BODY length, so a bare
+     * `\x04` (no characters written) counts as a poll. */
+    long floored = req < NM_EXEC_YIELD_MIN_MS ? NM_EXEC_YIELD_MIN_MS : req;
+    int yield_ms = ilen == 0
+                       ? clamp_ms(floored, NM_EXEC_EMPTY_POLL_MIN_MS,
+                                  poll_timeout_ms())
+                       : clamp_ms(floored, NM_EXEC_YIELD_MIN_MS,
+                                  NM_EXEC_YIELD_MAX_MS);
 
     if (!nm_proc_find((int)id)) {
         char msg[96];
@@ -448,6 +521,9 @@ static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
     e->outbox = outbox;
     e->outbox_len = ilen;
     e->close_stdin = close_stdin;
+    e->yield_ms = yield_ms;
+    e->requested_ms = req;
+    e->requested_ok = provided;
     e->deadline = nm_monotonic_seconds() + (double)yield_ms / 1000.0;
     return e;
 }
@@ -509,7 +585,7 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
     }
     if (ms_until(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
-        e->result = running_result(e->job_id, body);
+        e->result = running_result(e, body);
         e->done = 1;
         return take(e, out);
     }
@@ -668,15 +744,31 @@ static NmToolResult kill_job_exec(const NmTool *tool,
 /* Vtables                                                           */
 /* ---------------------------------------------------------------- */
 
+/* The yield-window blurbs, per call site — the ADVERTISED shape, so a
+ * model can plan around the clamp instead of discovering it with a
+ * stopwatch (the Codex #22541 ask). The Windows variant names its 10 s
+ * floor, as Codex's does. */
+#ifdef _WIN32
+#define NM_EXEC_YIELD_DESC                                          \
+    "Wait before yielding output. Defaults to 10000 ms; effective " \
+    "range on Windows is 10000-30000 ms."
+#else
+#define NM_EXEC_YIELD_DESC                                          \
+    "Wait before yielding output. Defaults to 10000 ms; effective " \
+    "range is 250-30000 ms."
+#endif
+
+#define NM_WRITE_YIELD_DESC                                             \
+    "Wait before yielding output. Non-empty writes default to 1000 ms " \
+    "and cap at 30000 ms; empty polls wait 5000-300000 ms by default."
+
 static const char exec_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"cmd\":{\"type\":\"string\",\"description\":\"Shell command to start "
     "(runs under /bin/sh -c in its own terminal).\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Working directory "
     "(defaults to the agent's working directory).\"},"
-    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"How long to "
-    "wait for the command to finish before reporting a job id "
-    "(250-30000, default 10000).\"}},"
+    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"" NM_EXEC_YIELD_DESC "\"}},"
     "\"required\":[\"cmd\"]}";
 
 const NmTool nm_tool_exec_command = {
@@ -703,8 +795,7 @@ static const char write_stdin_schema[] =
     "\"input\":{\"type\":\"string\",\"description\":\"Text for the job's "
     "stdin. A trailing \\\\x04 closes stdin; an interior \\\\x04 is an "
     "error. Omit to just read output.\"},"
-    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"How long to "
-    "wait for output (250-30000, default 1000).\"}},"
+    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"" NM_WRITE_YIELD_DESC "\"}},"
     "\"required\":[\"job_id\"]}";
 
 const NmTool nm_tool_write_stdin = {
