@@ -52,6 +52,22 @@ static void ws_reset_health(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SEARXNG_ENABLED);
 }
 
+/* The per-request budget: the store's `searxng_timeout` key (a
+ * positive decimal, ms), which the tool resolves at the point of use.
+ * The seam is the store — no tool-side setter (a hook kept alive only
+ * by tests is dead code). */
+static void ws_set_timeout(int ms)
+{
+    char v[32];
+    snprintf(v, sizeof(v), "%d", ms);
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_SEARXNG_TIMEOUT, v);
+}
+
+static void ws_clear_timeout(void)
+{
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SEARXNG_TIMEOUT);
+}
+
 /* test_net_helpers maps usleep -> Sleep on Windows; one spelling here. */
 #define tsleep(ms) usleep((unsigned)(ms) * 1000)
 
@@ -219,7 +235,7 @@ static void test_web_search_deadline_ms_seam(void)
 
     pthread_t th = srv_launch(&s);
 
-    nm_tool_web_search_set_timeout_ms(200);
+    ws_set_timeout(200);
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, "web_search");
     NmToolExec *e = t->begin(t, "{\"query\":\"x\"}", NULL);
@@ -240,7 +256,7 @@ static void test_web_search_deadline_ms_seam(void)
     nm_tool_result_free(&out);
     t->end(e);
 
-    nm_tool_web_search_set_timeout_ms(0); /* restore the default */
+    ws_clear_timeout(); /* restore the default */
     close(s.fd);
     pthread_join(th, NULL);
     nm_toolset_free(ts);
@@ -470,11 +486,11 @@ static void test_web_search_timeout(void)
 
     pthread_t th = srv_launch(&s);
 
-    nm_tool_web_search_set_timeout_ms(300);
+    ws_set_timeout(300);
     NmToolset *ts = nm_toolset_new_defaults();
     NmToolResult r = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                         NULL);
-    nm_tool_web_search_set_timeout_ms(0); /* restore the default */
+    ws_clear_timeout(); /* restore the default */
     pthread_join(th, NULL);
 
     ASSERT_EQ(r.status, NM_TOOL_ERR);
@@ -482,6 +498,22 @@ static void test_web_search_timeout(void)
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
     close(s.fd);
+}
+
+/* The per-request budget resolves from the store's `searxng_timeout`
+ * key at the point of use — the built-in default with no key, the
+ * store's value once set (the tool keeps no copy, so /config, the
+ * shadow and the env layer all drive it). */
+static void test_web_search_timeout_resolves_from_store(void)
+{
+    ws_clear_timeout();
+    ASSERT_EQ(nm_tool_web_search_timeout_ms(),
+              NM_WEBSEARCH_DEFAULT_TIMEOUT_MS);
+    ws_set_timeout(2500);
+    ASSERT_EQ(nm_tool_web_search_timeout_ms(), 2500);
+    ws_clear_timeout();
+    ASSERT_EQ(nm_tool_web_search_timeout_ms(),
+              NM_WEBSEARCH_DEFAULT_TIMEOUT_MS);
 }
 
 /* Argument validation happens before any connection. */
@@ -519,7 +551,7 @@ static void test_web_search_async_step_seam(void)
 
     pthread_t th = srv_launch(&s);
 
-    nm_tool_web_search_set_timeout_ms(2000);
+    ws_set_timeout(2000);
     NmToolset *ts = nm_toolset_new_defaults();
     const NmTool *t = nm_toolset_find(ts, "web_search");
     NmToolExec *e = t->begin(t, "{\"query\":\"x\"}", NULL);
@@ -543,7 +575,7 @@ static void test_web_search_async_step_seam(void)
     t->end(e);
 
     /* The stalling server is unblocked when the test closes out. */
-    nm_tool_web_search_set_timeout_ms(0);
+    ws_clear_timeout(); /* restore the default */
     close(s.fd);
     pthread_join(th, NULL);
     nm_toolset_free(ts);
@@ -571,6 +603,7 @@ int main(void)
     RUN_TEST(test_web_search_malformed_json);
     RUN_TEST(test_web_search_refused_then_cached);
     RUN_TEST(test_web_search_timeout);
+    RUN_TEST(test_web_search_timeout_resolves_from_store);
     RUN_TEST(test_web_search_args_validation);
     RUN_TEST(test_web_search_async_step_seam);
     RUN_TEST(test_web_search_deadline_ms_seam);

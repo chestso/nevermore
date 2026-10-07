@@ -74,6 +74,9 @@ static void usage(FILE *out)
             "  NEVERMORE_SEARXNG_URL   SearXNG endpoint the web_search\n"
             "                          tool queries (default\n"
             "                          http://127.0.0.1:8888)\n"
+            "  NEVERMORE_SEARXNG_TIMEOUT_MS\n"
+            "                          web_search per-request timeout in\n"
+            "                          ms (default 10000)\n"
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
             "  NEVERMORE_TIMEOUT_MS    stream-inactivity timeout in ms\n"
             "                          (default 300000; negative disables)\n"
@@ -331,7 +334,7 @@ static int run_interactive(const char *provider_name, const char *model,
      * Nothing is pushed — the agent reads `rounds`/`reasoning_echo`, the
      * connect walk reads `connect_timeout`/`family_skip`/
      * `skip_families`, the web_search tool reads `searxng`/
-     * `searxng_enabled`. */
+     * `searxng_enabled`/`searxng_timeout`. */
     nm_chat_app_set_config(app, cfg);
     nm_chat_app_set_timeout_ms(app, resolved_timeout_ms());
     /* Base URL override only: the API key is left NULL so the app

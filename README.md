@@ -123,8 +123,8 @@ Settings resolve once, lowest to highest:
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
    `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
    `NEVERMORE_CONNECT_SKIP_FAMILIES`, `NEVERMORE_SEARXNG_URL`,
-   `NEVERMORE_SEARXNG_ENABLED`, `NEVERMORE_ROLLING_WINDOW`,
-   `NEVERMORE_CONTEXT_BUDGET`
+   `NEVERMORE_SEARXNG_ENABLED`, `NEVERMORE_SEARXNG_TIMEOUT_MS`,
+   `NEVERMORE_ROLLING_WINDOW`, `NEVERMORE_CONTEXT_BUDGET`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -149,6 +149,7 @@ family_skip      = on
 skip_families    = none
 searxng          = http://127.0.0.1:8888
 searxng_enabled  = on
+searxng_timeout  = 10000
 rolling_window   = off
 context_budget   = 100000
 ```
@@ -183,6 +184,9 @@ says so once and the tool writes `searxng_enabled = off` on the
 **runtime** layer, so later calls short-circuit instead of hammering a
 dead server — `/config` shows the value and its `(runtime)` layer, and
 `/config reset searxng_enabled` (or fixing the endpoint) re-arms it.
+`searxng_timeout` is the per-request budget in milliseconds (default
+10000): a query whose connection is accepted but never answered is
+abandoned after it instead of hanging the turn.
 
 `connect_timeout` is the per-address budget in milliseconds for the
 bounded connect walk (default 750): a hostname resolves to several

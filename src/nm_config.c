@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 11
+#define NM_CFG_NKEYS 12
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -134,6 +134,8 @@ static const struct
     { NM_CFG_KEY_SKIP_FAMILIES, "NEVERMORE_CONNECT_SKIP_FAMILIES", "none" },
     { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL", NM_WEBSEARCH_DEFAULT_URL },
     { NM_CFG_KEY_SEARXNG_ENABLED, "NEVERMORE_SEARXNG_ENABLED", "on" },
+    { NM_CFG_KEY_SEARXNG_TIMEOUT, "NEVERMORE_SEARXNG_TIMEOUT_MS",
+      NM_STR(NM_WEBSEARCH_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_ROLLING_WINDOW, "NEVERMORE_ROLLING_WINDOW", "off" },
     { NM_CFG_KEY_CONTEXT_BUDGET, "NEVERMORE_CONTEXT_BUDGET",
       NM_STR(NM_AGENT_DEFAULT_CONTEXT_BUDGET) },
@@ -505,7 +507,8 @@ static int normalize_value(const char *key, const char *raw, char *out,
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_ROUNDS) == 0 ||
                strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_CONTEXT_BUDGET) == 0) {
+               strcmp(key, NM_CFG_KEY_CONTEXT_BUDGET) == 0 ||
+               strcmp(key, NM_CFG_KEY_SEARXNG_TIMEOUT) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0) {

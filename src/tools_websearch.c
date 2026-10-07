@@ -53,13 +53,10 @@
 #include "nm_clock.h"
 
 #define NM_WEBSEARCH_DEFAULT_URL         "http://127.0.0.1:8888"
-#define NM_WEBSEARCH_DEFAULT_TIMEOUT_MS  10000
 #define NM_WEBSEARCH_DEFAULT_MAX_RESULTS 8
 #define NM_WEBSEARCH_MAX_RESULTS         8 /* quoth's cap (== the default) */
 #define NM_WEBSEARCH_BODY_MAX            (4u * 1024u * 1024u)
 #define NM_WEBSEARCH_URL_MAX             1024
-
-static int g_timeout_ms; /* 0 = default */
 
 /* The endpoint we last probed. The latch we keep is a "when", not a
  * "what": the URL itself is resolved from the store, but we remember
@@ -70,11 +67,6 @@ static char g_probed_url[NM_WEBSEARCH_URL_MAX];
 /* ---------------------------------------------------------------- */
 /* Runtime knobs (resolved from the store, never copied)             */
 /* ---------------------------------------------------------------- */
-
-void nm_tool_web_search_set_timeout_ms(int ms)
-{
-    g_timeout_ms = ms > 0 ? ms : 0;
-}
 
 /* The effective endpoint: the store's `searxng` value, else the
  * built-in default. */
@@ -91,6 +83,16 @@ int nm_tool_web_search_enabled(void)
 {
     NmConfig *c = nm_config_store();
     return c ? nm_config_resolve_bool(c, NM_CFG_KEY_SEARXNG_ENABLED, 1) : 1;
+}
+
+/* The per-request budget in ms: the store's `searxng_timeout`, else the
+ * built-in default (no store = the default, exactly as the URL). */
+int nm_tool_web_search_timeout_ms(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_int(c, NM_CFG_KEY_SEARXNG_TIMEOUT,
+                                     NM_WEBSEARCH_DEFAULT_TIMEOUT_MS)
+             : NM_WEBSEARCH_DEFAULT_TIMEOUT_MS;
 }
 
 /* Record that the instance did not answer: latch `searxng_enabled=off`
@@ -119,8 +121,7 @@ static void ws_note_endpoint(const char *url)
 
 static double timeout_seconds(void)
 {
-    int ms = g_timeout_ms > 0 ? g_timeout_ms : NM_WEBSEARCH_DEFAULT_TIMEOUT_MS;
-    return (double)ms / 1000.0;
+    return (double)nm_tool_web_search_timeout_ms() / 1000.0;
 }
 
 /* ---------------------------------------------------------------- */

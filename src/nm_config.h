@@ -139,6 +139,13 @@ extern "C" {
  * probe fails, so a self-disabling search is visible to /config and
  * resettable. Env spelling: NEVERMORE_SEARXNG_ENABLED. */
 #define NM_CFG_KEY_SEARXNG_ENABLED "searxng_enabled"
+/* Per-request timeout for the web_search tool, in ms (a positive
+ * decimal, default NM_WEBSEARCH_DEFAULT_TIMEOUT_MS). The tool resolves
+ * it at the point of use, so it bounds a query that accepts the
+ * connection and never answers — the same drive the tool's
+ * NmTool.deadline_ms seam gives the agent. Env spelling:
+ * NEVERMORE_SEARXNG_TIMEOUT_MS. */
+#define NM_CFG_KEY_SEARXNG_TIMEOUT "searxng_timeout"
 /* Rolling context window: whether the agent trims the stored
  * conversation to a token budget before each request. `on`/`off` (a
  * bool, default OFF). OFF — the default — sends the whole transcript

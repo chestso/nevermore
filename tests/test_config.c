@@ -574,9 +574,10 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SKIP_FAMILIES);
     ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SEARXNG);
     ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_ROLLING_WINDOW);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_NULL(nm_config_key_at(11));
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(12));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -593,6 +594,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_SEARXNG_URL");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG_ENABLED),
                   "NEVERMORE_SEARXNG_ENABLED");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG_TIMEOUT),
+                  "NEVERMORE_SEARXNG_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROLLING_WINDOW),
                   "NEVERMORE_ROLLING_WINDOW");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONTEXT_BUDGET),
@@ -681,10 +684,15 @@ static void test_defaults_and_resolve(void)
     ASSERT_FALSE(nm_config_resolve_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 1));
     ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_CONTEXT_BUDGET, -1),
               NM_AGENT_DEFAULT_CONTEXT_BUDGET);
+    /* web_search's per-request budget is a key with a built-in default
+     * (the tool's own macro), so it too never resolves to "-". */
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_SEARXNG_TIMEOUT, -1),
+              10000);
 
     /* The default table is queryable without a config handle. */
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_CONNECT_TIMEOUT), "750");
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_SEARXNG_TIMEOUT), "10000");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_PROVIDER), "ollama:local");
     ASSERT_NULL(nm_config_default(NM_CFG_KEY_MODEL));
     nm_config_free(c);

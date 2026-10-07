@@ -198,17 +198,22 @@ NmToolset *nm_toolset_new_defaults(void);
  * references it, so there is one spelling. */
 #define NM_WEBSEARCH_DEFAULT_URL "http://127.0.0.1:8888"
 
-/* Per-request timeout in ms (0 = default 10000). Test seam and the
- * anchor for a future `searxng_timeout` knob. */
-void nm_tool_web_search_set_timeout_ms(int ms);
+/* Per-request timeout in ms — the tool's built-in default, and the
+ * `searxng_timeout` key's default text (the macro lives here, the tool
+ * owns the value, nm_config's key table stringizes it). The tool
+ * resolves the key from the store at the point of use, so /config
+ * shows it and the shadow/env layers carry it. */
+#define NM_WEBSEARCH_DEFAULT_TIMEOUT_MS 10000
 
-/* The effective SearXNG endpoint and enable flag, resolved from the
- * store (nm_config) at the point of use — the tool keeps no copy. With
- * no store installed, the URL default and enabled=on apply. The
+/* The effective SearXNG endpoint, enable flag and per-request timeout,
+ * resolved from the store (nm_config) at the point of use — the tool
+ * keeps no copy. With no store installed, the built-in defaults apply
+ * (the default URL, enabled=on, the default timeout). The
  * `searxng_enabled` RUNTIME layer is written `off` by the tool when a
  * probe fails, so /config can show and reset a self-disabled search. */
 const char *nm_tool_web_search_base_url(void);
 int nm_tool_web_search_enabled(void);
+int nm_tool_web_search_timeout_ms(void);
 
 /* ---------------------------------------------------------------- */
 /* run_command inactivity budget (process-global, like the above)    */
