@@ -647,8 +647,9 @@ static void test_connect_knobs(void)
 
 /* The built-in defaults are store values, so resolution never yields
  * "-": every known key resolves to a value, and the source says the
- * default dictates. provider/model have no store default (the app
- * picks), so resolve returns NULL there. */
+ * default dictates. provider HAS a default (the zero-config local
+ * daemon — the active-provider source the scoped model lookup keys on);
+ * model has none (the app asks). */
 static void test_defaults_and_resolve(void)
 {
     pin_paths("defaults");
@@ -662,7 +663,10 @@ static void test_defaults_and_resolve(void)
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SEARXNG_ENABLED, &s), "on");
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SEARXNG, &s),
                   "http://127.0.0.1:8888");
-    ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_PROVIDER, &s));
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_PROVIDER, &s),
+                  "ollama:local");
+    ASSERT_EQ(s, NM_CFG_DEFAULT);
+    ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_MODEL, &s));
     ASSERT_NULL(nm_config_resolve(c, "bogus", &s));
 
     /* Typed reads come off the same default. */
@@ -681,7 +685,8 @@ static void test_defaults_and_resolve(void)
     /* The default table is queryable without a config handle. */
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_CONNECT_TIMEOUT), "750");
-    ASSERT_NULL(nm_config_default(NM_CFG_KEY_PROVIDER));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_PROVIDER), "ollama:local");
+    ASSERT_NULL(nm_config_default(NM_CFG_KEY_MODEL));
     nm_config_free(c);
 }
 
@@ -824,6 +829,125 @@ static void test_rolling_window_keys(void)
     nm_config_free(c2);
 }
 
+/* The model key is PROVIDER-SCOPED: `model.<provider>` is the memory,
+ * the plain `model` resolves below it, and -m / $NEVERMORE_MODEL stay
+ * global. The precedence matrix, cell by cell. */
+static void test_scoped_model_resolution(void)
+{
+    pin_paths("scoped");
+    write_file_at(g_user,
+                  "provider = openai\n"
+                  "model = plain-user\n"
+                  "model.openai = scoped-user\n"
+                  "model.ollama:local = local-user\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* The active provider (openai) picks its scoped value, and the
+     * scoped spelling outranks the plain one. */
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL), "scoped-user");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "scoped-user");
+
+    /* Another provider with a scoped value of its own uses it; one with
+     * NO memory falls through to the plain spelling. */
+    ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "plain-user");
+
+    /* The shadow's scoped spelling outranks the user's. */
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "scoped-shadow"), 0);
+    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "scoped-shadow");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
+
+    /* -m / $NEVERMORE_MODEL are GLOBAL: an explicit flag is not memory,
+     * so it beats the scoped value on every provider. */
+    nm_config_set_cli(c, NM_CFG_KEY_MODEL, "from-cli");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "from-cli");
+    ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "from-cli");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_CLI);
+    nm_config_set_cli(c, NM_CFG_KEY_MODEL, "");
+
+    /* Switching the active provider re-scopes the plain `model` read. */
+    nm_config_set_cli(c, NM_CFG_KEY_PROVIDER, "openrouter");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL), "plain-user");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_USER);
+    nm_config_free(c);
+}
+
+/* The scoped-key shape: `model.<known provider>` only. An unknown
+ * provider warns and is skipped, and the listing names just the SET
+ * keys. */
+static void test_scoped_key_vocabulary(void)
+{
+    pin_paths("scoped-keys");
+    nm_config_set_provider_validator(test_valid_provider);
+
+    ASSERT_TRUE(nm_config_scoped_key_ok("model.openai"));
+    ASSERT_TRUE(nm_config_scoped_key_ok("model.ollama:local"));
+    ASSERT_FALSE(nm_config_scoped_key_ok("model.nosuchprovider"));
+    ASSERT_FALSE(nm_config_scoped_key_ok("model"));         /* the plain key */
+    ASSERT_FALSE(nm_config_scoped_key_ok("rounds.openai")); /* not a scoped base */
+    ASSERT_FALSE(nm_config_scoped_key_ok("model."));
+    ASSERT_FALSE(nm_config_scoped_key_ok("model..x"));
+
+    write_file_at(g_user,
+                  "model.nosuchprovider = x\n"
+                  "model.openai = gpt-x\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "gpt-x");
+    ASSERT_NULL(nm_config_model_for(c, "nosuchprovider", NULL));
+
+    ASSERT_STR_EQ(nm_config_scoped_key_at(c, 0), "model.openai");
+    ASSERT_NULL(nm_config_scoped_key_at(c, 1));
+    nm_config_free(c);
+}
+
+/* A scoped key writes its own shadow slot, reloads as one, and
+ * `model` reset clears the WHOLE model memory (plain + every scoped
+ * spelling) — what "forget my model" means. */
+static void test_scoped_shadow_write_and_reset(void)
+{
+    pin_paths("scoped-write");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.ollama:local", "local-x"), 0);
+    ASSERT_EQ(nm_config_shadow_count(c), 2);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "model.openai = gpt-x\nmodel.ollama:local = local-x\n");
+
+    /* A fresh load reads them back as scoped shadow values. */
+    NmConfig *c2 = nm_config_load();
+    ASSERT_STR_EQ(nm_config_model_for(c2, "openai", NULL), "gpt-x");
+    ASSERT_EQ(nm_config_source(c2, "model.openai"), NM_CFG_SHADOW);
+    nm_config_free(c2);
+
+    /* Resetting one scoped key leaves the other. */
+    ASSERT_EQ(nm_config_shadow_reset(c, "model.openai"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "model.ollama:local = local-x\n");
+    ASSERT_EQ(nm_config_shadow_count(c), 1);
+
+    /* Resetting `model` clears every scoped spelling. */
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
+    ASSERT_FALSE(file_present(g_shadow));
+    ASSERT_EQ(nm_config_shadow_count(c), 0);
+    nm_config_free(c);
+}
+
+/* The no-model hint names the provider, the scoped spelling and the
+ * TUI command — ONE spelling for ask mode and the TUI. */
+static void test_no_model_hint(void)
+{
+    char buf[512];
+    int n = nm_config_no_model_hint("openrouter", buf, sizeof(buf));
+    ASSERT_TRUE(n > 0);
+    ASSERT_TRUE(strstr(buf, "no model for provider 'openrouter'") != NULL);
+    ASSERT_TRUE(strstr(buf, "model.openrouter = <id>") != NULL);
+    ASSERT_TRUE(strstr(buf, "/model") != NULL);
+}
+
 int main(void)
 {
     /* A dev box or CI runner may export any of these; the matrix tests
@@ -873,5 +997,9 @@ int main(void)
     RUN_TEST(test_family_set_validation);
     RUN_TEST(test_new_keys);
     RUN_TEST(test_rolling_window_keys);
+    RUN_TEST(test_scoped_model_resolution);
+    RUN_TEST(test_scoped_key_vocabulary);
+    RUN_TEST(test_scoped_shadow_write_and_reset);
+    RUN_TEST(test_no_model_hint);
     TEST_SUMMARY();
 }

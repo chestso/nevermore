@@ -309,6 +309,19 @@ static void sys_blank(NmChatApp *app)
     send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
 }
 
+/* The one line that says there is no model for this provider and how to
+ * set one — the same text ask mode prints (nm_config_no_model_hint), so
+ * the two entry paths cannot drift. */
+static void no_model_notice(NmChatApp *app)
+{
+    if (!app)
+        return;
+    char hint[512];
+    nm_config_no_model_hint(app->provider ? app->provider->name : NULL, hint,
+                            sizeof(hint));
+    sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, hint);
+}
+
 /* Separator, once per content/reasoning run. pending_sep is the "owed"
  * flag: it is set when agent text is forwarded and cleared here, so a
  * turn that ends several streams (reasoning then content, or a tool
@@ -1038,15 +1051,14 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         return NULL;
     app->base.type = NM_CHAT_APP_TYPE_ID;
 
-    /* Default model: the provider catalog's first entry. */
-    if (model && *model) {
+    /* The model is the CALLER's resolved value (main.c resolves it from
+     * the store, provider-scoped). No catalog-first-entry fallback: a
+     * model id belongs to ONE provider, so guessing from a different
+     * provider's catalog is the wrong-default bug. NULL = no model for
+     * this provider — the app says so and refuses the send until /model
+     * sets one. */
+    if (model && *model)
         app->model = strdup(model);
-    } else {
-        size_t n = 0;
-        const NmModel *models = provider->models(provider, NULL, NULL, &n);
-        if (models && n > 0 && models[0].id)
-            app->model = strdup(models[0].id);
-    }
 
     app->term_w = 80;
     app->term_h = 24;
@@ -1222,6 +1234,10 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt)
      * (tui_runtime_set_transcript is explicit); the app frees it. */
     if (rt && app->transcript)
         tui_runtime_set_transcript(rt, app->transcript);
+    /* No model for this provider: say so once, now that the transcript
+     * can be written. The send path refuses until /model sets one. */
+    if (rt && !app->model)
+        no_model_notice(app);
 }
 
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
@@ -1535,7 +1551,8 @@ static void print_help(NmChatApp *app)
 {
     sys_text(app, "commands:\n"
                   "  /help              this list\n"
-                  "  /model [id|query]  show, set, or pick a model (! id = exact)\n"
+                  "  /model [id|query]  show, set, or pick a model (! id = exact;\n"
+                  "                     remembered per provider)\n"
                   "  /model @vision     pick among vision models (@img = image-gen,\n"
                   "                     @tool = tool use)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
@@ -1925,8 +1942,25 @@ static int switch_provider(NmChatApp *app, const char *name)
     hold_discard(app, NM_STREAM_ID_REASONING);
     app->pending_sep = 0;
     app->reasoning_open = 0;
+    /* The store is the per-provider model memory: re-resolve the model
+     * for the NEW provider, so a switch to one with no memory lands on
+     * the ask instead of carrying the previous provider's id (the "no
+     * implicit model" bug in its other dress). With no store there is
+     * no memory to consult, so the model the app was given stands. */
+    char *next_model = NULL;
+    if (app->cfg) {
+        const char *m = nm_config_model_for(app->cfg, p->name, NULL);
+        if (m && *m)
+            next_model = strdup(m);
+    } else if (app->model) {
+        next_model = strdup(app->model);
+    }
+    free(app->model);
+    app->model = next_model;
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
+    if (!app->model)
+        no_model_notice(app);
     if (dropped)
         sys_line(app, "image: %zu pending attachment%s dropped with the "
                       "session",
@@ -1951,8 +1985,18 @@ static void persist_and_report(NmChatApp *app, const char *key,
         sys_line(app, "%s", line);
         return;
     }
+    /* A model is persisted per provider (`model.<provider>`): a model id
+     * belongs to ONE provider, so the scoped spelling is the memory.
+     * The report still keys off `model`, whose resolution sees the
+     * global env/CLI pin (-m / $NEVERMORE_MODEL are not memory). */
+    char scoped[NM_CFG_SCOPED_KEY];
+    const char *write_key = key;
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0 && app->provider) {
+        snprintf(scoped, sizeof(scoped), "%s.%s", key, app->provider->name);
+        write_key = scoped;
+    }
     NmCfgSource upper = nm_config_source(app->cfg, key);
-    if (nm_config_shadow_set(app->cfg, key, value) != 0) {
+    if (nm_config_shadow_set(app->cfg, write_key, value) != 0) {
         sys_line(app, "%s — not saved (shadow file unavailable)", line);
         return;
     }
@@ -1965,6 +2009,19 @@ static void persist_and_report(NmChatApp *app, const char *key,
     } else {
         sys_line(app, "%s — saved to the session shadow", line);
     }
+}
+
+/* Resolve a config key the way THIS app sees it. Only `model` differs
+ * from the store's plain resolution: it is scoped by the app's ACTIVE
+ * provider (a /provider switch, or a pinned run, can move that away
+ * from the store's own `provider`), so /config shows the value the next
+ * request will actually use — never a stale scoped one. */
+static const char *app_config_resolve(const NmChatApp *app, const char *key,
+                                      NmCfgSource *src)
+{
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0 && app->provider)
+        return nm_config_model_for(app->cfg, app->provider->name, src);
+    return nm_config_resolve(app->cfg, key, src);
 }
 
 /* /config: the store's current state. The paths first (that is the
@@ -1986,7 +2043,7 @@ static void print_config(NmChatApp *app)
     for (size_t i = 0; nm_config_key_at(i); i++) {
         const char *k = nm_config_key_at(i);
         NmCfgSource src = NM_CFG_DEFAULT;
-        const char *v = nm_config_resolve(app->cfg, k, &src);
+        const char *v = app_config_resolve(app, k, &src);
         const char *layer = nm_config_source_name(src);
         /* The reasoning echo can be FROZEN for this conversation: once
          * a request has carried a trace, the mode sent then holds (a
@@ -2006,6 +2063,18 @@ static void print_config(NmChatApp *app)
             !nm_connection_family_skip() && v && strcmp(v, "none") != 0)
             layer = "inert: family_skip off";
         sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-", layer);
+    }
+    /* The provider-scoped keys actually set (`model.<provider>`), after
+     * the plain ones: the per-provider model memory. The plain `model`
+     * row above shows the effective value for the ACTIVE provider. */
+    for (size_t i = 0;; i++) {
+        const char *k = nm_config_scoped_key_at(app->cfg, i);
+        if (!k)
+            break;
+        NmCfgSource src = NM_CFG_DEFAULT;
+        const char *v = nm_config_resolve(app->cfg, k, &src);
+        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-",
+                 nm_config_source_name(src));
     }
 }
 
@@ -2057,7 +2126,7 @@ static void config_reset(NmChatApp *app, const char *key)
         sys_line(app, "no config: this session does not persist settings");
         return;
     }
-    if (key && !nm_config_env_name(key)) {
+    if (key && !nm_config_env_name(key) && !nm_config_scoped_key_ok(key)) {
         sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
                  key);
         return;
@@ -2587,6 +2656,15 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
         text = "";
     if (!*text && app->n_pending == 0)
         return;
+
+    /* A send with no model is refused BEFORE anything is echoed: the
+     * line would otherwise look delivered. The input is left intact so
+     * the user can /model and re-submit. Slash commands still run —
+     * that is how /model sets one. */
+    if (text[0] != '/' && !app->model) {
+        no_model_notice(app);
+        return;
+    }
 
     char *saved = strdup(text);
     if (!saved)

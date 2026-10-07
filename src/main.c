@@ -496,11 +496,12 @@ int main(int argc, char *argv[])
      * 0/absent = the tool's built-in default. */
     nm_tool_run_command_set_timeout_ms(resolved_run_command_timeout_ms());
 
+    /* The store owns both values: `provider` has a built-in default
+     * (the zero-config local daemon), and `model` resolves
+     * provider-scoped (a model id belongs to ONE provider). */
     const char *provider_name =
-        nm_config_get(cfg, NM_CFG_KEY_PROVIDER);
-    if (!provider_name)
-        provider_name = "ollama:local"; /* zero-config default: local daemon */
-    const char *model = nm_config_get(cfg, NM_CFG_KEY_MODEL);
+        nm_config_resolve(cfg, NM_CFG_KEY_PROVIDER, NULL);
+    const char *model = nm_config_resolve(cfg, NM_CFG_KEY_MODEL, NULL);
 
     const NmProvider *provider = nm_provider_by_name(provider_name);
     if (!provider) {
@@ -528,10 +529,18 @@ int main(int argc, char *argv[])
     if (prompt) {
         /* One-shot ask mode (phase 3): the full agent loop — stream,
          * tool calls, file edits — with deltas on stdout and tool
-         * activity on stderr. */
+         * activity on stderr. No model for this provider = no turn: say
+         * how to set one and exit before any traffic (the store has no
+         * guess — a catalog's first entry is a different provider's id
+         * spelled differently). */
+        if (!model) {
+            char hint[512];
+            nm_config_no_model_hint(provider_name, hint, sizeof(hint));
+            fprintf(stderr, "nevermore: %s\n", hint);
+            nm_config_free(cfg);
+            return 1;
+        }
         const char *api_key = nm_provider_api_key(provider);
-        if (!model)
-            model = "gpt-oss:20b"; /* sane local default */
 
         NmToolset *tools = nm_toolset_new_defaults();
         if (!tools) {

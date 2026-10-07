@@ -3576,10 +3576,11 @@ static void test_config_command_reports_and_resets(void)
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
-    /* "! id" is the exact-set path (the id need not be in the catalog). */
+    /* "! id" is the exact-set path (the id need not be in the catalog).
+     * The model is persisted per provider: `model.<provider>`. */
     harness_type(h, "/model ! from-user");
     harness_enter(h);
-    ASSERT_STR_EQ(cfg_read_shadow(), "model = from-user\n");
+    ASSERT_STR_EQ(cfg_read_shadow(), "model.openai = from-user\n");
 
     harness_type(h, "/config");
     harness_enter(h);
@@ -3603,6 +3604,96 @@ static void test_config_command_reports_and_resets(void)
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "config: all keys reset") != NULL);
     ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* A model pick is remembered PER PROVIDER: /model writes
+ * `model.<provider>`, a switch re-resolves for the new provider (no
+ * memory = the ask, never the previous provider's id), and switching
+ * back restores it. */
+static void test_model_memory_is_per_provider(void)
+{
+    pin_cfg_paths("scopedmodel");
+    write_file_at(g_cfg_user, "provider = openai\n");
+
+    AppHarness *h = harness_new("openai", "m1", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "m1");
+
+    /* The pick lands under the ACTIVE provider's scoped spelling. */
+    harness_type(h, "/model ! m2");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "m2");
+    ASSERT_STR_EQ(cfg_read_shadow(), "model.openai = m2\n");
+
+    /* A provider with no memory for this model: the switch lands on the
+     * ask (no model), not the previous provider's id. */
+    harness_type(h, "/provider hyper");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "hyper");
+    ASSERT_NULL(nm_chat_app_model(h->app));
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "no model for provider 'hyper'") != NULL);
+
+    /* Back to openai: the memory restores the id. */
+    harness_type(h, "/provider openai");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "m2");
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* A send with no model for the provider is refused BEFORE the echo: the
+ * line never looks delivered and the input is left for a retry after
+ * /model. */
+static void test_send_without_model_is_refused(void)
+{
+    AppHarness *h = harness_new("openai", NULL, NULL);
+    ASSERT_NOT_NULL(h);
+    ASSERT_NULL(nm_chat_app_model(h->app));
+
+    /* The startup notice says how to set one. */
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "no model for provider 'openai'") != NULL);
+
+    /* A plain send is refused: the agent stays idle and the input is
+     * NOT cleared (submit's echo/clear never ran). */
+    harness_type(h, "hello");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "hello");
+
+    /* Slash commands still run: /model sets one (clear the refused
+     * buffer first — the point of leaving it was the retry). */
+    tui_textinput_clear(nm_chat_app_textinput(h->app));
+    harness_type(h, "/model ! m1");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "m1");
+
+    harness_free(h);
+}
+
+/* /config lists the provider-scoped keys that are set, after the plain
+ * ones — the per-provider model memory. */
+static void test_config_lists_scoped_model_keys(void)
+{
+    pin_cfg_paths("scopedlist");
+    write_file_at(g_cfg_user, "provider = openai\nmodel.openai = gpt-x\n");
+
+    AppHarness *h = harness_new("openai", "gpt-x", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "model.openai") != NULL);
+    ASSERT_TRUE(strstr(out, "gpt-x") != NULL);
 
     nm_config_free(cfg);
     harness_free(h);
@@ -5627,6 +5718,9 @@ int main(void)
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_set_and_runtime_layer);
+    RUN_TEST(test_model_memory_is_per_provider);
+    RUN_TEST(test_send_without_model_is_refused);
+    RUN_TEST(test_config_lists_scoped_model_keys);
     RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_connect_knobs_via_config_command);
     RUN_TEST(test_connect_knobs_from_config_reach_transport);

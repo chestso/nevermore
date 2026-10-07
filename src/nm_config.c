@@ -50,6 +50,13 @@
 
 #define NM_CFG_NKEYS 11
 
+/* The scoped-key pool: `model.<provider>` is a family, not a fixed
+ * list, but only the two PERSISTED layers have a scoped spelling (-m
+ * and $NEVERMORE_MODEL are global by definition), so a small fixed
+ * table suffices — the registry cap (NM_PROVIDER_MAX, 16). A file
+ * naming more providers than this drops the extras with a warning. */
+#define NM_CFG_NSCOPED 16
+
 typedef struct
 {
     const char *name;
@@ -62,9 +69,21 @@ typedef struct
     char runtime[NM_CONFIG_VAL];
 } CfgKey;
 
+/* A provider-scoped key (`model.<provider>`): the plain key's user and
+ * shadow spellings, per provider. The scoped pool lives beside the
+ * fixed key table; nm_config_scoped_key_at lists the SET ones. */
+typedef struct
+{
+    char name[NM_CFG_SCOPED_KEY]; /* "model.<provider>" */
+    char user[NM_CONFIG_VAL];
+    char shadow[NM_CONFIG_VAL];
+} CfgScoped;
+
 struct NmConfig
 {
     CfgKey keys[NM_CFG_NKEYS];
+    CfgScoped scoped[NM_CFG_NSCOPED];
+    int n_scoped;
     char user_path[NM_CONFIG_PATH];
     char shadow_path[NM_CONFIG_PATH];
     int user_present;
@@ -101,7 +120,10 @@ static const struct
     const char *env;
     const char *def; /* NULL = no built-in default */
 } KEYS[NM_CFG_NKEYS] = {
-    { NM_CFG_KEY_PROVIDER, "NEVERMORE_PROVIDER", NULL },
+    /* provider HAS a built-in default: it is the active-provider source
+     * the scoped `model.<provider>` lookup keys on, so it must always
+     * resolve (main.c used to hardcode the same fallback). */
+    { NM_CFG_KEY_PROVIDER, "NEVERMORE_PROVIDER", "ollama:local" },
     { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL", NULL },
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
@@ -137,6 +159,110 @@ static CfgKey *key_by_name(NmConfig *c, const char *name)
             return &c->keys[i];
     }
     return NULL;
+}
+
+/* ---------------------------------------------------------------- */
+/* Provider-scoped keys (`model.<provider>`)                         */
+/* ---------------------------------------------------------------- */
+
+/* Is `name` a scoped key `<base>.<provider>`, with `base` a scoped base
+ * (only `model` today) and `<provider>` a name the registry knows?
+ * Fills `base` / `provider` when asked. The provider check goes through
+ * the SAME validator hook `provider =` uses, so a scoped key can never
+ * name a provider that does not exist. */
+static int scoped_split(const char *name, char *base, size_t base_cap,
+                        char *provider, size_t prov_cap)
+{
+    if (!name || !*name)
+        return 0;
+    const char *dot = strchr(name, '.');
+    if (!dot || dot == name || !dot[1])
+        return 0;
+    size_t blen = (size_t)(dot - name);
+    if (blen >= NM_CFG_SCOPED_KEY)
+        return 0;
+    char b[NM_CFG_SCOPED_KEY];
+    memcpy(b, name, blen);
+    b[blen] = '\0';
+    if (strcmp(b, NM_CFG_KEY_MODEL) != 0)
+        return 0; /* the only scoped base */
+    const char *prov = dot + 1;
+    if (!nm_config_valid_provider(prov))
+        return 0;
+    if (base && base_cap)
+        snprintf(base, base_cap, "%s", b);
+    if (provider && prov_cap)
+        snprintf(provider, prov_cap, "%s", prov);
+    return 1;
+}
+
+int nm_config_scoped_key_ok(const char *key)
+{
+    return scoped_split(key, NULL, 0, NULL, 0);
+}
+
+/* The scoped slot for `provider`, or NULL when it was never set. */
+static CfgScoped *scoped_find(const NmConfig *c, const char *provider)
+{
+    if (!c || !provider || !*provider)
+        return NULL;
+    char want[NM_CFG_SCOPED_KEY];
+    snprintf(want, sizeof(want), "%s.%s", NM_CFG_KEY_MODEL, provider);
+    for (int i = 0; i < c->n_scoped; i++)
+        if (strcmp(c->scoped[i].name, want) == 0)
+            return (CfgScoped *)&c->scoped[i];
+    return NULL;
+}
+
+/* The scoped slot holding the exact key `name` (the /config listing and
+ * a scoped resolve both carry the full spelling). */
+static CfgScoped *scoped_find_name(const NmConfig *c, const char *name)
+{
+    if (!c || !name)
+        return NULL;
+    for (int i = 0; i < c->n_scoped; i++)
+        if (strcmp(c->scoped[i].name, name) == 0)
+            return (CfgScoped *)&c->scoped[i];
+    return NULL;
+}
+
+/* Find or create the slot for `provider`; NULL when the pool is full
+ * (a misconfiguration, warned at the point of use). */
+static CfgScoped *scoped_get_or_create(NmConfig *c, const char *provider)
+{
+    CfgScoped *s = scoped_find(c, provider);
+    if (s)
+        return s;
+    if (c->n_scoped >= NM_CFG_NSCOPED)
+        return NULL;
+    s = &c->scoped[c->n_scoped++];
+    memset(s, 0, sizeof(*s));
+    snprintf(s->name, sizeof(s->name), "%s.%s", NM_CFG_KEY_MODEL, provider);
+    return s;
+}
+
+const char *nm_config_scoped_key_at(const NmConfig *c, size_t i)
+{
+    if (!c)
+        return NULL;
+    size_t seen = 0;
+    for (int j = 0; j < c->n_scoped; j++) {
+        if (!c->scoped[j].user[0] && !c->scoped[j].shadow[0])
+            continue;
+        if (seen++ == i)
+            return c->scoped[j].name;
+    }
+    return NULL;
+}
+
+int nm_config_no_model_hint(const char *provider, char *out, size_t cap)
+{
+    const char *p = provider && *provider ? provider : "?";
+    return snprintf(out, cap,
+                    "no model for provider '%s' — set one with -m, "
+                    "$NEVERMORE_MODEL, '%s.%s = <id>' in %s, or /model in "
+                    "the TUI",
+                    p, NM_CFG_KEY_MODEL, p, nm_config_user_path());
 }
 
 /* The provider-name validator: installed by main.c (the registry is a
@@ -625,6 +751,40 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
 
         CfgKey *k = key_by_name(c, key);
         if (!k) {
+            /* A scoped key (`model.<provider>`) is a key in its own
+             * right: the provider memory. */
+            char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
+            if (scoped_split(key, base, sizeof(base), provider,
+                             sizeof(provider))) {
+                char norm[NM_CONFIG_VAL];
+                if (!normalize_value(base, val, norm, sizeof(norm))) {
+                    fprintf(stderr, "nevermore: %s: %s: invalid value "
+                                    "'%s': ignored\n",
+                            which, key, val);
+                    continue;
+                }
+                CfgScoped *s = scoped_get_or_create(c, provider);
+                if (!s) {
+                    fprintf(stderr, "nevermore: %s: too many scoped keys "
+                                    "(max %d): '%s' ignored\n",
+                            which, NM_CFG_NSCOPED, key);
+                    continue;
+                }
+                snprintf(into_shadow ? s->shadow : s->user, NM_CONFIG_VAL,
+                         "%s", norm);
+                count++;
+                continue;
+            }
+            /* The scoped SHAPE with an unknown provider is a more
+             * useful message than the generic unknown-key line. */
+            size_t plen = strlen(NM_CFG_KEY_MODEL);
+            if (strncmp(key, NM_CFG_KEY_MODEL, plen) == 0 &&
+                key[plen] == '.') {
+                fprintf(stderr, "nevermore: %s: unknown provider in key "
+                                "'%s': ignored\n",
+                        which, key);
+                continue;
+            }
             /* The key list is read off the one table, so it can never
              * drift out of the hint (it did: reasoning, rolling_window
              * and context_budget were missing). */
@@ -692,10 +852,43 @@ void nm_config_free(NmConfig *c)
 /* The winning layer for a key, highest first. `*src` is the layer that
  * dictates; NM_CFG_DEFAULT when only the built-in default applies.
  * Returns the winning value (borrowed), or the key's built-in default
- * text when no layer sets it (may be NULL for provider/model). */
+ * text when no layer sets it (may be NULL for model). A scoped key
+ * resolves within its own slot; `model` is provider-aware (below). */
 static const char *resolve_slot(const NmConfig *c, const char *key,
                                 NmCfgSource *src)
 {
+    if (!c || !key) {
+        if (src)
+            *src = NM_CFG_DEFAULT;
+        return NULL;
+    }
+    /* A scoped key (`model.<provider>`) has only the two persisted
+     * layers, and resolves within its own slot. */
+    if (scoped_split(key, NULL, 0, NULL, 0)) {
+        CfgScoped *s = scoped_find_name(c, key);
+        if (s) {
+            if (s->shadow[0]) {
+                if (src)
+                    *src = NM_CFG_SHADOW;
+                return s->shadow;
+            }
+            if (s->user[0]) {
+                if (src)
+                    *src = NM_CFG_USER;
+                return s->user;
+            }
+        }
+        if (src)
+            *src = NM_CFG_DEFAULT;
+        return NULL;
+    }
+    /* `model` is provider-scoped: the scoped spellings outrank the
+     * plain one. The active provider is the store's own resolved
+     * `provider` (a built-in default, so it always answers). */
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+        const char *prov = resolve_slot(c, NM_CFG_KEY_PROVIDER, NULL);
+        return nm_config_model_for(c, prov, src);
+    }
     CfgKey *k = key_by_name((NmConfig *)c, key);
     if (!k) {
         if (src)
@@ -716,6 +909,61 @@ static const char *resolve_slot(const NmConfig *c, const char *key,
         if (src)
             *src = NM_CFG_ENV;
         return k->env_v;
+    }
+    if (k->shadow[0]) {
+        if (src)
+            *src = NM_CFG_SHADOW;
+        return k->shadow;
+    }
+    if (k->user[0]) {
+        if (src)
+            *src = NM_CFG_USER;
+        return k->user;
+    }
+    if (src)
+        *src = NM_CFG_DEFAULT;
+    return k->def;
+}
+
+/* The `model` key for an explicit provider — the ONE implementation
+ * behind its resolution (resolve_slot delegates here with the store's
+ * own provider). Highest layer first, the scoped spelling before the
+ * plain one within each persisted layer. */
+const char *nm_config_model_for(const NmConfig *c, const char *provider,
+                                NmCfgSource *src)
+{
+    if (src)
+        *src = NM_CFG_DEFAULT;
+    if (!c)
+        return NULL;
+    CfgKey *k = key_by_name((NmConfig *)c, NM_CFG_KEY_MODEL);
+    if (!k)
+        return NULL;
+    if (k->runtime[0]) {
+        if (src)
+            *src = NM_CFG_RUNTIME;
+        return k->runtime;
+    }
+    if (k->cli[0]) {
+        if (src)
+            *src = NM_CFG_CLI;
+        return k->cli;
+    }
+    if (k->env_v[0]) {
+        if (src)
+            *src = NM_CFG_ENV;
+        return k->env_v;
+    }
+    CfgScoped *s = scoped_find(c, provider);
+    if (s && s->shadow[0]) {
+        if (src)
+            *src = NM_CFG_SHADOW;
+        return s->shadow;
+    }
+    if (s && s->user[0]) {
+        if (src)
+            *src = NM_CFG_USER;
+        return s->user;
     }
     if (k->shadow[0]) {
         if (src)
@@ -899,6 +1147,8 @@ static void shadow_render(NmConfig *c)
     size_t need = 1;
     for (int i = 0; i < NM_CFG_NKEYS; i++)
         need += strlen(c->keys[i].name) + strlen(c->keys[i].shadow) + 8;
+    for (int i = 0; i < c->n_scoped; i++)
+        need += strlen(c->scoped[i].name) + strlen(c->scoped[i].shadow) + 8;
     if (need > c->out_cap) {
         size_t cap = c->out_cap ? c->out_cap : 256;
         while (cap < need)
@@ -915,6 +1165,14 @@ static void shadow_render(NmConfig *c)
             continue;
         int n = snprintf(o, c->out_cap - (size_t)(o - c->out), "%s = %s\n",
                          c->keys[i].name, c->keys[i].shadow);
+        if (n > 0)
+            o += n;
+    }
+    for (int i = 0; i < c->n_scoped; i++) {
+        if (!c->scoped[i].shadow[0])
+            continue;
+        int n = snprintf(o, c->out_cap - (size_t)(o - c->out), "%s = %s\n",
+                         c->scoped[i].name, c->scoped[i].shadow);
         if (n > 0)
             o += n;
     }
@@ -977,6 +1235,24 @@ static int shadow_flush(NmConfig *c)
 
 int nm_config_shadow_set(NmConfig *c, const char *key, const char *value)
 {
+    if (!c)
+        return -1;
+    /* A scoped key (`model.<provider>`) writes its own slot. */
+    char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
+    if (scoped_split(key, base, sizeof(base), provider, sizeof(provider))) {
+        if (!value || !*value)
+            return nm_config_shadow_reset(c, key);
+        char norm[NM_CONFIG_VAL];
+        if (!normalize_value(base, value, norm, sizeof(norm)))
+            return -1;
+        CfgScoped *s = scoped_get_or_create(c, provider);
+        if (!s)
+            return -1;
+        if (!s->shadow[0])
+            c->shadow_count++;
+        snprintf(s->shadow, NM_CONFIG_VAL, "%s", norm);
+        return shadow_flush(c);
+    }
     CfgKey *k = key_by_name(c, key);
     if (!k)
         return -1;
@@ -1000,7 +1276,35 @@ int nm_config_shadow_reset(NmConfig *c, const char *key)
     if (!key) {
         for (int i = 0; i < NM_CFG_NKEYS; i++)
             c->keys[i].shadow[0] = '\0';
+        for (int i = 0; i < c->n_scoped; i++)
+            c->scoped[i].shadow[0] = '\0';
         c->shadow_count = 0;
+        return shadow_flush(c);
+    }
+    /* `model` clears the WHOLE model memory: the plain spelling and
+     * every provider's scoped one (what "forget my model" means). */
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+        CfgKey *k = key_by_name(c, key);
+        if (k && k->shadow[0]) {
+            k->shadow[0] = '\0';
+            c->shadow_count--;
+        }
+        for (int i = 0; i < c->n_scoped; i++) {
+            if (c->scoped[i].shadow[0]) {
+                c->scoped[i].shadow[0] = '\0';
+                c->shadow_count--;
+            }
+        }
+        return shadow_flush(c);
+    }
+    /* A scoped key clears just its slot (idempotent: absent = done). */
+    char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
+    if (scoped_split(key, base, sizeof(base), provider, sizeof(provider))) {
+        CfgScoped *s = scoped_find(c, provider);
+        if (s && s->shadow[0]) {
+            s->shadow[0] = '\0';
+            c->shadow_count--;
+        }
         return shadow_flush(c);
     }
     CfgKey *k = key_by_name(c, key);

@@ -53,8 +53,26 @@ extern "C" {
 /* The knobs. One spelling each — no aliases, no NEVERMORE_ prefix in
  * the file. */
 #define NM_CFG_KEY_PROVIDER "provider"
-#define NM_CFG_KEY_MODEL    "model"
-#define NM_CFG_KEY_ROUNDS   "rounds"
+/* The model key is PROVIDER-SCOPED: a model id belongs to ONE provider
+ * (a value saved under `ollama:local` is a 404 under `openrouter`), so
+ * the store remembers it per provider. A scoped spelling
+ * `model.<provider>` — `<provider>` a name the registry knows, checked
+ * with the same hook `provider =` uses — is a key in its own right,
+ * and the plain `model` still resolves, below the scoped ones:
+ *
+ *   runtime > -m > $NEVERMORE_MODEL > shadow model.P > shadow model
+ *           > user model.P > user model > (none)
+ *
+ * `-m` and $NEVERMORE_MODEL stay GLOBAL: an explicit flag is not
+ * memory. With every layer empty there is no model — ask mode exits
+ * before any traffic, the TUI refuses the send until /model sets one.
+ * See nm_config_model_for, docs/CONFIG-PLAN.md §14. */
+#define NM_CFG_KEY_MODEL  "model"
+#define NM_CFG_KEY_ROUNDS "rounds"
+
+/* Longest scoped-key spelling ("model." + a provider name), for a
+ * caller that builds one (the TUI writes `model.<provider>`). */
+#define NM_CFG_SCOPED_KEY 128
 /* Reasoning echo-back: which assistant messages re-send their thinking
  * trace to the provider as `reasoning_content`. Three modes:
  *
@@ -197,6 +215,28 @@ const char *nm_config_resolve(const NmConfig *c, const char *key,
  * write, so this never actually falls back for a known key). */
 int nm_config_resolve_int(const NmConfig *c, const char *key, int fallback);
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback);
+
+/* The model id for `provider` (see the `model` key's comment): the
+ * scoped spellings outrank the plain one, in the same layer order. This
+ * is the ONE implementation behind the `model` key's resolution, which
+ * scopes by the store's own resolved `provider`. NULL when no layer
+ * sets one (the caller then asks). */
+const char *nm_config_model_for(const NmConfig *c, const char *provider,
+                                NmCfgSource *src);
+
+/* Is `key` a scoped key — `model.<provider>` with a provider the
+ * registry knows? The shape the file layer accepts, the shadow writes
+ * and /config lists. */
+int nm_config_scoped_key_ok(const char *key);
+
+/* The scoped keys actually SET (any persisted layer), for the /config
+ * table — `model.<provider>` after the plain keys. NULL past the end. */
+const char *nm_config_scoped_key_at(const NmConfig *c, size_t i);
+
+/* The "no model for provider P" hint, ONE spelling for ask mode and
+ * the TUI (which layer to set it on, and where). Returns snprintf's
+ * would-be length. */
+int nm_config_no_model_hint(const char *provider, char *out, size_t cap);
 
 /* The built-in default text for a key (stringized macro), or NULL when
  * the key has no default. Never a file layer, never persisted. */

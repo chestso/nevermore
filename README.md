@@ -152,6 +152,15 @@ quoting, no inline comments. Unknown keys and invalid values warn and
 are skipped, so a stale file can never break startup. No secrets: API
 keys stay in the environment or `~/.authinfo`.
 
+`model` is remembered **per provider**: a model id belongs to one
+provider, so a scoped `model.<provider>` line (e.g. `model.openai =
+glm-5.3`) is what the chat writes when you pick a model, and it
+outranks the plain `model`. `-m` and `$NEVERMORE_MODEL` stay global
+(an explicit flag is not memory). With no model set for the active
+provider, nevermore says so and waits for `/model` — ask mode exits
+before any traffic — rather than guessing an id from another
+provider's catalog.
+
 `rolling_window` (default `off`) is whether the agent trims the stored
 conversation to `context_budget` tokens (a 4-chars-per-token estimate)
 before each request. Off — the default — sends the whole transcript and
