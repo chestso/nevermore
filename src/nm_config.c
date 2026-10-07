@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 12
+#define NM_CFG_NKEYS 14
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -128,6 +128,8 @@ static const struct
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
     { NM_CFG_KEY_REASONING_ECHO, "NEVERMORE_REASONING_ECHO", "off" },
+    { NM_CFG_KEY_TIMEOUT, "NEVERMORE_TIMEOUT_MS",
+      NM_STR(NM_AGENT_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
       NM_STR(NM_CONNECT_ATTEMPT_MS) },
     { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP", "off" },
@@ -136,6 +138,8 @@ static const struct
     { NM_CFG_KEY_SEARXNG_ENABLED, "NEVERMORE_SEARXNG_ENABLED", "on" },
     { NM_CFG_KEY_SEARXNG_TIMEOUT, "NEVERMORE_SEARXNG_TIMEOUT_MS",
       NM_STR(NM_WEBSEARCH_DEFAULT_TIMEOUT_MS) },
+    { NM_CFG_KEY_RUN_COMMAND_TIMEOUT, "NEVERMORE_RUN_COMMAND_TIMEOUT_MS",
+      NM_STR(NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT) },
     { NM_CFG_KEY_ROLLING_WINDOW, "NEVERMORE_ROLLING_WINDOW", "off" },
     { NM_CFG_KEY_CONTEXT_BUDGET, "NEVERMORE_CONTEXT_BUDGET",
       NM_STR(NM_AGENT_DEFAULT_CONTEXT_BUDGET) },
@@ -328,6 +332,60 @@ int nm_config_valid_bool(const char *value)
            strcmp(v, "off") == 0 || strcmp(v, "no") == 0;
 }
 
+/* The `off` spelling of a duration, case-insensitive. */
+static int duration_off(const char *value)
+{
+    return value && (value[0] == 'o' || value[0] == 'O') &&
+           (value[1] == 'f' || value[1] == 'F') &&
+           (value[2] == 'f' || value[2] == 'F') && value[3] == '\0';
+}
+
+/* A positive decimal's ms value, or -1 when not one (or over INT_MAX).
+ * Its own scan, not nm_config_valid_positive_int: that shape caps at
+ * ~1e6 (a `rounds`-ish magnitude), while a stream-inactivity budget is
+ * legitimately hours — the OLD env spelling accepted anything up to
+ * INT_MAX, and this keeps that range. */
+static long duration_parse(const char *value)
+{
+    long v = 0;
+    if (!value || !*value)
+        return -1;
+    for (const char *p = value; *p; p++) {
+        if (*p < '0' || *p > '9')
+            return -1;
+        int d = *p - '0';
+        /* Guard BEFORE the multiply: `long` is 32-bit on Windows, so
+         * a 20-digit value would overflow into UB and read as valid. */
+        if (v > (2147483647L - d) / 10)
+            return -1;
+        v = v * 10 + d;
+    }
+    return v > 0 ? v : -1;
+}
+
+/* A duration: a positive decimal (ms, up to INT_MAX) or `off`
+ * (case-insensitive) — the shape `timeout` / `run_command_timeout`
+ * share. `off` is the ONE non-numeric spelling: a deadline is either a
+ * budget or absent, and a negative budget (the old env spelling) is not
+ * a thing. */
+int nm_config_valid_duration(const char *value)
+{
+    return duration_off(value) || duration_parse(value) > 0;
+}
+
+int nm_config_duration_canon(const char *value, char *out, size_t cap)
+{
+    if (duration_off(value)) {
+        snprintf(out, cap, "off");
+        return 1;
+    }
+    if (duration_parse(value) > 0) {
+        snprintf(out, cap, "%s", value); /* the decimal, verbatim */
+        return 1;
+    }
+    return 0;
+}
+
 /* Normalize a validated truthy spelling to "on"/"off", so the shadow
  * file, /config's view and the env layer all read the same. The 'o'
  * prefix is ambiguous ("on" and "off" both start with it), so it is
@@ -515,6 +573,10 @@ static int normalize_value(const char *key, const char *raw, char *out,
         /* The one key whose value space is not a bool: off/tools/all
          * (with the old bool spellings folded in). */
         return nm_config_reasoning_echo_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
+               strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0) {
+        /* The duration keys: a positive decimal (ms) or `off`. */
+        return nm_config_duration_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {
@@ -1018,6 +1080,19 @@ static int parse_int(const char *v, int fallback)
 int nm_config_resolve_int(const NmConfig *c, const char *key, int fallback)
 {
     return parse_int(nm_config_resolve(c, key, NULL), fallback);
+}
+
+/* A duration key: >0 = ms, 0 = `off` (disabled), `fallback` when
+ * unset. No 100000 clamp (parse_int's cap is for `rounds`-shaped keys;
+ * a stream-inactivity budget is legitimately minutes to hours). */
+int nm_config_resolve_duration_ms(const NmConfig *c, const char *key,
+                                  int fallback)
+{
+    const char *v = nm_config_resolve(c, key, NULL);
+    if (duration_off(v))
+        return 0; /* `off`: no deadline */
+    long n = duration_parse(v);
+    return n > 0 ? (int)n : fallback;
 }
 
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)

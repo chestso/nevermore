@@ -232,12 +232,11 @@ int nm_tool_web_search_timeout_ms(void);
  * model deserve different patience. */
 #define NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT 300000
 
-/* Inactivity budget in ms: 0/absent = NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT,
- * a positive value = that many ms, a negative value disables the
- * deadline (an unbounded wait, for a caller that has its own bound).
- * main.c sets it from $NEVERMORE_RUN_COMMAND_TIMEOUT_MS; the getter is
- * the tool's own read. */
-void nm_tool_run_command_set_timeout_ms(int ms);
+/* The effective inactivity budget in ms, resolved from the store's
+ * `run_command_timeout` key at the point of use: >0 = that many ms,
+ * 0 = `off` (the deadline disabled — an unbounded wait, for a caller
+ * that has its own bound), the built-in default when the key is unset
+ * or no store is installed. */
 int nm_tool_run_command_timeout_ms(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report

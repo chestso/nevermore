@@ -312,14 +312,6 @@ struct NmToolExec
     size_t last_total; /* nm_proc_total_output at the previous step */
 };
 
-/* The inactivity budget in ms: 0/absent = the built-in default, a
- * negative value = disabled. */
-static int run_command_budget_ms(void)
-{
-    int ms = nm_tool_run_command_timeout_ms();
-    return ms == 0 ? NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT : ms;
-}
-
 /* Hand the terminal result to the caller exactly once. The step is
  * finished, so its return value IS the result's outcome (a terminal
  * result is never NM_TOOL_RUNNING). */
@@ -362,7 +354,7 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     }
     e->job_id = id;
     /* Arm the inactivity deadline (a no-op when disabled). */
-    e->budget_ms = run_command_budget_ms();
+    e->budget_ms = nm_tool_run_command_timeout_ms();
     if (e->budget_ms > 0)
         e->deadline = nm_monotonic_seconds() +
                       (double)e->budget_ms / 1000.0;

@@ -100,6 +100,15 @@ extern "C" {
  * and can re-trip the replay check the echo exists for. A change
  * applies to the next chat. */
 #define NM_CFG_KEY_REASONING_ECHO "reasoning_echo"
+/* Stream-inactivity timeout for a chat round, in ms. While a round
+ * streams, no wire byte for this long fails the turn ("timed out")
+ * instead of hanging — a model that connects but never answers, or
+ * stalls mid-body. It is an INACTIVITY deadline over BYTES, so a
+ * long-but-live answer is never cut. The value space is a positive
+ * decimal or `off` (the deadline disabled — a purely readiness-driven
+ * stream). Built-in default NM_AGENT_DEFAULT_TIMEOUT_MS; the agent
+ * resolves it at the point of use. Env spelling: NEVERMORE_TIMEOUT_MS. */
+#define NM_CFG_KEY_TIMEOUT "timeout"
 /* Per-address connect budget in ms (the bounded connect walk). A
  * positive decimal; unset = the transport's built-in default
  * (NM_CONNECT_ATTEMPT_MS). A durable profile value: a slow network
@@ -146,6 +155,15 @@ extern "C" {
  * NmTool.deadline_ms seam gives the agent. Env spelling:
  * NEVERMORE_SEARXNG_TIMEOUT_MS. */
 #define NM_CFG_KEY_SEARXNG_TIMEOUT "searxng_timeout"
+/* run_command's inactivity budget, in ms: a child that produces no
+ * output for this long is stopped (group-kill) and its partial output
+ * returned, so a wedged command cannot hold the turn — Ctrl+C is the
+ * only escape in the TUI and ask mode has none. Every read pushes the
+ * deadline out, so a slow-but-noisy command is never cut off. The
+ * value space is a positive decimal or `off` (no deadline). Built-in
+ * default NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT; the tool resolves it at
+ * the point of use. Env spelling: NEVERMORE_RUN_COMMAND_TIMEOUT_MS. */
+#define NM_CFG_KEY_RUN_COMMAND_TIMEOUT "run_command_timeout"
 /* Rolling context window: whether the agent trims the stored
  * conversation to a token budget before each request. `on`/`off` (a
  * bool, default OFF). OFF — the default — sends the whole transcript
@@ -222,6 +240,14 @@ const char *nm_config_resolve(const NmConfig *c, const char *key,
  * write, so this never actually falls back for a known key). */
 int nm_config_resolve_int(const NmConfig *c, const char *key, int fallback);
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback);
+
+/* A duration key (`timeout`, `run_command_timeout`): a positive decimal
+ * (milliseconds) or `off` (the deadline disabled). Resolved at the
+ * point of use: >0 = milliseconds, 0 = `off`, `fallback` when the key
+ * is unset. Unlike nm_config_resolve_int there is no 100000 clamp — a
+ * stream-inactivity budget is legitimately minutes to hours. */
+int nm_config_resolve_duration_ms(const NmConfig *c, const char *key,
+                                  int fallback);
 
 /* The model id for `provider` (see the `model` key's comment): the
  * scoped spellings outrank the plain one, in the same layer order. This
@@ -349,6 +375,17 @@ int nm_config_valid_rounds(const char *value);
  * searxng_enabled, rolling_window) share, read back by
  * nm_config_get_bool. */
 int nm_config_valid_bool(const char *value);
+/* Is `value` a duration spelling — a positive decimal (ms, up to
+ * INT_MAX) or `off` (case-insensitive)? The shape `timeout` and
+ * `run_command_timeout` share; read back by
+ * nm_config_resolve_duration_ms. The decimal range is wider than
+ * nm_config_valid_positive_int's (which caps at ~1e6): a
+ * stream-inactivity budget is legitimately hours. */
+int nm_config_valid_duration(const char *value);
+/* Canonicalize a validated duration into `out` (the decimal verbatim,
+ * or the canonical `off`). Returns 1 on success, 0 when `value` is not
+ * valid. */
+int nm_config_duration_canon(const char *value, char *out, size_t cap);
 /* Is `value` a reasoning echo mode — `off`, `tools` or `all`
  * (case-insensitive), plus the bool spellings the key comment lists? */
 int nm_config_valid_reasoning_echo(const char *value);

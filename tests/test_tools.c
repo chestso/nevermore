@@ -22,6 +22,7 @@
 #endif
 
 #include "json.h"
+#include "nm_config.h" /* the store the run_command budget resolves from */
 #include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "tools.h"
@@ -30,6 +31,21 @@
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "tools_internal.h"
 #include "test_helpers.h"
+
+/* The run_command inactivity budget lives in the config STORE now (the
+ * `run_command_timeout` key); the tests install a scratch store (no
+ * file I/O) and drive it on the runtime layer, the same way /config and
+ * the machinery do. */
+static NmConfig *g_cfg;
+
+/* Set (or clear, with NULL/empty) the budget key. */
+static void rc_set_budget(const char *value)
+{
+    if (value && *value)
+        nm_config_runtime_set(g_cfg, NM_CFG_KEY_RUN_COMMAND_TIMEOUT, value);
+    else
+        nm_config_runtime_clear(g_cfg, NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+}
 
 /* Scratch dir per test run. */
 static const char *scratch_dir(void)
@@ -2593,7 +2609,7 @@ static int reported_job_id(const char *output)
 /* ---------------------------------------------------------------- */
 
 /* One run_command call, driven by the async seam, with `budget_ms` as
- * the process-global inactivity budget. The knob is restored to its
+ * the store's `run_command_timeout` key. The knob is restored to its
  * default afterwards so a later test is never left with a short one.
  *
  * `virtual_deadline`: the child is silent by construction, so nothing
@@ -2612,7 +2628,9 @@ static NmToolResult run_command_driven(const char *cmd, int budget_ms,
     nm_json_set(j, "cmd", nm_json_new_string(cmd));
     char *args = nm_json_dump(j);
     nm_json_free(j);
-    nm_tool_run_command_set_timeout_ms(budget_ms);
+    char budget[32];
+    snprintf(budget, sizeof(budget), "%d", budget_ms);
+    rc_set_budget(budget_ms > 0 ? budget : NULL);
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     NmToolResult r = { 0 };
@@ -2625,7 +2643,7 @@ static NmToolResult run_command_driven(const char *cmd, int budget_ms,
             drive_async(t, e, &r, 15000);
         t->end(e);
     }
-    nm_tool_run_command_set_timeout_ms(0); /* restore the default */
+    rc_set_budget(NULL); /* restore the default */
     nm_toolset_free(ts);
     return r;
 }
@@ -2672,6 +2690,8 @@ static void test_run_command_output_resets_the_deadline(void)
 
 /* A negative budget disables the deadline entirely (no drive declared),
  * for a caller that supplies its own bound. */
+/* A budget of `off` disables the deadline entirely (no drive declared),
+ * for a caller that supplies its own bound. */
 static void test_run_command_deadline_can_be_disabled(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
@@ -2680,14 +2700,14 @@ static void test_run_command_deadline_can_be_disabled(void)
     nm_json_set(j, "cmd", nm_json_new_string("sleep 30"));
     char *args = nm_json_dump(j);
     nm_json_free(j);
-    nm_tool_run_command_set_timeout_ms(-1);
+    rc_set_budget("off");
     NmToolExec *e = t->begin(t, args, NULL);
     free(args);
     ASSERT_NOT_NULL(e);
     ASSERT_NOT_NULL(t->deadline_ms);
     ASSERT_EQ(t->deadline_ms(e), -1); /* no deadline: readiness-driven */
     t->end(e);                        /* cancel kills the `sleep 30` */
-    nm_tool_run_command_set_timeout_ms(0);
+    rc_set_budget(NULL);
     nm_toolset_free(ts);
 }
 
@@ -3405,7 +3425,7 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     ASSERT_NOT_NULL(t);
     ASSERT_NOT_NULL(t->deadline_ms);
 
-    nm_tool_run_command_set_timeout_ms(500);
+    rc_set_budget("500");
     NmJson *j = nm_json_new_object();
     nm_json_set(j, "cmd",
                 nm_json_new_string("ping -n 31 127.0.0.1 >nul"));
@@ -3423,7 +3443,7 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     NmToolResult r = { 0 };
     ASSERT_EQ(drive_virtual(t, e, &r, 15000, 0), 0);
     t->end(e);
-    nm_tool_run_command_set_timeout_ms(0); /* restore the default */
+    rc_set_budget(NULL); /* restore the default */
 
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
@@ -3437,6 +3457,12 @@ static void test_run_command_silent_child_times_out_on_windows(void)
 int main(void)
 {
     printf("test_tools:\n");
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
     RUN_TEST(test_registry_defaults);
     RUN_TEST(test_unknown_tool_error);
     RUN_TEST(test_schema_json);

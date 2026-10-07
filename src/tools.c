@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "json.h"
+#include "nm_config.h" /* the store the run_command budget is read from */
 #include "tools.h"
 
 #include "tools_internal.h"
@@ -245,23 +246,23 @@ char *nm_tool_result_body(const char *status, const char *clamped)
 }
 
 /* ---------------------------------------------------------------- */
-/* run_command inactivity budget (process-global; tools.h)           */
+/* run_command inactivity budget (tools.h)                           */
 /* ---------------------------------------------------------------- */
 
-/* 0 = the built-in default; <0 = disabled. Lives here, not in the
+/* The budget is the config store's `run_command_timeout` key, resolved
+ * at the point of use (the tool keeps no copy): >0 = ms, 0 = `off` (no
+ * deadline), the built-in default when unset, and the default again
+ * when no store is installed (headless/test). Lives here, not in a
  * platform spawn file, because tools_spawn_posix.c and
  * tools_spawn_win.c are mutually exclusive — this TU is the one both
- * link (the tool's own read is nm_tool_run_command_timeout_ms). */
-static int g_run_command_timeout_ms = 0;
-
-void nm_tool_run_command_set_timeout_ms(int ms)
-{
-    g_run_command_timeout_ms = ms;
-}
-
+ * link. */
 int nm_tool_run_command_timeout_ms(void)
 {
-    return g_run_command_timeout_ms;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_duration_ms(
+                   c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                   NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT)
+             : NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT;
 }
 
 NmToolset *nm_toolset_new_defaults(void)

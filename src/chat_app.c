@@ -117,15 +117,14 @@ struct NmChatApp
     char *model;
     char *base_url; /* our copy; (re)applied to built agents */
     char *api_key;  /* explicit key override; NULL = resolve per provider */
-    int timeout_ms; /* stream-inactivity ms; 0 = agent default */
     /* The bounded connect walk's observation, for the one-shot skip
      * notice only: the last NM_FAMILY_* latch the app has reported, so
      * the line prints once per family. The latch itself lives in the
      * config store (skip_families); this is UI dedup state, NOT a copy
-     * of any config value. The tool-round cap, the reasoning echo and
-     * both connect-knob settings are config values the machinery
-     * resolves from the store at the point of use — the app mirrors
-     * none of them. */
+     * of any config value. The tool-round cap, the reasoning echo, the
+     * stream-inactivity timeout and both connect-knob settings are
+     * config values the machinery resolves from the store at the point
+     * of use — the app mirrors none of them. */
     int skipped_families;
 
     /* The resolved config (nm_config.h), borrowed; NULL = no
@@ -1069,12 +1068,10 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_on_notice(a, nm_chat_app_on_notice);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
-    /* The tool-round cap and the reasoning echo are NOT pushed: the
-     * agent resolves them from the config store at the point of use
-     * (nm_agent_max_rounds / nm_agent_reasoning_echo). Only the
-     * stream-inactivity timeout, which has no config key yet, is a
-     * per-agent value. */
-    nm_agent_set_timeout_ms(a, app->timeout_ms);
+    /* The tool-round cap, the reasoning echo and the stream-inactivity
+     * timeout are NOT pushed: the agent resolves them from the config
+     * store at the point of use (nm_agent_max_rounds /
+     * nm_agent_reasoning_echo / nm_agent_timeout_ms). */
     nm_agent_set_context_limit(a, model_context_limit(app, p));
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
@@ -1298,15 +1295,6 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
     if (app->agent)
         nm_agent_set_endpoint(app->agent, app->base_url,
                               endpoint_key(app, app->provider));
-}
-
-void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms)
-{
-    if (!app)
-        return;
-    app->timeout_ms = ms; /* 0 = agent default, <0 = disabled */
-    if (app->agent)
-        nm_agent_set_timeout_ms(app->agent, app->timeout_ms);
 }
 
 void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg)
@@ -2205,7 +2193,7 @@ static void print_config(NmChatApp *app)
         if (strcmp(k, NM_CFG_KEY_SKIP_FAMILIES) == 0 &&
             !nm_connection_family_skip() && v && strcmp(v, "none") != 0)
             layer = "inert: family_skip off";
-        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-", layer);
+        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-", layer);
     }
     /* The provider-scoped keys actually set (`model.<provider>`), after
      * the plain ones: the per-provider model memory. The plain `model`
@@ -2216,7 +2204,7 @@ static void print_config(NmChatApp *app)
             break;
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = nm_config_resolve(app->cfg, k, &src);
-        sys_line(app, "  %-15s %-14s (%s)", k, v ? v : "-",
+        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
                  nm_config_source_name(src));
     }
 }

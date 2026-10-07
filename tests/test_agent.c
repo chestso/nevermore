@@ -2491,7 +2491,9 @@ static void test_agent_stream_stall_times_out(void)
     ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1);
     ASSERT_EQ(nm_agent_timeout_ms(agent), NM_AGENT_DEFAULT_TIMEOUT_MS);
 
-    nm_agent_set_timeout_ms(agent, 200); /* a short budget for the test */
+    /* A short budget for the test, from the store (the agent resolves
+     * the `timeout` key at the point of use — no setter to push). */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "200");
     ASSERT_EQ(nm_agent_timeout_ms(agent), 200);
 
     ASSERT_EQ(nm_agent_start(agent, "hello?", NULL, 0), 0);
@@ -2516,10 +2518,11 @@ static void test_agent_stream_stall_times_out(void)
     /* Not busy any more: no deadline to report. */
     ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1);
 
-    /* A negative setter disables it (documented semantics). */
-    nm_agent_set_timeout_ms(agent, -1);
-    ASSERT_TRUE(nm_agent_timeout_ms(agent) < 0);
+    /* `off` disables it (a purely readiness-driven stream). */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "off");
+    ASSERT_EQ(nm_agent_timeout_ms(agent), 0);
 
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_TIMEOUT); /* restore default */
     nm_agent_free(agent);
     nm_toolset_free(tools);
     pthread_join(th, NULL);
@@ -3583,12 +3586,16 @@ static void test_agent_keepalive_comments_reset_the_deadline(void)
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
-    nm_agent_set_timeout_ms(agent, 300); /* comment cadence is 60 ms */
+    /* Comment cadence is 60 ms: a 300 ms inactivity budget survives it
+     * only because the keep-alive comments count as traffic (the store's
+     * `timeout` key). */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "300");
 
     ASSERT_EQ(nm_agent_turn(agent, "draw something slow", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "survived");
 
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_TIMEOUT); /* restore default */
     nm_agent_free(agent);
     nm_toolset_free(tools);
     pthread_join(th, NULL);

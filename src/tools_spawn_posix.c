@@ -209,15 +209,6 @@ static NmToolResult run_command_result(const char *output, size_t len,
     return r;
 }
 
-/* The inactivity budget in ms: 0/absent = the built-in default, a
- * negative value = disabled (returned as such; the caller treats any
- * non-positive value as "no deadline"). */
-static int run_command_budget_ms(void)
-{
-    int ms = nm_tool_run_command_timeout_ms();
-    return ms == 0 ? NM_RUN_COMMAND_TIMEOUT_MS_DEFAULT : ms;
-}
-
 /* Parse the args and build the /bin/sh -c argv. Returns the heap cmd
  * (caller frees) via *cmd_out, or NULL on bad args (caller then runs
  * the synchronous execute, which reports the error). */
@@ -381,7 +372,7 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     free(cmd); /* posix_spawn copied argv before returning */
     if (e) {
         /* Arm the inactivity deadline (a no-op when disabled). */
-        e->budget_ms = run_command_budget_ms();
+        e->budget_ms = nm_tool_run_command_timeout_ms();
         if (e->budget_ms > 0)
             e->deadline = nm_monotonic_seconds() +
                           (double)e->budget_ms / 1000.0;

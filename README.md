@@ -121,9 +121,10 @@ Settings resolve once, lowest to highest:
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
-   `NEVERMORE_CONNECT_TIMEOUT_MS`, `NEVERMORE_CONNECT_FAMILY_SKIP`,
-   `NEVERMORE_CONNECT_SKIP_FAMILIES`, `NEVERMORE_SEARXNG_URL`,
-   `NEVERMORE_SEARXNG_ENABLED`, `NEVERMORE_SEARXNG_TIMEOUT_MS`,
+   `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
+   `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
+   `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
+   `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`,
    `NEVERMORE_ROLLING_WINDOW`, `NEVERMORE_CONTEXT_BUDGET`
 5. **command line** — `-p` / `-m`
 
@@ -144,12 +145,14 @@ provider         = openai
 model            = glm-5.3
 rounds           = 40
 reasoning_echo   = tools
+timeout          = 300000
 connect_timeout  = 1500
 family_skip      = on
 skip_families    = none
 searxng          = http://127.0.0.1:8888
 searxng_enabled  = on
 searxng_timeout  = 10000
+run_command_timeout = 300000
 rolling_window   = off
 context_budget   = 100000
 ```
@@ -187,6 +190,17 @@ dead server — `/config` shows the value and its `(runtime)` layer, and
 `searxng_timeout` is the per-request budget in milliseconds (default
 10000): a query whose connection is accepted but never answered is
 abandoned after it instead of hanging the turn.
+
+`timeout` is the stream-inactivity budget in milliseconds (default
+300000): while a round is streaming, no wire byte for that long fails
+the turn with `timed out` instead of hanging. It counts _bytes_, not
+events — every delta resets it, and so do the SSE keep-alive comments
+that bridge a minutes-long image-generation gap — so a long-but-live
+answer is never cut. `run_command_timeout` (default 300000) is the
+same shape for the `run_command` tool: a child that produces no output
+for that long is stopped and its partial output returned. Either key
+takes `off` to disable the deadline entirely (a purely readiness-driven
+wait).
 
 `connect_timeout` is the per-address budget in milliseconds for the
 bounded connect walk (default 750): a hostname resolves to several

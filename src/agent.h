@@ -46,9 +46,10 @@ typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
 /* Default stream-inactivity timeout (ms): while a round is streaming,
  * if no answer/reasoning delta arrives for this long the turn fails
  * with "timed out" instead of hanging. Matches Codex's 300 s stream
- * idle timeout; <= 0 disables it (pure readiness-driven). This is an
- * *inactivity* deadline — a stream that keeps producing deltas is never
- * cut, however long the answer runs. */
+ * idle timeout; the store's `timeout` key resolves over it (a positive
+ * decimal overrides, `off` disables it). This is an *inactivity*
+ * deadline — a stream that keeps producing deltas is never cut,
+ * however long the answer runs. */
 #define NM_AGENT_DEFAULT_TIMEOUT_MS 300000
 
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
@@ -153,14 +154,11 @@ long nm_agent_session_cache_base_tokens(const NmAgent *a);
  * comment bridging a minutes-long image-generation gap —
  * docs/OPENROUTER-API.md §5.1), so a long-but-live answer is never cut.
  *
- *   ms > 0   use it
- *   ms == 0  restore the default (NM_AGENT_DEFAULT_TIMEOUT_MS)
- *   ms < 0   disable the inactivity deadline entirely
- */
-void nm_agent_set_timeout_ms(NmAgent *a, int ms);
-
-/* The effective inactivity timeout in ms (the set value or the default);
- * <= 0 means disabled. */
+ * The value is the config store's `timeout` key, resolved at the point
+ * of use with NM_AGENT_DEFAULT_TIMEOUT_MS as the default; the agent
+ * keeps no copy (a setter that pushed one was the proxy this design
+ * deletes). A positive decimal is the budget in ms; `off` disables the
+ * deadline entirely. >0 = ms, 0 = `off` (disabled). */
 int nm_agent_timeout_ms(const NmAgent *a);
 
 /* Milliseconds until the agent wants a step even though no fd is ready,

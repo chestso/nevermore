@@ -569,21 +569,27 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
     ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
     ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING_ECHO);
-    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_CONNECT_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_FAMILY_SKIP);
-    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_SKIP_FAMILIES);
-    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SEARXNG);
-    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_ROLLING_WINDOW);
-    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_NULL(nm_config_key_at(12));
+    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_CONNECT_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_FAMILY_SKIP);
+    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SKIP_FAMILIES);
+    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(14));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
      * bare `reasoning` (or a reversed ECHO_REASONING). */
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_REASONING_ECHO),
                   "NEVERMORE_REASONING_ECHO");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_TIMEOUT),
+                  "NEVERMORE_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_RUN_COMMAND_TIMEOUT),
+                  "NEVERMORE_RUN_COMMAND_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
@@ -648,6 +654,75 @@ static void test_connect_knobs(void)
     nm_config_free(c2);
 }
 
+/* The duration keys (`timeout`, `run_command_timeout`): a positive
+ * decimal (ms) or `off`. `off` is the ONE non-numeric spelling; a
+ * negative budget (the old env spelling) is refused, so a typo falls
+ * through to the default rather than silently disarming a deadline. */
+static void test_duration_keys(void)
+{
+    pin_paths("duration");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* The vocabulary: a positive decimal or `off` (case-insensitive). */
+    ASSERT_TRUE(nm_config_valid_duration("5000"));
+    ASSERT_TRUE(nm_config_valid_duration("off"));
+    ASSERT_TRUE(nm_config_valid_duration("OFF"));
+    ASSERT_FALSE(nm_config_valid_duration("-1"));
+    ASSERT_FALSE(nm_config_valid_duration("0"));
+    ASSERT_FALSE(nm_config_valid_duration("abc"));
+    ASSERT_FALSE(nm_config_valid_duration("offx"));
+    ASSERT_FALSE(nm_config_valid_duration(""));
+    /* Wider than the rounds-ish ~1e6 positive-int cap: an hour is a
+     * legitimate inactivity budget, and the bound is INT_MAX (a longer
+     * decimal is refused rather than overflowing). */
+    ASSERT_TRUE(nm_config_valid_duration("3600000"));
+    ASSERT_TRUE(nm_config_valid_duration("2147483647"));
+    ASSERT_FALSE(nm_config_valid_duration("2147483648"));
+    ASSERT_FALSE(nm_config_valid_duration("99999999999999999999"));
+
+    /* Canonicalization: the decimal verbatim, `off` lowercased. */
+    char canon[32];
+    ASSERT_TRUE(nm_config_duration_canon("2500", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "2500");
+    ASSERT_TRUE(nm_config_duration_canon("Off", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "off");
+    ASSERT_FALSE(nm_config_duration_canon("nope", canon, sizeof(canon)));
+
+    /* A shadow write persists the decimal; `off` is stored canonical;
+     * a negative or zero value is refused (the shape is positive-or-
+     * off, never a signed budget). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TIMEOUT, "60000"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT, "OFF"),
+              0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TIMEOUT, "-5"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TIMEOUT, "0"), -1);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "timeout = 60000\nrun_command_timeout = off\n");
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_TIMEOUT, -1), 60000);
+    /* `off` resolves to 0 (disabled) — distinct from the default. */
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                                            -1),
+              0);
+    /* A large budget round-trips: no 100000 clamp (an hour is legal). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                                   "3600000"),
+              0);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                                            -1),
+              3600000);
+
+    /* The env layer speaks the same vocabulary, normalized the same. */
+    test_setenv("NEVERMORE_TIMEOUT_MS", "OFF");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_TIMEOUT, -1), 0);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_TIMEOUT), "off");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TIMEOUT), NM_CFG_ENV);
+    test_unsetenv("NEVERMORE_TIMEOUT_MS");
+
+    nm_config_free(c);
+}
+
 /* The built-in defaults are store values, so resolution never yields
  * "-": every known key resolves to a value, and the source says the
  * default dictates. provider HAS a default (the zero-config local
@@ -688,6 +763,13 @@ static void test_defaults_and_resolve(void)
      * (the tool's own macro), so it too never resolves to "-". */
     ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_SEARXNG_TIMEOUT, -1),
               10000);
+    /* The duration keys resolve to their built-in defaults (ms) when
+     * unset — no `off` unless the user asks for it. */
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_TIMEOUT, -1),
+              NM_AGENT_DEFAULT_TIMEOUT_MS);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                                            -1),
+              300000);
 
     /* The default table is queryable without a config handle. */
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
@@ -999,6 +1081,7 @@ int main(void)
     RUN_TEST(test_provider_validator_hook);
     RUN_TEST(test_key_vocabulary);
     RUN_TEST(test_connect_knobs);
+    RUN_TEST(test_duration_keys);
     RUN_TEST(test_defaults_and_resolve);
     RUN_TEST(test_runtime_layer);
     RUN_TEST(test_store_handle);

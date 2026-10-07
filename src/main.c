@@ -79,10 +79,10 @@ static void usage(FILE *out)
             "                          ms (default 10000)\n"
             "  NEVERMORE_MAX_ROUNDS    tool-round cap per turn\n"
             "  NEVERMORE_TIMEOUT_MS    stream-inactivity timeout in ms\n"
-            "                          (default 300000; negative disables)\n"
+            "                          (default 300000; 'off' disables)\n"
             "  NEVERMORE_RUN_COMMAND_TIMEOUT_MS\n"
             "                          run_command silence budget in ms\n"
-            "                          (default 300000; negative disables)\n"
+            "                          (default 300000; 'off' disables)\n"
             "  NEVERMORE_REASONING_ECHO=off|tools|all\n"
             "                          re-send reasoning traces to the\n"
             "                          provider: never (default) / on\n"
@@ -92,39 +92,6 @@ static void usage(FILE *out)
             "                          been sent in a chat\n"
             "  NEVERMORE_DEBUG_WIRE=1  record the wire to\n"
             "                          ~/.local/state/nevermore/wire/\n");
-}
-
-/* Stream-inactivity timeout from $NEVERMORE_TIMEOUT_MS: 0 = the agent
- * default (NM_AGENT_DEFAULT_TIMEOUT_MS), a positive value = that many
- * ms, a negative value disables the inactivity deadline. A missing or
- * non-numeric value leaves the agent default. (A `timeout` config key,
- * so /config and the shadow file can carry it too, is a follow-up —
- * see docs/PROCESS-PLAN.md §3.4.) */
-static int resolved_ms_env(const char *name)
-{
-    const char *v = getenv(name);
-    if (!v || !*v)
-        return 0;
-    char *end = NULL;
-    long ms = strtol(v, &end, 10);
-    if (end == v || (end && *end != '\0'))
-        return 0; /* not a plain integer: keep the built-in default */
-    if (ms > 2147483647L || ms < -2147483647L)
-        return 0; /* out of int range: keep the built-in default */
-    return (int)ms;
-}
-
-static int resolved_timeout_ms(void)
-{
-    return resolved_ms_env("NEVERMORE_TIMEOUT_MS");
-}
-
-/* run_command's inactivity budget, same shape (see tools.h): 0/absent
- * = the tool's built-in default, positive = that many ms, negative =
- * disabled. */
-static int resolved_run_command_timeout_ms(void)
-{
-    return resolved_ms_env("NEVERMORE_RUN_COMMAND_TIMEOUT_MS");
 }
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
@@ -331,12 +298,11 @@ static int run_interactive(const char *provider_name, const char *model,
     /* The resolved config: the app installs it as the process-wide
      * store (nm_chat_app_set_config → nm_config_set_store), so the
      * machinery resolves every setting from it at the point of use.
-     * Nothing is pushed — the agent reads `rounds`/`reasoning_echo`, the
-     * connect walk reads `connect_timeout`/`family_skip`/
-     * `skip_families`, the web_search tool reads `searxng`/
-     * `searxng_enabled`/`searxng_timeout`. */
+     * Nothing is pushed — the agent reads `rounds`/`reasoning_echo`/
+     * `timeout`, the connect walk reads `connect_timeout`/`family_skip`/
+     * `skip_families`, the tools read `searxng`/`searxng_enabled`/
+     * `searxng_timeout`/`run_command_timeout`. */
     nm_chat_app_set_config(app, cfg);
-    nm_chat_app_set_timeout_ms(app, resolved_timeout_ms());
     /* Base URL override only: the API key is left NULL so the app
      * resolves it per provider (env then ~/.authinfo) — a /provider
      * switch must resolve the new provider's own key, never reuse the
@@ -494,11 +460,6 @@ int main(int argc, char *argv[])
      * only borrows it. */
     nm_config_set_store(cfg);
 
-    /* run_command's inactivity budget: process-global too, and read at
-     * each tool call, so push it once here for BOTH paths (see tools.h).
-     * 0/absent = the tool's built-in default. */
-    nm_tool_run_command_set_timeout_ms(resolved_run_command_timeout_ms());
-
     /* The store owns both values: `provider` has a built-in default
      * (the zero-config local daemon), and `model` resolves
      * provider-scoped (a model id belongs to ONE provider). */
@@ -560,11 +521,10 @@ int main(int argc, char *argv[])
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
         nm_agent_set_endpoint(agent, base_url, api_key);
-        /* The round cap, the reasoning echo, the connect budget and the
-         * family policy are all store values now — resolved by the
-         * agent / the walk themselves. Nothing to push here beyond the
-         * stream-inactivity timeout, which is not a config key. */
-        nm_agent_set_timeout_ms(agent, resolved_timeout_ms());
+        /* The round cap, the reasoning echo, the stream-inactivity
+         * timeout, the connect budget and the family policy are all
+         * store values now — resolved by the agent / the walk
+         * themselves. Nothing to push here. */
 
         /* -i attachments: read once here, report on stderr (the tool-plan
          * line's shape), and hand the ids to the turn. A refusal names

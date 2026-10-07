@@ -74,19 +74,16 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 
-/* Tool-call round cap and reasoning echo mode are NOT app state: they
- * are config values (the store's `rounds` and `reasoning_echo` keys) that
- * the agent resolves at the point of use (nm_agent_max_rounds /
- * nm_agent_reasoning_echo). Setting them goes through the store
- * (/config set rounds …, /config set reasoning_echo off|tools|all), which
- * main.c installs as the process store via nm_chat_app_set_config. The
- * echo mode, unlike the cap, is frozen for the conversation once a
- * request has carried a trace — see nm_agent_reasoning_echo_frozen. */
-
-/* Stream-inactivity timeout for the agent this app builds and the live
- * agent (0 = agent default NM_AGENT_DEFAULT_TIMEOUT_MS, <0 = disable).
- * main.c wires $NEVERMORE_TIMEOUT_MS here. See nm_agent_set_timeout_ms. */
-void nm_chat_app_set_timeout_ms(NmChatApp *app, int ms);
+/* Tool-call round cap, reasoning echo mode and stream-inactivity
+ * timeout are NOT app state: they are config values (the store's
+ * `rounds`, `reasoning_echo` and `timeout` keys) that the agent
+ * resolves at the point of use (nm_agent_max_rounds /
+ * nm_agent_reasoning_echo / nm_agent_timeout_ms). Setting them goes
+ * through the store (/config set rounds …, /config set reasoning_echo
+ * off|tools|all, /config set timeout 60000|off), which main.c installs
+ * as the process store via nm_chat_app_set_config. The echo mode,
+ * unlike the others, is frozen for the conversation once a request has
+ * carried a trace — see nm_agent_reasoning_echo_frozen. */
 
 /* The resolved config (nm_config.h), BORROWED: the app writes runtime
  * changes (/config set, /model, /provider, …) to its shadow file AND

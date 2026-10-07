@@ -1726,8 +1726,10 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     AppHarness *h = harness_new("openai", "test-model", base);
     ASSERT_NOT_NULL(h);
 
-    /* A short budget for a fast test (applied to the live agent too). */
-    nm_chat_app_set_timeout_ms(h->app, 200);
+    /* A short budget for a fast test: the store's `timeout` key, which
+     * the live agent resolves at the point of use (no setter to push). */
+    scratch_store_begin();
+    store_set(NM_CFG_KEY_TIMEOUT, "200");
     ASSERT_EQ(nm_agent_timeout_ms(nm_chat_app_agent(h->app)), 200);
 
     harness_type(h, "stall please");
@@ -1755,6 +1757,7 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     /* Idle again: nothing to tick for. */
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), -1);
 
+    scratch_store_end();
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -3612,6 +3615,11 @@ static void test_config_command_reports_and_resets(void)
     /* model resolves to the shadow (just set); rounds has no layer. */
     ASSERT_TRUE(strstr(out, "(session shadow)") != NULL);
     ASSERT_TRUE(strstr(out, "(built-in default)") != NULL);
+    /* The duration keys show their built-in defaults too (the stream
+     * inactivity and run_command budgets are ordinary keys now). The
+     * leading spaces pin the `timeout` ROW (not a *_timeout key). */
+    ASSERT_NOT_NULL(strstr(out, "  timeout "));
+    ASSERT_NOT_NULL(strstr(out, "run_command_timeout"));
 
     harness_type(h, "/config reset model");
     harness_enter(h);

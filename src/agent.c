@@ -88,17 +88,16 @@ struct NmAgent
      * (memory-reuse principle: grown, not reallocated per delta). */
     NmChatStream *stream;
     int round; /* rounds started this turn */
-    /* Stream-inactivity timeout (nm_agent_set_timeout_ms): 0 = follow
-     * NM_AGENT_DEFAULT_TIMEOUT_MS, >0 = this value, <0 = disabled.
-     * last_activity is the monotonic timestamp of the last wire byte
-     * (a delta, a keep-alive comment, or the round's start); the
-     * deadline seam compares it against the effective timeout. (The tool-round cap is NOT a
-     * field: it is a config value the agent resolves from the store at
-     * the point of use — nm_agent_max_rounds. The reasoning echo IS a
-     * field, by necessity: the store is read until a request actually
-     * carries a trace, and the mode that was sent is then frozen for
-     * the conversation — reasoning_echo_frozen / reasoning_echo_mode below.) */
-    int timeout_ms;
+    /* last_activity is the monotonic timestamp of the last wire byte (a
+     * delta, a keep-alive comment, or the round's start); the deadline
+     * seam compares it against the effective timeout. The stream-
+     * inactivity budget is NOT a field: it is a config value the agent
+     * resolves from the store at the point of use (nm_agent_timeout_ms,
+     * the store's `timeout` key). (The tool-round cap is the same shape
+     * — nm_agent_max_rounds. The reasoning echo IS a field, by
+     * necessity: the store is read until a request actually carries a
+     * trace, and the mode that was sent is then frozen for the
+     * conversation — reasoning_echo_frozen / reasoning_echo_mode below.) */
     double last_activity;
     /* Reasoning echo mode (the store's `reasoning_echo` key until the first
      * request that carries a trace; the sent mode thereafter). A
@@ -465,18 +464,19 @@ void nm_agent_set_context_limit(NmAgent *a, long limit)
         a->context_limit = limit;
 }
 
-void nm_agent_set_timeout_ms(NmAgent *a, int ms)
-{
-    if (!a)
-        return;
-    a->timeout_ms = ms;
-}
-
+/* The stream-inactivity budget is the config store's `timeout` key,
+ * resolved at the point of use (the agent keeps no copy — a setter that
+ * pushed one was the proxy this design deletes). >0 = milliseconds,
+ * 0 = `off` (the deadline disabled — a purely readiness-driven stream);
+ * no store installed (a unit test with no config) = the built-in
+ * default. */
 int nm_agent_timeout_ms(const NmAgent *a)
 {
-    if (!a)
-        return NM_AGENT_DEFAULT_TIMEOUT_MS;
-    return a->timeout_ms == 0 ? NM_AGENT_DEFAULT_TIMEOUT_MS : a->timeout_ms;
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_duration_ms(c, NM_CFG_KEY_TIMEOUT,
+                                             NM_AGENT_DEFAULT_TIMEOUT_MS)
+             : NM_AGENT_DEFAULT_TIMEOUT_MS;
 }
 
 /* Millis left on a monotonic deadline, clamped to int range; a deadline
