@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "openai_client.h"
+#include "nm_clock.h" /* nm_monotonic_seconds (the pump's deadline) */
 #include "sse.h"
 #include "transport_internal.h"
 
@@ -37,14 +38,6 @@
 /* Non-SSE error-body capture cap: larger than NM_CHAT_MSG_MAX so
  * the "body too long" marker can note what was dropped. */
 #define ERROR_BODY_MAX (NM_CHAT_MSG_MAX + 32)
-
-/* nm_fetch_json's *err target: the function's failure details come
- * from connection state that dies with the connection (and from a
- * stack-local NmConnectInfo), so the string is copied here before
- * the owning object is closed. Process-static, one caller at a time
- * (the one-shot fetch is documented blocking) — same pattern as
- * authinfo's password slot. */
-static char g_fetch_err[NM_ERR_DETAIL_MAX];
 
 /* Silences -Wunused-parameter on params kept for vtable symmetry. */
 #if defined(__GNUC__)
@@ -1284,43 +1277,70 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
     return r;
 }
 
-NmJson *nm_fetch_json(const char *base_url, const char *method,
-                      const char *path, const char *auth_header,
-                      const char *api_key, const NmExtraHeader *extra,
-                      size_t n_extra, const char *body, const char **err)
-{
-    if (err)
-        *err = NULL;
-    if (!base_url || !*base_url) {
-        if (err)
-            *err = "no base url";
-        return NULL;
-    }
+/* ---------------------------------------------------------------- */
+/* Async one-shot JSON fetch (the catalog seam's engine)             */
+/* ---------------------------------------------------------------- */
 
+/* A catalog is a document, not a stream: one bounded body buffer. */
+#define NM_FETCH_BODY_MAX (4u * 1024u * 1024u)
+/* The blocking pump's readiness slice: short enough that a silent peer
+ * is re-checked against the request's deadline promptly. */
+#define NM_FETCH_SLICE_MS 50
+/* Per-REQUEST bound (the old recv timeout's role): a peer that accepts
+ * and never answers fails this request instead of stalling its caller.
+ * Per request, not per fetch — ollama's catalog is one GET plus one
+ * POST per model, and each of those is entitled to its own budget. */
+#define NM_FETCH_TIMEOUT_MS 2000
+
+struct NmFetchStream
+{
+    NmConnection *conn;
+    char *body; /* owned response body (grown geometrically) */
+    size_t len, cap;
+    NmJson *doc;     /* parsed; owned until taken or freed by end */
+    double deadline; /* monotonic seconds; 0 = none */
+    int terminal;    /* 1 once the status is OK or ERR */
+    int ok;
+};
+
+/* Mark the fetch terminal-failed. The reason is not kept: no caller
+ * has ever surfaced one (the providers discarded nm_fetch_json's
+ * *err), and the wire recorder owns diagnostics. */
+static void fetch_fail(NmFetchStream *f)
+{
+    f->terminal = 1;
+    f->ok = 0;
+}
+
+NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
+                              const char *path, const char *auth_header,
+                              const char *api_key,
+                              const NmExtraHeader *extra, size_t n_extra,
+                              const char *body)
+{
+    if (!base_url || !*base_url)
+        return NULL;
     char host[256];
     int port;
     NmTransportMode mode;
     if (nm_openai_split_base_url(base_url, host, sizeof(host), &port,
-                                 &mode) != 0) {
-        if (err)
-            *err = "bad base url";
+                                 &mode) != 0)
         return NULL;
-    }
 
+    /* Non-blocking connect: the caller drives it (step + source). */
     NmConnectInfo ci;
-    NmConnection *conn = nm_connect(host, port, mode, &ci);
-    if (!conn) {
-        /* ci.detail is stack-local to this call: copy before use. */
-        snprintf(g_fetch_err, sizeof(g_fetch_err), "%s",
-                 ci.detail[0] ? ci.detail : "connect failed");
-        if (err)
-            *err = g_fetch_err;
+    NmConnection *conn = nm_connect_async(host, port, mode, &ci);
+    if (!conn)
+        return NULL;
+
+    NmFetchStream *f = calloc(1, sizeof(*f));
+    if (!f) {
+        nm_connection_close(conn);
         return NULL;
     }
-    /* One-shot fetch is user-facing-blocking (models popup, catalog
-     * refresh): bound it, so a wedged peer degrades to the static
-     * fallback instead of freezing the UI. */
-    nm_connection_set_recv_timeout(conn, 2);
+    f->conn = conn;
+    f->deadline =
+        nm_monotonic_seconds() + (double)NM_FETCH_TIMEOUT_MS / 1000.0;
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
@@ -1350,86 +1370,202 @@ NmJson *nm_fetch_json(const char *base_url, const char *method,
     nh++;
 
     size_t body_len = body ? strlen(body) : 0;
-    if (nm_request(conn, method, path, hdrs, nh, body, body_len) != NM_TRANSPORT_OK) {
-        /* Capture the detail BEFORE close: the connection (and its
-         * error string) is freed by nm_connection_close, and the
-         * *err contract needs a pointer that outlives this call.
-         * Process-static slot, same pattern as authinfo's password
-         * slot (the one-shot fetch is documented blocking; one
-         * caller at a time). */
-        const char *d = nm_connection_last_error(conn);
-        snprintf(g_fetch_err, sizeof(g_fetch_err), "%s", d ? d : "");
+    if (nm_request_queue(conn, method, path, hdrs, nh, body, body_len) !=
+        NM_TRANSPORT_OK) {
         nm_connection_close(conn);
-        if (err)
-            *err = g_fetch_err[0] ? g_fetch_err : "request failed";
+        free(f);
         return NULL;
     }
-    const NmResponse *resp = nm_response(conn);
-    if (resp->status < 200 || resp->status >= 300) {
-        nm_wire_tap_error(conn, "protocol", "http error");
-        nm_connection_close(conn);
-        if (err)
-            *err = "http error";
-        return NULL;
+    return f;
+}
+
+NmCatalogStatus nm_fetch_step(NmFetchStream *f)
+{
+    if (!f)
+        return NM_CATALOG_ERR;
+    if (f->terminal)
+        return f->ok ? NM_CATALOG_OK : NM_CATALOG_ERR;
+    if (f->deadline > 0 && nm_monotonic_seconds() >= f->deadline) {
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
     }
 
-    /* Whole response body into one growing buffer (one-shot fetch,
-     * not the streaming path — the catalog is a bounded document). */
-    char *resp_body = NULL;
-    size_t len = 0, cap = 0;
-    char chunk[4096];
-    long n;
-    while ((n = nm_read_body(conn, chunk, sizeof(chunk))) > 0) {
-        if (len + (size_t)n > cap) {
-            cap = cap ? cap * 2 : 8192;
-            char *grown = realloc(resp_body, cap);
-            if (!grown) {
-                free(resp_body);
-                nm_connection_close(conn);
-                if (err)
-                    *err = "oom";
-                return NULL;
-            }
-            resp_body = grown;
-        }
-        memcpy(resp_body + len, chunk, (size_t)n);
-        len += (size_t)n;
+    /* Connect + send phases first (idempotent, PENDING while in
+     * flight), then the resumable head/body read. */
+    NmTransportStatus ts = nm_connection_step(f->conn);
+    if (ts == NM_TRANSPORT_PENDING)
+        return NM_CATALOG_PENDING;
+    if (ts != NM_TRANSPORT_OK) {
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
     }
-    nm_connection_close(conn);
-    if (!resp_body) {
-        if (err)
-            *err = "empty body";
-        return NULL;
+
+    for (;;) {
+        if (f->len >= NM_FETCH_BODY_MAX) {
+            fetch_fail(f);
+            return NM_CATALOG_ERR;
+        }
+        if (f->len + 4096 + 1 > f->cap) {
+            size_t ncap = f->cap ? f->cap : 8192;
+            while (ncap < f->len + 4096 + 1)
+                ncap *= 2;
+            char *np = realloc(f->body, ncap);
+            if (!np) {
+                fetch_fail(f);
+                return NM_CATALOG_ERR;
+            }
+            f->body = np;
+            f->cap = ncap;
+        }
+        long n =
+            nm_read_body(f->conn, f->body + f->len, f->cap - f->len - 1);
+        if (n == NM_READ_WOULD_BLOCK)
+            return NM_CATALOG_PENDING;
+        if (n < 0) {
+            fetch_fail(f);
+            return NM_CATALOG_ERR;
+        }
+        if (n == 0)
+            break; /* body complete */
+        f->len += (size_t)n;
+    }
+
+    /* Head + body are in: status, then parse. */
+    const NmResponse *resp = nm_response(f->conn);
+    if (!resp || resp->status < 200 || resp->status >= 300) {
+        nm_wire_tap_error(f->conn, "protocol", "http error");
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
+    }
+    if (f->len == 0) {
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
     }
 
     /* response capture point: a complete non-streaming body (the
      * one-shot fetch paths; WIRE-DEBUG §3 "response"). */
-    nm_wire_tap_response(conn, resp_body, len);
+    nm_wire_tap_response(f->conn, f->body, f->len);
 
     const char *jerr = NULL;
-    NmJson *doc = nm_json_parse(resp_body, len, &jerr);
-    free(resp_body);
-    if (!doc) {
-        if (err)
-            *err = jerr ? jerr : "bad json";
-        return NULL;
+    f->doc = nm_json_parse(f->body, f->len, &jerr);
+    if (!f->doc) {
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
     }
-    return doc; /* caller owns: nm_json_free when done */
+    f->terminal = 1;
+    f->ok = 1;
+    return NM_CATALOG_OK;
 }
 
-NmJson *nm_openai_models(const NmOpenaiEndpoint *ep, const char **err)
+NmSource nm_fetch_source(NmFetchStream *f)
 {
-    if (err)
-        *err = NULL;
-    if (!ep || !ep->base_url || !*ep->base_url) {
-        if (err)
-            *err = "no base url";
-        return NULL;
-    }
+    NmSource none = { -1, 0, NM_SRC_FD };
+    if (!f || f->terminal || !f->conn)
+        return none;
+    return nm_connection_interest(f->conn);
+}
 
+NmJson *nm_fetch_take(NmFetchStream *f)
+{
+    if (!f || !f->terminal || !f->ok)
+        return NULL;
+    NmJson *doc = f->doc;
+    f->doc = NULL; /* ownership moves to the caller */
+    return doc;
+}
+
+void nm_fetch_end(NmFetchStream *f)
+{
+    if (!f)
+        return;
+    if (f->conn)
+        nm_connection_close(f->conn);
+    if (f->doc)
+        nm_json_free(f->doc);
+    free(f->body);
+    free(f);
+}
+
+/* ---------------------------------------------------------------- */
+/* A provider's one-request catalog fetch                            */
+/* ---------------------------------------------------------------- */
+
+int nm_catalog_fetch_begin(NmCatalogFetch *cf, const NmOpenaiEndpoint *ep,
+                           int (*parse)(const NmJson *doc, void *ud),
+                           void *ud)
+{
+    if (!cf || cf->f || !parse || !ep || !ep->base_url || !*ep->base_url)
+        return 0;
+    NmFetchStream *f = nm_openai_models_begin(ep);
+    if (!f)
+        return 0;
+    cf->f = f;
+    cf->parse = parse;
+    cf->ud = ud;
+    return 1;
+}
+
+NmCatalogStatus nm_catalog_fetch_step(NmCatalogFetch *cf)
+{
+    if (!cf || !cf->f)
+        return NM_CATALOG_OK;
+    NmCatalogStatus s = nm_fetch_step(cf->f);
+    if (s == NM_CATALOG_PENDING)
+        return NM_CATALOG_PENDING;
+    int ok = 0;
+    if (s == NM_CATALOG_OK) {
+        NmJson *doc = nm_fetch_take(cf->f);
+        if (doc) {
+            ok = cf->parse ? cf->parse(doc, cf->ud) : 0;
+            nm_json_free(doc);
+        }
+    }
+    nm_fetch_end(cf->f);
+    cf->f = NULL;
+    return ok ? NM_CATALOG_OK : NM_CATALOG_ERR;
+}
+
+NmSource nm_catalog_fetch_source(const NmCatalogFetch *cf)
+{
+    NmSource none = { -1, 0, NM_SRC_FD };
+    return cf && cf->f ? nm_fetch_source(cf->f) : none;
+}
+
+void nm_catalog_fetch_end(NmCatalogFetch *cf)
+{
+    if (!cf || !cf->f)
+        return;
+    nm_fetch_end(cf->f);
+    cf->f = NULL;
+}
+
+NmFetchStream *nm_openai_models_begin(const NmOpenaiEndpoint *ep)
+{
+    if (!ep || !ep->base_url || !*ep->base_url)
+        return NULL;
     char path[512];
     snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
-    return nm_fetch_json(ep->base_url, "GET", path, ep->auth_header,
-                         ep->api_key, ep->extra_headers, ep->n_extra_headers,
-                         NULL, err);
+    return nm_fetch_begin(ep->base_url, "GET", path, ep->auth_header,
+                          ep->api_key, ep->extra_headers, ep->n_extra_headers,
+                          NULL);
+}
+
+NmCatalogStatus nm_catalog_run(const NmProvider *p)
+{
+    if (!p || !p->models_step)
+        return NM_CATALOG_OK;
+    for (;;) {
+        NmCatalogStatus s = p->models_step(p);
+        if (s != NM_CATALOG_PENDING)
+            return s;
+        NmSource src = { -1, 0, NM_SRC_FD };
+        if (p->models_source)
+            src = p->models_source(p);
+        if (src.handle < 0 || src.flags == 0) {
+            if (p->models_end)
+                p->models_end(p);
+            return NM_CATALOG_ERR;
+        }
+        nm_source_wait(src, NM_FETCH_SLICE_MS);
+    }
 }

@@ -39,6 +39,8 @@ static const NmModel openai_static_models[] = {
 /* Live catalog cache: provider-owned, process lifetime. */
 static NmModel *openai_live_models;
 static size_t openai_live_n;
+/* The in-flight catalog fetch (one at a time — the async seam's state). */
+static NmCatalogFetch openai_fetch;
 
 /* The curated static table is OpenAI's only metadata source: the live
  * /v1/models list is ids-only (no capabilities, no context window) —
@@ -90,102 +92,25 @@ static NmChatStream *openai_chat_begin(const NmProvider *p,
 
 /* GET {base}/models -> data[] -> cache as NmModel[]. One-shot fetch:
  * on failure the caller gets the static fallback. */
-static void openai_fetch_catalog(const char *base_url, const char *api_key)
+static int openai_parse_catalog(const NmJson *doc, void *ud)
 {
-    const char *base = (base_url && *base_url) ? base_url
-                                               : OPENAI_DEFAULT_BASE;
-    char host[256];
-    int port;
-    NmTransportMode mode;
-    if (nm_openai_split_base_url(base, host, sizeof(host), &port, &mode) != 0)
-        return;
-
-    NmConnectInfo tst;
-    NmConnection *conn = nm_connect(host, port, mode, &tst);
-    if (!conn)
-        return;
-    /* Bounded one-shot fetch: a wedged peer degrades to the static
-     * fallback instead of hanging the catalog call (seen on Windows
-     * CI where a loopback:11434 probe stalled >10s). */
-    nm_connection_set_recv_timeout(conn, 2);
-
-    NmRequestHeader hdrs[2];
-    size_t nh = 0;
-    if (api_key && *api_key) {
-        static char authbuf[512];
-        snprintf(authbuf, sizeof(authbuf), "Bearer %s", api_key);
-        hdrs[nh].name = "Authorization";
-        hdrs[nh].value = authbuf;
-        hdrs[nh].secret = 1; /* marked at construction (WIRE-DEBUG §4) */
-        nh++;
-    }
-    hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = NM_USER_AGENT;
-    hdrs[nh].secret = 0;
-    nh++;
-
-    char path[512];
-    const char *prefix = strstr(base, "://");
-    prefix = prefix ? strchr(prefix + 3, '/') : NULL;
-    snprintf(path, sizeof(path), "%s/models", prefix ? prefix : "");
-
-    if (nm_request(conn, "GET", path, hdrs, nh, NULL, 0) != NM_TRANSPORT_OK) {
-        nm_connection_close(conn);
-        return;
-    }
-    const NmResponse *resp = nm_response(conn);
-    if (resp->status < 200 || resp->status >= 300) {
-        nm_connection_close(conn);
-        return;
-    }
-
-    /* Read the whole body into one reused growing buffer. */
-    char *body = NULL;
-    size_t len = 0, cap = 0;
-    char chunk[4096];
-    long n;
-    while ((n = nm_read_body(conn, chunk, sizeof(chunk))) > 0) {
-        if (len + (size_t)n > cap) {
-            cap = cap ? cap * 2 : 8192;
-            body = realloc(body, cap);
-            if (!body) {
-                nm_connection_close(conn);
-                return;
-            }
-        }
-        memcpy(body + len, chunk, (size_t)n);
-        len += (size_t)n;
-    }
-    nm_connection_close(conn);
-    if (!body)
-        return;
-
-    const char *jerr = NULL;
-    NmJson *doc = nm_json_parse(body, len, &jerr);
-    free(body);
-    if (!doc)
-        return;
-
+    (void)ud;
     NmJson *data = nm_json_get(doc, "data");
     size_t count = nm_json_len(data);
-    if (count == 0) {
-        nm_json_free(doc);
-        return;
-    }
+    if (count == 0)
+        return 0;
     NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models) {
-        nm_json_free(doc);
-        return;
-    }
+    if (!models)
+        return 0;
     size_t out = 0;
     for (size_t i = 0; i < count; i++) {
         NmJson *e = nm_json_at(data, i);
         const char *id = nm_json_str(nm_json_get(e, "id"));
         if (!id)
             continue;
-        /* Strings are owned by the parsed document — but that document
-         * is freed below, so strdup them into the cache. One-time cost
-         * per process, not per-call (memory reuse across calls). The
+        /* Strings are owned by the parsed document — freed by the
+         * caller — so strdup them into the cache. One-time cost per
+         * process, not per-call (memory reuse across calls). The
          * metadata comes from the curated table (the ids-only wire
          * carries none): membership from the live list, capabilities
          * from what we know. */
@@ -204,20 +129,53 @@ static void openai_fetch_catalog(const char *base_url, const char *api_key)
     }
     if (out == 0) {
         free(models);
-        nm_json_free(doc);
-        return;
+        return 0;
     }
-    nm_json_free(doc);
     openai_live_models = models;
     openai_live_n = out;
+    return 1;
 }
 
-static const NmModel *openai_models(const NmProvider *p, const char *base_url,
-                                    const char *api_key, size_t *n_out)
+/* The async seam (the /model popup's non-blocking drive). The endpoint
+ * carries the auth header format, so the shared fetch builds the same
+ * "Bearer <key>" the hand-rolled one did. */
+static int openai_models_begin(const NmProvider *p, const char *base_url,
+                               const char *api_key)
 {
     (void)p;
-    if (!openai_live_models && (base_url || nm_live_catalog_enabled()))
-        openai_fetch_catalog(base_url, api_key);
+    if (openai_live_models || openai_fetch.f)
+        return 0;
+    if (!base_url && !nm_live_catalog_enabled())
+        return 0;
+    const char *base =
+        (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE;
+    NmOpenaiEndpoint ep = { base, "Bearer %s", api_key, NM_USER_AGENT,
+                            NULL, 0, 0 };
+    return nm_catalog_fetch_begin(&openai_fetch, &ep, openai_parse_catalog,
+                                  NULL);
+}
+
+static NmCatalogStatus openai_models_step(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_step(&openai_fetch);
+}
+
+static NmSource openai_models_source(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_source(&openai_fetch);
+}
+
+static void openai_models_end(const NmProvider *p)
+{
+    (void)p;
+    nm_catalog_fetch_end(&openai_fetch);
+}
+
+static const NmModel *openai_models_cached(const NmProvider *p, size_t *n_out)
+{
+    (void)p;
     if (openai_live_models) {
         if (n_out)
             *n_out = openai_live_n;
@@ -231,6 +189,16 @@ static const NmModel *openai_models(const NmProvider *p, const char *base_url,
         *n_out = n;
     }
     return openai_static_models;
+}
+
+static const NmModel *openai_models(const NmProvider *p, const char *base_url,
+                                    const char *api_key, size_t *n_out)
+{
+    /* The BLOCKING drive of the async seam (one implementation, two
+     * drives). */
+    if (openai_models_begin(p, base_url, api_key))
+        nm_catalog_run(p);
+    return openai_models_cached(p, n_out);
 }
 
 static int openai_needs_auth(const NmProvider *p, const char *base_url)
@@ -259,6 +227,11 @@ const struct NmProvider nm_openai_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     openai_models,
+    openai_models_cached,
+    openai_models_begin,
+    openai_models_step,
+    openai_models_source,
+    openai_models_end,
     openai_needs_auth,
     openai_env_key,
 };

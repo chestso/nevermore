@@ -613,6 +613,22 @@ static void harness_step_ack(AppHarness *h)
         server_ack(h->pacer);
 }
 
+/* Drive an in-flight catalog fetch the way the event loop does: wait on
+ * the app's source, then hand it to external_ready (the popup opens on
+ * the terminal step). Bounded; 0 when no fetch is in flight. */
+static int harness_pump_catalog(AppHarness *h, int max_spins)
+{
+    for (int i = 0; i < max_spins; i++) {
+        NmSource s = nm_chat_app_source(h->app);
+        if (s.handle < 0 || !s.flags)
+            return 0;
+        app_wait_src(&s, 10);
+        nm_chat_app_external_ready(h->app, s.handle, s.flags);
+        tui_runtime_flush(h->rt);
+    }
+    return -1;
+}
+
 /* Drive the agent to completion the way the runtime's external-fd
  * loop would: poll fd -> step. Bounded. */
 /* Drive the agent to completion the way the runtime's external-fd
@@ -3718,6 +3734,58 @@ static void test_missing_key_preflight_warns(void)
     test_unsetenv("OPENAI_API_KEY");
 }
 
+/* The popup no longer blocks on a wire catalog: /model returns at once
+ * with a note, the event loop drives the fetch, and the popup opens
+ * when it lands — here with the static fallback, because the peer never
+ * answers and the fetch's own deadline ends it. The point is the ORDER:
+ * the note (and a live render) happen before any round trip. */
+static void test_model_popup_does_not_block_on_a_wire_catalog(void)
+{
+    /* A listening socket that is never accepted: the connect completes
+     * (the kernel's backlog), the request goes out, nothing comes back
+     * — a guaranteed PENDING. */
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model");
+    harness_enter(h);
+    /* /model returned WITHOUT the popup: the fetch is in flight and the
+     * UI is live (the note, not a frozen frame). */
+    ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT Astra") == NULL);
+
+    /* A few event-loop turns: the connect lands and the request goes
+     * out. Still nothing to show. */
+    for (int i = 0; i < 5; i++) {
+        NmSource s = nm_chat_app_source(h->app);
+        if (s.handle < 0 || !s.flags)
+            break;
+        app_wait_src(&s, 10);
+        nm_chat_app_external_ready(h->app, s.handle, s.flags);
+    }
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT Astra") == NULL);
+
+    /* The peer never answers: the fetch's own deadline (2 s on the fake
+     * clock) ends it, and the popup opens with the built-in list. */
+    nm_test_clock_advance_ms(2100);
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    ASSERT_EQ(harness_pump_catalog(h, 50), 0);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "could not load the live openrouter catalog") != NULL);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
+
+    harness_free(h);
+    close(lfd);
+}
+
 /* /config lists the provider-scoped keys that are set, after the plain
  * ones — the per-provider model memory. */
 static void test_config_lists_scoped_model_keys(void)
@@ -5622,9 +5690,14 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
 
     /* /model @img: the deep generator is the ONLY match — past the
      * cap it was invisible and the answer was "none in the catalog".
-     * The active filler carries no image_gen, so nothing prepends. */
+     * The active filler carries no image_gen, so nothing prepends.
+     * The catalog is a WIRE catalog here (an explicit base): /model
+     * starts the fetch and returns, so pump the event loop until the
+     * popup lands. */
     harness_type(h, "/model @img");
     harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
+    ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
     ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
@@ -5634,6 +5707,7 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
     harness_type(h, "/model deep");
     harness_enter(h);
+    ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
 
@@ -5761,6 +5835,7 @@ int main(void)
     RUN_TEST(test_model_memory_is_per_provider);
     RUN_TEST(test_send_without_model_is_refused);
     RUN_TEST(test_missing_key_preflight_warns);
+    RUN_TEST(test_model_popup_does_not_block_on_a_wire_catalog);
     RUN_TEST(test_config_lists_scoped_model_keys);
     RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_connect_knobs_via_config_command);

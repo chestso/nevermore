@@ -81,19 +81,25 @@ static NmChatStream *test_replay_chat_begin(const NmProvider *p,
     return nm_openai_chat_begin(&ep, req, err);
 }
 
-static const NmModel *test_replay_models(const NmProvider *p,
-                                         const char *base_url,
-                                         const char *api_key, size_t *n_out)
+static const NmModel *test_replay_models_cached(const NmProvider *p,
+                                                size_t *n_out)
 {
     (void)p;
-    (void)base_url;
-    (void)api_key;
     size_t n = 0;
     while (test_replay_static_models[n].id)
         n++;
     if (n_out)
         *n_out = n;
     return test_replay_static_models;
+}
+
+static const NmModel *test_replay_models(const NmProvider *p,
+                                         const char *base_url,
+                                         const char *api_key, size_t *n_out)
+{
+    (void)base_url;
+    (void)api_key;
+    return test_replay_models_cached(p, n_out);
 }
 
 /* A replay has no auth surface at all: no key, no authinfo machine.
@@ -131,6 +137,11 @@ const struct NmProvider nm_test_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     test_replay_models,
+    test_replay_models_cached,
+    NULL, /* no live catalog: the static replay table is all there is */
+    NULL,
+    NULL,
+    NULL,
     test_replay_needs_auth,
     test_replay_env_key,
 };

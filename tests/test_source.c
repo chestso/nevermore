@@ -1,7 +1,9 @@
 /* test_source.c - listing-plane source tests (the catalog picker's
  * data seam). Runs offline: static + registry sources only, with the
- * catalog pin held (a wire source rides fetch_begin/step against
- * canned servers in its own test). */
+ * catalog pin held. The catalog source's ASYNC wire drive (a canned
+ * catalog server behind an explicit base) is exercised end to end by
+ * test_chat_app's model-picker tests, which drive the same source
+ * through the app's event loop. */
 
 #include <stdio.h>
 #include <string.h>
@@ -15,12 +17,12 @@
 
 static void test_registry_source_lists_all_providers(void)
 {
-    NmSource *s = nm_source_registry_create();
+    NmListSource *s = nm_source_registry_create();
     ASSERT_NOT_NULL(s);
 
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
     ASSERT_TRUE(nm_source_step(s) == NM_FETCH_OK);
-    ASSERT_EQ(nm_source_fd(s), -1); /* sync: no fd to poll */
+    ASSERT_EQ(nm_source_fd(s).handle, (intptr_t)-1); /* sync: nothing to poll */
 
     size_t n = 0;
     const NmEntry *items = nm_source_items(s, &n);
@@ -40,7 +42,7 @@ static void test_registry_source_lists_all_providers(void)
 
 static void test_registry_source_names_round_trip(void)
 {
-    NmSource *s = nm_source_registry_create();
+    NmListSource *s = nm_source_registry_create();
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
 
     size_t n = 0;
@@ -63,7 +65,7 @@ static void test_static_source_wraps_provider_catalog(void)
     const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(ollama);
 
-    NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
+    NmListSource *s = nm_source_catalog_create(ollama, NULL, NULL);
     ASSERT_NOT_NULL(s);
 
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
@@ -91,7 +93,7 @@ static void test_static_source_wraps_provider_catalog(void)
 static void test_static_source_entry_shape(void)
 {
     const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
-    NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
+    NmListSource *s = nm_source_catalog_create(ollama, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
 
     size_t n = 0;
@@ -110,7 +112,7 @@ static void test_static_source_refetch_reuses(void)
     /* The memory-reuse principle: a second fetch rebuilds in place —
      * items stay valid, no leak (ASan watches), count consistent. */
     const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
-    NmSource *s = nm_source_catalog_create(ollama, NULL, NULL);
+    NmListSource *s = nm_source_catalog_create(ollama, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
     size_t n1 = 0;
     const NmEntry *items1 = nm_source_items(s, &n1);
@@ -128,7 +130,7 @@ static void test_static_source_empty_catalog(void)
     /* A provider with no catalog yields an empty view, not a crash. */
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
-    NmSource *s = nm_source_catalog_create(p, NULL, NULL);
+    NmListSource *s = nm_source_catalog_create(p, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);
     size_t n = 99;
     const NmEntry *items = nm_source_items(s, &n);
@@ -138,12 +140,12 @@ static void test_static_source_empty_catalog(void)
 
 static void test_cancel_is_safe_on_sync_sources(void)
 {
-    NmSource *reg = nm_source_registry_create();
+    NmListSource *reg = nm_source_registry_create();
     nm_source_cancel(reg); /* no fetch in flight */
     nm_source_free(reg);
 
     const NmProvider *ollama = nm_provider_by_name("ollama:cloud");
-    NmSource *cat = nm_source_catalog_create(ollama, NULL, NULL);
+    NmListSource *cat = nm_source_catalog_create(ollama, NULL, NULL);
     nm_source_cancel(cat);
     nm_source_free(cat);
 }
@@ -152,8 +154,8 @@ static void test_null_safety(void)
 {
     nm_source_free(NULL);
 
-    NmSource *s = nm_source_registry_create();
-    ASSERT_EQ(nm_source_fd(s), -1);
+    NmListSource *s = nm_source_registry_create();
+    ASSERT_EQ(nm_source_fd(s).handle, (intptr_t)-1);
     size_t n = 1;
     ASSERT_TRUE(nm_source_items(s, &n) == NULL); /* never fetched */
     ASSERT_EQ(n, 0);

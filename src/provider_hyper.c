@@ -223,43 +223,28 @@ static NmChatStream *hyper_chat_begin(const NmProvider *p,
 static NmModel *hyper_live_models;
 static size_t hyper_live_n;
 
-/* Fetch /v1/models once, cache as NmModel[] (ids/labels strdup'd —
- * one-time per process, not per call; memory-reuse principle). */
-static void hyper_fetch_catalog(const char *base_url)
-{
-    /* x-crush-id rides the catalog too (Crush sends it on every
-     * request); the session-affinity pair is for chat traffic, where
-     * the route to the prefix cache matters. */
-    if (!hyper_crush_id_ready)
-        hyper_derive_crush_id();
-    NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
-    NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
-                            NM_USER_AGENT, &crush, 1,
-                            0 /* include_usage: a catalog GET has no stream */ };
-    const char *err = NULL;
-    NmJson *doc = nm_openai_models(&ep, &err);
-    if (!doc)
-        return; /* offline: caller falls back to static */
+/* The in-flight catalog fetch (one at a time — the async seam's state). */
+static NmCatalogFetch hyper_fetch;
 
+/* Build the cache from a fetched document; 1 when it committed one. */
+static int hyper_parse_catalog(const NmJson *doc, void *ud)
+{
+    (void)ud;
     NmJson *data = nm_json_get(doc, "data");
     size_t count = nm_json_len(data);
-    if (count == 0) {
-        nm_json_free(doc);
-        return;
-    }
+    if (count == 0)
+        return 0;
     NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models) {
-        nm_json_free(doc);
-        return;
-    }
+    if (!models)
+        return 0;
     size_t out = 0;
     for (size_t i = 0; i < count; i++) {
         NmJson *e = nm_json_at(data, i);
         const char *id = nm_json_str(nm_json_get(e, "id"));
         if (!id)
             continue;
-        /* Strings are owned by the parsed document — freed below —
-         * so copy into the cache. One-time per process. */
+        /* Strings are owned by the parsed document — freed by the
+         * caller — so copy into the cache. One-time per process. */
         models[out].id = strdup(id);
         const char *display = nm_json_str(nm_json_get(e, "display_name"));
         models[out].label = strdup(display ? display : id);
@@ -277,28 +262,65 @@ static void hyper_fetch_catalog(const char *base_url)
         }
         out++;
     }
-    nm_json_free(doc);
     if (out == 0) {
         free(models);
-        return;
+        return 0;
     }
     hyper_live_models = models;
     hyper_live_n = out;
+    return 1;
 }
 
-static const NmModel *hyper_models(const NmProvider *p, const char *base_url,
-                                   const char *api_key, size_t *n_out)
+/* The async seam: begin/step/source/end over the shared catalog fetch
+ * (the /model popup's non-blocking drive). */
+static int hyper_models_begin(const NmProvider *p, const char *base_url,
+                              const char *api_key)
 {
     (void)p;
     (void)api_key; /* catalog is tokenless (HYPER-API.md §5) */
-    if (!hyper_live_models && (base_url || nm_live_catalog_enabled()))
-        hyper_fetch_catalog(base_url);
+    if (hyper_live_models || hyper_fetch.f)
+        return 0; /* cached, or already in flight */
+    if (!base_url && !nm_live_catalog_enabled())
+        return 0;
+    /* x-crush-id rides the catalog too (Crush sends it on every
+     * request); the session-affinity pair is for chat traffic, where
+     * the route to the prefix cache matters. */
+    if (!hyper_crush_id_ready)
+        hyper_derive_crush_id();
+    NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
+    NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
+                            NM_USER_AGENT, &crush, 1,
+                            0 /* include_usage: a catalog GET has no stream */ };
+    return nm_catalog_fetch_begin(&hyper_fetch, &ep, hyper_parse_catalog,
+                                  NULL);
+}
+
+static NmCatalogStatus hyper_models_step(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_step(&hyper_fetch);
+}
+
+static NmSource hyper_models_source(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_source(&hyper_fetch);
+}
+
+static void hyper_models_end(const NmProvider *p)
+{
+    (void)p;
+    nm_catalog_fetch_end(&hyper_fetch);
+}
+
+static const NmModel *hyper_models_cached(const NmProvider *p, size_t *n_out)
+{
+    (void)p;
     if (hyper_live_models) {
         if (n_out)
             *n_out = hyper_live_n;
         return hyper_live_models;
     }
-    /* Offline: the static fallback. */
     if (n_out) {
         size_t n = 0;
         while (hyper_static_models[n].id)
@@ -306,6 +328,16 @@ static const NmModel *hyper_models(const NmProvider *p, const char *base_url,
         *n_out = n;
     }
     return hyper_static_models;
+}
+
+static const NmModel *hyper_models(const NmProvider *p, const char *base_url,
+                                   const char *api_key, size_t *n_out)
+{
+    /* The BLOCKING drive of the async seam: one implementation, two
+     * drives (the event loop uses begin/step/fd directly). */
+    if (hyper_models_begin(p, base_url, api_key))
+        nm_catalog_run(p);
+    return hyper_models_cached(p, n_out);
 }
 
 static int hyper_needs_auth(const NmProvider *p, const char *base_url)
@@ -334,6 +366,11 @@ const struct NmProvider nm_hyper_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     hyper_models,
+    hyper_models_cached,
+    hyper_models_begin,
+    hyper_models_step,
+    hyper_models_source,
+    hyper_models_end,
     hyper_needs_auth,
     hyper_env_key,
 };

@@ -161,35 +161,22 @@ static size_t opencode_catalog_slot(const NmProvider *p)
  * list and metadata from the shipped table by id (opencode_meta_find);
  * an id models.dev has not seen yet falls back to id / -1 / 0. One-time
  * per process; static fallback on failure. */
-static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
+static int opencode_parse_catalog(const NmJson *doc, const NmProvider *p)
 {
-    NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
-    NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
-                            NM_USER_AGENT, &sess, 1,
-                            0 /* include_usage: a catalog GET has no stream */ };
-    const char *err = NULL;
-    NmJson *doc = nm_openai_models(&ep, &err);
-    if (!doc)
-        return;
-
     NmJson *data = nm_json_get(doc, "data");
     size_t count = nm_json_len(data);
-    if (count == 0) {
-        nm_json_free(doc);
-        return;
-    }
+    if (count == 0)
+        return 0;
     NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models) {
-        nm_json_free(doc);
-        return;
-    }
+    if (!models)
+        return 0;
     size_t out = 0;
     for (size_t i = 0; i < count; i++) {
         NmJson *e = nm_json_at(data, i);
         const char *id = nm_json_str(nm_json_get(e, "id"));
         if (!id || !*id)
             continue;
-        /* Strings belong to the parsed document (freed below):
+        /* Strings belong to the parsed document (freed by the caller):
          * copy into the cache. One-time per process. */
         models[out].id = strdup(id);
         /* Enrich the ids-only wire row from the shipped table: the
@@ -211,24 +198,61 @@ static void opencode_fetch_catalog(const NmProvider *p, const char *base_url)
         }
         out++;
     }
-    nm_json_free(doc);
     if (out == 0) {
         free(models);
-        return;
+        return 0;
     }
     size_t slot = opencode_catalog_slot(p);
     oc_catalogs[slot].models = models;
     oc_catalogs[slot].n = out;
+    return 1;
 }
 
-const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
-                                  const char *api_key, size_t *n_out)
+/* The async seam (the /model popup's non-blocking drive). The parse is
+ * per-provider (the table differs by tier), so the slot's fetch carries
+ * the provider it belongs to as the parse's context. */
+static NmCatalogFetch oc_fetches[2];
+
+static int opencode_parse_slot(const NmJson *doc, void *ud)
+{
+    return opencode_parse_catalog(doc, (const NmProvider *)ud);
+}
+
+int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
+                             const char *api_key)
 {
     (void)api_key; /* catalog is tokenless (OPENCODE-API.md §5) */
     size_t slot = opencode_catalog_slot(p);
-    if (!oc_catalogs[slot].models &&
-        (base_url || nm_live_catalog_enabled()))
-        opencode_fetch_catalog(p, base_url);
+    if (oc_catalogs[slot].models || oc_fetches[slot].f)
+        return 0;
+    if (!base_url && !nm_live_catalog_enabled())
+        return 0;
+    NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
+    NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
+                            NM_USER_AGENT, &sess, 1,
+                            0 /* include_usage: a catalog GET has no stream */ };
+    return nm_catalog_fetch_begin(&oc_fetches[slot], &ep,
+                                  opencode_parse_slot, (void *)p);
+}
+
+NmCatalogStatus nm_opencode_models_step(const NmProvider *p)
+{
+    return nm_catalog_fetch_step(&oc_fetches[opencode_catalog_slot(p)]);
+}
+
+NmSource nm_opencode_models_source(const NmProvider *p)
+{
+    return nm_catalog_fetch_source(&oc_fetches[opencode_catalog_slot(p)]);
+}
+
+void nm_opencode_models_end(const NmProvider *p)
+{
+    nm_catalog_fetch_end(&oc_fetches[opencode_catalog_slot(p)]);
+}
+
+const NmModel *nm_opencode_models_cached(const NmProvider *p, size_t *n_out)
+{
+    size_t slot = opencode_catalog_slot(p);
     if (oc_catalogs[slot].models) {
         if (n_out)
             *n_out = oc_catalogs[slot].n;
@@ -242,6 +266,16 @@ const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
         *n_out = n;
     }
     return statics;
+}
+
+const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
+                                  const char *api_key, size_t *n_out)
+{
+    /* The BLOCKING drive of the async seam (one implementation, two
+     * drives). */
+    if (nm_opencode_models_begin(p, base_url, api_key))
+        nm_catalog_run(p);
+    return nm_opencode_models_cached(p, n_out);
 }
 
 int nm_opencode_needs_auth(const NmProvider *p, const char *base_url)
@@ -271,6 +305,11 @@ const struct NmProvider nm_opencode_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     nm_opencode_models,
+    nm_opencode_models_cached,
+    nm_opencode_models_begin,
+    nm_opencode_models_step,
+    nm_opencode_models_source,
+    nm_opencode_models_end,
     nm_opencode_needs_auth,
     opencode_env_key,
 };

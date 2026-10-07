@@ -58,6 +58,7 @@
 #include "nm_markdown_render.h"
 #include "nm_image.h"
 #include "nm_size.h"
+#include "source.h"
 #include "nm_process.h"
 #include "spinner.h"
 
@@ -225,6 +226,15 @@ struct NmChatApp
      * discoverability hint (the first image a chat receives names the
      * command once, and never again). */
     int save_hinted;
+
+    /* The model-catalog fetch in flight (the /model popup's
+     * non-blocking path). A catalog SOURCE (src/source.h) owns the
+     * fetch: its begin/step/fd drive the provider's async seam, and
+     * the popup opens when it lands. The query/cap are remembered so
+     * the popup opens with the filter the user asked for. */
+    NmListSource *catalog_src;
+    char catalog_query[128];
+    unsigned catalog_cap;
 };
 
 /* The singleton (see file header). */
@@ -245,6 +255,11 @@ static void post_image_line(NmChatApp *app, const char *alt,
                             const char *data_url, size_t url_len);
 static void show_received_image(NmChatApp *app, const NmImage *img, size_t id);
 static int model_vision(const NmChatApp *app, const NmProvider *p);
+/* The model-catalog fetch (defined with the popup below): the event
+ * loop's fd-ready and tick drive it. */
+static void catalog_step(NmChatApp *app);
+static void show_models_popup(NmChatApp *app, NmListSource *s,
+                              const char *query, unsigned cap);
 
 /* ---------------------------------------------------------------- */
 /* Transcript writers (boba's streaming IR owns the scrollback)     */
@@ -706,7 +721,8 @@ static int model_vision(const NmChatApp *app, const NmProvider *p)
     if (!p || !app->model)
         return -1;
     size_t n = 0;
-    const NmModel *models = p->models(p, NULL, NULL, &n);
+    /* The CACHED read (never a UI-thread fetch). */
+    const NmModel *models = p->models_cached(p, &n);
     if (!models)
         return -1;
     for (size_t i = 0; i < n; i++) {
@@ -1018,7 +1034,9 @@ static long model_context_limit(const NmChatApp *app, const NmProvider *p)
     if (!p || !app->model)
         return -1;
     size_t n = 0;
-    const NmModel *models = p->models(p, NULL, NULL, &n);
+    /* The CACHED read: a wire catalog must never be fetched from the
+     * UI thread here (the popup's async seam owns that). */
+    const NmModel *models = p->models_cached(p, &n);
     if (!models)
         return -1;
     for (size_t i = 0; i < n; i++) {
@@ -1189,6 +1207,7 @@ void nm_chat_app_free(NmChatApp *app)
         nm_config_set_store(NULL);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
+    nm_source_free(app->catalog_src);                  /* an in-flight fetch goes with it */
     nm_markdown_render_state_free(&app->render_state); /* image slot */
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
@@ -1344,7 +1363,20 @@ int nm_chat_app_fd(NmChatApp *app)
 NmSource nm_chat_app_source(NmChatApp *app)
 {
     NmSource s = { -1, 0, NM_SRC_FD };
-    return app ? nm_agent_source(app->agent) : s;
+    if (!app)
+        return s;
+    NmSource agent = nm_agent_source(app->agent);
+    if (agent.handle >= 0 && agent.flags)
+        return agent;
+    /* A catalog fetch borrows the primary slot: the agent is idle
+     * whenever one can start (/model is only reachable from submit,
+     * which is a no-op while a turn runs). If the agent does hold the
+     * slot the fetch is still stepped by the tick, and its own
+     * per-request deadline still bounds it. */
+    NmSource cat = nm_source_fd(app->catalog_src);
+    if (cat.handle >= 0 && cat.flags)
+        return cat;
+    return s;
 }
 
 /* boba's I/O-source pool must hold every job PLUS the agent's own
@@ -1402,7 +1434,14 @@ void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
     (void)ready;
     if (!app)
         return;
-    if (app->agent && handle == nm_chat_app_source(app).handle) {
+    /* The catalog fetch first: it borrows the primary slot only while
+     * the agent is idle, so the two handles never collide. */
+    if (app->catalog_src &&
+        handle == nm_source_fd(app->catalog_src).handle) {
+        catalog_step(app);
+        return;
+    }
+    if (app->agent && handle == nm_agent_source(app->agent).handle) {
         nm_chat_app_step(app);
         return;
     }
@@ -1454,6 +1493,12 @@ void nm_chat_app_tick(NmChatApp *app)
     if (app->agent && nm_agent_next_timeout_ms(app->agent) == 0)
         nm_chat_app_step(app);
 
+    /* A catalog fetch in flight: step it so its per-request deadline
+     * (the fetch's own) fires even when the fd never becomes readable
+     * (an accepted-but-silent peer). tick_ms keeps the loop waking. */
+    if (app->catalog_src)
+        catalog_step(app);
+
     const char *frame = nm_spinner_tick(app->spinner);
     if (frame && frame != app->spinner_frame) {
         app->spinner_frame = frame;
@@ -1466,8 +1511,12 @@ int nm_chat_app_tick_ms(NmChatApp *app)
     if (!app)
         return -1;
     NmAgentState st = nm_agent_state(app->agent);
-    if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
-        return -1;
+    if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL) {
+        /* Idle: a catalog fetch is the one thing that wants a wakeup
+         * (its own deadline; the fd alone cannot fire a silent peer).
+         * The spinner is the turn's, so no cadence otherwise. */
+        return app->catalog_src ? 100 : -1;
+    }
     /* Spinner cadence while busy (100 ms), shortened to the nearest
      * agent deadline so a stalled stream / a due tool fires promptly.
      * The step that results clears the deadline (tool done, new round,
@@ -1800,7 +1849,7 @@ static void meta_append(char *buf, size_t cap, size_t *off, const char *s)
  * (tools == 1), never for 0 ("the catalog says nothing") nor -1 ("a
  * definite no" — a badge must never assert the negative). Text only —
  * the popup styles the whole column (nm_color_popup_meta). */
-static void format_model_meta(const NmModel *m, char *buf, size_t cap)
+static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
 {
     if (cap == 0)
         return;
@@ -1828,23 +1877,85 @@ static void format_model_meta(const NmModel *m, char *buf, size_t cap)
         meta_append(buf, cap, &off, "🔧️");
 }
 
-/* Open the models popup over the catalog source, pre-filtered by
- * `query` (NULL = no filter) and by `cap` (0 = every model, else the
- * NM_CAP_* capability filter). Popups are modal: one fetch in
- * flight; reopening cancels nothing here (sync source). Each row
- * carries a right-aligned metadata column (format_model_meta) — the
- * id is the item's value, the metadata is display-only, so compose
- * never sees it and nothing needs stripping. */
+/* Open the models popup over the catalog SOURCE (src/source.h), which
+ * drives the provider's async catalog seam — a wire catalog is fetched
+ * without ever blocking the event loop: the popup opens when it lands
+ * (catalog_step), with the note below for the gap. `query` pre-filters
+ * (NULL = none), `cap` is the NM_CAP_* capability filter (0 = every
+ * model). Popups are modal: one fetch in flight; a second /model while
+ * one runs says so rather than stacking. */
 static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
 {
+    if (!app->provider) {
+        sys_line(app, "no models in the catalog");
+        return;
+    }
+    if (app->catalog_src) {
+        sys_line(app, "still loading the %s model catalog…",
+                 app->provider->name);
+        return;
+    }
+    NmListSource *s = nm_source_catalog_create(app->provider, app->base_url,
+                                               endpoint_key(app, app->provider));
+    if (!s) {
+        sys_line(app, "no models in the catalog");
+        return;
+    }
+    if (nm_source_fetch_begin(s, NULL) != 0) {
+        nm_source_free(s);
+        sys_line(app, "no models in the catalog");
+        return;
+    }
+    if (nm_source_step(s) == NM_FETCH_PENDING) {
+        /* A wire catalog: the fetch is in flight. The popup opens when
+         * it lands (nm_chat_app_external_ready / tick -> catalog_step),
+         * so the UI thread is never blocked on the round trip. */
+        app->catalog_src = s;
+        snprintf(app->catalog_query, sizeof(app->catalog_query), "%s",
+                 query ? query : "");
+        app->catalog_cap = cap;
+        sys_line(app, "loading the %s model catalog…", app->provider->name);
+        return;
+    }
+    show_models_popup(app, s, query, cap);
+    nm_source_free(s);
+}
+
+/* Drive the in-flight catalog fetch (the event loop's fd-ready, and the
+ * tick's deadline). On a terminal status the popup opens with the
+ * remembered query/cap — the source already holds the live catalog, or
+ * the static fallback when the fetch failed. */
+static void catalog_step(NmChatApp *app)
+{
+    if (!app || !app->catalog_src)
+        return;
+    NmFetchStatus st = nm_source_step(app->catalog_src);
+    if (st == NM_FETCH_PENDING)
+        return;
+    NmListSource *s = app->catalog_src;
+    app->catalog_src = NULL;
+    if (st != NM_FETCH_OK)
+        sys_line(app, "note: could not load the live %s catalog — showing "
+                      "the built-in list",
+                 app->provider ? app->provider->name : "model");
+    show_models_popup(app, s, app->catalog_query, app->catalog_cap);
+    nm_source_free(s);
+}
+
+/* Build and show the popup from a source whose fetch has completed.
+ * Popups are modal: each row carries a right-aligned metadata column
+ * (format_model_meta) — the id is the item's value, the metadata is
+ * display-only, so compose never sees it and nothing needs stripping. */
+static void show_models_popup(NmChatApp *app, NmListSource *s, const char *query,
+                              unsigned cap)
+{
     size_t n = 0;
-    const NmModel *models = app->provider->models(
-        app->provider, app->base_url, endpoint_key(app, app->provider), &n);
+    const NmEntry *models = nm_source_items(s, &n);
     if (!models || n == 0) {
         sys_line(app, "no models in the catalog");
         return;
     }
-    /* Rows point at the catalog's own ids (boba copies every string at
+    /* Rows point at the source's own ids (boba copies every string at
      * set_items, so no row storage is needed); only the formatted meta
      * column is fresh. Everything is sized by the catalog — a fixed
      * bound silently truncates a live one (OpenRouter's ran to 464
@@ -1866,7 +1977,7 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
     const char *active_meta = NULL;
     int count = 0;
     for (size_t i = 0; i < n; i++) {
-        const NmModel *m = &models[i];
+        const NmEntry *m = &models[i];
         if ((cap & NM_CAP_VISION) && !m->vision)
             continue;
         if ((cap & NM_CAP_IMAGE) && !m->image_gen)
@@ -1964,6 +2075,10 @@ static int switch_provider(NmChatApp *app, const char *name)
     size_t dropped = app->n_pending;
     pending_clear(app);
     app->save_hinted = 0; /* the hint is chat-scoped, like the ids */
+    /* A catalog fetch for the OLD provider is dropped with the session
+     * (the popup would otherwise open on a catalog nobody asked for). */
+    nm_source_free(app->catalog_src);
+    app->catalog_src = NULL;
     send_msg(app, tui_msg_transcript_clear());
     hold_discard(app, NM_STREAM_ID_CONTENT);
     hold_discard(app, NM_STREAM_ID_REASONING);

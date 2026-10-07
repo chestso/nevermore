@@ -2285,9 +2285,10 @@ static void test_extra_headers_null_changes_nothing(void)
     ASSERT_TRUE(strstr(req, "x-opencode-session") == NULL);
 }
 
-/* nm_fetch_json carries the extras too (the catalog path is a header
- * path; opencode's tier consistency requirement). */
-static void test_fetch_json_carries_extra_headers(void)
+/* The catalog fetch seam carries the extras too (the catalog path is a
+ * header path; opencode's tier consistency requirement) — driven here
+ * through begin/step/take exactly as the event loop drives it. */
+static void test_catalog_fetch_carries_extra_headers(void)
 {
     int port;
     int lfd = server_listen(&port);
@@ -2306,11 +2307,21 @@ static void test_fetch_json_carries_extra_headers(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmExtraHeader extras[1] = { { "x-opencode-session", "nm-catalogid", 0 } };
-    const char *err = NULL;
-    NmJson *doc = nm_fetch_json(base, "GET", "/v1/models", "Bearer %s",
-                                "test-key", extras, 1, NULL, &err);
+    NmFetchStream *f = nm_fetch_begin(base, "GET", "/v1/models", "Bearer %s",
+                                      "test-key", extras, 1, NULL);
+    ASSERT_NOT_NULL(f);
+    for (;;) {
+        NmCatalogStatus st = nm_fetch_step(f);
+        if (st != NM_CATALOG_PENDING)
+            break;
+        NmSource src = nm_fetch_source(f);
+        ASSERT_TRUE(src.handle >= 0);
+        nm_source_wait(src, 50);
+    }
+    NmJson *doc = nm_fetch_take(f);
     ASSERT_NOT_NULL(doc);
     nm_json_free(doc);
+    nm_fetch_end(f);
     pthread_join(th, NULL);
     close(lfd);
 
@@ -2714,7 +2725,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_extra_headers_ordered_between_auth_and_ua);
     RUN_TEST(test_extra_headers_empty_value_is_skipped);
     RUN_TEST(test_extra_headers_null_changes_nothing);
-    RUN_TEST(test_fetch_json_carries_extra_headers);
+    RUN_TEST(test_catalog_fetch_carries_extra_headers);
     RUN_TEST(test_extra_headers_redaction_marker);
     RUN_TEST(test_affinity_headers_logged_verbatim);
     RUN_TEST(test_reasoning_content_serialized_when_attached);

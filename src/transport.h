@@ -202,6 +202,20 @@ typedef struct NmSource
     int kind;        /* NM_SRC_FD / NM_SRC_SOCKET / NM_SRC_HANDLE */
 } NmSource;
 
+/* The NmSource kind for a socket handle in this build: a POSIX fd or a
+ * Windows SOCKET. The one place the #ifdef lives, so every feeder of
+ * the event loop (a chat stream, a catalog fetch) agrees. */
+int nm_socket_source_kind(void);
+
+/* Blocking wait for ONE source (a socket fd), up to `timeout_ms`; 0
+ * when it became ready, > 0 on timeout, -1 on error / an unsupported
+ * kind. The ONE readiness wait for the BLOCKING drives — a one-shot
+ * CLI's catalog fetch, a tool's direct-call pump; the event-driven
+ * path never reaches it (boba owns the wait). A timeout is a normal
+ * answer, not a failure: the caller loops and re-checks its deadline,
+ * which is what keeps a silent peer bounded. */
+int nm_source_wait(NmSource s, int timeout_ms);
+
 /* Current wait interest for the event loop: {handle, flags, kind} —
  * handle is -1 when there is nothing to wait on. Each connection
  * answers for itself; the app aggregates multiple sources into its

@@ -15,7 +15,7 @@
 
 typedef struct
 {
-    NmSource base;
+    NmListSource base;
     NmEntry *entries; /* rebuilt in place per fetch */
     size_t n;
 } RegistrySource;
@@ -29,7 +29,7 @@ static const char *const provider_labels[] = {
 #define PROVIDER_LABELS_N \
     (sizeof(provider_labels) / sizeof(provider_labels[0]))
 
-static int registry_fetch_begin(NmSource *s, const char *query_hint)
+static int registry_fetch_begin(NmListSource *s, const char *query_hint)
 {
     RegistrySource *r = (RegistrySource *)s;
     (void)query_hint; /* sync source: no query-side filtering */
@@ -63,24 +63,25 @@ static int registry_fetch_begin(NmSource *s, const char *query_hint)
     return 0;
 }
 
-static NmFetchStatus registry_step(NmSource *s)
+static NmFetchStatus registry_step(NmListSource *s)
 {
     (void)s;
     return NM_FETCH_OK; /* sync: the answer was ready at begin */
 }
 
-static int registry_fd(const NmSource *s)
+static NmSource registry_fd(const NmListSource *s)
 {
     (void)s;
-    return -1;
+    NmSource none = { -1, 0, NM_SRC_FD };
+    return none;
 }
 
-static void registry_cancel(NmSource *s)
+static void registry_cancel(NmListSource *s)
 {
     (void)s; /* nothing in flight: sync sources fetch at begin */
 }
 
-static const NmEntry *registry_items(const NmSource *s, size_t *n)
+static const NmEntry *registry_items(const NmListSource *s, size_t *n)
 {
     const RegistrySource *r = (const RegistrySource *)s;
     if (!r->entries) {
@@ -93,14 +94,14 @@ static const NmEntry *registry_items(const NmSource *s, size_t *n)
     return r->entries;
 }
 
-static void registry_free(NmSource *s)
+static void registry_free(NmListSource *s)
 {
     RegistrySource *r = (RegistrySource *)s;
     free(r->entries);
     free(r);
 }
 
-NmSource *nm_source_registry_create(void)
+NmListSource *nm_source_registry_create(void)
 {
     RegistrySource *r = calloc(1, sizeof(*r));
     if (!r)
@@ -118,12 +119,13 @@ NmSource *nm_source_registry_create(void)
 
 typedef struct
 {
-    NmSource base;
+    NmListSource base;
     const NmProvider *provider;
     const char *base_url; /* owned copies (constructor args) */
     const char *api_key;
     NmEntry *entries; /* view array, rebuilt in place */
     size_t n;
+    int in_flight; /* a wire fetch is running (step/fd drive it) */
 } CatalogSource;
 
 /* Tags derived from what NmModel already knows: vision support. The
@@ -131,20 +133,19 @@ typedef struct
  * tier; v1 is id/label substring. */
 static const char *const vision_tag[] = { "vision", NULL };
 
-static int catalog_fetch_begin(NmSource *s, const char *query_hint)
+/* Rebuild the view from the provider's catalog. NEVER fetches: the
+ * cached read is the event-driven path's (a blocking one would freeze
+ * the UI). 0 on success; -1 when there is nothing to show (a failed
+ * refetch keeps last-good). */
+static int catalog_build(CatalogSource *c)
 {
-    CatalogSource *c = (CatalogSource *)s;
-    (void)query_hint;
-
-    if (!c->provider || !c->provider->models)
-        return -1;
-
     size_t n = 0;
-    const NmModel *models =
-        c->provider->models(c->provider, c->base_url, c->api_key, &n);
-    if ((!models || n == 0) && c->n > 0) {
+    const NmModel *models = c->provider->models_cached
+                                ? c->provider->models_cached(c->provider, &n)
+                                : NULL;
+    if (!models || n == 0) {
         /* Keep last-good on a failed refetch; nothing to view. */
-        return -1;
+        return c->n > 0 ? -1 : 0;
     }
 
     if (n > c->n) {
@@ -160,29 +161,73 @@ static int catalog_fetch_begin(NmSource *s, const char *query_hint)
         c->entries[i].tags = models[i].vision ? vision_tag : NULL;
         c->entries[i].n_tags = models[i].vision ? 1 : 0;
         c->entries[i].context_length = models[i].context_length;
+        c->entries[i].vision = models[i].vision;
+        c->entries[i].image_gen = models[i].image_gen;
+        c->entries[i].tools = models[i].tools;
     }
     c->n = n;
     return 0;
 }
 
-static NmFetchStatus catalog_step(NmSource *s)
+/* Begin: a wire provider starts its async catalog fetch (step + fd
+ * drive it); a provider with no live fetch answers now. */
+static int catalog_fetch_begin(NmListSource *s, const char *query_hint)
 {
-    (void)s;
-    return NM_FETCH_OK;
+    CatalogSource *c = (CatalogSource *)s;
+    (void)query_hint;
+
+    if (!c->provider || !c->provider->models_cached)
+        return -1;
+
+    if (c->provider->models_begin) {
+        c->in_flight =
+            c->provider->models_begin(c->provider, c->base_url, c->api_key);
+        if (c->in_flight)
+            return 0; /* PENDING until step() drives it to a terminal */
+    }
+    return catalog_build(c);
 }
 
-static int catalog_fd(const NmSource *s)
+static NmFetchStatus catalog_step(NmListSource *s)
 {
-    (void)s;
-    return -1;
+    CatalogSource *c = (CatalogSource *)s;
+    if (!c->in_flight)
+        return NM_FETCH_OK; /* sync source: the answer was ready at begin */
+    if (!c->provider->models_step)
+        return NM_FETCH_ERR;
+
+    NmCatalogStatus st = c->provider->models_step(c->provider);
+    if (st == NM_CATALOG_PENDING)
+        return NM_FETCH_PENDING;
+    if (c->provider->models_end)
+        c->provider->models_end(c->provider);
+    c->in_flight = 0;
+    /* Build from whatever the terminal step left: the live cache on OK,
+     * the static fallback on ERR (never a second, blocking fetch). */
+    int built = catalog_build(c);
+    if (st != NM_CATALOG_OK)
+        return NM_FETCH_ERR;
+    return built == 0 ? NM_FETCH_OK : NM_FETCH_ERR;
 }
 
-static void catalog_cancel(NmSource *s)
+static NmSource catalog_fd(const NmListSource *s)
 {
-    (void)s;
+    const CatalogSource *c = (const CatalogSource *)s;
+    NmSource none = { -1, 0, NM_SRC_FD };
+    if (!c->in_flight || !c->provider->models_source)
+        return none;
+    return c->provider->models_source(c->provider);
 }
 
-static const NmEntry *catalog_items(const NmSource *s, size_t *n)
+static void catalog_cancel(NmListSource *s)
+{
+    CatalogSource *c = (CatalogSource *)s;
+    if (c->in_flight && c->provider->models_end)
+        c->provider->models_end(c->provider);
+    c->in_flight = 0;
+}
+
+static const NmEntry *catalog_items(const NmListSource *s, size_t *n)
 {
     const CatalogSource *c = (const CatalogSource *)s;
     if (n)
@@ -190,9 +235,12 @@ static const NmEntry *catalog_items(const NmSource *s, size_t *n)
     return c->entries;
 }
 
-static void catalog_free(NmSource *s)
+static void catalog_free(NmListSource *s)
 {
     CatalogSource *c = (CatalogSource *)s;
+    /* An in-flight fetch goes with the source: the provider's fetch
+     * state is process-global and would otherwise dangle. */
+    catalog_cancel(s);
     free(c->entries);
     free((void *)c->base_url);
     free((void *)c->api_key);
@@ -206,8 +254,8 @@ static char *dup_or_null(const char *s)
     return strdup(s);
 }
 
-NmSource *nm_source_catalog_create(const NmProvider *provider,
-                                   const char *base_url, const char *api_key)
+NmListSource *nm_source_catalog_create(const NmProvider *provider,
+                                       const char *base_url, const char *api_key)
 {
     CatalogSource *c = calloc(1, sizeof(*c));
     if (!c)
@@ -232,35 +280,36 @@ NmSource *nm_source_catalog_create(const NmProvider *provider,
 
 /* ---- generic drivers (NULL-safe) ---- */
 
-int nm_source_fetch_begin(NmSource *s, const char *query_hint)
+int nm_source_fetch_begin(NmListSource *s, const char *query_hint)
 {
     return s && s->fetch_begin ? s->fetch_begin(s, query_hint) : -1;
 }
 
-NmFetchStatus nm_source_step(NmSource *s)
+NmFetchStatus nm_source_step(NmListSource *s)
 {
     return s && s->step ? s->step(s) : NM_FETCH_ERR;
 }
 
-int nm_source_fd(const NmSource *s)
+NmSource nm_source_fd(const NmListSource *s)
 {
-    return s && s->fd ? s->fd(s) : -1;
+    NmSource none = { -1, 0, NM_SRC_FD };
+    return s && s->fd ? s->fd(s) : none;
 }
 
-void nm_source_cancel(NmSource *s)
+void nm_source_cancel(NmListSource *s)
 {
     if (s && s->cancel)
         s->cancel(s);
 }
 
-const NmEntry *nm_source_items(const NmSource *s, size_t *n)
+const NmEntry *nm_source_items(const NmListSource *s, size_t *n)
 {
     if (n)
         *n = 0;
     return s && s->items ? s->items(s, n) : NULL;
 }
 
-void nm_source_free(NmSource *s)
+void nm_source_free(NmListSource *s)
 {
     if (s && s->free)
         s->free(s);

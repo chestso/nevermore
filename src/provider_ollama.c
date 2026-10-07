@@ -157,73 +157,96 @@ static long model_info_context(NmJson *model_info)
 /* POST {api_root}/api/show for one model's metadata (capabilities,
  * model_info.context_length). Returns 0 on success (fields written),
  * -1 on any failure — the caller keeps defaults for that model. */
-static int show_one(const char *api_root, const char *api_key,
-                    const char *model, NmModel *out)
+static void show_apply(NmJson *doc, NmModel *out)
 {
-    /* Body: {"model": "<id>"} — built with nm_json_set + dump (raw
-     * snprintf would break on ids carrying \\ or "). */
-    NmJson *body = nm_json_new_object();
-    if (!body)
-        return -1;
-    nm_json_set(body, "model", nm_json_new_string(model));
-    char *dump = nm_json_dump(body);
-    nm_json_free(body);
-    if (!dump)
-        return -1;
-
-    const char *err = NULL;
-    NmJson *doc = nm_fetch_json(api_root, "POST", "/api/show", "Bearer %s",
-                                api_key, NULL, 0, dump, &err);
-    free(dump);
-    if (!doc)
-        return -1; /* offline / gated model: defaults stand */
-
     NmJson *caps = nm_json_get(doc, "capabilities");
     if (caps)
         out->vision = caps_has_vision(caps);
     long ctx = model_info_context(nm_json_get(doc, "model_info"));
     if (ctx > 0)
         out->context_length = ctx;
-    nm_json_free(doc);
-    return 0;
 }
 
-/* Fetch /api/tags once, then /api/show per model, cache as NmModel[].
- * One-time per process (memory-reuse principle); the show fan-out is
- * bounded by the tags list (19 on the cloud, Sep 2026). */
-static void ollama_fetch_catalog(const NmProvider *p, const char *base_url,
-                                 const char *api_key)
+/* The /api/show request body: {"model": "<id>"} — built with the JSON
+ * writer (raw snprintf would break on ids carrying \ or "). */
+static NmFetchStream *show_begin(const char *root, const char *api_key,
+                                 const char *model)
 {
-    /* The API root derives from the CHAT base (which defaults by
-     * provider: the local daemon or the cloud). */
+    NmJson *body = nm_json_new_object();
+    if (!body)
+        return NULL;
+    nm_json_set(body, "model", nm_json_new_string(model));
+    char *dump = nm_json_dump(body);
+    nm_json_free(body);
+    if (!dump)
+        return NULL;
+    NmFetchStream *f = nm_fetch_begin(root, "POST", "/api/show", "Bearer %s",
+                                      api_key, NULL, 0, dump);
+    free(dump);
+    return f;
+}
+
+/* The two-request shape (/api/tags, then one /api/show per model) is
+ * why ollama does not use the one-request NmCatalogFetch helper: it
+ * keeps its own stage machine over the same fetch primitive. */
+typedef enum
+{
+    OC_IDLE = 0, /* nothing in flight (the zero value) */
+    OC_TAGS,     /* fetching /api/tags */
+    OC_SHOW,     /* fetching /api/show for models[i] */
+} OllamaStage;
+
+typedef struct
+{
+    OllamaStage stage;
+    NmFetchStream *f; /* the request in flight */
     char root[256];
-    ollama_api_root(ollama_base(p, base_url, api_key), root, sizeof(root));
+    char api_key[512];
+    NmModel *models; /* being built */
+    size_t n, i;
+    int failed;
+} OllamaFetch;
 
-    const char *err = NULL;
-    NmJson *doc = nm_fetch_json(root, "GET", "/api/tags", "Bearer %s",
-                                api_key, NULL, 0, NULL, &err);
-    if (!doc)
-        return; /* daemon down / offline: caller uses static */
+static OllamaFetch ollama_fetches[2];
 
+/* Drop a partial build (a failed or abandoned fetch). */
+static void ollama_fetch_clear(OllamaFetch *o)
+{
+    if (o->f) {
+        nm_fetch_end(o->f);
+        o->f = NULL;
+    }
+    if (o->models) {
+        for (size_t i = 0; i < o->n; i++) {
+            free((void *)o->models[i].id);
+            free((void *)o->models[i].label);
+        }
+        free(o->models);
+        o->models = NULL;
+    }
+    o->n = 0;
+    o->i = 0;
+    o->stage = OC_IDLE;
+}
+
+/* /api/tags -> the id/label rows; 1 on success. */
+static int ollama_tags_parse(OllamaFetch *o, const NmJson *doc)
+{
     NmJson *list = nm_json_get(doc, "models");
     size_t count = nm_json_len(list);
-    if (count == 0) {
-        nm_json_free(doc);
-        return;
-    }
+    if (count == 0)
+        return 0;
     NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models) {
-        nm_json_free(doc);
-        return;
-    }
+    if (!models)
+        return 0;
     size_t out = 0;
     for (size_t i = 0; i < count; i++) {
         NmJson *e = nm_json_at(list, i);
         const char *name = nm_json_str(nm_json_get(e, "name"));
         if (!name)
             continue;
-        /* Strings are owned by the parsed documents — freed below —
-         * so copy into the cache. One-time per process. */
+        /* Strings are owned by the parsed document (freed by the
+         * caller), so copy into the cache. One-time per process. */
         models[out].id = strdup(name);
         models[out].label = strdup(name);
         models[out].vision = 0;
@@ -233,28 +256,121 @@ static void ollama_fetch_catalog(const NmProvider *p, const char *base_url,
             free((void *)models[out].label);
             continue;
         }
-        /* Tags details are a stub on the cloud: real metadata per
-         * model lives in /api/show (§6.3 note). Best-effort per
-         * model; failures keep the defaults (gated models etc.). */
-        show_one(root, api_key, name, &models[out]);
         out++;
     }
-    nm_json_free(doc);
     if (out == 0) {
         free(models);
-        return;
+        return 0;
     }
-    OllamaCatalog *c = &ollama_catalogs[ollama_catalog_slot(p)];
-    c->models = models;
-    c->n = out;
+    o->models = models;
+    o->n = out;
+    return 1;
 }
 
-const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
-                                const char *api_key, size_t *n_out)
+/* Commit the built rows as the slot's live catalog (the parse is done
+ * or has given up on the rest). */
+static void ollama_commit(size_t slot, OllamaFetch *o)
+{
+    ollama_catalogs[slot].models = o->models;
+    ollama_catalogs[slot].n = o->n;
+    o->models = NULL;
+    o->n = 0;
+    o->stage = OC_IDLE;
+}
+
+/* The async seam (the /model popup's non-blocking drive). */
+int nm_ollama_models_begin(const NmProvider *p, const char *base_url,
+                           const char *api_key)
+{
+    size_t slot = ollama_catalog_slot(p);
+    OllamaFetch *o = &ollama_fetches[slot];
+    if (ollama_catalogs[slot].models || o->stage != OC_IDLE)
+        return 0; /* cached, or a fetch is in flight */
+    if (!base_url && !nm_live_catalog_enabled())
+        return 0;
+
+    memset(o, 0, sizeof(*o));
+    /* The API root derives from the CHAT base (which defaults by
+     * provider: the local daemon or the cloud). */
+    ollama_api_root(ollama_base(p, base_url, api_key), o->root,
+                    sizeof(o->root));
+    snprintf(o->api_key, sizeof(o->api_key), "%s", api_key ? api_key : "");
+    o->stage = OC_TAGS;
+    o->f = nm_fetch_begin(o->root, "GET", "/api/tags", "Bearer %s", api_key,
+                          NULL, 0, NULL);
+    if (!o->f) {
+        o->stage = OC_IDLE;
+        o->failed = 1;
+        return 0;
+    }
+    return 1;
+}
+
+NmCatalogStatus nm_ollama_models_step(const NmProvider *p)
+{
+    size_t slot = ollama_catalog_slot(p);
+    OllamaFetch *o = &ollama_fetches[slot];
+    for (;;) {
+        if (o->stage == OC_IDLE)
+            return o->failed ? NM_CATALOG_ERR : NM_CATALOG_OK;
+        if (!o->f)
+            return NM_CATALOG_ERR;
+
+        NmCatalogStatus s = nm_fetch_step(o->f);
+        if (s == NM_CATALOG_PENDING)
+            return NM_CATALOG_PENDING;
+
+        NmJson *doc = nm_fetch_take(o->f);
+        nm_fetch_end(o->f);
+        o->f = NULL;
+
+        if (o->stage == OC_TAGS) {
+            int ok = doc ? ollama_tags_parse(o, doc) : 0;
+            nm_json_free(doc);
+            if (!ok) {
+                ollama_fetch_clear(o);
+                o->failed = 1;
+                return NM_CATALOG_ERR;
+            }
+            o->stage = OC_SHOW;
+            o->i = 0;
+        } else { /* OC_SHOW: one model's metadata (best-effort) */
+            if (doc && o->i < o->n)
+                show_apply(doc, &o->models[o->i]);
+            nm_json_free(doc); /* a failure keeps the defaults */
+            o->i++;
+            if (o->i >= o->n) {
+                ollama_commit(slot, o);
+                return NM_CATALOG_OK;
+            }
+        }
+
+        /* Start the next request (tags -> first show, or show i). */
+        o->f = show_begin(o->root, o->api_key, o->models[o->i].id);
+        if (!o->f) {
+            /* Could not queue a show: commit what we have (defaults for
+             * the rest) rather than throwing the tags away. */
+            ollama_commit(slot, o);
+            return NM_CATALOG_OK;
+        }
+    }
+}
+
+NmSource nm_ollama_models_source(const NmProvider *p)
+{
+    OllamaFetch *o = &ollama_fetches[ollama_catalog_slot(p)];
+    NmSource none = { -1, 0, NM_SRC_FD };
+    return o->f ? nm_fetch_source(o->f) : none;
+}
+
+void nm_ollama_models_end(const NmProvider *p)
+{
+    ollama_fetch_clear(&ollama_fetches[ollama_catalog_slot(p)]);
+}
+
+const NmModel *nm_ollama_models_cached(const NmProvider *p, size_t *n_out)
 {
     OllamaCatalog *c = &ollama_catalogs[ollama_catalog_slot(p)];
-    if (!c->models && (base_url || nm_live_catalog_enabled()))
-        ollama_fetch_catalog(p, base_url, api_key);
     if (c->models) {
         if (n_out)
             *n_out = c->n;
@@ -268,6 +384,16 @@ const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
         *n_out = n;
     }
     return ollama_static_models;
+}
+
+const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
+                                const char *api_key, size_t *n_out)
+{
+    /* The BLOCKING drive of the async seam (one implementation, two
+     * drives). */
+    if (nm_ollama_models_begin(p, base_url, api_key))
+        nm_catalog_run(p);
+    return nm_ollama_models_cached(p, n_out);
 }
 
 int nm_ollama_needs_auth(const NmProvider *p, const char *base_url)
@@ -301,6 +427,11 @@ const struct NmProvider nm_ollama_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     nm_ollama_models,
+    nm_ollama_models_cached,
+    nm_ollama_models_begin,
+    nm_ollama_models_step,
+    nm_ollama_models_source,
+    nm_ollama_models_end,
     nm_ollama_needs_auth,
     ollama_env_key,
 };

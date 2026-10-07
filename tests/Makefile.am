@@ -331,7 +331,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
-    $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c \
+    $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
     ../src/provider_hyper.c \
     ../src/provider_ollama.c ../src/provider_ollama_local.c \
     ../src/provider_openai.c \

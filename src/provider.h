@@ -45,6 +45,12 @@
 
 #include <stddef.h>
 
+/* NmSource: the catalog seam's wait target. transport.h pulls in no
+ * nevermore type and does not include this header, so this is a
+ * one-way dependency. (source.h's listing-plane type is NmListSource,
+ * precisely so the two can meet in one TU.) */
+#include "transport.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -310,6 +316,17 @@ typedef struct NmChatRequest
     void *userdata;
 } NmChatRequest;
 
+/* A provider's async catalog fetch (the /model popup's non-blocking
+ * path). PENDING is not an error: step again when the source is ready.
+ * OK means the live catalog is cached; ERR means the fetch failed and
+ * the static one stands — models() answers either way. */
+typedef enum
+{
+    NM_CATALOG_PENDING = 0,
+    NM_CATALOG_OK,
+    NM_CATALOG_ERR
+} NmCatalogStatus;
+
 /* Provider vtable */
 struct NmProvider
 {
@@ -373,9 +390,48 @@ struct NmProvider
      * caller: valid until the next call into this provider.
      * Providers that must fetch catalogs over the wire (ollama native
      * /api/tags + /api/show) do so here; static catalogs (hyper,
-     * openai, openrouter) are embedded from data/nm-*-models.json. */
+     * openai, openrouter) are embedded from data/nm-*-models.json.
+     *
+     * This is the BLOCKING drive: it pumps the async seam below to
+     * completion when a live fetch is warranted, then answers. The
+     * event-driven caller (the /model popup) uses models_begin +
+     * models_step + models_cached instead, so it never blocks the UI
+     * thread. */
     const NmModel *(*models)(const NmProvider *p, const char *base_url,
                              const char *api_key, size_t *n_out);
+
+    /* The catalog available RIGHT NOW, never fetching: the live cache
+     * when a fetch landed, else the static fallback. What the
+     * event-driven caller reads after a fetch's terminal step (and on
+     * its failure) — it must never start a blocking one. */
+    const NmModel *(*models_cached)(const NmProvider *p, size_t *n_out);
+
+    /* Async catalog fetch — the UI's non-blocking drive (the popup
+     * must never block the event loop). models_begin is NULL for a
+     * provider with no live catalog (a static table is all there is);
+     * the other four are NULL whenever it is.
+     *
+     *   ok = models_begin(p, base_url, api_key)
+     *     -> 1: a fetch is in flight (step + fd drive it)
+     *     -> 0: nothing to fetch — already cached, gated off
+     *           (!base_url && !nm_live_catalog_enabled()), or ALREADY
+     *           in flight, which is what makes models() safe to call
+     *           mid-fetch (it must never start a second, blocking one)
+     *   models_source(p)   -> what to wait on (fd + interest), or -1
+     *   ready -> models_step(p)
+     *     -> NM_CATALOG_PENDING  more to come
+     *     -> NM_CATALOG_OK       the live catalog is now cached
+     *     -> NM_CATALOG_ERR      the fetch failed; the static stands
+     *   models_end(p)            // abandon + free (cancel any time)
+     *
+     * models() is the blocking drive of the SAME seam (begin + a
+     * readiness pump, nm_catalog_run), so the one-shot CLI and the
+     * event loop share one implementation. */
+    int (*models_begin)(const NmProvider *p, const char *base_url,
+                        const char *api_key);
+    NmCatalogStatus (*models_step)(const NmProvider *p);
+    NmSource (*models_source)(const NmProvider *p);
+    void (*models_end)(const NmProvider *p);
 
     /* Auth: whether this provider + endpoint requires an API key. */
     int (*needs_auth)(const NmProvider *p, const char *base_url);

@@ -114,36 +114,27 @@ static int array_has(NmJson *arr, const char *want)
 
 /* Fetch /v1/models once, cache as NmModel[] (one-time per process;
  * memory-reuse principle). */
-static void openrouter_fetch_catalog(const char *base_url)
-{
-    NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
-                            NM_USER_AGENT,
-                            NULL, 0,
-                            0 /* include_usage: a catalog GET has no stream */ };
-    const char *err = NULL;
-    NmJson *doc = nm_openai_models(&ep, &err);
-    if (!doc)
-        return; /* offline: caller falls back to static */
+static NmCatalogFetch openrouter_fetch;
 
+/* Build the cache from a fetched document; 1 when it committed one. */
+static int openrouter_parse_catalog(const NmJson *doc, void *ud)
+{
+    (void)ud;
     NmJson *data = nm_json_get(doc, "data");
     size_t count = nm_json_len(data);
-    if (count == 0) {
-        nm_json_free(doc);
-        return;
-    }
+    if (count == 0)
+        return 0;
     NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models) {
-        nm_json_free(doc);
-        return;
-    }
+    if (!models)
+        return 0;
     size_t out = 0;
     for (size_t i = 0; i < count; i++) {
         NmJson *e = nm_json_at(data, i);
         const char *id = nm_json_str(nm_json_get(e, "id"));
         if (!id)
             continue;
-        /* Strings are owned by the parsed document — freed below —
-         * so copy into the cache. One-time per process. */
+        /* Strings are owned by the parsed document — freed by the
+         * caller — so copy into the cache. One-time per process. */
         models[out].id = strdup(id);
         const char *name = nm_json_str(nm_json_get(e, "name"));
         models[out].label = strdup(name ? name : id);
@@ -174,29 +165,60 @@ static void openrouter_fetch_catalog(const char *base_url)
         }
         out++;
     }
-    nm_json_free(doc);
     if (out == 0) {
         free(models);
-        return;
+        return 0;
     }
     openrouter_live_models = models;
     openrouter_live_n = out;
+    return 1;
 }
 
-static const NmModel *openrouter_models(const NmProvider *p,
-                                        const char *base_url,
-                                        const char *api_key, size_t *n_out)
+/* The async seam (the /model popup's non-blocking drive). */
+static int openrouter_models_begin(const NmProvider *p, const char *base_url,
+                                   const char *api_key)
 {
     (void)p;
     (void)api_key; /* the catalog is public (OPENROUTER-API.md §1) */
-    if (!openrouter_live_models && (base_url || nm_live_catalog_enabled()))
-        openrouter_fetch_catalog(base_url);
+    if (openrouter_live_models || openrouter_fetch.f)
+        return 0;
+    if (!base_url && !nm_live_catalog_enabled())
+        return 0;
+    NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
+                            NM_USER_AGENT,
+                            NULL, 0,
+                            0 /* include_usage: a catalog GET has no stream */ };
+    return nm_catalog_fetch_begin(&openrouter_fetch, &ep,
+                                  openrouter_parse_catalog, NULL);
+}
+
+static NmCatalogStatus openrouter_models_step(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_step(&openrouter_fetch);
+}
+
+static NmSource openrouter_models_source(const NmProvider *p)
+{
+    (void)p;
+    return nm_catalog_fetch_source(&openrouter_fetch);
+}
+
+static void openrouter_models_end(const NmProvider *p)
+{
+    (void)p;
+    nm_catalog_fetch_end(&openrouter_fetch);
+}
+
+static const NmModel *openrouter_models_cached(const NmProvider *p,
+                                               size_t *n_out)
+{
+    (void)p;
     if (openrouter_live_models) {
         if (n_out)
             *n_out = openrouter_live_n;
         return openrouter_live_models;
     }
-    /* Offline: the static fallback. */
     if (n_out) {
         size_t n = 0;
         while (openrouter_static_models[n].id)
@@ -204,6 +226,17 @@ static const NmModel *openrouter_models(const NmProvider *p,
         *n_out = n;
     }
     return openrouter_static_models;
+}
+
+static const NmModel *openrouter_models(const NmProvider *p,
+                                        const char *base_url,
+                                        const char *api_key, size_t *n_out)
+{
+    /* The BLOCKING drive of the async seam (one implementation, two
+     * drives). */
+    if (openrouter_models_begin(p, base_url, api_key))
+        nm_catalog_run(p);
+    return openrouter_models_cached(p, n_out);
 }
 
 static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
@@ -232,6 +265,11 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
     openrouter_models,
+    openrouter_models_cached,
+    openrouter_models_begin,
+    openrouter_models_step,
+    openrouter_models_source,
+    openrouter_models_end,
     openrouter_needs_auth,
     openrouter_env_key,
 };

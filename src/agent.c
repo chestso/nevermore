@@ -1405,15 +1405,6 @@ int nm_agent_step(NmAgent *a)
  * it with WSAEventSelect) or a POSIX descriptor.  An async tool supplies
  * its own kind instead (see NmTool.source): only the tool knows whether
  * it is waiting on a descriptor, a socket or a process job's event. */
-static int stream_source_kind(void)
-{
-#ifdef _WIN32
-    return NM_SRC_SOCKET;
-#else
-    return NM_SRC_FD;
-#endif
-}
-
 NmSource nm_agent_source(NmAgent *a)
 {
     NmSource s = { -1, 0, NM_SRC_FD };
@@ -1435,7 +1426,7 @@ NmSource nm_agent_source(NmAgent *a)
         return s;
     s.handle = (intptr_t)a->provider->chat_stream_fd(a->stream);
     s.flags = a->provider->chat_stream_interest(a->stream);
-    s.kind = stream_source_kind();
+    s.kind = nm_socket_source_kind();
     if (s.handle < 0)
         s.flags = 0;
     return s;

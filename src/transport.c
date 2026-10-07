@@ -25,7 +25,9 @@
 #include <ws2tcpip.h>
 #else
 #include <errno.h>
+#include <sys/select.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/types.h>
 #endif
 
@@ -556,4 +558,48 @@ int nm_connection_fd(NmConnection *conn)
 int nm_connection_wait_ms(const NmConnection *conn)
 {
     return nm_socket_wait_ms(conn);
+}
+
+int nm_socket_source_kind(void)
+{
+#ifdef _WIN32
+    return NM_SRC_SOCKET;
+#else
+    return NM_SRC_FD;
+#endif
+}
+
+int nm_source_wait(NmSource s, int timeout_ms)
+{
+    if (s.handle < 0 || s.flags == 0 || timeout_ms < 0)
+        return -1;
+    if (s.kind == NM_SRC_HANDLE)
+        return -1; /* not a select() target (a Windows job's event) */
+
+    fd_set r, w;
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    int any_r = (s.flags & NM_INTEREST_READ) != 0;
+    int any_w = (s.flags & NM_INTEREST_WRITE) != 0;
+#ifdef _WIN32
+    if (any_r)
+        FD_SET((SOCKET)s.handle, &r);
+    if (any_w)
+        FD_SET((SOCKET)s.handle, &w);
+#else
+    if (any_r)
+        FD_SET((int)s.handle, &r);
+    if (any_w)
+        FD_SET((int)s.handle, &w);
+#endif
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+#ifdef _WIN32
+    return select(0, any_r ? &r : NULL, any_w ? &w : NULL, NULL, &tv);
+#else
+    return select((int)s.handle + 1, any_r ? &r : NULL,
+                  any_w ? &w : NULL, NULL, &tv);
+#endif
 }
