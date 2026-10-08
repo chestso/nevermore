@@ -44,6 +44,14 @@ typedef struct SchCtx
     int have_ctxt;
     int recv_closed;
 
+    /* The handshake's deadline, for the waits inside the loop: the
+     * budget (ms, 0 = none — `handshake_timeout = off`) and its
+     * monotonic start, both set at handshake entry and read only by
+     * the handshake (the record layer passes its own ceiling to
+     * sock_send_all). */
+    double hs_t0;
+    int hs_budget;
+
     /* Handshake token staging: reused across the loop. */
     BYTE token[TLS_MAX_TOKEN];
     DWORD token_len;
@@ -72,7 +80,12 @@ typedef struct SchCtx
  * it with WSAEventSelect, which pins it non-blocking — and a socket
  * with a live association additionally REFUSES ioctlsocket(FIONBIO,
  * 0) with WSAEINVAL (10022), so "flip the fd blocking for TLS" is not
- * available here at all (see nm_connection_tls_handshake).
+ * available here at all. That suits the transport's handshake, which
+ * runs on a NON-BLOCKING fd on every platform: Schannel's loop then
+ * gets would-block instead of blocking inside recv, and the waits
+ * below are what make the shape "blocking" — against the handshake's
+ * budget during the handshake, against a fixed ceiling in the record
+ * layer.
  *
  * So the blocking semantics come from these helpers instead:
  *   - writes wait for writability (the sub-second deferral class the
@@ -84,24 +97,21 @@ typedef struct SchCtx
  * through the same code.
  */
 
-#define TLS_SOCK_WAIT_MS 30000 /* a wedged peer must fail, not freeze */
+/* The RECORD layer's ceiling: a wedged peer must fail, not freeze. The
+ * handshake has its own budget instead (handshake_timeout). */
+#define TLS_SOCK_WAIT_MS 30000
 
 /* Wait for the fd to become ready in one direction: 0 = ready,
- * -1 = timed out. (Windows select() ignores nfds — always 0 here.) */
-static int sock_wait(int fd, int for_write)
+ * -1 = timed out. The shared wait (nm_socket_wait_ready_ms) does the
+ * select; ms <= 0 = no deadline. (Windows select() ignores nfds —
+ * always 0 there.) */
+static int sock_wait(int fd, int for_write, int ms)
 {
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET((SOCKET)fd, &fds);
-    struct timeval tv = { TLS_SOCK_WAIT_MS / 1000,
-                          (TLS_SOCK_WAIT_MS % 1000) * 1000 };
-    int rc = for_write ? select(0, NULL, &fds, NULL, &tv)
-                       : select(0, &fds, NULL, NULL, &tv);
-    return rc > 0 ? 0 : -1;
+    return nm_socket_wait_ready_ms(fd, for_write, ms) ? 0 : -1;
 }
 
-/* Drain the whole buffer; a full send window just waits. */
-static int sock_send_all(int fd, const BYTE *buf, size_t len)
+/* Drain the whole buffer; a full send window just waits (up to `ms`). */
+static int sock_send_all(int fd, const BYTE *buf, size_t len, int ms)
 {
     size_t off = 0;
     while (off < len) {
@@ -111,7 +121,7 @@ static int sock_send_all(int fd, const BYTE *buf, size_t len)
             continue;
         }
         if (n < 0 && WSAGetLastError() == WSAEWOULDBLOCK &&
-            sock_wait(fd, 1) == 0)
+            sock_wait(fd, 1, ms) == 0)
             continue;
         return -1;
     }
@@ -184,9 +194,15 @@ static int schannel_read_flight(SchCtx *c, int fd, const char **err)
                 *err = "socket read failed during handshake";
             return -1;
         }
-        if (sock_wait(fd, 0) != 0) { /* timed out: wedged peer */
+        /* The wait is the handshake's remaining budget (see SchCtx's
+         * hs_* fields), so a peer that goes silent mid-exchange costs
+         * the budget, not the record layer's ceiling. */
+        int left = nm_handshake_left(c->hs_t0, c->hs_budget);
+        if (left < 0 || sock_wait(fd, 0, left) != 0) {
             if (err)
-                *err = "socket read timed out during handshake";
+                *err = c->hs_budget > 0
+                           ? nm_handshake_timeout_reason(c->hs_budget)
+                           : "socket read timed out during handshake";
             return -1;
         }
     }
@@ -221,6 +237,12 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
         return NULL;
     }
     c->fd = fd;
+    /* The handshake's deadline: every wait in the loop below (and in
+     * schannel_read_flight) is bounded by it, so a peer that goes
+     * silent mid-exchange costs the budget instead of the OS's own
+     * timeout. 0 = `handshake_timeout = off` (wait indefinitely). */
+    c->hs_budget = nm_connection_handshake_timeout_ms();
+    c->hs_t0 = nm_socket_now();
 
     /* Credentials: full system verification, revocation checked when
      * the network allows (best-effort), no client cert. */
@@ -320,10 +342,16 @@ static void *schannel_handshake(int fd, const char *host, const char **err)
         }
         if (sec == SEC_E_OK || sec == SEC_I_CONTINUE_NEEDED) {
             if (out_buf.cbBuffer > 0) {
-                if (sock_send_all(fd, (const BYTE *)out_buf.pvBuffer,
-                                  out_buf.cbBuffer) != 0) {
+                /* Sending a flight is a wait too: bound it by the
+                 * handshake's remaining budget (0 = none). */
+                int left = nm_handshake_left(c->hs_t0, c->hs_budget);
+                if (left < 0 ||
+                    sock_send_all(fd, (const BYTE *)out_buf.pvBuffer,
+                                  out_buf.cbBuffer, left) != 0) {
                     if (err)
-                        *err = "socket write failed during handshake";
+                        *err = left < 0 && c->hs_budget > 0
+                                   ? nm_handshake_timeout_reason(c->hs_budget)
+                                   : "socket write failed during handshake";
                     FreeContextBuffer(out_buf.pvBuffer);
                     schannel_close(c);
                     return NULL;
@@ -513,7 +541,10 @@ static long schannel_write(void *ctx, const char *buf, size_t len,
             return -1;
         }
         size_t total = bufs[0].cbBuffer + bufs[1].cbBuffer + bufs[2].cbBuffer;
-        if (sock_send_all(c->fd, c->send_crypt, total) != 0) {
+        /* The record layer's own ceiling: a wedged peer must fail, not
+         * freeze (the handshake has its budget instead). */
+        if (sock_send_all(c->fd, c->send_crypt, total, TLS_SOCK_WAIT_MS) !=
+            0) {
             if (err)
                 *err = "socket write failed";
             return -1;

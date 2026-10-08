@@ -99,19 +99,47 @@ static void *openssl_handshake(int fd, const char *host, const char **err)
             *err = "SSL_new failed";
         return NULL;
     }
-    /* blocking fd, blocking SSL — phase-1 ask runs the blocking loop;
-     * phase 4 moves the fd nonblocking and drives SSL_read/SSL_write
-     * readiness from the boba callback (the API shapes here do not
-     * change: read/write/close remain pure step functions). */
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host); /* SNI */
     SSL_set1_host(ssl, host);            /* hostname verification */
-    int rc = SSL_connect(ssl);
-    if (rc != 1) {
-        if (err)
-            *err = openssl_call_errstr(ssl, rc);
-        SSL_free(ssl);
-        return NULL;
+    /* The transport runs this on a NON-BLOCKING fd, so SSL_connect
+     * reports "not ready yet" (SSL_ERROR_WANT_READ/WANT_WRITE) instead
+     * of sitting in recv(): the loop below waits for readiness itself,
+     * against the handshake budget (handshake_timeout), which is what
+     * bounds a peer that goes silent mid-exchange. Without a budget
+     * (`off`) the wait is indefinite — the OS default, by request. */
+    int budget = nm_connection_handshake_timeout_ms();
+    double t0 = nm_socket_now();
+    int rc;
+    for (;;) {
+        rc = SSL_connect(ssl);
+        if (rc == 1)
+            break;
+        int why = SSL_get_error(ssl, rc);
+        if (why != SSL_ERROR_WANT_READ && why != SSL_ERROR_WANT_WRITE) {
+            if (err)
+                *err = openssl_call_errstr(ssl, rc);
+            SSL_free(ssl);
+            return NULL;
+        }
+        /* WANT_* is also pushed onto the error queue; clear it or the
+         * next call's reason reads as this one's. */
+        ERR_clear_error();
+        int left = nm_handshake_left(t0, budget);
+        if (left < 0) {
+            if (err)
+                *err = nm_handshake_timeout_reason(budget);
+            SSL_free(ssl);
+            return NULL;
+        }
+        if (!nm_socket_wait_ready_ms(fd, why == SSL_ERROR_WANT_WRITE, left)) {
+            if (err)
+                *err = budget > 0 ? nm_handshake_timeout_reason(budget)
+                                  : "connection failed during the TLS "
+                                    "handshake";
+            SSL_free(ssl);
+            return NULL;
+        }
     }
     return ssl;
 }

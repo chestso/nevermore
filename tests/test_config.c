@@ -571,16 +571,17 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING_ECHO);
     ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_CONNECT_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_FAMILY_SKIP);
-    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_SKIP_FAMILIES);
-    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SEARXNG);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_POLL_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_ROLLING_WINDOW);
-    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_NULL(nm_config_key_at(15));
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_FAMILY_SKIP);
+    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SKIP_FAMILIES);
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(16));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -595,6 +596,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_POLL_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CONNECT_TIMEOUT),
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_HANDSHAKE_TIMEOUT),
+                  "NEVERMORE_HANDSHAKE_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
                   "NEVERMORE_CONNECT_FAMILY_SKIP");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SKIP_FAMILIES),
@@ -707,6 +710,22 @@ static void test_duration_keys(void)
     ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
                                             -1),
               0);
+    /* The handshake budget shares the shape (a decimal, or `off` for
+     * the OS default). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "2500"),
+              0);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT,
+                                            -1),
+              2500);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "off"), 0);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT,
+                                            -1),
+              0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "0"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT), 0);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT,
+                                            -1),
+              NM_HANDSHAKE_TIMEOUT_MS);
     /* A large budget round-trips: no 100000 clamp (an hour is legal). */
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
                                    "3600000"),
@@ -785,6 +804,11 @@ static void test_defaults_and_resolve(void)
     ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
                                             -1),
               300000);
+    /* The handshake budget is a duration key with a built-in default
+     * too (the connect phase's second half). */
+    ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT,
+                                            -1),
+              NM_HANDSHAKE_TIMEOUT_MS);
     /* The write_stdin empty-poll ceiling is a key with a built-in
      * default too (Codex's background window). */
     ASSERT_EQ(nm_config_resolve_duration_ms(c, NM_CFG_KEY_POLL_TIMEOUT, -1),
@@ -793,6 +817,7 @@ static void test_defaults_and_resolve(void)
     /* The default table is queryable without a config handle. */
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_ROUNDS), "25");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_CONNECT_TIMEOUT), "750");
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_HANDSHAKE_TIMEOUT), "10000");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_SEARXNG_TIMEOUT), "10000");
     ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_PROVIDER), "ollama:local");
     ASSERT_NULL(nm_config_default(NM_CFG_KEY_MODEL));

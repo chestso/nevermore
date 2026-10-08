@@ -27,8 +27,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "transport.h"
+#include "nm_config.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 
@@ -36,6 +38,10 @@
 #include <openssl/err.h>
 #include <openssl/ssl.h>
 #endif
+
+/* The scratch config store the handshake-budget test drives (no file
+ * I/O): the budget is a config key like the connect one. */
+static NmConfig *g_cfg;
 
 /* ---------------------------------------------------------------- */
 /* TLS dummy server, built with whatever backend is compiled in.
@@ -527,6 +533,155 @@ static void test_schannel_flight_view_keeps_leftover(void)
 #endif
 
 /* ---------------------------------------------------------------- */
+/* A silent peer: the TCP handshake completes, then nothing           */
+/* ---------------------------------------------------------------- */
+
+/* The shape the handshake budget exists for. The connect walk is
+ * satisfied (the listener accepts), and then the peer says nothing at
+ * all — a wedged middlebox, a route black-holed after the SYN/ACK, a
+ * server stuck before its ServerHello. The client must give up on its
+ * OWN budget: the OS would sit in recv() for minutes, and on the async
+ * path that is the UI thread. Portable (no TLS needed server-side). */
+
+static int silent_port;
+static int silent_listen_fd = -1;
+
+static int silent_server_start(void)
+{
+    silent_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (silent_listen_fd < 0)
+        return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(silent_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+        return -1;
+    socklen_t l = sizeof(a);
+    if (getsockname(silent_listen_fd, (struct sockaddr *)&a, &l) < 0)
+        return -1;
+    silent_port = ntohs(a.sin_port);
+    if (listen(silent_listen_fd, 1) < 0)
+        return -1;
+    return 0;
+}
+
+static void *silent_server_thread(void *arg)
+{
+    int lfd = *(int *)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    /* Drain whatever the client sends (its ClientHello) and hold the
+     * connection open until the client gives up and closes it — EOF is
+     * the thread's exit. */
+    char drain[4096];
+    for (;;) {
+        int n = recv(cfd, drain, sizeof(drain), 0);
+        if (n <= 0)
+            break;
+    }
+    close(cfd);
+    return NULL;
+}
+
+static void silent_server_stop(void)
+{
+    if (silent_listen_fd >= 0)
+        close(silent_listen_fd);
+    silent_listen_fd = -1;
+}
+
+/* ---------------------------------------------------------------- */
+/* The handshake budget bounds a silent peer                          */
+/* ---------------------------------------------------------------- */
+
+/* One drive: connect to the silent peer with `budget_ms` configured
+ * and return the wall-clock seconds it took. `async_path` picks
+ * nm_connect_async + the step loop (what the TUI runs) over the
+ * blocking nm_connect. */
+static void run_silent_handshake(int budget_ms, int async_path,
+                                 NmConnectInfo *ci, double *seconds)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", budget_ms);
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, buf);
+
+    time_t t0 = time(NULL);
+    NmConnection *c;
+    if (async_path) {
+        c = nm_connect_async("127.0.0.1", silent_port, NM_TRANSPORT_TLS, ci);
+        if (c) {
+            /* The step runs the handshake inline (a bounded deferral),
+             * so a short spin reaches the verdict. The step's own
+             * reason rides the connection, not the connect info (which
+             * the async entry point already filled with "OK") — copy it
+             * across so both drives assert the same text. */
+            for (int i = 0; i < 100; i++) {
+                NmTransportStatus s = nm_connection_step(c);
+                if (s != NM_TRANSPORT_OK && s != NM_TRANSPORT_PENDING) {
+                    ci->status = s;
+                    snprintf(ci->detail, sizeof(ci->detail), "%s",
+                             nm_connection_last_error(c));
+                    break;
+                }
+                usleep(20 * 1000);
+            }
+            nm_connection_close(c);
+        }
+    } else {
+        c = nm_connect("127.0.0.1", silent_port, NM_TRANSPORT_TLS, ci);
+        if (c)
+            nm_connection_close(c);
+    }
+    *seconds = difftime(time(NULL), t0);
+}
+
+/* The budget is the property: a peer that completes the TCP handshake
+ * and then goes silent must cost the configured budget, not the OS's
+ * own timeout (minutes — the pre-key behavior, and what the wall-clock
+ * assertion rules out). Both drives are covered: the blocking ask path
+ * and the async path the TUI's event loop steps. */
+static void test_tls_handshake_budget_bounds_a_silent_peer(void)
+{
+    if (!nm_tls_backend()) {
+        printf("  (no TLS backend — skipped by contract)\n");
+        return;
+    }
+    ASSERT_EQ(silent_server_start(), 0);
+
+    /* A budget small enough to keep the suite fast; the property is
+     * that the handshake is bounded BY IT, not what the number is. */
+    for (int async_path = 0; async_path <= 1; async_path++) {
+        pthread_t th;
+        pthread_create(&th, NULL, silent_server_thread, &silent_listen_fd);
+        NmConnectInfo ci = { 0 };
+        double dt = 0;
+        run_silent_handshake(400, async_path, &ci, &dt);
+        ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
+        /* The always-set contract still holds: the reason names the
+         * phase and the budget that ran out. */
+        ASSERT_TRUE(ci.detail[0] != '\0');
+        ASSERT_TRUE(strstr(ci.detail, "handshake") != NULL);
+        ASSERT_TRUE(strstr(ci.detail, "timed out") != NULL);
+        /* 1 budget, with slack for a slow runner. The OS default (the
+         * pre-key behavior) fails here. */
+        ASSERT_TRUE(dt <= 5);
+        pthread_join(th, NULL);
+    }
+    silent_server_stop();
+
+    /* The key's value space: a budget, or `off` (no deadline = the OS
+     * default), resolved at the point of use like the connect budget. */
+    ASSERT_EQ(nm_connection_handshake_timeout_ms(), 400);
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "off");
+    ASSERT_EQ(nm_connection_handshake_timeout_ms(), 0);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+    ASSERT_EQ(nm_connection_handshake_timeout_ms(), NM_HANDSHAKE_TIMEOUT_MS);
+}
+
+/* ---------------------------------------------------------------- */
 
 static void live_tls_probe(void)
 {
@@ -569,12 +724,22 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;
     }
+    /* A scratch store (no file I/O): the handshake budget is a config
+     * key, so the test drives it like the app does — at the point of
+     * use, through the store. */
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
     printf("test_tls:\n");
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_on_loop_owned_socket);
     RUN_TEST(test_schannel_record_view_consumed);
     RUN_TEST(test_schannel_flight_view_keeps_leftover);
+    RUN_TEST(test_tls_handshake_budget_bounds_a_silent_peer);
     live_tls_probe();
     TEST_SUMMARY();
 }

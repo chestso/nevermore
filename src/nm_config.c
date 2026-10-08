@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 15
+#define NM_CFG_NKEYS 16
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -132,6 +132,8 @@ static const struct
       NM_STR(NM_AGENT_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
       NM_STR(NM_CONNECT_ATTEMPT_MS) },
+    { NM_CFG_KEY_HANDSHAKE_TIMEOUT, "NEVERMORE_HANDSHAKE_TIMEOUT_MS",
+      NM_STR(NM_HANDSHAKE_TIMEOUT_MS) },
     { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP", "off" },
     { NM_CFG_KEY_SKIP_FAMILIES, "NEVERMORE_CONNECT_SKIP_FAMILIES", "none" },
     { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL", NM_WEBSEARCH_DEFAULT_URL },
@@ -576,7 +578,8 @@ static int normalize_value(const char *key, const char *raw, char *out,
          * (with the old bool spellings folded in). */
         return nm_config_reasoning_echo_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0) {
+               strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0 ||
+               strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0) {
         /* The duration keys: a positive decimal (ms) or `off`. */
         return nm_config_duration_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_POLL_TIMEOUT) == 0) {

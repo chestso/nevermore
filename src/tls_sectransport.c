@@ -44,21 +44,29 @@ typedef struct StCtx
 {
     SSLContextRef ssl;
     int fd;
+    int want_write; /* the last IO callback's direction: what the
+                     * handshake loop must wait on */
 } StCtx;
 
-/* Secure Transport IO callbacks: bridge the socket. The fd may be
- * non-blocking (an async stream flips it after the request), so a
- * would-block read/write callback returns errSSLWouldBlock — Secure
- * Transport surfaces that as errSSLWouldBlock out of SSLRead/SSLWrite
- * and the record layer maps it to the transport's would-block
- * sentinel. */
+/* Secure Transport IO callbacks: bridge the socket. The fd is
+ * non-blocking (the transport runs the handshake and the stream that
+ * way), so a would-block read/write callback returns errSSLWouldBlock —
+ * Secure Transport surfaces that as errSSLWouldBlock out of
+ * SSLRead/SSLWrite and the record layer maps it to the transport's
+ * would-block sentinel, while the handshake loop waits for readiness
+ * itself (bounded by the handshake budget). The direction is recorded
+ * because SSLHandshake does not say which side it wants. */
 static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
 {
-    ssize_t n = read(((StCtx *)conn)->fd, data, *len);
+    StCtx *c = conn;
+    ssize_t n = read(c->fd, data, *len);
     if (n < 0) {
         *len = 0;
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? errSSLWouldBlock
-                                                         : errSSLClosedAbort;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            c->want_write = 0;
+            return errSSLWouldBlock;
+        }
+        return errSSLClosedAbort;
     }
     if (n == 0) {
         *len = 0;
@@ -71,11 +79,15 @@ static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
 static OSStatus st_write(SSLConnectionRef conn, const void *data,
                          size_t *len)
 {
-    ssize_t n = write(((StCtx *)conn)->fd, data, *len);
+    StCtx *c = conn;
+    ssize_t n = write(c->fd, data, *len);
     if (n < 0) {
         *len = 0;
-        return (errno == EAGAIN || errno == EWOULDBLOCK) ? errSSLWouldBlock
-                                                         : errSSLClosedAbort;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            c->want_write = 1;
+            return errSSLWouldBlock;
+        }
+        return errSSLClosedAbort;
     }
     *len = (size_t)n;
     return noErr;
@@ -119,13 +131,33 @@ static void *sectransport_handshake(int fd, const char *host,
     }
 
     /* Drive the handshake. Secure Transport does verification during
-     * the handshake; a failure returns errSSLXCertChainInvalid etc. */
+     * the handshake; a failure returns errSSLXCertChainInvalid etc.
+     * The fd is non-blocking, so a step that needs the peer comes back
+     * errSSLWouldBlock: wait for the direction the callbacks recorded,
+     * against the handshake budget (handshake_timeout), which is what
+     * bounds a peer that goes silent mid-exchange. (The old loop
+     * `continue`d on would-block — an unbounded busy spin the moment
+     * the fd stopped blocking.) Without a budget (`off`) the wait is
+     * indefinite: the OS default, by request. */
+    int budget = nm_connection_handshake_timeout_ms();
+    double t0 = nm_socket_now();
     for (;;) {
         st = SSLHandshake(c->ssl);
         if (st == noErr)
             break;
-        if (st == errSSLWouldBlock)
-            continue; /* callbacks handled blocking; safety valve */
+        if (st == errSSLWouldBlock) {
+            int left = nm_handshake_left(t0, budget);
+            if (left < 0 ||
+                !nm_socket_wait_ready_ms(fd, c->want_write, left)) {
+                if (err)
+                    *err = budget > 0
+                               ? nm_handshake_timeout_reason(budget)
+                               : "connection failed during the TLS handshake";
+                sectransport_close(c);
+                return NULL;
+            }
+            continue;
+        }
         if (err)
             *err = "TLS handshake failed";
         sectransport_close(c);

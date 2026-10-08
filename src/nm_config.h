@@ -123,6 +123,18 @@ extern "C" {
  * wants a longer budget, a v6-broken one wants `family_skip` below.
  * Env spelling: NEVERMORE_CONNECT_TIMEOUT_MS. */
 #define NM_CFG_KEY_CONNECT_TIMEOUT "connect_timeout"
+/* TLS handshake budget in ms — the connect phase's second half. A
+ * positive decimal or `off` (the deadline disabled: the handshake
+ * waits on the OS default, as it did before this key existed). The
+ * per-address `connect_timeout` above bounds the TCP connect; this
+ * bounds the TLS handshake that follows it on the SAME connection. A
+ * peer that completes the TCP handshake and then goes silent — a black
+ * hole mid-exchange, a wedged middlebox — otherwise sits in a blocking
+ * read for the OS's own, minutes-long, timeout, freezing the turn (and
+ * the UI thread, on the async path). Built-in default
+ * NM_HANDSHAKE_TIMEOUT_MS; the TLS backends resolve it at the point of
+ * use. Env spelling: NEVERMORE_HANDSHAKE_TIMEOUT_MS. */
+#define NM_CFG_KEY_HANDSHAKE_TIMEOUT "handshake_timeout"
 /* Address-family skip: after an address of a family burns the
  * connect budget (a black hole — the classic unroutable IPv6 on a
  * v4-only network), dial that family LAST for the rest of the session.
@@ -396,8 +408,8 @@ int nm_config_valid_rounds(const char *value);
  * nm_config_get_bool. */
 int nm_config_valid_bool(const char *value);
 /* Is `value` a duration spelling — a positive decimal (ms, up to
- * INT_MAX) or `off` (case-insensitive)? The shape `timeout` and
- * `run_command_timeout` share; read back by
+ * INT_MAX) or `off` (case-insensitive)? The shape `timeout`,
+ * `run_command_timeout` and `handshake_timeout` share; read back by
  * nm_config_resolve_duration_ms. The decimal range is wider than
  * nm_config_valid_positive_int's (which caps at ~1e6): a
  * stream-inactivity budget is legitimately hours. */

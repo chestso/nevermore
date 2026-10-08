@@ -178,6 +178,54 @@ int nm_connection_connect_timeout_ms(void)
              : NM_CONNECT_ATTEMPT_MS;
 }
 
+/* The TLS handshake's budget in ms (see nm_connection_handshake_timeout
+ * _ms). Same point-of-use resolution as the connect budget above, with
+ * one difference: the key is a DURATION, so `off` is a legal value and
+ * resolves to 0 — "no deadline" (the OS default, which is what the
+ * handshake had before the key existed). nm_config_resolve_duration_ms
+ * is the one reader of that value space (it skips parse_int's clamp:
+ * a handshake budget is legitimately seconds). */
+int nm_connection_handshake_timeout_ms(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_duration_ms(c, NM_CFG_KEY_HANDSHAKE_TIMEOUT,
+                                             NM_HANDSHAKE_TIMEOUT_MS)
+             : NM_HANDSHAKE_TIMEOUT_MS;
+}
+
+/* The handshake's remaining budget, measured from `t0` (a
+ * nm_socket_now() stamp the backend takes before its first TLS call):
+ * the ms left, 0 when there is NO budget (budget_ms <= 0, the
+ * `handshake_timeout = off` spelling — the wait is then the OS
+ * default), or -1 when the budget is spent and the backend must fail.
+ *
+ * A sub-millisecond remainder must NOT truncate to 0: 0 means "no
+ * deadline" to nm_socket_wait_ready_ms, so a spent budget would read as
+ * an unbounded wait. Report 1 ms and wake again instead — the same
+ * guard nm_socket_wait_ms carries for the connect walk. */
+int nm_handshake_left(double t0, int budget_ms)
+{
+    if (budget_ms <= 0)
+        return 0;
+    double left = (double)budget_ms - (nm_socket_now() - t0) * 1000.0;
+    if (left <= 0)
+        return -1;
+    int ms = (int)left;
+    return ms > 0 ? ms : 1;
+}
+
+/* A spent handshake budget, named ONE way for every backend, so the
+ * four handshake loops cannot spell the same failure four ways. The
+ * caller's wrapper adds the "TLS handshake with <host> failed: "
+ * prefix. Borrow-until-next-call (the backends read it immediately, in
+ * the same single-threaded turn that spent the budget). */
+const char *nm_handshake_timeout_reason(int budget_ms)
+{
+    static char buf[64];
+    snprintf(buf, sizeof(buf), "timed out after %d ms", budget_ms);
+    return buf;
+}
+
 /* Address-family vocabulary: the ONE spelling per family (see
  * transport.h). Pure naming, so it lives in this TU (which links no
  * socket code) — the walk's diagnostics, the agent's notice line and
@@ -271,6 +319,37 @@ static void conn_fail(NmConnection *conn, const char *stage,
 /* Connection lifecycle                                              */
 /* ---------------------------------------------------------------- */
 
+/* Run the backend's handshake over a NON-BLOCKING fd. The backends
+ * wait for readiness themselves, against the handshake budget
+ * (nm_connection_handshake_timeout_ms), so a peer that goes silent
+ * mid-exchange costs the budget instead of the OS's own timeout — on a
+ * blocking fd the thread sits inside recv(), where no wait of ours can
+ * reach it, and on the async path that thread is the UI's. The mode
+ * the caller had is restored either way: the ask path needs a blocking
+ * fd for its blocking request, the async stream path owns a
+ * non-blocking one (and on Windows the event loop's WSAEventSelect
+ * association pins it there already, so the flip is a no-op).
+ *
+ * The flip is best-effort (a Windows association refuses a mode change
+ * back, never this one): if it fails, the handshake still runs — on a
+ * blocking fd that is the OS default, which is what
+ * `handshake_timeout = off` asks for anyway. Returns 1 on success, 0 on
+ * failure with *err set. */
+static int tls_handshake(NmConnection *conn, const char *host,
+                         const char **err)
+{
+    int owner_blocking = !conn->nonblocking;
+    if (owner_blocking)
+        nm_socket_set_nonblocking(conn); /* sets conn->nonblocking */
+    conn->tls_ctx = conn->tls->handshake(conn->fd, host, err);
+    int ok = conn->tls_ctx != NULL;
+    if (owner_blocking) {
+        nm_socket_set_blocking(conn->fd);
+        conn->nonblocking = 0;
+    }
+    return ok;
+}
+
 NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
                          NmConnectInfo *info)
 {
@@ -302,8 +381,7 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
     if (mode == NM_TRANSPORT_TLS) {
         conn->tls = nm_tls_backend();
         const char *err = NULL;
-        conn->tls_ctx = conn->tls->handshake(conn->fd, host, &err);
-        if (!conn->tls_ctx) {
+        if (!tls_handshake(conn, host, &err)) {
             if (info) {
                 info->status = NM_TRANSPORT_ERR_TLS;
                 snprintf(info->detail, sizeof(info->detail),
@@ -394,31 +472,20 @@ NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
 {
     if (!conn || !conn->tls || conn->tls_ctx)
         return conn ? NM_TRANSPORT_OK : NM_TRANSPORT_ERR_SOCKET;
-    /* The handshake itself wants a blocking fd (the backends run
-     * blocking handshakes: SSL_connect/mbedtls loop on readiness
-     * internally, Schannel waits itself). But the OWNER's mode must
-     * survive it: the async stream path (openai_client chat_begin)
-     * already flipped this fd non-blocking for the body stream, and
-     * the record layer only reports would-block on a non-blocking
-     * fd — without the restore, every SSL_read after the handshake
-     * blocks the event loop for the whole response (dead spinner,
-     * Ctrl+C postponed to the stream's end). Best-effort on Windows,
-     * where a WSAEventSelect-associated socket refuses flips but is
-     * kept non-blocking by the association itself. */
-    int owner_nonblocking = conn->nonblocking;
-    if (conn->nonblocking && nm_socket_set_blocking(conn->fd) == 0)
-        conn->nonblocking = 0;
+    /* The handshake runs on the connection's own mode (the async stream
+     * path already flipped the fd non-blocking for the body stream) and
+     * is bounded by the handshake budget — see tls_handshake. It is
+     * still a blocking deferral for the event loop, but a bounded one:
+     * the budget, not the OS's own timeout, is what a silent peer
+     * costs. */
     const char *err = NULL;
-    conn->tls_ctx = conn->tls->handshake(conn->fd, host, &err);
-    if (conn->tls_ctx) {
-        if (owner_nonblocking)
-            nm_socket_set_nonblocking(conn); /* restore; sets the flag */
-        return NM_TRANSPORT_OK;
+    if (!tls_handshake(conn, host, &err)) {
+        conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
+                  "TLS handshake with %s failed: %s", host,
+                  err ? err : "unknown TLS error");
+        return NM_TRANSPORT_ERR_TLS;
     }
-    conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
-              "TLS handshake with %s failed: %s", host,
-              err ? err : "unknown TLS error");
-    return NM_TRANSPORT_ERR_TLS;
+    return NM_TRANSPORT_OK;
 }
 
 NmTransportStatus nm_connection_step(NmConnection *conn)

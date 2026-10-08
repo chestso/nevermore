@@ -97,13 +97,21 @@ static int mb_init_once(void)
 }
 
 /* I/O callbacks over the raw fd (mbedtls_net would own its own fd
- * state; we already have one). */
+ * state; we already have one). A would-block errno is MBEDTLS's
+ * "not ready yet" (WANT_READ/WANT_WRITE), never a failure: the
+ * transport runs the handshake and the record layer on a NON-BLOCKING
+ * fd, and the callers wait for readiness themselves (the handshake
+ * against its budget, the stream against the event loop). Mapping it
+ * to -1 would report a healthy no-data-yet as a fatal read error. */
 static int mb_recv(void *ctx, unsigned char *buf, size_t len)
 {
     MbCtx *c = ctx;
     ssize_t n = recv(c->fd, buf, len, 0);
-    if (n < 0)
-        return errno == EINTR ? MBEDTLS_ERR_SSL_WANT_READ : -1;
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return MBEDTLS_ERR_SSL_WANT_READ;
+        return -1;
+    }
     if (n == 0)
         return MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY;
     return (int)n;
@@ -113,8 +121,11 @@ static int mb_send(void *ctx, const unsigned char *buf, size_t len)
 {
     MbCtx *c = ctx;
     ssize_t n = send(c->fd, buf, len, 0);
-    if (n < 0)
-        return errno == EINTR ? MBEDTLS_ERR_SSL_WANT_WRITE : -1;
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR)
+            return MBEDTLS_ERR_SSL_WANT_WRITE;
+        return -1;
+    }
     return (int)n;
 }
 
@@ -147,10 +158,30 @@ static void *mbedtls_handshake(int fd, const char *host, const char **err)
     }
     mbedtls_ssl_set_bio(&c->ssl, c, mb_send, mb_recv, NULL);
 
+    /* The transport runs this on a NON-BLOCKING fd, so a handshake step
+     * that needs the peer reports WANT_READ/WANT_WRITE; the loop waits
+     * for readiness itself, against the handshake budget
+     * (handshake_timeout), which is what bounds a peer that goes silent
+     * mid-exchange. Without a budget (`off`) the wait is indefinite —
+     * the OS default, by request. */
+    int budget = nm_connection_handshake_timeout_ms();
+    double t0 = nm_socket_now();
     while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
         if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-            ret == MBEDTLS_ERR_SSL_WANT_WRITE)
+            ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+            int left = nm_handshake_left(t0, budget);
+            if (left < 0 ||
+                !nm_socket_wait_ready_ms(
+                    fd, ret == MBEDTLS_ERR_SSL_WANT_WRITE, left)) {
+                if (err)
+                    *err = budget > 0
+                               ? nm_handshake_timeout_reason(budget)
+                               : "connection failed during the TLS handshake";
+                mbedtls_close(c);
+                return NULL;
+            }
             continue;
+        }
         if (err)
             *err = mb_errstr(ret);
         mbedtls_close(c);

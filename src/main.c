@@ -300,7 +300,8 @@ static int run_interactive(const char *provider_name, const char *model,
      * machinery resolves every setting from it at the point of use.
      * Nothing is pushed — the agent reads `rounds`/`reasoning_echo`/
      * `timeout`, the connect walk reads `connect_timeout`/`family_skip`/
-     * `skip_families`, the tools read `searxng`/`searxng_enabled`/
+     * `skip_families`, the TLS handshake reads `handshake_timeout`,
+     * the tools read `searxng`/`searxng_enabled`/
      * `searxng_timeout`/`run_command_timeout`. */
     nm_chat_app_set_config(app, cfg);
     /* Base URL override only: the API key is left NULL so the app

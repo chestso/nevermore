@@ -705,6 +705,42 @@ void nm_socket_wait_writable_budget(NmConnection *conn, int ms)
 #endif
 }
 
+/* Wait for readiness in one direction with a deadline — the TLS
+ * handshake's wait (the backends run on a non-blocking fd, so the
+ * handshake's own loop is what turns "no bytes yet" into a budget).
+ * ms <= 0 = no deadline (the `handshake_timeout = off` spelling).
+ * EINTR is retried: a SIGWINCH (the TUI resizing mid-handshake) must
+ * not read as a spent budget. */
+int nm_socket_wait_ready_ms(int fd, int for_write, int ms)
+{
+    if (fd < 0)
+        return 0;
+    fd_set fds;
+    struct timeval tv;
+    struct timeval *tvp = NULL;
+    if (ms > 0) {
+        tv.tv_sec = ms / 1000;
+        tv.tv_usec = (ms % 1000) * 1000;
+        tvp = &tv;
+    }
+    for (;;) {
+        FD_ZERO(&fds);
+#ifdef _WIN32
+        FD_SET((SOCKET)fd, &fds);
+        int rc = for_write ? select(0, NULL, &fds, NULL, tvp)
+                           : select(0, &fds, NULL, NULL, tvp);
+#else
+        FD_SET(fd, &fds);
+        int rc = for_write ? select(fd + 1, NULL, &fds, NULL, tvp)
+                           : select(fd + 1, &fds, NULL, NULL, tvp);
+#endif
+        if (rc >= 0)
+            return rc > 0 ? 1 : 0;
+        if (errno != EINTR)
+            return 0;
+    }
+}
+
 /* Async connect: non-blocking socket, connect() in flight, the rest
  * of the address list kept on the connection so the CONNECTING phase
  * can move on when one address is black-holed (the bounded walk —

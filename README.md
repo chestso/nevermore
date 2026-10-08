@@ -163,6 +163,7 @@ rounds           = 40
 reasoning_echo   = tools
 timeout          = 300000
 connect_timeout  = 1500
+handshake_timeout = 10000
 family_skip      = on
 skip_families    = none
 searxng          = http://127.0.0.1:8888
@@ -222,7 +223,14 @@ wait).
 bounded connect walk (default 750): a hostname resolves to several
 addresses and each is dialled in turn, so a black-holed one — the
 classic unroutable IPv6 on a v4-only network, no RST and no SYN-ACK —
-is abandoned after the budget instead of the OS's ~130 s. `family_skip`
+is abandoned after the budget instead of the OS's ~130 s.
+`handshake_timeout` (default 10000, or `off`) is the connect phase's
+second half: the TLS handshake runs on a non-blocking socket and each
+backend waits for readiness against this budget, so a peer that
+completes the TCP handshake and then goes silent — a wedged middlebox,
+a route black-holed mid-exchange — costs the budget instead of sitting
+in a blocking read until the OS gives up (minutes). `off` restores
+that OS default. `family_skip`
 (a bool) goes one step further: once an address of a family burns the
 budget and an address of _another_ family then answers, that family is
 dialled _last_ for the rest of the session, so later connects pay no

@@ -113,6 +113,28 @@ NmTransportStatus nm_connection_set_recv_timeout(NmConnection *conn,
 #define NM_CONNECT_ATTEMPT_MS 750
 int nm_connection_connect_timeout_ms(void);
 
+/* TLS handshake budget (ms) — the connect phase's second half. The
+ * per-address budget above bounds the TCP connect; this bounds the TLS
+ * handshake that follows it on the same connection. Without it, a peer
+ * that completes the TCP handshake and then goes silent (a black hole
+ * mid-exchange, a wedged middlebox) sits in a blocking read until the
+ * OS's own timeout — minutes, on a dropped SYN/ACK-less path — and on
+ * the async path that is the UI thread. The handshake is run on a
+ * non-blocking fd and each backend waits for readiness against this
+ * deadline (nm_socket_wait_ready_ms), so the budget bounds the WHOLE
+ * handshake, not one read.
+ *
+ * 10 s: a handshake is ~1 RTT plus local crypto once the socket is up,
+ * so anything inside it is a healthy peer on any real network, while a
+ * wedged one surfaces while a human is still watching. Go's
+ * http.DefaultTransport picks the same number (TLSHandshakeTimeout).
+ * The value lives in the config store's `handshake_timeout` key (a
+ * positive decimal ms, or `off` for no deadline — the OS default);
+ * the TLS backends resolve it at the point of use and keep no copy,
+ * exactly as the connect walk does with its own budget. */
+#define NM_HANDSHAKE_TIMEOUT_MS 10000
+int nm_connection_handshake_timeout_ms(void);
+
 /* Address-family skip: the answer to "that address went silent — so
  * don't dial that FAMILY first again". Not an OS knob (no portable
  * socket option exists) and not a getaddrinfo knob (AI_ADDRCONFIG is
@@ -227,10 +249,10 @@ NmSource nm_connection_interest(NmConnection *conn);
 
 /* Open a connection WITHOUT blocking on connect(): the socket is
  * non-blocking and connect() is in flight (EINPROGRESS /
- * WSAEWOULDBLOCK). Plain HTTP only for now — TLS connections still
- * need nm_connect (the handshake blocks; documented narrowed
- * deferral, see nm_connection_tls_handshake). Returns a connection
- * in the CONNECTING phase; step it with nm_connection_step().
+ * WSAEWOULDBLOCK). Returns a connection in the CONNECTING phase; step
+ * it with nm_connection_step(). (The TLS handshake still runs inline
+ * in the step — a bounded deferral: its own `handshake_timeout`, not
+ * the OS default. See nm_connection_tls_handshake.)
  *
  * Drive contract:
  *   conn = nm_connect_async(host, port, PLAIN, &st)
@@ -246,9 +268,8 @@ NmConnection *nm_connect_async(const char *host, int port,
  *
  *   CONNECTING: finish connect() when writable — writable means
  *              completed (SO_ERROR distinguishes failure), then
- *              TLS handshake (blocking on a blocking fd; on a socket
- *              the event loop owns non-blocking it runs through the
- *              backend's own readiness waits), phase -> SENDING
+ *              TLS handshake (inline, on a non-blocking fd, bounded
+ *              by handshake_timeout), phase -> SENDING
  *   SENDING:   drain req_buf into the socket; EAGAIN leaves the
  *              remainder for the next step, phase -> READING when
  *              fully sent
@@ -276,10 +297,13 @@ NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    size_t n_headers, const char *body,
                                    size_t body_len);
 
-/* The blocking TLS handshake for async connections, called by
+/* The TLS handshake for async connections, called by
  * nm_connection_step when connect completes. Kept public for test
- * seams; blocking is the documented narrowed deferral (sub-second,
- * post-writability). */
+ * seams. Blocking, but BOUNDED: the backends wait for readiness
+ * against the handshake budget (`handshake_timeout`, default
+ * NM_HANDSHAKE_TIMEOUT_MS, `off` = the OS default), so the deferral
+ * the event loop eats is the budget rather than whatever the OS would
+ * have taken on a silent peer. */
 NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
                                               const char *host);
 

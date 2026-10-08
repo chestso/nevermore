@@ -55,6 +55,21 @@ void nm_socket_shutdown(int fd);
  * failure; a 0 timeout clears it. */
 NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
 
+/* Wait for `fd` to become ready in one direction (the TLS handshake's
+ * wait): 1 = ready, 0 = the deadline passed or the wait failed. ms <= 0
+ * = NO deadline (wait indefinitely — the `handshake_timeout = off`
+ * spelling). EINTR is retried, never reported as a spent budget: the
+ * TUI's SIGWINCH lands mid-handshake. Portable (Windows select ignores
+ * nfds). */
+int nm_socket_wait_ready_ms(int fd, int for_write, int ms);
+
+/* The TLS handshake's deadline arithmetic, shared by the four backends
+ * so their loops cannot drift (transport.c — next to the budget
+ * resolver both read). See nm_handshake_left / nm_handshake_timeout_
+ * reason there. */
+int nm_handshake_left(double t0, int budget_ms);
+const char *nm_handshake_timeout_reason(int budget_ms);
+
 /* Connect-walk helpers (transport_socket.c): resolve + store the
  * address list on the connection, start the attempt at index `idx`,
  * and read the monotonic clock the per-attempt budget is measured
