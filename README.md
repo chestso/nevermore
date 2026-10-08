@@ -159,6 +159,7 @@ searxng          = http://127.0.0.1:8888
 searxng_enabled  = on
 searxng_timeout  = 10000
 run_command_timeout = 300000
+login_shell      = off
 reminders        = on
 rolling_window   = off
 context_budget   = 100000
@@ -259,6 +260,15 @@ says so.
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
 endpoint for one run — a testing knob, deliberately not a config key.
+
+`login_shell` (a bool, default `off`) is whether `exec_command` may run
+a login shell: one that sources your profile, so the PATH and aliases
+in it are yours. It is off because a profile is code you wrote for
+yourself, not something a model call should run by default; turn it on
+when jobs cannot find your toolchain (a TUI started from a launcher has
+a minimal PATH). A call's own `login: false` always wins, and the key
+never reaches `run_command` or nevermore's own stages — those run under
+the platform shell, deterministically, whatever this is set to.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation
@@ -387,6 +397,22 @@ non-interactive command, one result — no job, no terminal, no stdin.
 A one-shot `ls`, `grep` or `make` is a `run_command`; anything that
 might still be running, or that expects a terminal, is an
 `exec_command`.
+
+`exec_command` takes a `shell` and a `login` argument. `shell` names
+the interpreter (a path or a bare name — `bash`, `/usr/bin/zsh`,
+`pwsh`); the default stays the platform's deterministic shell
+(`/bin/sh`, `cmd.exe`), which is what nevermore's own machinery
+assumes, so naming one is opt-in. `login` runs the shell with login
+semantics, sourcing your profile so the PATH, aliases and version
+managers it sets actually apply — the fix for a TUI launched from a
+desktop launcher or a session manager, where `cargo`, `nvm` or `brew`
+are simply not on the job's PATH. It is off unless you turn it on
+(`login_shell = on`); a call's own `login: true` still needs the gate,
+and on a shell with no login mode (`cmd.exe`) a requested login is
+refused by name rather than silently ignored. Profile chatter lands in
+the job's output — the model reads it once. Neither argument affects
+`run_command`, which is always one short command under the platform
+shell.
 
 The job keeps running between turns, and the model drives it on its
 own: `write_stdin` feeds it input and reports what it has printed since,

@@ -49,14 +49,57 @@ typedef struct NmProc NmProc;
  * boba's macro. */
 #define NM_PROC_MAX_JOBS 31
 
-/* Spawn `cmd` under a shell (`/bin/sh -c` on POSIX, `cmd.exe /d /c` on
- * Windows) in `cwd` (NULL = inherit the process working directory),
- * with a sanitized environment.  On success the job is registered,
- * *job_id is set, and the handle is returned; on failure NULL is
- * returned with a message in `err` (job cap reached, spawn failure,
- * empty cmd). */
-NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
-                      char *err, size_t errsz);
+/* Which shell a job's command is handed to, and whether login
+ * semantics apply.  The zero value (path NULL, login 0) is the
+ * built-in default: /bin/sh on POSIX, cmd.exe on Windows — the
+ * deterministic shell the machinery already assumes (the <env> git
+ * stage's command, run_command's Windows job, so neither ever names
+ * one). */
+typedef struct NmProcShell
+{
+    const char *path; /* shell binary: a path or a bare name; NULL = default */
+    int login;        /* 1 = login semantics where the shell has one */
+} NmProcShell;
+
+/* Spawn `cmd` under a shell (the default — `/bin/sh -c` on POSIX,
+ * `cmd.exe /d /c` on Windows — unless `sh` names another) in `cwd`
+ * (NULL = inherit the process working directory), with a sanitized
+ * environment.  On success the job is registered, *job_id is set, and
+ * the handle is returned; on failure NULL is returned with a message in
+ * `err` (job cap reached, spawn failure, empty cmd). */
+NmProc *nm_proc_start(const char *cmd, const char *cwd,
+                      const NmProcShell *sh, int *job_id, char *err,
+                      size_t errsz);
+
+/* The shell vocabulary behind NmProcShell: one classification, so the
+ * flag vector and the "does this shell have a login mode" question
+ * cannot drift apart.  Codex's `derive_exec_args` shapes (quoth's
+ * `quoth-process--shell-args` is the same table in Elisp). */
+typedef enum
+{
+    NM_SHELL_SH = 0, /* also the platform default (NULL path) */
+    NM_SHELL_BASH,
+    NM_SHELL_ZSH,
+    NM_SHELL_CMD,
+    NM_SHELL_POWERSHELL,
+    NM_SHELL_OTHER /* an unknown name: treated as sh-like */
+} NmShellKind;
+
+/* Classify a shell by its basename, lowercased, with a trailing `.exe`
+ * stripped (`C:\Program Files\Git\bin\Bash.EXE` → BASH).  A NULL path
+ * is the platform default: SH on POSIX, CMD on Windows. */
+NmShellKind nm_proc_shell_kind(const char *path);
+
+/* 1 when the shell has login semantics (a profile to source).  Only
+ * cmd.exe does not: it has no login mode at all, which is why a
+ * REQUESTED login on it is a refusal rather than a silent ignore. */
+int nm_proc_shell_has_login(NmShellKind k);
+
+/* The flag vector that runs `cmd` under kind `k`: the argv tail on
+ * POSIX, the tail of the Windows command line.  Fills `flags` with
+ * borrowed pointers (the last one is `cmd`) and returns the count. */
+int nm_proc_shell_flags(NmShellKind k, int login, const char *cmd,
+                        const char *flags[4]);
 
 int nm_proc_id(const NmProc *p);
 const char *nm_proc_command(const NmProc *p);

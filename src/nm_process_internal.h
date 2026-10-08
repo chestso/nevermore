@@ -23,12 +23,14 @@ static inline void nm_proc_set_err(char *err, size_t errsz, const char *msg)
 typedef struct NmProcOs NmProcOs;
 
 /* Spawn `cmd` under a shell with merged stdout+stderr and a sanitized
- * environment, in `cwd` (NULL = inherit the process working directory).
- * `owner` is the job the child's output belongs to (the Windows reader
- * thread feeds it).  On success fills *os and returns 0; on failure
- * returns -1 and writes a message into err. */
+ * environment, in `cwd` (NULL = inherit the process working directory),
+ * using the shell `sh` names (NULL = the platform default).  `owner` is
+ * the job the child's output belongs to (the Windows reader thread
+ * feeds it).  On success fills *os and returns 0; on failure returns -1
+ * and writes a message into err. */
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     NmProcOs **os, char *err, size_t errsz);
+                     const NmProcShell *sh, NmProcOs **os, char *err,
+                     size_t errsz);
 
 /* Release every OS resource: stop the output reader, close pipes,
  * process and group handles.  Does not kill the child (nm_proc_os_kill

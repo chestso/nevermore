@@ -4088,12 +4088,12 @@ static void test_job_cap_fits_the_fd_budget(void)
     for (int i = 0; i < 4; i++) {
         int id = -1;
         ASSERT_NOT_NULL(
-            nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+            nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err)));
     }
     /* One past the cap fails loudly instead of spawning a child nobody
      * will ever drain. */
     int id = -1;
-    ASSERT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    ASSERT_NULL(nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err)));
     ASSERT_TRUE(strstr(err, "cap") != NULL);
 
     NmSource set[TUI_IO_SOURCE_MAX];
@@ -4127,7 +4127,7 @@ static void test_windows_job_source_kind(void)
 
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start("ping -n 31 127.0.0.1 >nul", NULL, &id, err,
+    NmProc *p = nm_proc_start("ping -n 31 127.0.0.1 >nul", NULL, NULL, &id, err,
                               sizeof(err));
     ASSERT_NOT_NULL(p);
     ASSERT_TRUE(nm_proc_live(p) == 1); /* still running: a real job */
@@ -4166,9 +4166,9 @@ static void test_interest_lists_every_job(void)
 
     char err[128];
     int id1 = -1, id2 = -1;
-    NmProc *p1 = nm_proc_start("sleep 30", NULL, &id1, err, sizeof(err));
+    NmProc *p1 = nm_proc_start("sleep 30", NULL, NULL, &id1, err, sizeof(err));
     ASSERT_NOT_NULL(p1);
-    NmProc *p2 = nm_proc_start("sleep 30", NULL, &id2, err, sizeof(err));
+    NmProc *p2 = nm_proc_start("sleep 30", NULL, NULL, &id2, err, sizeof(err));
     ASSERT_NOT_NULL(p2);
 
     size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
@@ -4206,7 +4206,7 @@ static void test_app_teardown_kills_jobs(void)
 
     char err[128];
     int id = -1;
-    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err)));
     ASSERT_EQ(nm_proc_count(), 1);
 
     harness_free(h); /* runtime -> component free -> nm_chat_app_free */
@@ -4225,7 +4225,7 @@ static void test_external_ready_drains_background_job(void)
     char err[128];
     int id = -1;
     NmProc *p = nm_proc_start("printf 'background output\\n'; sleep 30",
-                              NULL, &id, err, sizeof(err));
+                              NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     int fd = nm_proc_handle(p);
     ASSERT_TRUE(fd >= 0);
@@ -4399,12 +4399,12 @@ static void test_ps_lists_and_kill_removes(void)
 
     char err[128];
     int id_run = -1, id_done = -1;
-    NmProc *pr = nm_proc_start("echo hello; sleep 30", NULL, &id_run, err,
+    NmProc *pr = nm_proc_start("echo hello; sleep 30", NULL, NULL, &id_run, err,
                                sizeof(err));
     ASSERT_NOT_NULL(pr);
     /* This one exits on its own: /ps must show BOTH states. */
     ASSERT_NOT_NULL(
-        nm_proc_start("exit 3", NULL, &id_done, err, sizeof(err)));
+        nm_proc_start("exit 3", NULL, NULL, &id_done, err, sizeof(err)));
     ASSERT_EQ(nm_proc_count(), 2);
     /* Wait for the second one to actually leave — on its own handle
      * (its exit is what makes the handle readable/EOF), not a sleep. */
@@ -4467,7 +4467,7 @@ static void test_ps_lists_and_kill_removes(void)
      * stage, a Windows run_command) is drained like any other but never
      * listed: /ps is the window on jobs the USER started. */
     int id_hidden = -1;
-    ASSERT_NOT_NULL(nm_proc_start("echo HIDDEN-MARKER; sleep 30", NULL,
+    ASSERT_NOT_NULL(nm_proc_start("echo HIDDEN-MARKER; sleep 30", NULL, NULL,
                                   &id_hidden, err, sizeof(err)));
     ASSERT_EQ(nm_proc_count(), 1);
     NmProc *hid = nm_proc_find(id_hidden);
@@ -4505,7 +4505,7 @@ static void test_kill_rejects_bad_ids(void)
 
     char err[128];
     int id = -1;
-    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, &id, err, sizeof(err)));
+    ASSERT_NOT_NULL(nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err)));
 
     harness_type(h, "/kill");
     harness_enter(h);
@@ -4547,10 +4547,10 @@ static void test_ps_command_column_elides_safely(void)
     /* Runs of spaces/tabs and a newline collapse to single spaces. */
     char err[128];
     int id_a = -1, id_b = -1;
-    ASSERT_NOT_NULL(nm_proc_start("sleep\t\t 30; echo   a\nb", NULL, &id_a,
+    ASSERT_NOT_NULL(nm_proc_start("sleep\t\t 30; echo   a\nb", NULL, NULL, &id_a,
                                   err, sizeof(err)));
     ASSERT_NOT_NULL(
-        nm_proc_start("sleep 30", NULL, &id_b, err, sizeof(err)));
+        nm_proc_start("sleep 30", NULL, NULL, &id_b, err, sizeof(err)));
 
     harness_type(h, "/ps");
     harness_enter(h);
@@ -4570,7 +4570,7 @@ static void test_ps_command_column_elides_safely(void)
         o += (size_t)snprintf(long_cmd + o, sizeof(long_cmd) - o, " word%d",
                               i);
     int id_c = -1;
-    ASSERT_NOT_NULL(nm_proc_start(long_cmd, NULL, &id_c, err, sizeof(err)));
+    ASSERT_NOT_NULL(nm_proc_start(long_cmd, NULL, NULL, &id_c, err, sizeof(err)));
     harness_type(h, "/ps");
     harness_enter(h);
     clean = strip_frames(harness_read(h));
@@ -4587,7 +4587,7 @@ static void test_ps_command_column_elides_safely(void)
     for (int i = 0; i < 60; i++)
         o += (size_t)snprintf(wide + o, sizeof(wide) - o, " \xE6\xBC\xA2");
     int id_d = -1;
-    ASSERT_NOT_NULL(nm_proc_start(wide, NULL, &id_d, err, sizeof(err)));
+    ASSERT_NOT_NULL(nm_proc_start(wide, NULL, NULL, &id_d, err, sizeof(err)));
     harness_type(h, "/ps");
     harness_enter(h);
     clean = strip_frames(harness_read(h));

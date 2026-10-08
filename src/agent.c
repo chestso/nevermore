@@ -309,7 +309,7 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
         char err[128];
         int id = -1;
         NmProc *p = nm_proc_start(nm_context_env_git_command(),
-                                  nm_context_env_cwd(a->context), &id, err,
+                                  nm_context_env_cwd(a->context), NULL, &id, err,
                                   sizeof(err));
         if (p) {
             nm_proc_set_hidden(p, 1); /* not the user's job: /ps skips it */

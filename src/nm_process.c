@@ -109,6 +109,91 @@ static void registry_remove(NmProc *p)
 /* Job lifecycle                                                */
 /* ---------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------- */
+/* Shell vocabulary (pure; the OS halves consume this)              */
+/* ---------------------------------------------------------------- */
+
+/* Lowercase `name` into `out` (truncating), returning its length. */
+static size_t lower_into(char *out, size_t cap, const char *name)
+{
+    size_t n = 0;
+    for (; name[n] && n + 1 < cap; n++) {
+        char c = name[n];
+        out[n] = (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c;
+    }
+    out[n] = '\0';
+    return n;
+}
+
+NmShellKind nm_proc_shell_kind(const char *path)
+{
+    if (!path || !*path) {
+#ifdef _WIN32
+        return NM_SHELL_CMD; /* the platform default */
+#else
+        return NM_SHELL_SH;
+#endif
+    }
+    /* basename: after the last '/' (and on Windows the last '\') */
+    const char *base = path;
+    for (const char *s = path; *s; s++) {
+        if (*s == '/' || *s == '\\')
+            base = s + 1;
+    }
+    char name[64];
+    size_t n = lower_into(name, sizeof(name), base);
+    /* An explicit .exe suffix (the Windows spelling) is not part of the
+     * name: `cmd.exe` and `cmd` are the same shell. */
+    if (n > 4 && strcmp(name + n - 4, ".exe") == 0) {
+        name[n - 4] = '\0';
+        n -= 4;
+    }
+    if (strcmp(name, "sh") == 0)
+        return NM_SHELL_SH;
+    if (strcmp(name, "bash") == 0)
+        return NM_SHELL_BASH;
+    if (strcmp(name, "zsh") == 0)
+        return NM_SHELL_ZSH;
+    if (strcmp(name, "cmd") == 0)
+        return NM_SHELL_CMD;
+    if (strcmp(name, "powershell") == 0 || strcmp(name, "pwsh") == 0)
+        return NM_SHELL_POWERSHELL;
+    return NM_SHELL_OTHER; /* sh-like: -c / -lc */
+}
+
+int nm_proc_shell_has_login(NmShellKind k)
+{
+    /* cmd.exe has no login mode; every POSIX shell (and every unknown
+     * name, which is spawned sh-like) does. */
+    return k != NM_SHELL_CMD;
+}
+
+int nm_proc_shell_flags(NmShellKind k, int login, const char *cmd,
+                        const char *flags[4])
+{
+    int n = 0;
+    switch (k) {
+    case NM_SHELL_CMD:
+        /* Login is IGNORED here (cmd.exe has none); /d skips AutoRun. */
+        flags[n++] = "/d";
+        flags[n++] = "/c";
+        break;
+    case NM_SHELL_POWERSHELL:
+        if (login) {
+            flags[n++] = "-Command";
+        } else {
+            flags[n++] = "-NoProfile";
+            flags[n++] = "-Command";
+        }
+        break;
+    default: /* SH / BASH / ZSH / OTHER */
+        flags[n++] = login ? "-lc" : "-c";
+        break;
+    }
+    flags[n++] = cmd;
+    return n;
+}
+
 static void proc_free(NmProc *p)
 {
     nm_proc_os_free(p->os);
@@ -119,8 +204,9 @@ static void proc_free(NmProc *p)
     free(p);
 }
 
-NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
-                      char *err, size_t errsz)
+NmProc *nm_proc_start(const char *cmd, const char *cwd,
+                      const NmProcShell *sh, int *job_id, char *err,
+                      size_t errsz)
 {
     if (job_id)
         *job_id = -1;
@@ -147,7 +233,7 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
     PROC_LOCK_INIT(&p->lock);
 
     NmProcOs *os = NULL;
-    if (nm_proc_os_spawn(p, cmd, cwd, &os, err, errsz) != 0) {
+    if (nm_proc_os_spawn(p, cmd, cwd, sh, &os, err, errsz) != 0) {
         PROC_LOCK_FREE(&p->lock);
         free(p);
         return NULL;

@@ -88,8 +88,47 @@ static char **build_env(void)
     return env;
 }
 
+/* The child's last words when execve fails: the model otherwise reads
+ * `Process exited with code 127` with an empty body, which is also what
+ * a legitimate 127 looks like — and with a named shell in play, "cannot
+ * exec" becomes the common failure mode.  Only write(2) and literals
+ * here: the child is between fork and exec, so nothing else is safe. */
+static void child_exec_diag(const char *path, int err)
+{
+    static const char k_prefix[] = "nevermore: cannot exec '";
+    const char *reason = "exec failed";
+    switch (err) {
+    case ENOENT:
+        reason = "no such file or directory";
+        break;
+    case EACCES:
+        reason = "permission denied";
+        break;
+    case ENOTDIR:
+        reason = "not a directory";
+        break;
+    default:
+        break;
+    }
+    char buf[256];
+    size_t n = 0;
+    for (const char *s = k_prefix; *s && n < sizeof(buf) - 1; s++)
+        buf[n++] = *s;
+    for (const char *s = path; s && *s && n < sizeof(buf) - 1; s++)
+        buf[n++] = *s;
+    for (const char *s = "': "; *s && n < sizeof(buf) - 1; s++)
+        buf[n++] = *s;
+    for (const char *s = reason; *s && n < sizeof(buf) - 1; s++)
+        buf[n++] = *s;
+    if (n < sizeof(buf) - 1)
+        buf[n++] = '\n';
+    ssize_t ignored = write(STDERR_FILENO, buf, n);
+    (void)ignored;
+}
+
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     NmProcOs **os_out, char *err, size_t errsz)
+                     const NmProcShell *sh, NmProcOs **os_out, char *err,
+                     size_t errsz)
 {
     (void)owner; /* POSIX reads on the loop thread: nothing to hand over */
     *os_out = NULL;
@@ -138,7 +177,19 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         return -1;
     }
 
-    const char *argv_sh[] = { "/bin/sh", "-c", cmd, NULL };
+    /* The shell: the caller's choice, or /bin/sh (the deterministic
+     * default the machinery's own commands assume).  The flag vector is
+     * the shared table's, so `-c` / `-lc` and the login question have
+     * exactly one answer. */
+    const char *sh_path = (sh && sh->path && *sh->path) ? sh->path : "/bin/sh";
+    const char *sh_flags[4];
+    int nf = nm_proc_shell_flags(nm_proc_shell_kind(sh ? sh->path : NULL),
+                                 sh ? sh->login : 0, cmd, sh_flags);
+    const char *argv_sh[6];
+    argv_sh[0] = sh_path;
+    for (int i = 0; i < nf; i++)
+        argv_sh[i + 1] = sh_flags[i];
+    argv_sh[nf + 1] = NULL;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -171,7 +222,8 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
             (void)cwd_rc;
         }
         signal(SIGPIPE, SIG_DFL); /* do not inherit a SIG_IGN */
-        execve("/bin/sh", (char *const *)argv_sh, env);
+        execve(sh_path, (char *const *)argv_sh, env);
+        child_exec_diag(sh_path, errno); /* why, on the job's own output */
         _exit(127);
     }
 

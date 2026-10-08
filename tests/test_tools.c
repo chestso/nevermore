@@ -3175,6 +3175,215 @@ static void test_exec_command_workdir(void)
     nm_toolset_free(ts);
 }
 
+/* The schema is where the model learns the two arguments exist — and
+ * the only place it can learn that `login` is gated (it reads the
+ * schema, not the user's config). */
+static void test_exec_command_schema_names_shell_and_login(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "exec_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(strstr(t->params_schema, "\"shell\""));
+    ASSERT_NOT_NULL(strstr(t->params_schema, "\"login\""));
+    ASSERT_NOT_NULL(strstr(t->params_schema, "login_shell"));
+    nm_toolset_free(ts);
+}
+
+/* A requested login with the gate off is a NAMED refusal, and no child
+ * is spawned: an argument the spawn would ignore is worse than an
+ * omitted one (docs/PROCESS-PLAN.md §6). */
+static void test_exec_command_login_refused_when_gated_off(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    int before = nm_proc_count();
+    NmToolResult r = nm_toolset_execute(
+        ts, "exec_command",
+        "{\"cmd\":\"echo hi\",\"login\":true,\"yield_time_ms\":5000}", NULL);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "login shells are disabled by config"));
+    ASSERT_NOT_NULL(strstr(r.output, "login_shell = on"));
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), before); /* nothing was spawned */
+    nm_toolset_free(ts);
+}
+
+/* A login REQUESTED on a shell that has no login mode is its own refusal
+ * (cmd.exe has none, whatever the gate says) — and the gate's own
+ * default stays inert for such a shell: nothing was asked for, so
+ * nothing is silently ignored. */
+static void test_exec_command_login_on_a_loginless_shell(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_LOGIN_SHELL, "on"), 0);
+
+    int before = nm_proc_count();
+    NmToolResult r = nm_toolset_execute(
+        ts, "exec_command",
+        "{\"cmd\":\"echo hi\",\"shell\":\"cmd.exe\",\"login\":true,"
+        "\"yield_time_ms\":5000}",
+        NULL);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "no login-shell mode"));
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), before);
+
+    /* The same shell with NO login arg runs: the default is inert, not
+     * a refusal. */
+    char *args = exec_args("echo inert-default", 5000);
+    r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+#ifndef _WIN32
+    /* POSIX: cmd.exe does not exist, so the spawn fails — but it failed
+     * at the SPAWN (a real reason), not at a validation refusal. */
+    ASSERT_TRUE(strstr(r.output, "login-shell mode") == NULL);
+#else
+    ASSERT_TRUE(strstr(r.output, "inert-default") != NULL);
+#endif
+    nm_tool_result_free(&r);
+
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_LOGIN_SHELL);
+    nm_toolset_free(ts);
+}
+
+/* A `shell` that cannot be what it claims is refused by name, before
+ * any spawn: the value reaches execve / CreateProcessW. */
+static void test_exec_command_shell_validation_refusals(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    int before = nm_proc_count();
+    static const struct
+    {
+        const char *json;
+        const char *want;
+    } cases[] = {
+        { "{\"cmd\":\"echo hi\",\"shell\":\"\"}", "shell must name" },
+        { "{\"cmd\":\"echo hi\",\"shell\":\"-c\"}", "must not start with" },
+        /* A control character (\u0001 here; a \u0000 cannot reach the
+         * spawn at all — the C string ends there). */
+        { "{\"cmd\":\"echo hi\",\"shell\":\"sh\\u0001\"}",
+          "control characters" },
+        { "{\"cmd\":\"echo hi\",\"shell\":\"sh\\\"x\"}",
+          "double quote" },
+        { NULL, NULL },
+    };
+    char long_shell[320];
+    memset(long_shell, 'a', sizeof(long_shell));
+    long_shell[sizeof(long_shell) - 1] = '\0';
+
+    for (int i = 0; cases[i].json; i++) {
+        NmToolResult r = nm_toolset_execute(ts, "exec_command", cases[i].json,
+                                            NULL);
+        ASSERT_EQ(r.status, NM_TOOL_ERR);
+        ASSERT_NOT_NULL(r.output);
+        ASSERT_TRUE(strstr(r.output, cases[i].want) != NULL);
+        ASSERT_TRUE(strstr(r.output, "exec_command:") != NULL);
+        nm_tool_result_free(&r);
+    }
+    /* A 300-character shell name is refused too (the validation is a
+     * bound, not a suggestion). */
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string("echo hi"));
+    nm_json_set(j, "shell", nm_json_new_string(long_shell));
+    char *args = args_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "too long"));
+    nm_tool_result_free(&r);
+
+    ASSERT_EQ(nm_proc_count(), before); /* no child for any refusal */
+    nm_toolset_free(ts);
+}
+
+/* A malformed `login` is refused by name rather than read as false. */
+static void test_exec_command_login_garbage_refused(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(
+        ts, "exec_command",
+        "{\"cmd\":\"echo hi\",\"login\":\"maybe\"}", NULL);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "login must be true or false"));
+    nm_tool_result_free(&r);
+
+    /* The string spellings ARE accepted (models emit both). */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_LOGIN_SHELL, "on"), 0);
+    r = nm_toolset_execute(ts, "exec_command",
+                           "{\"cmd\":\"echo hi\",\"login\":\"true\","
+                           "\"yield_time_ms\":5000}",
+                           NULL);
+    ASSERT_TRUE(strstr(r.output, "login must be") == NULL);
+    nm_tool_result_free(&r);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_LOGIN_SHELL);
+    nm_toolset_free(ts);
+}
+
+#ifndef _WIN32
+/* The gate ON is what makes `login: true` run a REAL login shell:
+ * bash's own `shopt -q login_shell` is the identity check (no profile
+ * needed, so the test is hermetic — the profile path is pinned in
+ * test_process). */
+static void test_exec_command_login_gate_on_runs_a_login_shell(void)
+{
+    if (access("/bin/bash", X_OK) != 0)
+        return; /* no bash: nothing to assert */
+    NmToolset *ts = nm_toolset_new_defaults();
+    const char *cfg = "{\"cmd\":\"shopt -q login_shell && echo IS-LOGIN || "
+                      "echo NOT-LOGIN\",\"shell\":\"/bin/bash\","
+                      "\"login\":%s,\"yield_time_ms\":5000}";
+    char args[256];
+
+    /* Gate ON: the login path runs. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_LOGIN_SHELL, "on"), 0);
+    snprintf(args, sizeof(args), cfg, "true");
+    NmToolResult r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(strstr(r.output, "IS-LOGIN"));
+    nm_tool_result_free(&r);
+
+    /* Gate ON + an explicit false: the call wins (the gate is a default,
+     * not a floor). */
+    snprintf(args, sizeof(args), cfg, "false");
+    r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(strstr(r.output, "NOT-LOGIN"));
+    nm_tool_result_free(&r);
+
+    /* Gate ON + login ABSENT: the gate's own default applies. */
+    r = nm_toolset_execute(
+        ts, "exec_command",
+        "{\"cmd\":\"shopt -q login_shell && echo IS-LOGIN || echo NOT-LOGIN\","
+        "\"shell\":\"/bin/bash\",\"yield_time_ms\":5000}",
+        NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(strstr(r.output, "IS-LOGIN"));
+    nm_tool_result_free(&r);
+
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_LOGIN_SHELL);
+    nm_toolset_free(ts);
+}
+
+/* A named shell that cannot be executed is not a validation refusal: the
+ * child says why, and the exit code is the conventional 127. */
+static void test_exec_command_missing_shell_reports_why(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(
+        ts, "exec_command",
+        "{\"cmd\":\"echo hi\",\"shell\":\"/nonexistent/nevermore-shell\","
+        "\"yield_time_ms\":5000}",
+        NULL);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "Process exited with code 127"));
+    ASSERT_NOT_NULL(strstr(r.output, "cannot exec"));
+    ASSERT_NOT_NULL(strstr(r.output, "no such file or directory"));
+    nm_tool_result_free(&r);
+    ASSERT_EQ(nm_proc_count(), 0);
+    nm_toolset_free(ts);
+}
+#endif /* !_WIN32 */
+
 /* exec output rides the 70/30 head/tail job clamp: the head names
  * what happened, the tail (where a build's errors live) survives, and
  * the middle is named as omitted. */
@@ -3791,6 +4000,15 @@ int main(void)
     RUN_TEST(test_exec_command_yield_in_range_not_annotated);
     RUN_TEST(test_exec_command_missing_cmd);
     RUN_TEST(test_exec_command_workdir);
+    RUN_TEST(test_exec_command_schema_names_shell_and_login);
+    RUN_TEST(test_exec_command_login_refused_when_gated_off);
+    RUN_TEST(test_exec_command_login_on_a_loginless_shell);
+    RUN_TEST(test_exec_command_shell_validation_refusals);
+    RUN_TEST(test_exec_command_login_garbage_refused);
+#ifndef _WIN32
+    RUN_TEST(test_exec_command_login_gate_on_runs_a_login_shell);
+    RUN_TEST(test_exec_command_missing_shell_reports_why);
+#endif
     RUN_TEST(test_exec_command_output_clamped_head_and_tail);
     RUN_TEST(test_clamp_job_output_trims_and_marks_empty);
     RUN_TEST(test_write_stdin_round_trip);

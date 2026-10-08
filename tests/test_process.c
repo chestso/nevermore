@@ -192,7 +192,7 @@ static void test_spawn_output_and_exit(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_ECHO, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_ECHO, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     ASSERT_TRUE(id > 0);
     ASSERT_EQ(nm_proc_id(p), id);
@@ -218,7 +218,7 @@ static void test_exit_status_is_reported(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_EXIT7, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_EXIT7, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
 
     ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
@@ -237,7 +237,7 @@ static void test_write_stdin_and_eof(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_READER, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_READER, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
 
     /* No arming delay needed: stdin bytes sit in the PTY/pipe buffer
@@ -259,7 +259,7 @@ static void test_live_and_handle(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(nm_proc_live(p), 1);
     ASSERT_TRUE(nm_proc_handle(p) >= 0);
@@ -288,7 +288,7 @@ static void test_close_is_prompt(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, &id, err,
+    NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, NULL, &id, err,
                               sizeof(err));
     ASSERT_NOT_NULL(p);
     /* Wait for the child's first line (its readiness handle), not a
@@ -316,7 +316,7 @@ static void test_close_of_undrained_job_is_prompt(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, &id, err,
+    NmProc *p = nm_proc_start(TEST_ECHO_THEN_LONG, NULL, NULL, &id, err,
                               sizeof(err));
     ASSERT_NOT_NULL(p);
 #ifndef _WIN32
@@ -356,7 +356,7 @@ static void test_bounded_buffer_reports_omission(void)
     nm_proc_set_buffer_max(64); /* tiny cap: force eviction */
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_NOISY, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_NOISY, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
 
     ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
@@ -382,13 +382,13 @@ static void test_job_cap(void)
     nm_proc_set_max_jobs(2);
     char err[128];
     int id = -1;
-    NmProc *a = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *a = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(a);
-    NmProc *b = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *b = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(b);
 
     int id3 = -1;
-    NmProc *c = nm_proc_start(TEST_LONG, NULL, &id3, err, sizeof(err));
+    NmProc *c = nm_proc_start(TEST_LONG, NULL, NULL, &id3, err, sizeof(err));
     ASSERT_NULL(c);
     ASSERT_TRUE(strstr(err, "cap") != NULL);
 
@@ -397,7 +397,7 @@ static void test_job_cap(void)
     ASSERT_EQ(nm_proc_count(), 0);
     nm_proc_reset();
 
-    NmProc *d = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *d = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(d);
     nm_proc_close(d);
 }
@@ -407,10 +407,10 @@ static void test_registry_iteration(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *a = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *a = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(a);
     int ida = nm_proc_id(a);
-    NmProc *b = nm_proc_start(TEST_LONG, NULL, &id, err, sizeof(err));
+    NmProc *b = nm_proc_start(TEST_LONG, NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(b);
     int idb = nm_proc_id(b);
     ASSERT_EQ(nm_proc_count(), 2);
@@ -437,7 +437,7 @@ static void test_empty_command_is_rejected(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    ASSERT_NULL(nm_proc_start("", NULL, &id, err, sizeof(err)));
+    ASSERT_NULL(nm_proc_start("", NULL, NULL, &id, err, sizeof(err)));
     ASSERT_TRUE(strstr(err, "cmd") != NULL);
     ASSERT_EQ(nm_proc_count(), 0);
 }
@@ -456,7 +456,7 @@ static void test_workdir_is_honored(void)
 
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_PWD, dir, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_PWD, dir, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
     const char *out = nm_proc_take_output(p);
@@ -473,7 +473,7 @@ static void test_workdir_is_honored(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start(TEST_PWD, TEST_WORKDIR, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(TEST_PWD, TEST_WORKDIR, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
     const char *out = nm_proc_take_output(p);
@@ -492,7 +492,7 @@ static void test_handle_is_a_signaled_event(void)
     char err[128];
     int id = -1;
     /* Prints once the first ping reply lands (~1 s). */
-    NmProc *p = nm_proc_start("ping -n 2 127.0.0.1 >nul & echo late", NULL,
+    NmProc *p = nm_proc_start("ping -n 2 127.0.0.1 >nul & echo late", NULL, NULL,
                               &id, err, sizeof(err));
     ASSERT_NOT_NULL(p);
     intptr_t h = nm_proc_handle(p);
@@ -515,6 +515,237 @@ static void test_handle_is_a_signaled_event(void)
 }
 #endif
 
+/* ---------------------------------------------------------------- */
+/* The shell vocabulary and a chosen shell                          */
+/* ---------------------------------------------------------------- */
+
+/* The flag table, every kind × login — ONE table, so the flag vector
+ * and the "does this shell have a login mode" question cannot drift
+ * apart (Codex's derive_exec_args shapes). */
+static void test_shell_flag_table(void)
+{
+    const char *f[4];
+    int n;
+
+    n = nm_proc_shell_flags(NM_SHELL_SH, 0, "echo hi", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-c");
+    ASSERT_STR_EQ(f[1], "echo hi");
+    n = nm_proc_shell_flags(NM_SHELL_SH, 1, "echo hi", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-lc");
+    ASSERT_STR_EQ(f[1], "echo hi");
+
+    n = nm_proc_shell_flags(NM_SHELL_BASH, 1, "x", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-lc");
+    n = nm_proc_shell_flags(NM_SHELL_ZSH, 0, "x", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-c");
+    /* An unknown name is spawned sh-like (quoth's fallback), never
+     * refused. */
+    n = nm_proc_shell_flags(NM_SHELL_OTHER, 1, "x", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-lc");
+
+    /* cmd.exe: /d /c, with login IGNORED (it has no login mode). */
+    n = nm_proc_shell_flags(NM_SHELL_CMD, 0, "x", f);
+    ASSERT_EQ(n, 3);
+    ASSERT_STR_EQ(f[0], "/d");
+    ASSERT_STR_EQ(f[1], "/c");
+    ASSERT_STR_EQ(f[2], "x");
+    n = nm_proc_shell_flags(NM_SHELL_CMD, 1, "x", f);
+    ASSERT_EQ(n, 3);
+    ASSERT_STR_EQ(f[0], "/d");
+
+    /* powershell: -NoProfile unless login. */
+    n = nm_proc_shell_flags(NM_SHELL_POWERSHELL, 0, "x", f);
+    ASSERT_EQ(n, 3);
+    ASSERT_STR_EQ(f[0], "-NoProfile");
+    ASSERT_STR_EQ(f[1], "-Command");
+    ASSERT_STR_EQ(f[2], "x");
+    n = nm_proc_shell_flags(NM_SHELL_POWERSHELL, 1, "x", f);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(f[0], "-Command");
+    ASSERT_STR_EQ(f[1], "x");
+
+    /* Only cmd.exe lacks login semantics. */
+    ASSERT_TRUE(nm_proc_shell_has_login(NM_SHELL_SH));
+    ASSERT_TRUE(nm_proc_shell_has_login(NM_SHELL_BASH));
+    ASSERT_TRUE(nm_proc_shell_has_login(NM_SHELL_POWERSHELL));
+    ASSERT_TRUE(nm_proc_shell_has_login(NM_SHELL_OTHER));
+    ASSERT_FALSE(nm_proc_shell_has_login(NM_SHELL_CMD));
+}
+
+/* The classification: basename, case, an explicit .exe, an unknown name
+ * (sh-like, not a refusal), and the platform default for a NULL path. */
+static void test_shell_classification(void)
+{
+    ASSERT_EQ(nm_proc_shell_kind("/bin/sh"), NM_SHELL_SH);
+    ASSERT_EQ(nm_proc_shell_kind("bash"), NM_SHELL_BASH);
+    ASSERT_EQ(nm_proc_shell_kind("/usr/local/bin/BASH"), NM_SHELL_BASH);
+    ASSERT_EQ(nm_proc_shell_kind("/bin/zsh"), NM_SHELL_ZSH);
+    ASSERT_EQ(nm_proc_shell_kind("C:\\Windows\\System32\\CMD.EXE"),
+              NM_SHELL_CMD);
+    ASSERT_EQ(nm_proc_shell_kind("cmd"), NM_SHELL_CMD);
+    ASSERT_EQ(nm_proc_shell_kind("pwsh"), NM_SHELL_POWERSHELL);
+    ASSERT_EQ(nm_proc_shell_kind("PowerShell.exe"), NM_SHELL_POWERSHELL);
+    ASSERT_EQ(nm_proc_shell_kind("fish"), NM_SHELL_OTHER);
+#ifdef _WIN32
+    ASSERT_EQ(nm_proc_shell_kind(NULL), NM_SHELL_CMD);
+    ASSERT_EQ(nm_proc_shell_kind(""), NM_SHELL_CMD);
+#else
+    ASSERT_EQ(nm_proc_shell_kind(NULL), NM_SHELL_SH);
+    ASSERT_EQ(nm_proc_shell_kind(""), NM_SHELL_SH);
+#endif
+}
+
+/* A NAMED shell is what runs the command: each platform names its own,
+ * so the assertion is about the spawn honouring the argument, not about
+ * which shell that is. */
+static void test_named_shell_runs_the_command(void)
+{
+    nm_proc_reset();
+#ifdef _WIN32
+    NmProcShell sh = { "cmd.exe", 0 };
+#else
+    NmProcShell sh = { "/bin/sh", 0 };
+#endif
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start(TEST_ECHO, NULL, &sh, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    ASSERT_EQ(nm_proc_exit(p), 0);
+    ASSERT_NOT_NULL(strstr(nm_proc_take_output(p), "hello"));
+    nm_proc_close(p);
+}
+
+#ifndef _WIN32
+/* Is a real bash here? (The POSIX shell tests need one; /bin/sh is
+ * dash on Debian/Ubuntu, which has no login semantics of its own.) */
+static int bash_available(void)
+{
+    return access("/bin/bash", X_OK) == 0;
+}
+
+/* A named bash with a bash-ONLY expansion as the identity check. */
+static void test_named_bash_runs_the_command(void)
+{
+    if (!bash_available())
+        return; /* no bash: nothing to assert */
+    nm_proc_reset();
+    NmProcShell sh = { "/bin/bash", 0 };
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("echo shell=${BASH_VERSION:+bash}", NULL, &sh,
+                              &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    ASSERT_EQ(nm_proc_exit(p), 0);
+    const char *out = nm_proc_take_output(p);
+    ASSERT_NOT_NULL(strstr(out, "shell=bash"));
+    nm_proc_close(p);
+}
+
+/* `login` really sources the user's profile: a scratch HOME whose
+ * .bash_profile sets a marker, then the same command with and without
+ * login semantics. */
+static void test_login_shell_sources_the_profile(void)
+{
+    if (!bash_available())
+        return;
+    nm_proc_reset();
+    char tmpl[] = "/tmp/nm-login-XXXXXX";
+    char *dir = mkdtemp(tmpl);
+    if (!dir)
+        return; /* no writable /tmp: nothing to assert */
+    char prof[256];
+    snprintf(prof, sizeof(prof), "%s/.bash_profile", dir);
+    FILE *f = fopen(prof, "w");
+    if (!f) {
+        rmdir(dir);
+        return;
+    }
+    fputs("export NV_PROFILE_MARKER=from-profile\n", f);
+    fclose(f);
+
+    char saved_home[512];
+    const char *old_home = getenv("HOME");
+    snprintf(saved_home, sizeof(saved_home), "%s", old_home ? old_home : "");
+    setenv("HOME", dir, 1);
+
+    char err[128];
+    int id = -1;
+    int login_ran = 0, plain_ran = 0;
+    NmProcShell login_sh = { "/bin/bash", 1 };
+    NmProc *p = nm_proc_start("echo MARKER=$NV_PROFILE_MARKER", NULL,
+                              &login_sh, &id, err, sizeof(err));
+    if (p) {
+        if (pump_until(p, done_exited, 5000) == 0) {
+            const char *out = nm_proc_take_output(p);
+            login_ran = out && strstr(out, "MARKER=from-profile") != NULL;
+        }
+        nm_proc_close(p);
+    }
+    NmProcShell plain_sh = { "/bin/bash", 0 };
+    NmProc *q = nm_proc_start("echo MARKER=$NV_PROFILE_MARKER", NULL,
+                              &plain_sh, &id, err, sizeof(err));
+    if (q) {
+        if (pump_until(q, done_exited, 5000) == 0) {
+            const char *out = nm_proc_take_output(q);
+            plain_ran = out && strstr(out, "MARKER=from-profile") != NULL;
+        }
+        nm_proc_close(q);
+    }
+
+    if (saved_home[0])
+        setenv("HOME", saved_home, 1);
+    else
+        unsetenv("HOME");
+    unlink(prof);
+    rmdir(dir);
+
+    ASSERT_TRUE(login_ran);  /* -lc: the profile ran */
+    ASSERT_FALSE(plain_ran); /* -c: it did not */
+}
+
+/* A shell that cannot be executed says WHY on the job's own output, so
+ * the model does not have to guess from a bare 127. */
+static void test_unexecutable_shell_reports_why(void)
+{
+    nm_proc_reset();
+    NmProcShell sh = { "/nonexistent/nevermore-shell", 0 };
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("echo hi", NULL, &sh, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    ASSERT_EQ(nm_proc_exit(p), 127);
+    const char *out = nm_proc_take_output(p);
+    ASSERT_NOT_NULL(strstr(out, "cannot exec"));
+    ASSERT_NOT_NULL(strstr(out, "/nonexistent/nevermore-shell"));
+    ASSERT_NOT_NULL(strstr(out, "no such file or directory"));
+    nm_proc_close(p);
+}
+
+/* A directory is not an executable: ENOTDIR/EACCES are named too. */
+static void test_unexecutable_shell_names_the_reason(void)
+{
+    nm_proc_reset();
+    NmProcShell sh = { "/tmp", 0 };
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("echo hi", NULL, &sh, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    ASSERT_EQ(nm_proc_exit(p), 127);
+    const char *out = nm_proc_take_output(p);
+    ASSERT_NOT_NULL(strstr(out, "cannot exec '/tmp'"));
+    nm_proc_close(p);
+}
+#endif /* !_WIN32 */
+
 int main(void)
 {
     nm_proc_reset();
@@ -531,6 +762,15 @@ int main(void)
     RUN_TEST(test_job_cap);
     RUN_TEST(test_registry_iteration);
     RUN_TEST(test_empty_command_is_rejected);
+    RUN_TEST(test_shell_flag_table);
+    RUN_TEST(test_shell_classification);
+    RUN_TEST(test_named_shell_runs_the_command);
+#ifndef _WIN32
+    RUN_TEST(test_named_bash_runs_the_command);
+    RUN_TEST(test_login_shell_sources_the_profile);
+    RUN_TEST(test_unexecutable_shell_reports_why);
+    RUN_TEST(test_unexecutable_shell_names_the_reason);
+#endif
     RUN_TEST(test_workdir_is_honored);
 #ifdef _WIN32
     RUN_TEST(test_handle_is_a_signaled_event);

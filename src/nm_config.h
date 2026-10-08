@@ -204,6 +204,17 @@ extern "C" {
  * resolves it at the point of use. Env spelling:
  * NEVERMORE_POLL_TIMEOUT_MS. */
 #define NM_CFG_KEY_POLL_TIMEOUT "poll_timeout"
+/* Whether a process job may run a LOGIN shell (sourcing the user's
+ * profile, so the PATH and aliases in it apply). `on`/`off` (a bool,
+ * default OFF). A TUI started from a desktop launcher or a session
+ * manager has a minimal PATH, so `bash -lc` is the standard fix — but
+ * it executes the user's own profile, which is why it is opt-in
+ * (quoth's `quoth-tool-allow-login-shell`, Codex's
+ * `allow_login_shell`). `exec_command`'s `login` argument is the
+ * override: absent = this key, present = the call's own value. Never
+ * applies to `run_command` or nevermore's own stages. Env spelling:
+ * NEVERMORE_LOGIN_SHELL. */
+#define NM_CFG_KEY_LOGIN_SHELL "login_shell"
 /* Rolling context window: whether the agent trims the stored
  * conversation to a token budget before each request. `on`/`off` (a
  * bool, default OFF). OFF — the default — sends the whole transcript

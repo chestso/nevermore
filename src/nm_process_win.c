@@ -180,8 +180,61 @@ static DWORD WINAPI reader_thread(LPVOID param)
     return 0;
 }
 
+/* Append an ASCII (flag) string to a wide line. */
+static void append_ascii(wchar_t *dst, size_t cap, const char *s)
+{
+    size_t n = wcslen(dst);
+    for (; *s && n + 1 < cap; s++)
+        dst[n++] = (wchar_t)(unsigned char)*s;
+    dst[n] = L'\0';
+}
+
+/* The CreateProcessW command line for `cmd` under `sh`: `shell flags…
+ * cmd`.  The shell path is quoted only when it has a space (a
+ * `C:\Program Files\Git\bin\bash.exe`); the command tail is NEVER
+ * quoted — quoting the whole line makes CreateProcessW look for an
+ * executable literally named "cmd.exe /d /c …" (the trap both spawn
+ * halves document).  NULL = the platform default, cmd.exe. */
+static wchar_t *build_shell_line(const char *cmd, const NmProcShell *sh)
+{
+    const char *path = (sh && sh->path && *sh->path) ? sh->path : "cmd.exe";
+    const char *flags[4];
+    int nf = nm_proc_shell_flags(nm_proc_shell_kind(sh ? sh->path : NULL),
+                                 sh ? sh->login : 0, cmd, flags);
+    if (nf > 0)
+        nf--; /* the last entry is `cmd` itself (appended wide below) */
+    wchar_t *wpath = utf8_to_wide(path);
+    wchar_t *wcmd = utf8_to_wide(cmd);
+    size_t cap = strlen(cmd) + strlen(path) + 64;
+    wchar_t *line = malloc(cap * sizeof(*line));
+    if (!wpath || !wcmd || !line) {
+        free(wpath);
+        free(wcmd);
+        free(line);
+        return NULL;
+    }
+    line[0] = L'\0';
+    if (wcschr(wpath, L' ')) {
+        append_ascii(line, cap, "\"");
+        wcsncat(line, wpath, cap - wcslen(line) - 1);
+        append_ascii(line, cap, "\"");
+    } else {
+        wcsncat(line, wpath, cap - wcslen(line) - 1);
+    }
+    for (int i = 0; i < nf; i++) {
+        append_ascii(line, cap, " ");
+        append_ascii(line, cap, flags[i]);
+    }
+    append_ascii(line, cap, " ");
+    wcsncat(line, wcmd, cap - wcslen(line) - 1);
+    free(wpath);
+    free(wcmd);
+    return line;
+}
+
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     NmProcOs **os_out, char *err, size_t errsz)
+                     const NmProcShell *sh, NmProcOs **os_out, char *err,
+                     size_t errsz)
 {
     *os_out = NULL;
 
@@ -246,25 +299,15 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         si.StartupInfo.cb = sizeof(si.StartupInfo);
     }
 
-    /* Shell semantics: cmd.exe /d /c cmd.  The whole line must NOT be
-     * wrapped in one pair of quotes — CreateProcessW would look for an
-     * executable literally named "cmd.exe /d /c ..." (the same trap
-     * tools_spawn_win.c documents). */
-    wchar_t *wcmd = utf8_to_wide(cmd);
-    size_t line_cap = strlen(cmd) + 32;
-    wchar_t *line = malloc(line_cap * sizeof(*line));
-    if (!wcmd || !line) {
-        free(wcmd);
-        free(line);
+    /* Shell semantics: the requested shell (or cmd.exe /d /c). */
+    wchar_t *line = build_shell_line(cmd, sh);
+    if (!line) {
         nm_proc_set_err(err, errsz, "out of memory");
         if (attrs)
             DeleteProcThreadAttributeList(attrs);
         free(attrs);
         goto fail;
     }
-    wcsncpy(line, L"cmd.exe /d /c ", line_cap);
-    wcsncat(line, wcmd, line_cap - wcslen(line) - 1);
-    free(wcmd);
     wchar_t *wdirc = (cwd && *cwd) ? utf8_to_wide(cwd) : NULL;
     wchar_t *wenv = build_env_block();
 

@@ -159,6 +159,111 @@ static int poll_timeout_ms(void)
     return v < NM_EXEC_EMPTY_POLL_MIN_MS ? NM_EXEC_EMPTY_POLL_MIN_MS : v;
 }
 
+/* ---------------------------------------------------------------- */
+/* The `shell` / `login` arguments                                   */
+/* ---------------------------------------------------------------- */
+
+/* The `login_shell` policy key, resolved at the point of use: the tool's
+ * `login` argument is the OVERRIDE, this key is the default (Codex's
+ * `get_command`). No pushed copy, so `/config set login_shell` takes
+ * effect on the next call. Off when no store is installed. */
+static int login_shell_allowed(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_LOGIN_SHELL, 0) : 0;
+}
+
+/* Validate a requested `shell` before it reaches execve /
+ * CreateProcessW: NULL when accepted, a static reason when refused (the
+ * caller names the tool). A path that passes this and still cannot be
+ * executed is NOT a validation error — the child reports why (`cannot
+ * exec 'x': no such file or directory`) or CreateProcessW does. */
+static const char *shell_reject_reason(const char *shell)
+{
+    size_t n = strlen(shell);
+    if (n == 0)
+        return "shell must name a shell binary";
+    if (n > 255)
+        return "shell is too long (255 characters max)";
+    if (shell[0] == '-')
+        return "shell must not start with '-' (that is a flag, not a shell)";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)shell[i];
+        if (c < 32 || c == 127)
+            return "shell must not contain control characters";
+        if (c == '"')
+            return "shell must not contain a double quote";
+    }
+    return NULL;
+}
+
+/* A boolean argument, taken from a JSON bool or the string "true" /
+ * "false" (models emit both for a flag). 0 = absent, 1 = present
+ * (*value set), -1 = present but neither spelling — refused by name
+ * rather than silently ignored. */
+static int arg_bool(NmJson *args, const char *key, int *value)
+{
+    const NmJson *v = nm_json_get(args, key);
+    if (!v)
+        return 0;
+    if (nm_json_type(v) == NM_JSON_BOOL) {
+        *value = nm_json_bool(v);
+        return 1;
+    }
+    const char *s = nm_json_str(v);
+    if (s && (strcmp(s, "true") == 0 || strcmp(s, "false") == 0)) {
+        *value = (s[0] == 't');
+        return 1;
+    }
+    return -1;
+}
+
+/* The `login`/`shell` pair, resolved and validated, or NULL when
+ * accepted (with *out filled). The refusals are what the model reads
+ * instead of a silence: an argument the spawn ignores is worse than an
+ * omitted one (docs/PROCESS-PLAN.md §6). */
+static const char *resolve_shell(NmJson *args, NmProcShell *out, char *msg,
+                                 size_t msgsz)
+{
+    const char *shell = nm_json_str(nm_json_get(args, "shell"));
+    int req = 0;
+    int present = arg_bool(args, "login", &req);
+
+    if (shell) {
+        const char *why = shell_reject_reason(shell);
+        if (why) {
+            snprintf(msg, msgsz, "exec_command: %s", why);
+            return msg;
+        }
+    }
+    if (present < 0) {
+        snprintf(msg, msgsz, "exec_command: login must be true or false");
+        return msg;
+    }
+
+    out->path = shell;
+    out->login = present ? req : login_shell_allowed();
+    if (present && req) {
+        /* Only an EXPLICIT request is refused. The gate's own default is
+         * inert for a shell with no login mode: nothing was asked for,
+         * so nothing is being silently ignored (the split /config
+         * already uses for an inert `skip_families`). */
+        if (!login_shell_allowed()) {
+            snprintf(msg, msgsz,
+                     "exec_command: login shells are disabled by config "
+                     "(set login_shell = on, or omit login)");
+            return msg;
+        }
+        if (!nm_proc_shell_has_login(nm_proc_shell_kind(shell))) {
+            snprintf(msg, msgsz,
+                     "exec_command: cmd.exe has no login-shell mode; omit "
+                     "login or name a POSIX shell");
+            return msg;
+        }
+    }
+    return NULL;
+}
+
 /* Does `input` end with the close-stdin marker? */
 static int ends_with_eof_marker(const char *input, size_t n)
 {
@@ -382,11 +487,22 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
 #endif
     int yield_ms = clamp_ms(req, lo, NM_EXEC_YIELD_MAX_MS);
 
+    /* Which shell runs it, and whether it sources the user's profile.
+     * Resolved and validated BEFORE the spawn: a refused request must
+     * not leave a child behind (docs/PROCESS-PLAN.md §6's rule — an
+     * argument the spawn ignores is worse than an omitted one). */
+    NmProcShell sh = { NULL, 0 };
+    char why[192];
+    if (resolve_shell(args, &sh, why, sizeof(why))) {
+        nm_json_free(args);
+        return fail_exec(nm_tool_result_error(why));
+    }
+
     char err[256];
     int id = -1;
-    /* Both borrowed strings are consumed by the spawn (the child chdirs
-     * with its own copy-on-write pages), so the arena may go now. */
-    NmProc *p = nm_proc_start(cmd, cwd, &id, err, sizeof(err));
+    /* Every borrowed string (cmd, cwd, sh.path) is consumed by the
+     * spawn, so the arena may go now. */
+    NmProc *p = nm_proc_start(cmd, cwd, &sh, &id, err, sizeof(err));
     nm_json_free(args);
     if (!p) {
         char msg[320];
@@ -767,7 +883,13 @@ static NmToolResult kill_job_exec(const NmTool *tool,
 static const char exec_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
     "\"cmd\":{\"type\":\"string\",\"description\":\"Shell command to start "
-    "(runs under /bin/sh -c in its own terminal).\"},"
+    "(runs in its own terminal).\"},"
+    "\"shell\":{\"type\":\"string\",\"description\":\"Shell binary to run the "
+    "command with (a path or a bare name). Defaults to the platform shell: "
+    "/bin/sh, or cmd.exe on Windows.\"},"
+    "\"login\":{\"type\":\"boolean\",\"description\":\"Run the shell with "
+    "login (-l) semantics, sourcing the user's profile (PATH, aliases). "
+    "Omitted means the user's login_shell setting, off by default.\"},"
     "\"workdir\":{\"type\":\"string\",\"description\":\"Working directory "
     "(defaults to the agent's working directory).\"},"
     "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"" NM_EXEC_YIELD_DESC "\"}},"

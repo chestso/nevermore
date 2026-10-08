@@ -340,7 +340,7 @@ static NmToolExec *run_command_begin(const NmTool *tool,
 
     char err[256];
     int id = -1;
-    NmProc *p = nm_proc_start(cmd, NULL, &id, err, sizeof(err));
+    NmProc *p = nm_proc_start(cmd, NULL, NULL, &id, err, sizeof(err));
     free(cmd);
     if (!p)
         return NULL; /* spawn failed: execute reports it verbatim */
