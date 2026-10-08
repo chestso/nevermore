@@ -187,6 +187,18 @@ prefix stable so providers can serve it from their prompt cache
 (cached input bills far cheaper). Turn it on only if you want
 nevermore to silently cap the context instead.
 
+When it is on, the window is **stable-prefix**: it remembers where it
+cut, keeps that cut point as long as the newest messages still fit (so
+the prefix only grows and the provider's cache keeps working), and moves
+it only when the tail outgrows the budget — dropping **whole turns** at
+once (never half a turn, never a tool result without the call that
+produced it), down to about three quarters of the budget so the next
+jump is many rounds away rather than the next round. A single turn
+bigger than the budget is kept whole: the estimate is rough, and
+`/context` (the gauge) is what shows the real pressure. When a jump does
+drop messages, the model is told once that what it read earlier may be
+gone — re-read before asserting — unless `reminders = off`.
+
 `searxng` is the local [SearXNG](https://searxng.org) endpoint behind
 the `web_search` tool (default `http://127.0.0.1:8888`); the model
 queries it when it needs live web results. `searxng_enabled` (a bool)

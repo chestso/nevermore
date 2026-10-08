@@ -95,9 +95,11 @@ static void test_context_view_basic(void)
     nm_session_append(s, NM_ROLE_ASSISTANT, "a1");
     nm_session_append(s, NM_ROLE_USER, "u2");
 
-    NmContextView v = nm_session_context(s, 100000);
-    /* Everything fits: system + 3 messages. */
+    /* No memory (NULL): the view is computed for this call alone. */
+    NmContextView v = nm_session_context(s, 100000, NULL);
+    /* Everything fits: system + 3 messages; the ledger is empty. */
     ASSERT_EQ(v.n, 4);
+    ASSERT_EQ(v.dropped, 0u);
     ASSERT_EQ(v.messages[0]->role, NM_ROLE_SYSTEM);
     ASSERT_STR_EQ(v.messages[3]->content, "u2");
     nm_session_free(s);
@@ -106,7 +108,8 @@ static void test_context_view_basic(void)
 /* A non-positive budget is "no trim" (the agent's default with the
  * rolling window off): the WHOLE transcript, regardless of size. The
  * provider reports an oversize context rather than nevermore silently
- * capping it. */
+ * capping it. It also FORGETS any remembered cut point — turning the
+ * window off and back on must not resume a stale index. */
 static void test_context_view_no_trim(void)
 {
     NmSession *s = nm_session_new("system prompt");
@@ -116,24 +119,33 @@ static void test_context_view_no_trim(void)
                  "message %d with plenty of padding to matter", i);
         nm_session_append(s, NM_ROLE_USER, buf);
     }
-    /* A tiny budget would trim; zero and negative send everything. */
-    NmContextView trimmed = nm_session_context(s, 50);
+    /* A tiny budget windows the transcript, and remembers the cut. */
+    size_t anchor = NM_SESSION_NO_ANCHOR;
+    NmContextView trimmed = nm_session_context(s, 50, &anchor);
     ASSERT_TRUE(trimmed.n < nm_session_len(s));
+    ASSERT_TRUE(trimmed.dropped > 0);
+    ASSERT_EQ(trimmed.n + trimmed.dropped, nm_session_len(s));
+    ASSERT_TRUE(anchor != NM_SESSION_NO_ANCHOR);
 
-    NmContextView all = nm_session_context(s, 0);
+    /* Zero and negative send everything — and forget the cut point. */
+    NmContextView all = nm_session_context(s, 0, &anchor);
     ASSERT_EQ(all.n, nm_session_len(s)); /* 1 system + 50 */
+    ASSERT_EQ(all.dropped, 0u);
+    ASSERT_EQ(anchor, NM_SESSION_NO_ANCHOR);
     ASSERT_EQ(all.messages[0]->role, NM_ROLE_SYSTEM);
     ASSERT_STR_EQ(all.messages[all.n - 1]->content,
                   "message 49 with plenty of padding to matter");
 
-    NmContextView neg = nm_session_context(s, -1);
+    NmContextView neg = nm_session_context(s, -1, &anchor);
     ASSERT_EQ(neg.n, nm_session_len(s));
+    ASSERT_EQ(neg.dropped, 0u);
 
     /* A session with no system prompt is still whole, no off-by-one. */
     NmSession *e = nm_session_new(NULL);
     nm_session_append(e, NM_ROLE_USER, "only one");
-    NmContextView ev = nm_session_context(e, 0);
+    NmContextView ev = nm_session_context(e, 0, NULL);
     ASSERT_EQ(ev.n, 1);
+    ASSERT_EQ(ev.dropped, 0u);
     ASSERT_STR_EQ(ev.messages[0]->content, "only one");
     nm_session_free(e);
     nm_session_free(s);
@@ -148,14 +160,174 @@ static void test_context_view_budget_trims_oldest(void)
         nm_session_append(s, NM_ROLE_USER, buf);
     }
 
-    /* Tight budget: some middle messages dropped, system kept, the
-     * newest kept. */
-    NmContextView v = nm_session_context(s, 100);
+    /* A budget well under the transcript: the middle is dropped, the
+     * system prompt and the newest messages are kept, and the ledger
+     * accounts for exactly what is missing. */
+    NmContextView v = nm_session_context(s, 60, NULL);
     ASSERT_TRUE(v.n >= 2);
+    ASSERT_TRUE(v.dropped > 0);
+    ASSERT_EQ(v.n + v.dropped, nm_session_len(s));
     ASSERT_EQ(v.messages[0]->role, NM_ROLE_SYSTEM);
     const NmSessionMessage *last = v.messages[v.n - 1];
     ASSERT_EQ(last->role, NM_ROLE_USER);
     ASSERT_TRUE(strstr(last->content, "message 9") != NULL);
+    nm_session_free(s);
+}
+
+/* The stable prefix (P3): a remembered cut point HOLDS while the tail
+ * from it fits, so the request's prefix does not change between rounds —
+ * that is the whole reason the window remembers where it cut, and what
+ * keeps the provider's cached prefix alive. Only a tail that outgrows
+ * the budget moves it (and then it lands with headroom, so the next jump
+ * is many rounds away rather than the next one). */
+static void test_context_view_holds_its_cut_point(void)
+{
+    NmSession *s = nm_session_new("sys");
+    for (int i = 0; i < 200; i++) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "user message %d padding", i);
+        nm_session_append(s, NM_ROLE_USER, buf);
+    }
+
+    size_t anchor = NM_SESSION_NO_ANCHOR;
+    NmContextView first = nm_session_context(s, 1000, &anchor);
+    ASSERT_TRUE(first.dropped > 0);
+    size_t cut = anchor;
+    size_t dropped = first.dropped;
+    ASSERT_EQ(first.n + first.dropped, nm_session_len(s));
+
+    /* A handful of small rounds: the cut point does not move, so the
+     * prefix is byte-identical and the tail simply grows (append-only,
+     * which is exactly what the provider's cache likes). */
+    for (int i = 0; i < 5; i++) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "user message %d padding", 200 + i);
+        nm_session_append(s, NM_ROLE_USER, buf);
+        NmContextView v = nm_session_context(s, 1000, &anchor);
+        ASSERT_EQ(anchor, cut);
+        ASSERT_EQ(v.dropped, dropped);
+        ASSERT_EQ(v.n + v.dropped, nm_session_len(s));
+        /* The newest message is always in the window. */
+        ASSERT_STR_EQ(v.messages[v.n - 1]->content, buf);
+    }
+
+    /* One round big enough that no window can hold the tail any more:
+     * the cut advances (and reports more dropped messages). */
+    char *big = malloc(48000);
+    ASSERT_NOT_NULL(big);
+    memset(big, 'x', 48000 - 1);
+    big[48000 - 1] = '\0';
+    nm_session_append(s, NM_ROLE_USER, big);
+    free(big);
+
+    NmContextView jumped = nm_session_context(s, 1000, &anchor);
+    ASSERT_TRUE(anchor > cut); /* the cut moved */
+    ASSERT_TRUE(jumped.dropped > dropped);
+    ASSERT_EQ(jumped.n + jumped.dropped, nm_session_len(s));
+    /* The oversize message is the newest turn: it stays, whole. */
+    ASSERT_EQ(jumped.messages[jumped.n - 1]->role, NM_ROLE_USER);
+    ASSERT_TRUE(strlen(jumped.messages[jumped.n - 1]->content) == 48000 - 1);
+    nm_session_free(s);
+}
+
+/* The cut lands on a TURN start (a user message), so a kept answer never
+ * loses its question and a tool result never loses the assistant message
+ * that called it — even with a budget that cannot hold a turn as a
+ * whole. */
+static void test_context_view_cuts_whole_turns(void)
+{
+    NmSession *s = nm_session_new("sys");
+    for (int turn = 0; turn < 4; turn++) {
+        char buf[64];
+        snprintf(buf, sizeof(buf), "question %d with padding", turn);
+        nm_session_append(s, NM_ROLE_USER, buf);
+        nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]", NULL);
+        nm_session_append_tool_result(s, "c1", "read_file",
+                                      "a chunk of file contents");
+        snprintf(buf, sizeof(buf), "answer %d with padding", turn);
+        nm_session_append(s, NM_ROLE_ASSISTANT, buf);
+    }
+
+    NmContextView v = nm_session_context(s, 60, NULL);
+    ASSERT_TRUE(v.dropped > 0);
+    /* The first message after the system prompt is a turn start. */
+    ASSERT_EQ(v.messages[1]->role, NM_ROLE_USER);
+    /* And nothing in the view dangles: every tool result has an
+     * assistant tool_calls message before it. */
+    int dangling = 0;
+    for (size_t i = 0; i < v.n; i++) {
+        if (v.messages[i]->role != NM_ROLE_TOOL)
+            continue;
+        int paired = 0;
+        for (size_t j = 0; j < i; j++)
+            if (v.messages[j]->role == NM_ROLE_ASSISTANT &&
+                v.messages[j]->tool_calls_json)
+                paired = 1;
+        if (!paired)
+            dangling = 1;
+    }
+    ASSERT_FALSE(dangling);
+    /* The ledger's cut point is a turn boundary: dropping it drops whole
+     * turns, so the count is a multiple of the turn's size (4 messages)
+     * plus nothing else. */
+    ASSERT_EQ(v.dropped % 4, 0u);
+    nm_session_free(s);
+}
+
+/* The one thing a window cannot fix: a single turn that does not fit. It
+ * is kept WHOLE (a cut inside a turn would send an answer whose question
+ * is gone, and could dangle a tool result) — the budget is best-effort
+ * at turn granularity, and the context gauge is what tells the human. */
+static void test_context_view_keeps_the_newest_turn_whole(void)
+{
+    NmSession *s = nm_session_new("sys");
+    nm_session_append(s, NM_ROLE_USER, "read the big file");
+    nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]", NULL);
+    /* ~12000 tokens of tool output: far beyond the budget. */
+    char *big = malloc(48000);
+    ASSERT_NOT_NULL(big);
+    memset(big, 'x', 48000 - 1);
+    big[48000 - 1] = '\0';
+    nm_session_append_tool_result(s, "c1", "read_file", big);
+    free(big);
+
+    NmContextView v = nm_session_context(s, 100, NULL);
+    /* Nothing to drop: the turn is the newest one and it is indivisible. */
+    ASSERT_EQ(v.dropped, 0u);
+    ASSERT_EQ(v.n, nm_session_len(s));
+    ASSERT_STR_EQ(v.messages[1]->content, "read the big file");
+    nm_session_free(s);
+}
+
+/* A stale cut point (an index the session can no longer honour: it can
+ * only grow, but a caller may hand back one from another session) is
+ * ignored, not obeyed. */
+static void test_context_view_ignores_a_stale_anchor(void)
+{
+    NmSession *s = nm_session_new("sys");
+    for (int i = 0; i < 4; i++)
+        nm_session_append(s, NM_ROLE_USER, "message with some padding");
+
+    size_t anchor = 9999; /* past the end */
+    NmContextView v = nm_session_context(s, 30, &anchor);
+    ASSERT_TRUE(v.n >= 2);
+    ASSERT_EQ(v.n + v.dropped, nm_session_len(s));
+    ASSERT_EQ(v.messages[0]->role, NM_ROLE_SYSTEM);
+    ASSERT_TRUE(anchor < nm_session_len(s));
+
+    /* An anchor that names the END would leave an empty window (nothing
+     * but the system prompt): it is ignored too, never obeyed. */
+    anchor = nm_session_len(s);
+    NmContextView end = nm_session_context(s, 30, &anchor);
+    ASSERT_EQ(end.n, v.n);
+    ASSERT_EQ(end.dropped, v.dropped);
+    ASSERT_EQ(end.messages[end.n - 1]->role, NM_ROLE_USER);
+
+    /* A "no anchor" value behaves the same way. */
+    anchor = NM_SESSION_NO_ANCHOR;
+    NmContextView w = nm_session_context(s, 30, &anchor);
+    ASSERT_EQ(w.n, v.n);
+    ASSERT_EQ(w.dropped, v.dropped);
     nm_session_free(s);
 }
 
@@ -165,23 +337,30 @@ static void test_context_view_keeps_tool_pair(void)
     nm_session_append(s, NM_ROLE_USER, "do it");
     nm_session_append_tool_call(s, "[{\"id\":\"c1\"}]", NULL);
     nm_session_append_tool_result(s, "c1", "read_file", "the file contents");
+    nm_session_append(s, NM_ROLE_ASSISTANT, "done, the file says so");
+    /* A later turn, so there is a turn boundary to cut at: the pairing
+     * guarantee is structural — a cut lands on a turn start, so a tool
+     * result and the assistant message that called it leave together. */
+    nm_session_append(s, NM_ROLE_USER, "and now something else entirely");
 
-    /* Tight enough that a naive per-message walk would drop the tool
-     * call but keep the result: the pairing rule must keep both or
-     * drop both. */
-    NmContextView v = nm_session_context(s, 30);
+    /* A budget that holds the newest turn alone. */
+    NmContextView v = nm_session_context(s, 30, NULL);
+    ASSERT_TRUE(v.dropped >= 4u);
+    ASSERT_STR_EQ(v.messages[v.n - 1]->content,
+                  "and now something else entirely");
+    /* Nothing dangles: no tool result reaches the wire without the
+     * assistant tool_calls message that called it. */
     int dangling = 0;
     for (size_t i = 0; i < v.n; i++) {
-        if (v.messages[i]->role == NM_ROLE_TOOL) {
-            /* There must be an assistant tool_calls message before
-             * it in the view. */
-            int paired = 0;
-            for (size_t j = 0; j < i; j++)
-                if (v.messages[j]->role == NM_ROLE_ASSISTANT && v.messages[j]->tool_calls_json)
-                    paired = 1;
-            if (!paired)
-                dangling = 1;
-        }
+        if (v.messages[i]->role != NM_ROLE_TOOL)
+            continue;
+        int paired = 0;
+        for (size_t j = 0; j < i; j++)
+            if (v.messages[j]->role == NM_ROLE_ASSISTANT &&
+                v.messages[j]->tool_calls_json)
+                paired = 1;
+        if (!paired)
+            dangling = 1;
     }
     ASSERT_FALSE(dangling);
     nm_session_free(s);
@@ -537,8 +716,8 @@ static void test_session_append_user_images(void)
 }
 
 /* The context-window view carries the image lists along with their
- * messages: trimming is message-granular, so an image never survives
- * without its text (and vice versa). */
+ * messages: a cut lands on a turn start, so an image never survives
+ * without the user message that attached it (and vice versa). */
 static void test_session_context_view_carries_images(void)
 {
     char png[128];
@@ -552,21 +731,28 @@ static void test_session_context_view_carries_images(void)
     size_t ids[1] = { 0 };
     nm_session_append_user_images(s, "describe this", ids, 1);
     nm_session_append(s, NM_ROLE_ASSISTANT, "a 64x32 test image");
+    /* A later turn, so the image turn is droppable at all (a window
+     * never cuts inside a turn). */
+    nm_session_append(s, NM_ROLE_USER, "thanks, now do something small");
+    nm_session_append(s, NM_ROLE_ASSISTANT, "done");
 
     /* no trim: everything, image list included */
-    NmContextView v = nm_session_context(s, 0);
-    ASSERT_EQ(v.n, 3u);
+    NmContextView v = nm_session_context(s, 0, NULL);
+    ASSERT_EQ(v.n, 5u);
+    ASSERT_EQ(v.dropped, 0u);
     ASSERT_EQ(v.messages[1]->n_images, 1u);
     ASSERT_EQ(v.messages[1]->images[0], 0u);
     ASSERT_EQ(v.messages[2]->n_images, 0u);
 
-    /* a tiny budget drops the whole image message (never a dangling
-     * image list, never a textless image part) */
-    NmContextView t = nm_session_context(s, 10);
-    ASSERT_TRUE(t.n >= 1u);
+    /* The image message's own turn is 1200-odd tokens by the estimate,
+     * so a small budget drops the WHOLE turn: never a dangling image
+     * list, never a textless image part, and the ledger says so. */
+    NmContextView t = nm_session_context(s, 40, NULL);
+    ASSERT_TRUE(t.dropped >= 2u);
+    ASSERT_EQ(t.n + t.dropped, nm_session_len(s));
     for (size_t i = 0; i < t.n; i++)
         ASSERT_EQ(t.messages[i]->n_images, 0u);
-    ASSERT_STR_EQ(t.messages[t.n - 1]->content, "a 64x32 test image");
+    ASSERT_STR_EQ(t.messages[t.n - 1]->content, "done");
 
     nm_session_free(s);
     remove(png);
@@ -704,6 +890,10 @@ int main(void)
     RUN_TEST(test_context_view_basic);
     RUN_TEST(test_context_view_no_trim);
     RUN_TEST(test_context_view_budget_trims_oldest);
+    RUN_TEST(test_context_view_holds_its_cut_point);
+    RUN_TEST(test_context_view_cuts_whole_turns);
+    RUN_TEST(test_context_view_keeps_the_newest_turn_whole);
+    RUN_TEST(test_context_view_ignores_a_stale_anchor);
     RUN_TEST(test_context_view_keeps_tool_pair);
     RUN_TEST(test_session_save);
     RUN_TEST(test_session_attach_image);

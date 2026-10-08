@@ -143,6 +143,20 @@ typedef struct NmReminderFacts
     size_t n_jobs;
     int jobs_waiting;
 
+    /* The rolling window's ledger (ROUND point): how many stored
+     * messages the window left out of the request about to be built.
+     * 0 = the whole transcript is in context (windowing off, or
+     * everything fits). The number is the signature, so a window that
+     * HOLDS its cut point does not re-fire — only a real jump (more of
+     * the conversation falling out) does. */
+    int ctx_dropped;
+
+    /* Rounds the output limit cut short (`finish_reason: "length"`),
+     * cumulative over the conversation; 0 = none yet. Fires at the next
+     * round's request — a cut round that ended the turn is told when
+     * the next turn's first round opens. */
+    unsigned output_cuts;
+
     /* The tool round about to open: `round` rounds have been started
      * this turn, `round_cap` is the turn's cap. */
     int round, round_cap;

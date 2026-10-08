@@ -4426,6 +4426,155 @@ static void test_agent_round_budget_reminder(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROUNDS);
 }
 
+/* The output-cut note: a round the model's output limit cut short is
+ * incomplete, and the model is told before its next request. The cut
+ * round ends the turn here (a plain answer), so the fact is raised when
+ * the NEXT turn opens — and only once (the count is the edge). */
+static void test_agent_output_cut_reminder(void)
+{
+    reset_capture();
+    g_reminder_calls = 0;
+    g_reminder_names[0] = '\0';
+
+    /* Three one-round turns; the first was cut by the output limit. */
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"half an "
+                "answer\"},\"finish_reason\":\"length\"}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.sse[1] = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+                "\"finish_reason\":\"stop\"}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.sse[2] = sc.sse[1];
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_reminder(agent, cap_reminder);
+
+    /* Turn 1: the cut happens inside the round; nothing to say yet. */
+    ASSERT_EQ(nm_agent_turn(agent, "write me a long thing", NULL, 0), 0);
+    ASSERT_EQ(g_reminder_calls, 0);
+    ASSERT_EQ(count_framed_reminders(g_requests[0]), 0);
+
+    /* Turn 2: the note rides this turn's FIRST request, so the model
+     * reads it before it answers — and the user sees it. */
+    ASSERT_EQ(nm_agent_turn(agent, "carry on", NULL, 0), 0);
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_STR_EQ(g_reminder_names, "output-cut,");
+    ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
+    ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
+    ASSERT_TRUE(strstr(g_requests[1], "output limit") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "resume directly") != NULL);
+
+    /* Turn 3: the same cut, already reported — no second note (the note
+     * itself is carried verbatim in the transcript, so the prefix is
+     * untouched). */
+    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The post-trim note: when the rolling window's cut point actually
+ * JUMPED (the tail outgrew the budget), the model is told that what it
+ * read earlier is no longer in context — re-read before asserting. The
+ * window itself is the wire proof: the dropped turn is not in the
+ * request that carries the note. */
+static void test_agent_post_trim_reminder(void)
+{
+    reset_capture();
+    g_reminder_calls = 0;
+    g_reminder_names[0] = '\0';
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROLLING_WINDOW, "on");
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET, "500");
+
+    /* ~6 KB of file: one tool result's worth, well over the budget, and
+     * small enough that the test server captures the whole request. */
+    FILE *f = fopen(BIG_FIXTURE, "wb");
+    ASSERT_NOT_NULL(f);
+    for (int i = 0; i < 120; i++)
+        fprintf(f, "line %04d: the quick brown fox jumps over the lazy dog\n",
+                i);
+    fclose(f);
+
+    /* Round 1 (turn 1): read it. Round 2 (turn 1): answer. Then two more
+     * one-round turns: the window can only cut between them. */
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 4;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" BIG_FIXTURE
+        "\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] = "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"},"
+                "\"finish_reason\":\"stop\"}]}\n\n"
+                "data: [DONE]\n\n";
+    sc.sse[2] = sc.sse[1];
+    sc.sse[3] = sc.sse[1];
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_reminder(agent, cap_reminder);
+
+    /* Turn 1: the read is the newest turn, and a window never cuts inside
+     * a turn — so nothing was dropped and there is nothing to report. */
+    ASSERT_EQ(nm_agent_turn(agent, "read the big file", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_EQ(g_reminder_calls, 0);
+    ASSERT_TRUE(strstr(g_requests[1], "quick brown fox") != NULL);
+
+    /* Turn 2: the cut point jumps past the read turn to hold the new
+     * (small) turn, so the model is told — and the note rides the very
+     * request that no longer carries the file. */
+    ASSERT_EQ(nm_agent_turn(agent, "and now?", NULL, 0), 0);
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_STR_EQ(g_reminder_names, "post-trim,");
+    ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
+    ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
+    ASSERT_TRUE(strstr(g_requests[2], "earlier messages") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "re-read") != NULL);
+    ASSERT_NULL(strstr(g_requests[2], "quick brown fox"));
+
+    /* Turn 3: the cut point HOLDS (the tail still fits), so the note is
+     * not repeated — it is simply carried along. */
+    ASSERT_EQ(nm_agent_turn(agent, "still here?", NULL, 0), 0);
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_EQ(count_framed_reminders(g_requests[3]), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(BIG_FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROLLING_WINDOW);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -4493,6 +4642,8 @@ int main(void)
     RUN_TEST(test_agent_reminder_user_channel_is_edge_triggered);
     RUN_TEST(test_agent_reminders_gate_off);
     RUN_TEST(test_agent_round_budget_reminder);
+    RUN_TEST(test_agent_output_cut_reminder);
+    RUN_TEST(test_agent_post_trim_reminder);
     RUN_TEST(test_agent_context_usage_accessors);
     RUN_TEST(test_agent_context_usage_survives_null_usage_round);
     RUN_TEST(test_agent_session_accounting_accumulates_and_pairs);

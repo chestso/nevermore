@@ -493,6 +493,64 @@ static void test_usage_null_chunk_fires_nothing(void)
     close(lfd);
 }
 
+static void test_finish_reason_is_published(void)
+{
+    /* The round's finish_reason is a FACT about the completed round, and
+     * the agent needs it to tell a cut round (`length`) from a finished
+     * one. It rides the result; the first non-empty value wins (every
+     * mid-stream chunk carries `"finish_reason": null`). */
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"half \"},"
+        "\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"},"
+        "\"finish_reason\":\"length\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0 };
+    NmMessage msg = { "user", "say a lot", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.finish_reason, "length");
+    pthread_join(th, NULL);
+    close(lfd);
+
+    /* A stream that never reports one publishes "" — never reported, not
+     * "stop" (the round is still complete: [DONE] is what ends it). */
+    lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s2 = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":null}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_create(&th, NULL, sse_server_thread, &s2);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
+                             "nevermore-test", NULL, 0, 0 };
+    NmChatResult r2 = nm_openai_chat(&ep2, &req);
+    ASSERT_EQ(r2.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r2.finish_reason, "");
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void test_chat_stream_end_to_end(void)
 {
     int port;
@@ -2697,6 +2755,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_usage_reported_zero_is_not_absent);
     RUN_TEST(test_usage_absent_fires_nothing);
     RUN_TEST(test_usage_null_chunk_fires_nothing);
+    RUN_TEST(test_finish_reason_is_published);
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_image_parts_shape);
     RUN_TEST(test_chat_image_prefix_is_byte_stable);

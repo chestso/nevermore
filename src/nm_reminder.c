@@ -341,6 +341,52 @@ static int text_round(const NmReminderFacts *f, char *out, size_t cap)
                     f->round_cap);
 }
 
+/* --- the round was cut by the output limit ----------------------- */
+
+/* The count is the signature: 0 = never cut (no fire), and each new cut
+ * is a new event. A latched rule, not a per-result one — the fact is
+ * cumulative, so without the latch it would fire on every round from
+ * the first cut onward (prefix churn). */
+static int sig_output_cut(const NmReminderFacts *f)
+{
+    return (int)f->output_cuts;
+}
+
+static int text_output_cut(const NmReminderFacts *f, char *out, size_t cap)
+{
+    (void)f;
+    return snprintf(out, cap,
+                    "An earlier answer was cut off by the model's output "
+                    "limit (finish_reason: length) before it finished — the "
+                    "missing part was never generated, so do not treat that "
+                    "text as complete. If the user asks you to continue it, "
+                    "resume directly from where it stopped.");
+}
+
+/* --- the window dropped messages --------------------------------- */
+
+/* The dropped count is the signature, which is what makes this the
+ * honest twin of the window's own policy: a cut point that HOLDS
+ * reports the same number and stays silent, and only a real jump (the
+ * tail outgrew the budget and the cut advanced) fires. The note is
+ * appended after that jump, so it is the newest message and inside the
+ * window it describes — it survives until the next jump replaces it. */
+static int sig_post_trim(const NmReminderFacts *f)
+{
+    return f->ctx_dropped > 0 ? f->ctx_dropped : 0;
+}
+
+static int text_post_trim(const NmReminderFacts *f, char *out, size_t cap)
+{
+    return snprintf(out, cap,
+                    "The context window dropped %d earlier messages from this "
+                    "conversation — they are NOT in your context any more. "
+                    "Anything you read or ran before that point (file "
+                    "contents, command output) may be gone: re-read it before "
+                    "asserting anything about it.",
+                    f->ctx_dropped);
+}
+
 static const Rule RULES[] = {
     { "tool-output-truncated", NM_REMINDER_POINT_TOOL_RESULT,
       NM_REMINDER_CHANNEL_TOOL, 0, sig_tool_truncated, text_tool_truncated },
@@ -352,6 +398,10 @@ static const Rule RULES[] = {
       sig_jobs, text_jobs },
     { "round-budget", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
       sig_round, text_round },
+    { "output-cut", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
+      sig_output_cut, text_output_cut },
+    { "post-trim", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
+      sig_post_trim, text_post_trim },
 };
 
 #define N_RULES (sizeof(RULES) / sizeof(RULES[0]))

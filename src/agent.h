@@ -80,7 +80,10 @@ int nm_agent_max_rounds(const NmAgent *a);
  * means the WHOLE transcript is sent and the provider reports "too
  * large" rather than nevermore silently capping it — and a window that
  * slides every turn would defeat the provider's prefix cache, so
- * trimming is opt-in. */
+ * trimming is opt-in. ON means the window is the STABLE-PREFIX one
+ * (session.h): the agent remembers where it cut and keeps that cut
+ * point while the newest messages fit, so the prefix only grows between
+ * jumps. */
 int nm_agent_rolling_window(const NmAgent *a);
 
 /* The rolling window's token budget: the config store's
@@ -89,7 +92,8 @@ int nm_agent_rolling_window(const NmAgent *a);
  * nm_agent_rolling_window() is on; a non-positive result (impossible
  * via the store, which validates positive) means the same "no trim".
  * The budget is a rough 4-chars-per-token estimate (quoth convention),
- * not real tokenization. */
+ * not real tokenization — and it is best-effort: a single turn bigger
+ * than the budget is kept whole rather than cut (session.h). */
 long nm_agent_context_budget(const NmAgent *a);
 
 /* Context-usage gauge (provider-reported, P2). Every number comes from

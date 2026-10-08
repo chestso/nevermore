@@ -571,67 +571,46 @@ static long est_tokens(const NmSessionMessage *m)
            (long)m->n_images * NM_SESSION_IMAGE_TOKEN_ESTIMATE;
 }
 
-NmContextView nm_session_context(const NmSession *s, long budget_tokens)
+/* The window's own cost: every message from `cut` to the newest. The
+ * system prompt is NOT in here — it is always kept, so the caller adds
+ * it once (nm_session_context's sys_cost). */
+static long tail_cost(const NmSession *s, size_t cut)
 {
-    NmContextView v = { NULL, 0 };
-    if (!s || s->n == 0)
-        return v;
+    long t = 0;
+    for (size_t i = cut; i < s->n; i++)
+        t += est_tokens(&s->msgs[i]);
+    return t;
+}
 
-    /* A non-positive budget is "no trim": the whole transcript, system
-     * prompt included. This is the default the agent uses (rolling
-     * window off) — nevermore sends everything and lets the provider
-     * report "too large", instead of silently capping. A window that
-     * slid per turn would also defeat the provider's prefix cache
-     * (cached input bills far cheaper), so trimming is opt-in. */
-    int untrimmed = budget_tokens <= 0;
+/* Where a jump lands, as a percentage of the budget: the cut advances
+ * until the tail fits this much of it. Headroom is the whole point of a
+ * jump — without it the tail would sit right at the limit and every
+ * round's growth would force another jump, throwing the provider's
+ * cached prefix away as often as a sliding window does (the churn a
+ * stable prefix exists to avoid). */
+#define NM_SESSION_WINDOW_TARGET_PCT 75
 
-    /* The system prompt (message 0, when present) always leads and is
-     * always in; the rest is the most recent tail that fits. */
-    size_t start = (s->msgs[0].role == NM_ROLE_SYSTEM) ? 1 : 0;
-    long spent = (start == 1) ? est_tokens(&s->msgs[0]) : 0;
-    long budget = budget_tokens;
+/* The next TURN start after `cut`: the next user message. A turn is a
+ * user message through everything up to the next one, so a cut at a turn
+ * start can never keep an answer whose question is gone, and it never
+ * separates a tool result from the assistant message that called it
+ * (both live inside the turn that asked for them). Returns 0 when there
+ * is none — the caller's "keep the newest turn whole". */
+static size_t next_turn_start(const NmSession *s, size_t cut)
+{
+    for (size_t i = cut + 1; i < s->n; i++)
+        if (s->msgs[i].role == NM_ROLE_USER)
+            return i;
+    return 0;
+}
 
-    /* Walk backwards accumulating the newest messages that fit; never
-     * break a tool-result from its assistant tool-call message. Tool
-     * results follow their calls, so walking backwards a run of
-     * NM_ROLE_TOOL messages must extend to the call's assistant
-     * message. */
-    long tail = 0;
-    size_t i = s->n;
-    size_t newest_group = s->n; /* degenerate-fallback group start */
-    while (!untrimmed && i > start) {
-        size_t j = i;
-        /* Extend backwards over any run of tool results (plus their
-         * call message) as one unbreakable group. */
-        if (s->msgs[j - 1].role == NM_ROLE_TOOL) {
-            while (j > start && s->msgs[j - 1].role == NM_ROLE_TOOL)
-                j--;
-            /* The assistant tool-call message above the run pairs
-             * with the results; include it (a tool result without
-             * its call dangles). */
-            if (j > start && s->msgs[j - 1].role == NM_ROLE_ASSISTANT && s->msgs[j - 1].tool_calls_json)
-                j--;
-        } else {
-            j = i - 1; /* plain message: a group of one */
-        }
-        if (i == s->n)
-            newest_group = j;
-        long group_tokens = 0;
-        for (size_t k = j; k < i; k++)
-            group_tokens += est_tokens(&s->msgs[k]);
-        if (spent + tail + group_tokens > budget)
-            break;
-        tail += group_tokens;
-        i = j;
-    }
-    if (untrimmed)
-        i = start; /* keep everything: system + all messages */
-    else if (i == s->n)
-        i = newest_group; /* degenerate: budget too small for even
-                             the newest group; keep it whole so a
-                             tool result never dangles alone */
-
-    size_t n_view = s->n - i + (start == 1 ? 1 : 0);
+/* Fill the session's reused view array with [the system prompt, when
+ * present] + messages[cut .. n-1]. `start` is 1 when message 0 is the
+ * system prompt. Returns the view (messages == NULL on OOM). */
+static NmContextView fill_view(const NmSession *s, size_t start, size_t cut)
+{
+    NmContextView v = { NULL, 0, 0 };
+    size_t n_view = (s->n - cut) + (start == 1 ? 1 : 0);
     if (s->view_cap < n_view) {
         /* s is logically const here; the view array is scratch. */
         NmSession *mut = (NmSession *)s;
@@ -648,11 +627,65 @@ NmContextView nm_session_context(const NmSession *s, long budget_tokens)
     size_t vi = 0;
     if (start == 1)
         s->view[vi++] = &s->msgs[0];
-    for (size_t k = i; k < s->n; k++)
+    for (size_t k = cut; k < s->n; k++)
         s->view[vi++] = &s->msgs[k];
     v.messages = s->view;
     v.n = vi;
+    v.dropped = cut - start;
     return v;
+}
+
+NmContextView nm_session_context(const NmSession *s, long budget_tokens,
+                                 size_t *anchor)
+{
+    NmContextView v = { NULL, 0, 0 };
+    if (!s || s->n == 0) {
+        if (anchor)
+            *anchor = NM_SESSION_NO_ANCHOR;
+        return v;
+    }
+
+    /* The system prompt (message 0, when present) always leads and is
+     * always in, so it is never part of the cut. */
+    size_t start = (s->msgs[0].role == NM_ROLE_SYSTEM) ? 1 : 0;
+
+    if (budget_tokens <= 0) {
+        /* No trim: the whole transcript, system prompt included, and no
+         * remembered cut point (turning the window off forgets it, so
+         * turning it back on computes a fresh one instead of resuming a
+         * stale index). This is the default the agent uses (rolling
+         * window off) — nevermore sends everything and lets the provider
+         * report "too large", instead of silently capping. */
+        if (anchor)
+            *anchor = NM_SESSION_NO_ANCHOR;
+        return fill_view(s, start, start);
+    }
+
+    /* The remembered cut point. A value that names no real message (a
+     * fresh caller, a stale index — including one past the end) starts
+     * the search from the top: it must never leave an empty window. */
+    size_t cut = (anchor && *anchor != NM_SESSION_NO_ANCHOR &&
+                  *anchor >= start && *anchor < s->n)
+                     ? *anchor
+                     : start;
+    long sys_cost = (start == 1) ? est_tokens(&s->msgs[0]) : 0;
+
+    /* While the tail from the cut point fits, the cut point HOLDS: the
+     * prefix is unchanged and the tail simply grows (append-only, which
+     * is what the provider's prefix cache likes). Only a tail that no
+     * longer fits moves it. */
+    if (sys_cost + tail_cost(s, cut) > budget_tokens) {
+        long target = budget_tokens * NM_SESSION_WINDOW_TARGET_PCT / 100;
+        while (sys_cost + tail_cost(s, cut) > target) {
+            size_t next = next_turn_start(s, cut);
+            if (next == 0)
+                break; /* the newest turn alone: keep it whole */
+            cut = next;
+        }
+    }
+    if (anchor)
+        *anchor = cut;
+    return fill_view(s, start, cut);
 }
 
 /* ---------------------------------------------------------------- */

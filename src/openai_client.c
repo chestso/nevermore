@@ -299,14 +299,19 @@ struct NmChatStream
     NmStreamCallback on_delta;
     NmUsageFn on_usage;
     void *userdata;
-    int done;            /* [DONE] seen or fatal error */
-    int finished;        /* a non-empty choices[0].finish_reason was
-                          * seen: the generation is complete. [DONE]
-                          * is not universal — OpenCode Go's
-                          * minimax-m3 ends after the trailing cost
-                          * event with no marker at all — so a clean
-                          * transport end plus this flag is also a
-                          * complete stream; see chat_step. */
+    int done;     /* [DONE] seen or fatal error */
+    int finished; /* a non-empty choices[0].finish_reason was
+                   * seen: the generation is complete. [DONE]
+                   * is not universal — OpenCode Go's
+                   * minimax-m3 ends after the trailing cost
+                   * event with no marker at all — so a clean
+                   * transport end plus this flag is also a
+                   * complete stream; see chat_step. */
+    /* The reason itself, verbatim (NM_CHAT_FINISH_MAX): the FIRST
+     * non-empty value wins (providers stamp null on every mid-stream
+     * chunk), and it is published into NmChatResult.finish_reason so a
+     * caller can tell a cut round (`length`) from a finished one. */
+    char finish_reason[NM_CHAT_FINISH_MAX];
     NmChatStatus status; /* final status */
     int http_status;
     char error_body[ERROR_BODY_MAX]; /* captured non-SSE error body, capped */
@@ -445,9 +450,16 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
          * in the same chunk, as minimax-m3 does). Only a
          * non-empty string counts: providers send
          * `"finish_reason": null` on every mid-stream chunk, and
-         * `nm_json_str` is NULL for JSON null. */
-        if (nm_json_str(nm_json_get(choice, "finish_reason")))
+         * `nm_json_str` is NULL for JSON null. The VALUE is kept
+         * (first one wins) — it is how a caller learns the round was
+         * cut by the output limit rather than finished. */
+        const char *finish = nm_json_str(nm_json_get(choice, "finish_reason"));
+        if (finish) {
             st->finished = 1;
+            if (!st->finish_reason[0])
+                snprintf(st->finish_reason, sizeof(st->finish_reason), "%s",
+                         finish);
+        }
         NmJson *delta = nm_json_get(choice, "delta");
         if (delta) {
             /* Reasoning first: providers stream it phase-sequential
@@ -807,6 +819,11 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
     result->status = h->status;
     result->http_status = h->http_status;
     result->message[0] = '\0';
+    /* The round's finish reason rides every publish (it is a fact about
+     * the completed round, not about an error class); a stream that
+     * never reported one publishes "" — never reported, not "stop". */
+    snprintf(result->finish_reason, sizeof(result->finish_reason), "%s",
+             h->finish_reason);
     switch (h->status) {
     case NM_CHAT_OK:
     case NM_CHAT_PENDING:
@@ -1051,6 +1068,7 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         result->status = NM_CHAT_OK;
         result->http_status = 0;
         result->message[0] = '\0';
+        result->finish_reason[0] = '\0';
     }
     if (!h) {
         if (result) {

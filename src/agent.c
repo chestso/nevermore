@@ -99,6 +99,20 @@ struct NmAgent
      * needs no latch at all. */
     unsigned turn;
     int reminder_latch[NM_REMINDER_MAX_RULES];
+    /* The rolling window's remembered cut point (session.h): the
+     * stable-prefix drive reads and updates it, so the ON path's prefix
+     * does not slide per round. NM_SESSION_NO_ANCHOR until a window
+     * computes one (and again after a no-trim call, which forgets it).
+     * round_dropped is the ledger the post-trim note reads: how many
+     * messages the window left out of THIS round's request (0 = the
+     * whole transcript), set at begin_round before the round's
+     * reminders are evaluated. */
+    size_t trim_anchor;
+    int round_dropped;
+    /* Rounds the output limit cut short (`finish_reason: "length"`),
+     * cumulative: the fact the output-cut rule latches on (a new cut is
+     * a new edge). */
+    unsigned output_cuts;
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -305,6 +319,9 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
      * the first round wait for it — nm_agent_start/step below. A
      * non-git cwd starts nothing and the prompt is already final. */
     a->env_job = -1;
+    /* No window cut point yet: the first ON-path call computes one
+     * (session.h's NM_SESSION_NO_ANCHOR). */
+    a->trim_anchor = NM_SESSION_NO_ANCHOR;
     if (nm_context_env_git_pending(a->context)) {
         char err[128];
         int id = -1;
@@ -451,6 +468,10 @@ static void reminder_facts(NmAgent *a, NmReminderFacts *f)
     f->ctx_tier = nm_agent_context_tier(a);
     f->round = a->round;
     f->round_cap = nm_agent_max_rounds(a);
+    /* The window's ledger for this round's request (set by begin_round
+     * just before this is gathered) and the cumulative cut count. */
+    f->ctx_dropped = a->round_dropped;
+    f->output_cuts = a->output_cuts;
     /* The process registry: the jobs the MODEL started. nevermore's own
      * machinery (the context <env> git stage) is hidden and is not the
      * model's business — a reminder naming it would be noise the model
@@ -489,18 +510,27 @@ static void reminders_at(NmAgent *a, NmReminderPoint point, NmReminderFacts *f,
  * actually attend to — tool output is read as data). Appended at the
  * current position and never touched again, so the prefix before it is
  * untouched and the provider's cache survives; the text says it is the
- * harness talking (see the system-prompt clause). */
-static void append_user_reminders(NmAgent *a, NmReminderPoint point)
+ * harness talking (see the system-prompt clause).
+ *
+ * Returns 1 when a message was appended (the caller must then rebuild
+ * the round's context view: the view is a snapshot, so a message
+ * appended after it is computed would otherwise never reach the wire),
+ * 0 when there was nothing to say. */
+static int append_user_reminders(NmAgent *a, NmReminderPoint point)
 {
     if (!a->session)
-        return;
+        return 0;
     NmReminderFacts f;
     reminder_facts(a, &f);
     NmReminderOut out;
     reminders_at(a, point, &f, &out);
-    if (out.user.data && *out.user.data)
+    int appended = 0;
+    if (out.user.data && *out.user.data) {
         nm_session_append(a->session, NM_ROLE_USER, out.user.data);
+        appended = 1;
+    }
     nm_reminder_out_free(&out);
+    return appended;
 }
 
 void nm_agent_set_endpoint(NmAgent *a, const char *base_url, const char *api_key)
@@ -1041,10 +1071,24 @@ static int begin_round(NmAgent *a)
         return -1;
     }
 
-    /* The last-round nudge, before this round's request is built (the
-     * cap check above already passed, so the reminder can never be
-     * appended for a round that will not happen). */
-    append_user_reminders(a, NM_REMINDER_POINT_ROUND);
+    /* This round's reminders, before its request is built (the cap
+     * check above already passed, so the last-round nudge can never be
+     * appended for a round that will not happen).
+     *
+     * The window is computed FIRST, because one of those reminders
+     * reads its ledger: the post-trim note is about the very request
+     * this round builds, and it has to ride that request — a note
+     * describing a window it is not in would be exactly the divergence
+     * the transparency principle forbids. The view is a SNAPSHOT, so a
+     * reminder appended below only reaches the wire once the view is
+     * rebuilt, which is what the second call does. */
+    long budget = nm_agent_rolling_window(a) ? nm_agent_context_budget(a) : 0;
+    size_t anchor = a->trim_anchor;
+    NmContextView view = nm_session_context(a->session, budget, &anchor);
+    a->trim_anchor = anchor;
+    a->round_dropped = (int)view.dropped;
+    if (append_user_reminders(a, NM_REMINDER_POINT_ROUND))
+        view = nm_session_context(a->session, budget, &a->trim_anchor);
 
     round_reset(a);
     /* A model whose catalog positively does not claim tools gets no
@@ -1061,9 +1105,8 @@ static int begin_round(NmAgent *a)
      * window OFF (the default) means no trim: the whole transcript is
      * sent and the provider reports "too large", never a silent cap
      * (and a per-turn slide would defeat the provider's prefix
-     * cache). ON means the store's budget. */
-    long budget = nm_agent_rolling_window(a) ? nm_agent_context_budget(a) : 0;
-    NmContextView view = nm_session_context(a->session, budget);
+     * cache). ON means the store's budget, through the remembered cut
+     * point so the prefix holds between jumps (session.h). */
     NmMessage *msgs = malloc((view.n + 1) * sizeof(*msgs));
     if (!msgs) {
         set_error(a, "out of memory");
@@ -1238,6 +1281,28 @@ static void session_account_round(NmAgent *a)
     a->sess_rounds++;
 }
 
+/* Was this round cut off by the model's OUTPUT limit? The wire spells it
+ * `finish_reason: "length"` (the OpenAI-compatible wire every onboarded
+ * provider speaks; hyper's values are recorded in docs/HYPER-API.md
+ * §3.5), matched without case so an upstream that shouts it is still
+ * recognized, and exactly so a claim we have never seen ("lengthy") is
+ * not. */
+static int round_was_cut(const NmChatResult *r)
+{
+    static const char cut[] = "length";
+    const char *fr = r->finish_reason;
+    for (size_t i = 0; cut[i]; i++) {
+        char c = fr[i];
+        if (c == '\0')
+            return 0;
+        if (c >= 'A' && c <= 'Z')
+            c = (char)(c - 'A' + 'a');
+        if (c != cut[i])
+            return 0;
+    }
+    return fr[sizeof(cut) - 1] == '\0';
+}
+
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
     if (r->status != NM_CHAT_OK) {
@@ -1246,6 +1311,15 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         set_error(a, msg);
         return -1;
     }
+
+    /* A round the output limit cut short is incomplete by construction:
+     * the model was still writing when the cap landed and nothing was
+     * generated after it. Count it — the output-cut reminder raises the
+     * fact at the NEXT round's request (a cut round that ended the turn
+     * is told when the next turn's first round opens), so the model
+     * never treats the cut text as the whole answer. */
+    if (round_was_cut(r))
+        a->output_cuts++;
 
     /* The round completed: fold its usage into the session ledger (a
      * failed round above never reaches here, so it contributes no

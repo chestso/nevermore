@@ -277,6 +277,14 @@ typedef enum
  * part). */
 #define NM_CHAT_MSG_MAX 512
 
+/* The round's `finish_reason`, as the wire spelled it ("stop",
+ * "tool_calls", "length", a content-filter code, ...). A cap, not a
+ * contract: an unknown value is carried verbatim (a new value must
+ * never be silently dropped) and an over-long one truncates — the
+ * interesting facts are short words. Empty = the wire never reported
+ * one (a stream that ended on [DONE]/EOF without it). */
+#define NM_CHAT_FINISH_MAX 32
+
 /* A chat call's outcome. message is ALWAYS set when status is an
  * NM_CHAT_ERR_* (the always-set contract: every failure carries a
  * human-readable reason, so callers never guess a fallback string).
@@ -295,6 +303,14 @@ typedef struct NmChatResult
     int http_status; /* HTTP status code when the wire answered */
     int traffic;     /* step API: this step moved response bytes */
     char message[NM_CHAT_MSG_MAX];
+    /* The stream's finish_reason (NM_CHAT_FINISH_MAX), empty when the
+     * wire never reported one — never REPORTED, not "no reason": a
+     * stream that ended on [DONE]/EOF without the field is the known
+     * shape (OpenCode Go's minimax-m3, docs/OPENCODE-API.md §2). The
+     * first non-empty value wins (providers stamp null on mid-stream
+     * chunks); the agent reads it to tell a cut round
+     * (`finish_reason: "length"`) from a finished one. */
+    char finish_reason[NM_CHAT_FINISH_MAX];
 } NmChatResult;
 
 /* Event-driven stream handle (chat_begin/step/end below). Opaque;
