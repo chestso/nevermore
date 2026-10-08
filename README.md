@@ -439,8 +439,7 @@ See [docs/PORTTY.md](docs/PORTTY.md) for the terminal-feature matrix.
   Nothing to install: they are single-file headers, fetched into
   `third_party/stb/` by `scripts/fetch-stb.sh` on the first
   `configure` (a pinned commit, so that first configure needs
-  network), and never committed to the tree. See
-  [docs/VISION-PLAN.md](docs/VISION-PLAN.md).
+  network), and never committed to the tree.
 
 ## License
 
