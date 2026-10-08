@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 16
+#define NM_CFG_NKEYS 17
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -136,6 +136,7 @@ static const struct
       NM_STR(NM_HANDSHAKE_TIMEOUT_MS) },
     { NM_CFG_KEY_FAMILY_SKIP, "NEVERMORE_CONNECT_FAMILY_SKIP", "off" },
     { NM_CFG_KEY_SKIP_FAMILIES, "NEVERMORE_CONNECT_SKIP_FAMILIES", "none" },
+    { NM_CFG_KEY_REMINDERS, "NEVERMORE_REMINDERS", "on" },
     { NM_CFG_KEY_SEARXNG, "NEVERMORE_SEARXNG_URL", NM_WEBSEARCH_DEFAULT_URL },
     { NM_CFG_KEY_SEARXNG_ENABLED, "NEVERMORE_SEARXNG_ENABLED", "on" },
     { NM_CFG_KEY_SEARXNG_TIMEOUT, "NEVERMORE_SEARXNG_TIMEOUT_MS",
@@ -590,6 +591,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(out, "off") != 0;
     } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
+               strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {
         if (!nm_config_valid_bool(raw))
             return 0;

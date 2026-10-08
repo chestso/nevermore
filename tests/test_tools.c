@@ -545,6 +545,65 @@ static void test_read_file_line_numbers_and_window(void)
     nm_toolset_free(ts);
 }
 
+/* The truncation FACT (NmToolResult.truncated), separate from the
+ * marker text in the body: the reminder framework acts on it
+ * (nm_reminder.h), so it must say WHICH kind of gap this is — a clamped
+ * output (1) or a partial view of the source (2) — and 0 when the
+ * result is complete. */
+static void test_truncated_fact_is_reported(void)
+{
+    /* A windowed read is a partial view of the FILE (2), even though
+     * the rendered body is tiny. */
+    char *path = scratch_path("trunc-window.txt");
+    FILE *f = fopen(path, "wb");
+    for (int i = 0; i < 50; i++)
+        fprintf(f, "line %d\n", i);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "limit", nm_json_new_number(2));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_TRUE(strstr(r.output, "omitted") != NULL);
+    ASSERT_EQ(r.truncated, 2);
+    nm_tool_result_free(&r);
+
+    /* The whole file: nothing to say. */
+    NmJson *jall = nm_json_new_object();
+    nm_json_set(jall, "path", nm_json_new_string(path));
+    char *args2 = nm_json_dump(jall);
+    nm_json_free(jall);
+    NmToolResult r2 = nm_toolset_execute(ts, "read_file", args2, NULL);
+    free(args2);
+    ASSERT_EQ(r2.truncated, 0);
+    nm_tool_result_free(&r2);
+    nm_toolset_free(ts);
+    free(path);
+
+    /* A clamped body is 1 (the output, not the source). */
+    size_t n = (size_t)NM_TOOL_MAX_OUTPUT + 1000;
+    char *big = malloc(n + 1);
+    ASSERT_NOT_NULL(big);
+    memset(big, 'x', n);
+    big[n] = '\0';
+    NmToolResult r3 = nm_tool_format_result(big, 0);
+    free(big);
+    ASSERT_TRUE(strstr(r3.output, "bytes omitted") != NULL);
+    ASSERT_EQ(r3.truncated, 1);
+    nm_tool_result_free(&r3);
+
+    /* Under budget: the zero value, so a tool that cannot truncate
+     * needs no code at all. */
+    NmToolResult r4 = nm_tool_format_result("small", 0);
+    ASSERT_EQ(r4.truncated, 0);
+    nm_tool_result_free(&r4);
+}
+
 static void test_read_file_missing(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
@@ -1930,20 +1989,26 @@ static void test_clamp_output_head_only(void)
     memcpy(big + n - 8, "ENDMARK!", 8);
     big[n] = '\0';
 
-    char *out = nm_clamp_output(big);
+    size_t omitted = 0;
+    char *out = nm_clamp_output(big, &omitted);
     free(big);
     ASSERT_NOT_NULL(out);
     ASSERT_EQ(out[0], 'A');
     ASSERT_TRUE(strstr(out, "bytes omitted") != NULL);
+    /* The dropped byte count is the FACT the reminder framework reads
+     * (the marker in the body is text a reader has to interpret). */
+    ASSERT_TRUE(omitted > 0);
     /* The tail is gone — the old 70/30 split kept the last 30%. */
     ASSERT_TRUE(strstr(out, "ENDMARK") == NULL);
     ASSERT_TRUE(strlen(out) <= (size_t)NM_TOOL_MAX_OUTPUT);
     free(out);
 
     /* Under budget: a plain copy. */
-    char *small = nm_clamp_output("hello");
+    omitted = 123;
+    char *small = nm_clamp_output("hello", &omitted);
     ASSERT_NOT_NULL(small);
     ASSERT_STR_EQ(small, "hello");
+    ASSERT_EQ(omitted, (size_t)0); /* nothing dropped: the fact is 0 */
     free(small);
 }
 
@@ -3136,19 +3201,21 @@ static void test_exec_command_output_clamped_head_and_tail(void)
  * blank body through as real output. */
 static void test_clamp_job_output_trims_and_marks_empty(void)
 {
-    char *s = nm_clamp_job_output("line\n\n\n   \n");
+    size_t omitted = 0;
+    char *s = nm_clamp_job_output("line\n\n\n   \n", &omitted);
     ASSERT_NOT_NULL(s);
     ASSERT_STR_EQ(s, "line");
+    ASSERT_EQ(omitted, (size_t)0);
     free(s);
 
-    s = nm_clamp_job_output("   \n\t\n");
+    s = nm_clamp_job_output("   \n\t\n", NULL);
     ASSERT_NULL(s);
 
-    s = nm_clamp_job_output(NULL);
+    s = nm_clamp_job_output(NULL, NULL);
     ASSERT_NULL(s);
 
     /* Leading whitespace (indented output: trees, diffs) is preserved. */
-    s = nm_clamp_job_output("    indented\n");
+    s = nm_clamp_job_output("    indented\n", &omitted);
     ASSERT_NOT_NULL(s);
     ASSERT_STR_EQ(s, "    indented");
     free(s);
@@ -3655,6 +3722,7 @@ int main(void)
     RUN_TEST(test_tool_emoji_presentation_only);
     RUN_TEST(test_read_file_byte_exact);
     RUN_TEST(test_read_file_line_numbers_and_window);
+    RUN_TEST(test_truncated_fact_is_reported);
     RUN_TEST(test_read_file_missing);
     RUN_TEST(test_read_file_image_branch);
     RUN_TEST(test_read_file_image_branch_beats_window_args);

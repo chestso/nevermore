@@ -199,13 +199,15 @@ static NmToolResult run_command_result(const char *output, size_t len,
         snprintf(raw + off, cap - off, "Output: (empty)\n");
     /* Shared head-only clamp: the captured body rides the same budget
      * as every other tool result (rendered + session history alike). */
-    char *body = nm_clamp_output(raw);
+    size_t omitted = 0;
+    char *body = nm_clamp_output(raw, &omitted);
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
     NmToolResult r = { .status = (code == 0 && note == NULL) ? NM_TOOL_OK
                                                              : NM_TOOL_ERR,
-                       .output = body };
+                       .output = body,
+                       .truncated = omitted > 0 ? 1 : 0 };
     return r;
 }
 

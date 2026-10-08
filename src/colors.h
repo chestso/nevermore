@@ -115,6 +115,14 @@
 /* Dracula Red - errors (`nevermore: …`). */
 #define NM_SGR_ERROR "\033[38;2;255;85;85m"
 
+/* Dracula Purple - the harness's own speech: a `<system-reminder>`
+ * block inside a tool result (its tag lines and body) and the reminder
+ * line the UI prints for the user channel. Its own role on purpose: a
+ * reminder must never read as tool output (Foreground), as the model's
+ * words, or as an error — it is the harness talking, and the human must
+ * be able to tell (transparency, AGENTS.md). */
+#define NM_SGR_REMINDER "\033[38;2;189;147;249m"
+
 #define NM_SGR_RESET "\033[0m"
 
 /* ------------------------------------------------------------------ */

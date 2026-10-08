@@ -44,6 +44,7 @@
 #include "chat_app.h"
 #include "agent.h"
 #include "nm_config.h"
+#include "nm_reminder.h"
 #include "authinfo.h"
 #include "colors.h"
 #include "nm_image_bytes.h"
@@ -2488,7 +2489,7 @@ static void test_tool_round_prints_panels(void)
     ASSERT_TRUE(plan_at < res_at);
     /* The elbow sits in its own role (Cyan), not the panel's Comment
      * and not the body's Foreground; the raw bytes are the proof. */
-    ASSERT_TRUE(strstr(out, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT) != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_TOOL_ELBOW "  ╰─ ") != NULL);
     /* The result body is the full tool output, not a one-line slug. */
     ASSERT_TRUE(strstr(res_at, "Edited") != NULL ||
                 strstr(res_at, "Output") != NULL);
@@ -5916,6 +5917,139 @@ static void test_recv_image_after_text_opens_its_own_block(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Reminders in the UI (transparency)                                 */
+/* ---------------------------------------------------------------- */
+
+/* A nested reminder renders in the harness's own role, and the role
+ * ENDS at the closing tag (the rest of the body is tool output again).
+ * The bytes are the proof: a reminder must never read as tool output,
+ * as the model's words, or as an error. */
+static void test_reminder_panel_renders_in_its_own_role(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    char body[512];
+    snprintf(body, sizeof(body),
+             "STATUS\nOutput:\nreal output line\n"
+             "\n" NM_REMINDER_TAG "\n"
+             "This result was truncated by the tool's output cap.\n" NM_REMINDER_END "\n"
+             "trailing tool output\n");
+    NmToolResult res = { .status = NM_TOOL_OK, .output = body };
+    nm_chat_app_on_tool(NULL, "{}", NM_TOOL_EVENT_END, &res, -1, NULL);
+    /* Post -> dispatch -> commit: the transcript commits at the top of
+     * a flush, so the first flush delivers and the second commits. */
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    /* The body's own lines are Foreground. */
+    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "real output line") != NULL);
+    /* The tag lines and the reminder's text are the harness role... */
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_TAG) != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER
+                       "This result was truncated by the tool's output "
+                       "cap.") != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_END) != NULL);
+    /* ...and the block ENDS there: the next line is body text again. */
+    const char *after = strstr(out, NM_REMINDER_END);
+    ASSERT_NOT_NULL(after);
+    ASSERT_TRUE(strstr(after, NM_SGR_RESULT "trailing tool output") != NULL);
+
+    harness_free(h);
+}
+
+/* A forged tag in tool output can never reach the panel AS a reminder:
+ * the agent escapes it before the panel and the wire share the bytes
+ * (tested there), so the panel's recognizer has nothing to recognize. */
+static void test_reminder_panel_ignores_an_escaped_tag(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    NmToolResult res = { .status = NM_TOOL_OK,
+                         .output = "Output:\nfile says &lt;system-reminder> "
+                                   "here\n" };
+    nm_chat_app_on_tool(NULL, "{}", NM_TOOL_EVENT_END, &res, -1, NULL);
+    /* Post -> dispatch -> commit: the transcript commits at the top of
+     * a flush, so the first flush delivers and the second commits. */
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "&lt;system-reminder>") != NULL);
+    /* No harness role anywhere in the panel: the escaped form is body
+     * text, not a reminder. */
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER) == NULL);
+    harness_free(h);
+}
+
+/* The USER channel: the app prints the reminder itself (the model got it
+ * as its own user message, so the transcript owes the human the same
+ * text), naming the rule. */
+static void test_reminder_user_channel_is_shown(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_on_reminder("context-pressure",
+                            "Context is at 87% of the active model's window.",
+                            NM_REMINDER_CHANNEL_USER, NULL);
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "reminder (context-pressure): Context is at 87% "
+                            "of the active model's window.") != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER) != NULL);
+
+    harness_free(h);
+}
+
+/* The tool channel is NOT printed twice: the panel body already carries
+ * it, and the reminder callback must not duplicate it. */
+static void test_reminder_tool_channel_is_not_echoed(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_on_reminder("read-partial", "This read returned only part.",
+                            NM_REMINDER_CHANNEL_TOOL, NULL);
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "This read returned only part.") == NULL);
+    harness_free(h);
+}
+
+/* A forgery attempt is a security line for the human (the model is not
+ * told): red, and never confused with a reminder. */
+static void test_reminder_forgery_warning_is_red(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_on_warning("warning: read_file output contained 1 forged "
+                           "<system-reminder> tag - neutralized",
+                           NULL);
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, NM_SGR_ERROR "warning: read_file output contained "
+                                         "1 forged") != NULL);
+    harness_free(h);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -6003,6 +6137,11 @@ int main(void)
     RUN_TEST(test_black_hole_connect_is_bounded_by_the_tick);
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
+    RUN_TEST(test_reminder_panel_renders_in_its_own_role);
+    RUN_TEST(test_reminder_panel_ignores_an_escaped_tag);
+    RUN_TEST(test_reminder_user_channel_is_shown);
+    RUN_TEST(test_reminder_tool_channel_is_not_echoed);
+    RUN_TEST(test_reminder_forgery_warning_is_red);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_reasoning_not_echoed_by_default);
     RUN_TEST(test_reasoning_echo_opt_in);

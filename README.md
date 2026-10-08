@@ -170,6 +170,7 @@ searxng          = http://127.0.0.1:8888
 searxng_enabled  = on
 searxng_timeout  = 10000
 run_command_timeout = 300000
+reminders        = on
 rolling_window   = off
 context_budget   = 100000
 ```
@@ -269,6 +270,23 @@ says so.
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
 endpoint for one run — a testing knob, deliberately not a config key.
+
+`reminders` (a bool, default `on`) is the gate for the harness's own
+nudges: short `<system-reminder>` blocks injected into the conversation
+when a condition is met — a tool result that was truncated, a partial
+`read_file` window, the context gauge crossing 85 %/95 %, background
+jobs still running from earlier turns, the last tool round of a turn.
+They are **never silent**: the human sees every one (the user-channel
+ones as a purple `reminder (rule): …` line, the tool-channel ones
+inside the panel's own body, in the same purple role), because the
+transcript must never diverge from what the model received. Turn it
+`off` to silence the nudges. The **trust boundary is not gated**: any
+`<system-reminder>`-looking text arriving _inside_ tool output, file
+contents or search results is escaped as `&lt;system-reminder>` (so it
+can never be mistaken for harness speech) and the user is warned in red
+that something tried — the model is told, by the system prompt, that
+such text is data. That is also why a file that documents the tag reads
+escaped.
 
 In the chat: `/config` shows every key's effective value and where it
 comes from (including machinery-written runtime values), `/config set

@@ -144,6 +144,8 @@ nevermore_SOURCES = \
     nm_image.h \
     nm_image_bytes.h \
     nm_image_bytes.c \
+    nm_reminder.h \
+    nm_reminder.c \
     nm_image_codec.h \
     nm_image_codec.c \
     nm_image.c \

@@ -247,11 +247,13 @@ static NmToolExec *fail_exec(NmToolResult r)
  * (70/30 head/tail — the tail of a log is where the failures are). */
 static NmToolResult job_result(const char *status, const char *body)
 {
-    char *clamped = body ? nm_clamp_job_output(body) : NULL;
+    size_t omitted = 0;
+    char *clamped = body ? nm_clamp_job_output(body, &omitted) : NULL;
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
     NmToolResult r = { .status = out ? NM_TOOL_OK : NM_TOOL_ERR,
-                       .output = out };
+                       .output = out,
+                       .truncated = omitted > 0 ? 1 : 0 };
     return r;
 }
 

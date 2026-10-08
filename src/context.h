@@ -68,13 +68,17 @@ typedef struct NmContext NmContext;
  * the active model's catalog flag (1 accepts image content parts, 0
  * is text-only, -1 unknown): 1 puts the image-capability clause in the
  * assembled prompt, so the model never has to infer its own vision
- * from the transcript. Never fails hard — an unreadable or absent
+ * from the transcript. The reminder clause (nm_reminder.h: how to read
+ * a `<system-reminder>` tag, and what an escaped one means) is
+ * UNCONDITIONAL — the tag-escape trust boundary runs whether or not the
+ * harness injects nudges. Never fails hard — an unreadable or absent
  * AGENTS.md yields the base prompt alone. Returns NULL only on
  * allocation failure. */
 NmContext *nm_context_new(const char *dir, int vision);
 void nm_context_free(NmContext *c);
 
-/* The assembled system prompt: base text + the image-capability clause
+/* The assembled system prompt: base text + the reminder clause + the
+ * image-capability clause
  * (vision == 1) + the <env> block + optional <project_context> block.
  * Borrowed; stable for the context's lifetime — which is what keeps the
  * clause inside the provider's cached prefix. Never NULL (base text

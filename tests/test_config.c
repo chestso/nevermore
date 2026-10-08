@@ -574,14 +574,15 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_FAMILY_SKIP);
     ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_SKIP_FAMILIES);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SEARXNG);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_SEARXNG_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_POLL_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_ROLLING_WINDOW);
-    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_NULL(nm_config_key_at(16));
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_REMINDERS);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_ROLLING_WINDOW);
+    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_CONTEXT_BUDGET);
+    ASSERT_NULL(nm_config_key_at(17));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -598,6 +599,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_CONNECT_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_HANDSHAKE_TIMEOUT),
                   "NEVERMORE_HANDSHAKE_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_REMINDERS),
+                  "NEVERMORE_REMINDERS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_FAMILY_SKIP),
                   "NEVERMORE_CONNECT_FAMILY_SKIP");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SKIP_FAMILIES),
@@ -924,6 +927,42 @@ static void test_new_keys(void)
     nm_config_free(c);
 }
 
+/* The reminder gate (`reminders`): a bool, ON by default (the harness
+ * may inject nudges), durable like the rest, and normalized so the file
+ * and env layers read the same. The tag-escape trust boundary is NOT
+ * this key's business — it is unconditional (nm_reminder.h). */
+static void test_reminders_key(void)
+{
+    pin_paths("reminders");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    /* On by default. */
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_REMINDERS, 1));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_REMINDERS), "on");
+
+    write_file_at(g_user, "reminders = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_REMINDERS, 1));
+
+    test_setenv("NEVERMORE_REMINDERS", "YES");
+    nm_config_set_env(c2);
+    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_REMINDERS, 0));
+    /* Normalized to the file vocabulary, like every bool key. */
+    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_REMINDERS), "on");
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_REMINDERS");
+
+    /* A shadow write round-trips; a garbage value is refused (a typo
+     * must not read as "on" through some prefix match). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REMINDERS, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "reminders = off\n");
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REMINDERS, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_REMINDERS), 0);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_REMINDERS, 1));
+    nm_config_free(c);
+}
+
 /* The rolling-window knobs are durable keys like the rest: file/env/
  * shadow precedence, and a garbage value is dropped. The window is OFF
  * by default, and OFF is what the agent sends "everything" from. */
@@ -1131,6 +1170,7 @@ int main(void)
     RUN_TEST(test_store_handle);
     RUN_TEST(test_family_set_validation);
     RUN_TEST(test_new_keys);
+    RUN_TEST(test_reminders_key);
     RUN_TEST(test_rolling_window_keys);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);

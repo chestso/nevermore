@@ -159,6 +159,14 @@ extern "C" {
  * so it is a preference, never a veto. Env spelling:
  * NEVERMORE_CONNECT_SKIP_FAMILIES. */
 #define NM_CFG_KEY_SKIP_FAMILIES "skip_families"
+/* Whether the harness may inject reminders into the conversation
+ * (`<system-reminder>` blocks: tool-output truncation, a partial read,
+ * context pressure, background jobs still running, the last tool
+ * round). A bool, default on. The escape of forged tags in untrusted
+ * text is NOT gated by this: the trust boundary holds whether or not
+ * nudges are enabled (see nm_reminder.h). Env spelling:
+ * NEVERMORE_REMINDERS. */
+#define NM_CFG_KEY_REMINDERS "reminders"
 /* Local SearXNG endpoint for the web_search tool; the env spelling is
  * NEVERMORE_SEARXNG_URL. A durable profile value (not an exploratory
  * base_url like NEVERMORE_BASE_URL), so it is a first-class key. */

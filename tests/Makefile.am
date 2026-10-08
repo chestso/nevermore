@@ -25,6 +25,7 @@ check_PROGRAMS = \
     test_highlight \
     test_image \
     test_image_codec \
+    test_reminder \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -205,7 +206,7 @@ test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,
 # links context.c only — no network, no boba).
-test_context_SOURCES = test_context.c ../src/context.c
+test_context_SOURCES = test_context.c ../src/context.c ../src/nm_reminder.c
 test_context_CFLAGS = $(TEST_CFLAGS)
 
 # Tools: registry + schemas + file tools + spawn (canned temp files).
@@ -255,7 +256,7 @@ test_process_CFLAGS = $(TEST_CFLAGS)
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/nm_clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/nm_image_bytes.c ../src/nm_size.c \
-    ../src/context.c \
+    ../src/context.c ../src/nm_reminder.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
@@ -312,6 +313,11 @@ test_image_codec_SOURCES = test_image_codec.c ../src/nm_image_codec.c \
     ../src/nm_image_bytes.c ../src/nm_size.c
 test_image_codec_CFLAGS = $(TEST_CFLAGS)
 
+# Reminders: the tag framing, the trust boundary (sanitizer) and the
+# rule table — pure C (no boba, no I/O, no config store).
+test_reminder_SOURCES = test_reminder.c ../src/nm_reminder.c
+test_reminder_CFLAGS = $(TEST_CFLAGS)
+
 # Fence token highlighter: pure C (no boba, no I/O) — the resumable
 # per-line tokenizer behind the labeled-fence body styling (IR step
 # 4b). Unit-tests every language's token classes, cross-line block
@@ -327,7 +333,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm_config.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
-    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

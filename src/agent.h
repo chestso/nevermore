@@ -235,7 +235,6 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a);
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */
 void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
-
 /* One transport notice, for the UI to print as a system line while it
  * is the only sign of life. Fires from inside nm_agent_step when the
  * connect walk abandons an address that went silent for the per-
@@ -245,6 +244,42 @@ void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
  * valid for the call. */
 typedef void (*NmAgentNoticeFn)(const char *msg, void *userdata);
 void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
+
+/* A reminder the harness injected into the conversation (see
+ * nm_reminder.h). Fired for EVERY reminder, in table order, whether it
+ * was nested in a tool result (NM_REMINDER_CHANNEL_TOOL — the panel
+ * already shows it, since the result's bytes are the reminder's bytes)
+ * or carried by its own synthetic user message
+ * (NM_REMINDER_CHANNEL_USER — the UI must show it, or the transcript
+ * would diverge from what the model received). TRANSPARENCY: this
+ * callback is not optional decoration; it is how the human sees the
+ * harness's own speech (AGENTS.md). `name` is the rule, `text` is
+ * exactly what went on the wire; both borrowed for the call. */
+typedef void (*NmAgentReminderFn)(const char *name, const char *text,
+                                  int channel, void *userdata);
+void nm_agent_on_reminder(NmAgent *a, NmAgentReminderFn cb);
+
+/* A warning for the USER — the model is not told. Today: untrusted tool
+ * output contained a forged reminder tag, which the trust boundary
+ * neutralized (escaped). It has its own seam because it is a different
+ * KIND of line from a transport notice (security, not progress), and
+ * because one slot cannot serve two owners (AGENTS.md's connect-notice
+ * lesson). The message is borrowed for the call. */
+typedef void (*NmAgentWarningFn)(const char *msg, void *userdata);
+void nm_agent_on_warning(NmAgent *a, NmAgentWarningFn cb);
+
+/* The context gauge's tier: 0 = at rest, 1 = past 85 % of a KNOWN
+ * window, 2 = past 95 %. The ONE threshold policy — the input row's
+ * gauge colour and the `context-pressure` reminder both read it, so the
+ * nudge fires exactly when the human's gauge changes colour. Unknown
+ * inputs (no usage report yet, no catalog window) are tier 0. */
+int nm_agent_context_tier(const NmAgent *a);
+
+/* Whether the harness may inject reminders (the store's `reminders`
+ * key, resolved at the point of use, default on). Resolved by the agent
+ * at each firing point, so /config takes effect on the next round. The
+ * tag-escape trust boundary is NOT gated: it holds either way. */
+int nm_agent_reminders(const NmAgent *a);
 
 /* Run one user turn to completion: the full
  * stream -> tool-call -> execute -> stream cycle. Blocking; UI

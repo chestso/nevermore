@@ -45,6 +45,8 @@
  * winsock2.h must come first (house rule). */
 #include "nm_clock.h"
 
+#include "nm_reminder.h"
+
 #include "provider_internal.h"
 
 /* One image a round's tool phase collected (docs/TOOL-IMAGE-PLAN.md D6):
@@ -86,6 +88,17 @@ struct NmAgent
     NmToolCallback on_tool;    /* tool start/end */
     NmAgentStateFn on_state;   /* spinner state */
     NmAgentNoticeFn on_notice; /* transport notices (connect walk) */
+    /* Reminders (nm_reminder.h): every injected reminder is handed to
+     * the UI (transparency), and the user gets a warning of its own
+     * when untrusted output tried to forge one. */
+    NmAgentReminderFn on_reminder;
+    NmAgentWarningFn on_warning;
+    /* Turn counter (1-based) and the per-rule edge latch: the framework
+     * is edge-triggered, so a state reminder fires once per state (the
+     * latch holds the signature it fired at) and a per-result reminder
+     * needs no latch at all. */
+    unsigned turn;
+    int reminder_latch[NM_REMINDER_MAX_RULES];
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -390,6 +403,104 @@ void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb)
         g_notice_agent = NULL;
         nm_transport_set_connect_notice(NULL, NULL);
     }
+}
+
+void nm_agent_on_reminder(NmAgent *a, NmAgentReminderFn cb)
+{
+    if (a)
+        a->on_reminder = cb;
+}
+
+void nm_agent_on_warning(NmAgent *a, NmAgentWarningFn cb)
+{
+    if (a)
+        a->on_warning = cb;
+}
+
+/* The gauge's tier — the ONE threshold policy (see agent.h). */
+int nm_agent_context_tier(const NmAgent *a)
+{
+    long used = nm_agent_context_used_tokens(a);
+    long limit = nm_agent_context_limit(a);
+    if (used < 0 || limit <= 0)
+        return 0;
+    double pct = (double)used * 100.0 / (double)limit;
+    if (pct >= 95.0)
+        return 2;
+    if (pct >= 85.0)
+        return 1;
+    return 0;
+}
+
+int nm_agent_reminders(const NmAgent *a)
+{
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_REMINDERS, 1) : 1;
+}
+
+/* The facts the rules read: every one of them is state the agent
+ * already owns, filled at the firing point (no rule reaches into the
+ * agent, and nothing here does I/O). */
+static void reminder_facts(NmAgent *a, NmReminderFacts *f)
+{
+    memset(f, 0, sizeof(*f));
+    f->turn = a->turn;
+    f->ctx_used = nm_agent_context_used_tokens(a);
+    f->ctx_limit = nm_agent_context_limit(a);
+    f->ctx_tier = nm_agent_context_tier(a);
+    f->round = a->round;
+    f->round_cap = nm_agent_max_rounds(a);
+    /* The process registry: the jobs the MODEL started. nevermore's own
+     * machinery (the context <env> git stage) is hidden and is not the
+     * model's business — a reminder naming it would be noise the model
+     * cannot act on. */
+    int n = nm_proc_count();
+    for (int i = 0; i < n && f->n_jobs < NM_REMINDER_MAX_JOBS; i++) {
+        NmProc *p = nm_proc_at(i);
+        if (!p || !nm_proc_live(p) || nm_proc_hidden(p))
+            continue;
+        f->job_ids[f->n_jobs++] = nm_proc_id(p);
+        if (nm_proc_buffered(p) > 0)
+            f->jobs_waiting = 1;
+    }
+}
+
+/* Evaluate one firing point and, when something fires, hand every
+ * reminder to the UI (transparency). The buffers are the caller's; the
+ * agent decides where the bytes go (a tool result's content, or one
+ * synthetic user message). */
+static void reminders_at(NmAgent *a, NmReminderPoint point, NmReminderFacts *f,
+                         NmReminderOut *out)
+{
+    nm_reminder_out_init(out);
+    if (!nm_agent_reminders(a))
+        return;
+    nm_reminder_eval(point, f, a->reminder_latch, out);
+    for (size_t i = 0; i < out->n_fired; i++) {
+        if (a->on_reminder)
+            a->on_reminder(out->fired[i].name, out->fired[i].text,
+                           out->fired[i].channel, a->userdata);
+    }
+}
+
+/* The USER channel: reminders about the conversation's state ride ONE
+ * synthetic user message (harness speech, in the channel models
+ * actually attend to — tool output is read as data). Appended at the
+ * current position and never touched again, so the prefix before it is
+ * untouched and the provider's cache survives; the text says it is the
+ * harness talking (see the system-prompt clause). */
+static void append_user_reminders(NmAgent *a, NmReminderPoint point)
+{
+    if (!a->session)
+        return;
+    NmReminderFacts f;
+    reminder_facts(a, &f);
+    NmReminderOut out;
+    reminders_at(a, point, &f, &out);
+    if (out.user.data && *out.user.data)
+        nm_session_append(a->session, NM_ROLE_USER, out.user.data);
+    nm_reminder_out_free(&out);
 }
 
 void nm_agent_set_endpoint(NmAgent *a, const char *base_url, const char *api_key)
@@ -930,6 +1041,11 @@ static int begin_round(NmAgent *a)
         return -1;
     }
 
+    /* The last-round nudge, before this round's request is built (the
+     * cap check above already passed, so the reminder can never be
+     * appended for a round that will not happen). */
+    append_user_reminders(a, NM_REMINDER_POINT_ROUND);
+
     round_reset(a);
     /* A model whose catalog positively does not claim tools gets no
      * toolset — and no tool_choice: OpenRouter 404s the whole request
@@ -1233,6 +1349,58 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
             (void)tool_image_push(a, (size_t)image_id, tc->name);
         }
     }
+
+    /* The trust boundary (nm_reminder.h): tool output is DATA. One
+     * sanitized copy serves the panel and the wire — they must never
+     * diverge — and a forgery attempt is reported to the user. The
+     * model is not told: the escaped bytes are self-evident, and the
+     * system prompt says what the tag means. A clean body is left
+     * exactly as the tool built it (no copy): only a body that could
+     * forge something is rewritten. */
+    size_t forged = 0;
+    if (nm_reminder_has_tag(res->output)) {
+        char *safe = nm_reminder_sanitize_dup(res->output, &forged);
+        if (safe) {
+            free(res->output);
+            res->output = safe;
+        }
+    }
+    if (forged > 0 && a->on_warning) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "warning: %s output contained %zu forged <system-reminder> "
+                 "tag%s — neutralized (escaped as %s); tool output can never "
+                 "carry harness reminders",
+                 tc->name ? tc->name : "tool", forged, forged == 1 ? "" : "s",
+                 NM_REMINDER_ESCAPE);
+        a->on_warning(msg, a->userdata);
+    }
+
+    /* Reminders about THIS result ride its content (the TOOL channel),
+     * so the panel shows exactly what the model reads. */
+    {
+        NmReminderFacts f;
+        reminder_facts(a, &f);
+        f.tool_name = tc->name;
+        f.tool_truncated = res->truncated;
+        NmReminderOut out;
+        reminders_at(a, NM_REMINDER_POINT_TOOL_RESULT, &f, &out);
+        if (out.tool.data && *out.tool.data) {
+            NmReminderBuf b;
+            nm_reminder_buf_init(&b);
+            const char *body = res->output ? res->output : "";
+            nm_reminder_buf_append(&b, body, strlen(body));
+            /* The frame opens with a blank line of its own, so the
+             * result's body and the block never fuse. */
+            nm_reminder_buf_append(&b, out.tool.data, out.tool.len);
+            if (b.data) { /* OOM leaves the result as it was */
+                free(res->output);
+                res->output = b.data; /* transferred */
+            }
+        }
+        nm_reminder_out_free(&out);
+    }
+
     if (a->on_tool)
         a->on_tool(nm_toolset_find(a->tools, tc->name), tc->args_json,
                    NM_TOOL_EVENT_END, res, image_id, a->userdata);
@@ -1465,6 +1633,12 @@ int nm_agent_start(NmAgent *a, const char *user_input,
         nm_session_append(a->session, NM_ROLE_USER, user_input);
     }
     a->round = 0;
+    /* A new turn: state reminders (context pressure, jobs still running)
+     * ride their own user message right after the user's own, before the
+     * first round is built — the prefix before this point is untouched,
+     * so the provider's cached prefix survives. */
+    a->turn++;
+    append_user_reminders(a, NM_REMINDER_POINT_TURN);
     /* The <env> git stage: the system prompt is not final until it
      * resolves, so the first round waits for it. Drive it once here (the
      * event loop may already have drained it), then either finish or

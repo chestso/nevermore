@@ -154,9 +154,14 @@ char *nm_truncate_tail(const char *body, size_t max, const char *marker)
 }
 
 /* Head-only clamp of a rendered tool body at NM_TOOL_MAX_OUTPUT, with
- * a byte-count omission notice (no head/tail split). */
-char *nm_clamp_output(const char *text)
+ * a byte-count omission notice (no head/tail split). `*omitted` (when
+ * non-NULL) receives how many bytes were dropped — 0 when the body fit
+ * — which is the fact NmToolResult.truncated carries to the reminder
+ * framework (the marker alone is text a reader has to interpret). */
+char *nm_clamp_output(const char *text, size_t *omitted)
 {
+    if (omitted)
+        *omitted = 0;
     if (!text)
         text = "";
     size_t len = strlen(text);
@@ -171,6 +176,8 @@ char *nm_clamp_output(const char *text)
     size_t kept = NM_TOOL_MAX_OUTPUT - (mlen < NM_TOOL_MAX_OUTPUT ? mlen : 0);
     snprintf(marker, sizeof(marker), "\n... %zu bytes omitted ...\n",
              len - kept);
+    if (omitted)
+        *omitted = len - kept;
     return nm_truncate_tail(text, NM_TOOL_MAX_OUTPUT, marker);
 }
 
@@ -180,8 +187,10 @@ char *nm_clamp_output(const char *text)
  * summary and a crash dump all live in the last lines, so the head-only
  * cut the other tools use would drop exactly the part being asked for.
  * quoth spends the same 70/30 on exec output. */
-char *nm_clamp_job_output(const char *text)
+char *nm_clamp_job_output(const char *text, size_t *omitted_out)
 {
+    if (omitted_out)
+        *omitted_out = 0;
     if (!text)
         return NULL;
     size_t len = strlen(text);
@@ -206,6 +215,8 @@ char *nm_clamp_job_output(const char *text)
     size_t head = (size_t)NM_TOOL_MAX_OUTPUT * 7 / 10;
     size_t tail = NM_TOOL_MAX_OUTPUT - head;
     size_t omitted = len - NM_TOOL_MAX_OUTPUT;
+    if (omitted_out)
+        *omitted_out = omitted;
     /* Both cuts are byte offsets into text: back off to a character
      * boundary on each side so neither half ends mid-sequence. */
     head = nm_utf8_clamp_len(text, len, head);
@@ -288,14 +299,16 @@ NmToolset *nm_toolset_new_defaults(void)
  * file tools and web_search format identically. */
 NmToolResult nm_tool_format_result(const char *body, int exit_code)
 {
-    char *clamped = body ? nm_clamp_output(body) : NULL;
+    size_t omitted = 0;
+    char *clamped = body ? nm_clamp_output(body, &omitted) : NULL;
     char status[64];
     snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
     NmToolResult r = { .status = (out && exit_code == 0) ? NM_TOOL_OK
                                                          : NM_TOOL_ERR,
-                       .output = out };
+                       .output = out,
+                       .truncated = omitted > 0 ? 1 : 0 };
     return r;
 }
 

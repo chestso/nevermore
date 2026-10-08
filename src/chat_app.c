@@ -53,6 +53,7 @@
 
 #include "chat_app.h"
 #include "nm_config.h"
+#include "nm_reminder.h"
 #include "colors.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
@@ -596,20 +597,37 @@ static void sys_tool_result(NmChatApp *app, const char *output,
 
     const char *p = output ? output : "";
     int first = 1;
+    /* A nested reminder (the harness's own speech, injected into the
+     * result) is rendered in its own role — the tag lines and the text
+     * between them — so the panel never lets a reminder read as tool
+     * output. The sanitizer guarantees the ONLY tags in this body are
+     * the harness's (a forged one is escaped), so this scan cannot be
+     * fooled by file content. */
+    int in_reminder = 0;
     while (*p || first) {
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (len && p[len - 1] == '\r')
             len--; /* drop a CR before the LF */
+        int is_open = len == strlen(NM_REMINDER_TAG) &&
+                      strncmp(p, NM_REMINDER_TAG, len) == 0;
+        int is_close = len == strlen(NM_REMINDER_END) &&
+                       strncmp(p, NM_REMINDER_END, len) == 0;
+        if (is_open)
+            in_reminder = 1;
+        const char *role = in_reminder ? NM_SGR_REMINDER : NM_SGR_RESULT;
         /* "  ╰─ " and "     " are both 5 display columns. */
         if (first)
-            dynamic_buffer_append_str(b, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESULT);
+            dynamic_buffer_append_str(b, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESET);
         else
-            dynamic_buffer_append_str(b, NM_SGR_RESULT "     ");
+            dynamic_buffer_append_str(b, "     ");
+        dynamic_buffer_append_str(b, role);
         if (first && status != NM_TOOL_OK)
             dynamic_buffer_append_str(b, "error: ");
         dynamic_buffer_append(b, p, len);
         dynamic_buffer_append_str(b, NM_SGR_RESET "\r\n");
+        if (is_close)
+            in_reminder = 0;
         first = 0;
         if (!nl)
             break;
@@ -1096,6 +1114,8 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_on_notice(a, nm_chat_app_on_notice);
+    nm_agent_on_reminder(a, nm_chat_app_on_reminder);
+    nm_agent_on_warning(a, nm_chat_app_on_warning);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
     /* The tool-round cap, the reasoning echo and the stream-inactivity
      * timeout are NOT pushed: the agent resolves them from the config
@@ -1369,6 +1389,39 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     if (!app || !msg || !*msg)
         return;
     sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    tui_runtime_wakeup(app->rt);
+}
+
+/* A reminder the harness injected (nm_reminder.h). TRANSPARENCY: the
+ * human sees the harness's own speech — the rule's name and the exact
+ * text the model received. The TOOL channel is already on screen (it
+ * rides the result's body, styled by sys_tool_result), so only the
+ * USER channel needs a line of its own; printing it twice would be its
+ * own kind of lie. */
+void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
+                             void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !text || !*text)
+        return;
+    if (channel != NM_REMINDER_CHANNEL_USER)
+        return;
+    sys_line(app, NM_SGR_REMINDER "reminder (%s): %s" NM_SGR_RESET,
+             name ? name : "?", text);
+    tui_runtime_wakeup(app->rt);
+}
+
+/* A warning for the USER (the model is not told): today, untrusted
+ * output tried to forge a reminder tag and the trust boundary
+ * neutralized it. Red, and its own line — this is not progress news. */
+void nm_chat_app_on_warning(const char *msg, void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !msg || !*msg)
+        return;
+    sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, msg);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -3493,20 +3546,20 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
                  (double)read * 100.0 / (double)base);
 }
 
-/* The gauge's tier: Comment at rest, Orange past ~85 % of a KNOWN
- * limit, Red past ~95 %. */
+/* The gauge's tier (nm_agent_context_tier): Comment at rest, Orange
+ * past ~85 % of a KNOWN limit, Red past ~95 %. The thresholds live in
+ * the agent — the SAME tier the `context-pressure` reminder fires on,
+ * so the nudge and the colour change together. */
 static TuiColor gauge_color(const NmChatApp *app)
 {
-    long used = nm_agent_context_used_tokens(app->agent);
-    long limit = nm_agent_context_limit(app->agent);
-    if (used >= 0 && limit > 0) {
-        double pct = (double)used * 100.0 / (double)limit;
-        if (pct >= 95.0)
-            return nm_color_gutter_warn_hot();
-        if (pct >= 85.0)
-            return nm_color_gutter_warn();
+    switch (nm_agent_context_tier(app->agent)) {
+    case 2:
+        return nm_color_gutter_warn_hot();
+    case 1:
+        return nm_color_gutter_warn();
+    default:
+        return nm_color_gutter();
     }
-    return nm_color_gutter();
 }
 
 /* Compose and install the input's status line from the app's current

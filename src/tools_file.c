@@ -791,6 +791,12 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
                      ? nm_truncate_tail(body, NM_TOOL_MAX_OUTPUT, marker)
                      : strdup(body);
     NmToolResult r = nm_tool_format_result((full && full[0]) ? full : NULL, 0);
+    /* A windowed read is a PARTIAL VIEW (2), not a clamped render (1):
+     * the rest of the file exists on disk and is not in context, which
+     * is the fact the model has to act on (nm_reminder.h's read-partial
+     * rule). The window is the stronger statement, so it wins. */
+    if (marker_len)
+        r.truncated = 2;
     free(full);
     free(body);
     free(text);
@@ -1303,6 +1309,8 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         shaped = strdup(body);
     }
     NmToolResult r = nm_tool_format_result(shaped, 0);
+    if (truncated)
+        r.truncated = 1; /* the walk stopped at the budget */
     free(shaped);
     free(body);
     return r;
@@ -1526,8 +1534,9 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
     free(needle);
     /* Same seam as list_dir: the walk stopped at the budget, so name
      * the budget (search hits are not resumable from an offset). */
+    int truncated = bo >= NM_TOOL_MAX_OUTPUT;
     char *shaped = NULL;
-    if (bo >= NM_TOOL_MAX_OUTPUT) {
+    if (truncated) {
         char marker[96];
         snprintf(marker, sizeof(marker),
                  "\n... output truncated at the %d-byte budget ...\n",
@@ -1537,6 +1546,8 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         shaped = strdup(body);
     }
     NmToolResult r = nm_tool_format_result(shaped, 0);
+    if (truncated)
+        r.truncated = 1; /* the walk stopped at the budget */
     free(shaped);
     free(body);
     return r;

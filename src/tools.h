@@ -56,6 +56,15 @@ typedef struct NmToolResult
     unsigned char *image;
     size_t image_len;
     char image_alt[64]; /* the image's base name (marker/alt text) */
+    /* How much of this result the MODEL did not get — the actionable
+     * fact the reminder framework reads (nm_reminder.h), distinct from
+     * the `... omitted ...` marker in the body (which says WHERE the gap
+     * is). 0 = complete, 1 = the output was clamped by the tool-output
+     * cap, 2 = the tool returned only part of its SOURCE (read_file's
+     * window: the rest of the file exists and is not in context). A tool
+     * that cannot truncate leaves it 0 — the zero value means "nothing
+     * to say", so a tool that never fills it needs no code. */
+    int truncated;
 } NmToolResult;
 
 typedef enum

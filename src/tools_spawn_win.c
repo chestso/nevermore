@@ -283,12 +283,14 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     free(buf);
     /* Shared head-only clamp: the captured body rides the same budget
      * as every other tool result (rendered + session history alike). */
-    char *body = nm_clamp_output(raw);
+    size_t omitted = 0;
+    char *body = nm_clamp_output(raw, &omitted);
     free(raw);
     if (!body)
         return nm_tool_result_error("out of memory");
     NmToolResult r = { .status = ((int)st == 0) ? NM_TOOL_OK : NM_TOOL_ERR,
-                       .output = body };
+                       .output = body,
+                       .truncated = omitted > 0 ? 1 : 0 };
     return r;
 }
 
@@ -442,7 +444,8 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         snprintf(raw + off, cap - off, "Output:\n%s", body);
     else
         snprintf(raw + off, cap - off, "Output: (empty)\n");
-    char *clamped = nm_clamp_output(raw);
+    size_t omitted = 0;
+    char *clamped = nm_clamp_output(raw, &omitted);
     free(raw);
     nm_proc_close(p);
     e->job_id = -1;
@@ -451,7 +454,8 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     else
         e->result = (NmToolResult){
             .status = (code == 0 && !timed_out) ? NM_TOOL_OK : NM_TOOL_ERR,
-            .output = clamped
+            .output = clamped,
+            .truncated = omitted > 0 ? 1 : 0
         };
     e->done = 1;
     return take(e, out);

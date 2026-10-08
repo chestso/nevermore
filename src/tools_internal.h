@@ -23,9 +23,12 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code);
 
 /* Generic tool-output clamp: keep the head of `text` at
  * NM_TOOL_MAX_OUTPUT bytes and append a byte-count omission notice
- * when it overflows; a plain copy otherwise. Heap text (caller frees),
- * NULL on OOM. Used by format_result and run_command. */
-char *nm_clamp_output(const char *text);
+ * when it overflows; a plain copy otherwise. `*omitted` (non-NULL)
+ * receives how many bytes were dropped — 0 when nothing was, which is
+ * what NmToolResult.truncated reports to the reminder framework.
+ * Heap text (caller frees), NULL on OOM. Used by format_result and
+ * run_command. */
+char *nm_clamp_output(const char *text, size_t *omitted);
 
 /* Fit `body` + `marker` into `max` bytes: keep the head of `body` (up
  * to max - strlen(marker)) and append `marker` at the cut. The message
@@ -42,8 +45,9 @@ char *nm_truncate_tail(const char *body, size_t max, const char *marker);
  * summary, a crash), so the head-only clamp every other tool uses
  * would throw away the half worth reading. NULL when the body is
  * empty after the trim (the caller then renders it structurally),
- * heap text otherwise. */
-char *nm_clamp_job_output(const char *text);
+ * heap text otherwise. `*omitted` (non-NULL) receives the dropped byte
+ * count (0 = nothing dropped), like nm_clamp_output. */
+char *nm_clamp_job_output(const char *text, size_t *omitted);
 
 /* Assemble the canonical result text: the STATUS line, then the
  * "Output:" section. `clamped` is the caller's already-truncated body
