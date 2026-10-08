@@ -61,6 +61,15 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd, int *job_id,
 int nm_proc_id(const NmProc *p);
 const char *nm_proc_command(const NmProc *p);
 
+/* Hide a job from /ps (the user's window).  A hidden job is otherwise
+ * an ordinary job: it stays registered and subscribed to the event loop
+ * (its child must still be drained, or it blocks on a full pipe), it is
+ * just never offered as something the user started.  nevermore's own
+ * construction-time stages use this — the context <env> git stage is
+ * machinery, not a process the user can usefully kill. */
+void nm_proc_set_hidden(NmProc *p, int hidden);
+int nm_proc_hidden(const NmProc *p);
+
 /* The job's readiness handle for the event loop (a PTY master on POSIX;
  * a waitable auto-reset event on Windows), or -1 once it is exhausted
  * (the child's output stream closed, or the child was reaped).  The

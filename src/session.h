@@ -98,6 +98,17 @@ typedef struct NmSessionMessage
 NmSession *nm_session_new(const char *system_prompt);
 void nm_session_free(NmSession *s);
 
+/* Replace the session's system prompt (message 0). The transcript is
+ * otherwise append-only; this is the ONE mutation, and it exists for
+ * the async <env> stage: the agent seeds the session before the git
+ * section has landed and swaps the final prompt in when it does. Only
+ * safe while no request has been built from the session (the agent
+ * calls it before the first round), because a system prompt that
+ * changes after a request is on the wire is a different prefix (the
+ * provider's prompt cache keys on it). Creates the system message when
+ * the session has none. Returns 0, or -1 on OOM. */
+int nm_session_set_system(NmSession *s, const char *prompt);
+
 /* Append-only transcript. */
 const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
                                           const char *content);

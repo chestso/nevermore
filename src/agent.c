@@ -24,7 +24,8 @@
 #include "agent.h"
 #include "context.h"
 #include "json.h"
-#include "nm_config.h" /* the store the machinery reads (no proxies) */
+#include "nm_config.h"  /* the store the machinery reads (no proxies) */
+#include "nm_process.h" /* the <env> git stage runs as a hidden job */
 #include "session.h"
 #include "transport.h"
 
@@ -66,6 +67,17 @@ struct NmAgent
      * at new, owned here, rebuilt only when a new agent is (fresh
      * chat / provider switch). */
     NmContext *context;
+    /* The context's async <env> git stage (context.h). Spawned at new
+     * (a hidden process job), driven by nm_agent_step and bounded by
+     * env_deadline; awaiting_env is 1 while the first round waits for
+     * it, so the system prompt is final before anything rides the wire
+     * (a prefix that gains the git section mid-chat would throw the
+     * provider's cache away). env_job is a JOB ID, never an NmProc * —
+     * the job is process-global and can be closed under us (the
+     * "job-pair" invariant). -1 = no stage. */
+    int env_job;
+    double env_deadline;
+    int awaiting_env;
     NmAgentState state;
     char *last_error;
     const char *base_url;      /* borrowed; NULL = provider default */
@@ -274,6 +286,28 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
      * to a failed agent. The model's vision flag is part of the
      * prompt (the capability clause), so it is resolved here. */
     a->context = nm_context_new(NULL, model_vision(provider, model));
+    /* The <env> git section is the one part that must not run on this
+     * thread: `git status` on a monorepo can hang for seconds. Start it
+     * as a hidden process job (drained by the app's event loop) and let
+     * the first round wait for it — nm_agent_start/step below. A
+     * non-git cwd starts nothing and the prompt is already final. */
+    a->env_job = -1;
+    if (nm_context_env_git_pending(a->context)) {
+        char err[128];
+        int id = -1;
+        NmProc *p = nm_proc_start(nm_context_env_git_command(),
+                                  nm_context_env_cwd(a->context), &id, err,
+                                  sizeof(err));
+        if (p) {
+            nm_proc_set_hidden(p, 1); /* not the user's job: /ps skips it */
+            a->env_job = id;
+            a->env_deadline = nm_monotonic_seconds() +
+                              (double)NM_CONTEXT_GIT_TIMEOUT_MS / 1000.0;
+        }
+        /* A failed spawn (job cap, no shell) degrades to the gitless
+         * prompt: the <env> block's repo flag still says "yes", the
+         * section is simply absent. */
+    }
     nm_conversation_id_new(a->conversation_id);
     return a;
 }
@@ -283,6 +317,14 @@ void nm_agent_free(NmAgent *a)
     if (!a)
         return;
     nm_agent_on_notice(a, NULL); /* release the transport notice slot */
+    /* The <env> git stage, if it is still running: kill and unregister
+     * it (the agent is going away; nothing will drain it). */
+    if (a->env_job > 0) {
+        NmProc *p = nm_proc_find(a->env_job);
+        if (p)
+            nm_proc_close(p);
+        a->env_job = -1;
+    }
     if (a->stream && a->provider->chat_end)
         a->provider->chat_end(a->stream);
     if (a->exec && a->exec_tool && a->exec_tool->end)
@@ -520,6 +562,16 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
                a->state == NM_AGENT_RUNNING_TOOL;
     if (!busy)
         return -1;
+
+    /* The <env> git stage owns the wait while the first round waits for
+     * it: the deadline, or 0 when the output stream is exhausted and the
+     * next step should reap + finish. */
+    if (a->awaiting_env) {
+        NmProc *p = a->env_job > 0 ? nm_proc_find(a->env_job) : NULL;
+        if (!p || nm_proc_handle(p) < 0)
+            return 0; /* resolved / exhausted: step now to finish */
+        return ms_until(a->env_deadline);
+    }
 
     int best = -1;
 
@@ -1330,6 +1382,59 @@ static int tool_step(NmAgent *a)
 }
 
 /* ---------------------------------------------------------------- */
+/* The <env> git stage (context.h)                                   */
+/* ---------------------------------------------------------------- */
+
+/* Drive the git stage one notch. Returns 1 when it is resolved — the
+ * child exited, the deadline passed, or there was no stage — and 0
+ * while it is still running. A resolved stage has applied its git
+ * section (or deliberately not: a timeout or a garbled output degrades
+ * to the gitless prompt, quoth's behavior). */
+static int env_stage_step(NmAgent *a)
+{
+    if (a->env_job <= 0) {
+        a->awaiting_env = 0;
+        return 1;
+    }
+    NmProc *p = nm_proc_find(a->env_job);
+    if (!p) {
+        a->env_job = -1; /* closed under us (teardown, /kill): gitless */
+        a->awaiting_env = 0;
+        return 1;
+    }
+    nm_proc_drain(p);
+    if (nm_proc_live(p)) {
+        if (nm_monotonic_seconds() < a->env_deadline)
+            return 0; /* still running: the loop comes back */
+        /* Hung past the budget: abandon the stage and go gitless. */
+        nm_proc_close(p);
+        a->env_job = -1;
+        a->awaiting_env = 0;
+        return 1;
+    }
+    /* The child is gone: take its output and splice the section in. */
+    const char *out = nm_proc_take_output(p);
+    if (out && *out)
+        nm_context_env_apply_git(a->context, out);
+    nm_proc_close(p);
+    a->env_job = -1;
+    a->awaiting_env = 0;
+    return 1;
+}
+
+/* The stage has resolved: the system prompt is final now. Swap it into
+ * the session — seeded earlier with the gitless prompt — and open the
+ * first round. This is the ONE safe moment for the swap: no request has
+ * been built yet, so the provider's cached prefix cannot disagree. */
+static int env_finish(NmAgent *a)
+{
+    if (a->session)
+        nm_session_set_system(a->session,
+                              nm_context_system_prompt(a->context));
+    return begin_round(a) == 0 ? 0 : -1;
+}
+
+/* ---------------------------------------------------------------- */
 /* Step API                                                          */
 /* ---------------------------------------------------------------- */
 
@@ -1360,6 +1465,17 @@ int nm_agent_start(NmAgent *a, const char *user_input,
         nm_session_append(a->session, NM_ROLE_USER, user_input);
     }
     a->round = 0;
+    /* The <env> git stage: the system prompt is not final until it
+     * resolves, so the first round waits for it. Drive it once here (the
+     * event loop may already have drained it), then either finish or
+     * park in the busy state for nm_agent_step. */
+    if (a->env_job > 0) {
+        a->awaiting_env = 1;
+        if (env_stage_step(a))
+            return env_finish(a);
+        set_state(a, NM_AGENT_STREAMING);
+        return 0;
+    }
     return begin_round(a);
 }
 
@@ -1367,6 +1483,15 @@ int nm_agent_step(NmAgent *a)
 {
     if (!a)
         return -1;
+
+    /* The <env> git stage: while the first round waits for it, a step
+     * drives the stage (its fd readiness, or the deadline) and opens the
+     * round when it resolves. */
+    if (a->awaiting_env) {
+        if (env_stage_step(a))
+            return env_finish(a);
+        return 0;
+    }
 
     /* Tool phase: announce the next call (its plan) and run it — the
      * caller flushes between steps, so that call's plan is on screen
@@ -1427,6 +1552,23 @@ NmSource nm_agent_source(NmAgent *a)
     NmSource s = { -1, 0, NM_SRC_FD };
     if (!a)
         return s;
+    /* The <env> git stage: the job's readiness handle while the first
+     * round waits for it (a PTY master on POSIX, an event on Windows).
+     * The app's interest loop dedupes it against the job registry, so
+     * the stage is subscribed exactly once. */
+    if (a->awaiting_env) {
+        NmProc *p = a->env_job > 0 ? nm_proc_find(a->env_job) : NULL;
+        if (p) {
+            intptr_t h = nm_proc_handle(p);
+            if (h >= 0) {
+                s.handle = h;
+                s.flags = NM_INTEREST_READ;
+                s.kind = nm_proc_source_kind();
+                return s;
+            }
+        }
+        return s; /* handle -1: the tick finishes the stage */
+    }
     /* The active async tool's source takes precedence during the tool
      * phase (the stream is closed then). */
     if (a->exec) {
@@ -1464,6 +1606,21 @@ void nm_agent_cancel(NmAgent *a)
 {
     if (!a)
         return;
+    /* Waiting on the <env> git stage: nothing has been sent, so there is
+     * no stream or tool to unwind — just abandon the stage and go idle.
+     * The user message stays in the session (a later turn sends it with
+     * the final prompt, gitless). */
+    if (a->awaiting_env) {
+        if (a->env_job > 0) {
+            NmProc *p = nm_proc_find(a->env_job);
+            if (p)
+                nm_proc_close(p);
+            a->env_job = -1;
+        }
+        a->awaiting_env = 0;
+        set_state(a, NM_AGENT_IDLE);
+        return;
+    }
     if (a->stream) {
         a->provider->chat_end(a->stream);
         a->stream = NULL;

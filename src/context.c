@@ -25,9 +25,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <direct.h>
+#include <windows.h>
 #else
 #include <unistd.h>
 #endif
@@ -72,6 +74,13 @@ struct NmContext
     size_t cap;
     char *scratch; /* per-file read buffer, reused */
     size_t scratch_cap;
+    /* The <env> block's async git hook: where the section goes (the
+     * offset of the "\n</env>" footer's newline) and whether one is
+     * wanted (the cwd is a git repo). env_git_pos == 0 when there is no
+     * env block at all. */
+    size_t env_git_pos;
+    int env_git_wanted;
+    char wd[NM_CONTEXT_DIR_MAX]; /* the working directory the env names */
 };
 
 /* ---------------------------------------------------------------- */
@@ -106,6 +115,21 @@ static int append(NmContext *c, const char *s, size_t n)
 static int append_str(NmContext *c, const char *s)
 {
     return append(c, s, strlen(s));
+}
+
+/* Insert N bytes at byte offset OFF, shifting the tail (the NUL
+ * included). OFF past the end appends. The env block's git section is
+ * spliced in with this. */
+static int insert_at(NmContext *c, size_t off, const char *s, size_t n)
+{
+    if (off > c->len)
+        off = c->len;
+    if (ensure(c, n) != 0)
+        return -1;
+    memmove(c->prompt + off + n, c->prompt + off, c->len - off + 1);
+    memcpy(c->prompt + off, s, n);
+    c->len += n;
+    return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -333,6 +357,263 @@ static int append_entry(NmContext *c, size_t block_start, size_t cap,
 }
 
 /* ---------------------------------------------------------------- */
+/* The <env> block                                                   */
+/* ---------------------------------------------------------------- */
+
+/* Platform name for the env block: a compile-time constant, so the
+ * prompt is byte-stable across a run (it rides the cached prefix). */
+static const char *platform_name(void)
+{
+#ifdef _WIN32
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#else
+    return "linux";
+#endif
+}
+
+/* Today's LOCAL date as "M/D/YYYY" — quoth's `%-m/%-d/%Y`, unpadded. */
+static void today(char *out, size_t cap)
+{
+#ifdef _WIN32
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    snprintf(out, cap, "%d/%d/%d", (int)st.wMonth, (int)st.wDay,
+             (int)st.wYear);
+#else
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    snprintf(out, cap, "%d/%d/%d", tm.tm_mon + 1, tm.tm_mday,
+             tm.tm_year + 1900);
+#endif
+}
+
+/* The three marker lines the git command echoes to delimit its sections
+ * (one subprocess covers the whole stage). */
+#define GIT_BRANCH_MARKER  "NM_BRANCH_MARKER"
+#define GIT_STATUS_MARKER  "NM_STATUS_MARKER"
+#define GIT_COMMITS_MARKER "NM_COMMITS_MARKER"
+
+/* Status-line cap (quoth's `head -20`), applied while PARSING rather
+ * than in the command: cmd.exe has no `head`. */
+#define NM_CONTEXT_GIT_STATUS_LINES 20
+
+/* The git stage's one shell command: branch, `status --short`, recent
+ * commits, marker-delimited. The separator is the shell's own — `;` for
+ * sh, `&` for cmd.exe — because the job layer runs it under the
+ * platform shell. */
+static const char git_command[] =
+#ifdef _WIN32
+    "echo " GIT_BRANCH_MARKER " & git branch --show-current & echo " GIT_STATUS_MARKER " & git status --short & echo " GIT_COMMITS_MARKER
+    " & git log --oneline -n 3";
+#else
+    "echo " GIT_BRANCH_MARKER "; git branch --show-current; echo " GIT_STATUS_MARKER "; git status --short; echo " GIT_COMMITS_MARKER
+    "; git log --oneline -n 3";
+#endif
+
+const char *nm_context_env_git_command(void) { return git_command; }
+
+int nm_context_env_git_pending(const NmContext *c)
+{
+    return c ? c->env_git_wanted : 0;
+}
+
+const char *nm_context_env_cwd(const NmContext *c)
+{
+    return c ? c->wd : "";
+}
+
+/* Trim a stage section: leading NEWLINES (the blank lines a marker can
+ * leave behind) and trailing whitespace. Leading SPACES are KEPT —
+ * `git status --short`'s first column is meaningful (` M` = modified in
+ * the worktree, `M ` = staged), so trimming it would change what the
+ * model reads. quoth's plain string-trim would eat it; this is a
+ * deliberate improvement. */
+static char *trim_in_place(char *s, size_t *len)
+{
+    while (*s == '\n' || *s == '\r')
+        s++;
+    size_t n = strlen(s);
+    while (n > 0) {
+        char ch = s[n - 1];
+        if (ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r')
+            break;
+        n--;
+    }
+    s[n] = '\0';
+    *len = n;
+    return s;
+}
+
+/* The text between the START_MARKER line and the END_MARKER line (or
+ * the end of RAW), trimmed — quoth's marker-section, a character scan
+ * (no regex). Returns a heap copy (caller frees), or NULL when the
+ * start marker is absent. */
+static char *marker_section(const char *raw, const char *start_marker,
+                            const char *end_marker)
+{
+    if (!raw || !start_marker)
+        return NULL;
+    size_t mlen = strlen(start_marker);
+    /* Find the start marker at the beginning of a line. */
+    const char *p = raw;
+    const char *begin = NULL;
+    for (;;) {
+        if ((p == raw || p[-1] == '\n') && strncmp(p, start_marker, mlen) == 0) {
+            const char *nl = strchr(p, '\n');
+            if (!nl)
+                return NULL; /* marker line never ended: nothing after */
+            begin = nl + 1;
+            break;
+        }
+        const char *nl = strchr(p, '\n');
+        if (!nl)
+            return NULL;
+        p = nl + 1;
+    }
+
+    const char *end = raw + strlen(raw);
+    if (end_marker && *end_marker) {
+        size_t elen = strlen(end_marker);
+        const char *q = begin;
+        while (q < end) {
+            if ((q == raw || q[-1] == '\n') &&
+                strncmp(q, end_marker, elen) == 0) {
+                end = q;
+                break;
+            }
+            const char *nl = memchr(q, '\n', (size_t)(end - q));
+            if (!nl)
+                break;
+            q = nl + 1;
+        }
+    }
+    size_t n = (size_t)(end - begin);
+    char *buf = malloc(n + 1);
+    if (!buf)
+        return NULL;
+    memcpy(buf, begin, n);
+    buf[n] = '\0';
+    size_t tlen = 0;
+    char *trimmed = trim_in_place(buf, &tlen);
+    if (trimmed != buf)
+        memmove(buf, trimmed, tlen + 1);
+    return buf;
+}
+
+/* Keep the first `max` lines of `s` in place (the status cap). */
+static void keep_lines(char *s, int max)
+{
+    int n = 0;
+    for (char *p = s; *p; p++) {
+        if (*p == '\n' && ++n == max) {
+            *p = '\0';
+            return;
+        }
+    }
+}
+
+/* Append a section to the git-section buffer, blank-line separated. */
+static void section_append(char *out, size_t cap, const char *text,
+                           int *first)
+{
+    size_t used = strlen(out);
+    if (used + 1 >= cap)
+        return;
+    snprintf(out + used, cap - used, "%s%s", *first ? "" : "\n", text);
+    *first = 0;
+}
+
+int nm_context_env_apply_git(NmContext *c, const char *output)
+{
+    if (!c || !c->env_git_pos || !output || !*output)
+        return 0;
+
+    char *branch = marker_section(output, GIT_BRANCH_MARKER,
+                                  GIT_STATUS_MARKER);
+    char *status = marker_section(output, GIT_STATUS_MARKER,
+                                  GIT_COMMITS_MARKER);
+    char *commits = marker_section(output, GIT_COMMITS_MARKER, NULL);
+
+    /* A garbled stage (no markers) is the non-git degrade: no section. */
+    if (!branch && !status && !commits) {
+        free(branch);
+        free(status);
+        free(commits);
+        return 0;
+    }
+
+    if (status && *status)
+        keep_lines(status, NM_CONTEXT_GIT_STATUS_LINES);
+
+    /* quoth's section shape: branch line, status (clean or listed),
+     * recent commits — each present only when it has content. */
+    size_t cap = (branch ? strlen(branch) : 0) +
+                 (status ? strlen(status) : 0) +
+                 (commits ? strlen(commits) : 0) + 128;
+    char *section = calloc(1, cap);
+    if (!section) {
+        free(branch);
+        free(status);
+        free(commits);
+        return -1;
+    }
+    int first = 1;
+    char line[512];
+    if (branch && *branch) {
+        snprintf(line, sizeof(line), "Current branch: %s", branch);
+        section_append(section, cap, line, &first);
+    }
+    if (status && *status) {
+        snprintf(line, sizeof(line), "Status:\n%s", status);
+        section_append(section, cap, line, &first);
+    } else if (status) {
+        section_append(section, cap, "Status: clean", &first);
+    }
+    if (commits && *commits) {
+        snprintf(line, sizeof(line), "Recent commits:\n%s", commits);
+        section_append(section, cap, line, &first);
+    }
+    free(branch);
+    free(status);
+    free(commits);
+
+    if (!*section) {
+        free(section);
+        return 0;
+    }
+
+    /* Splice before the "\n</env>" footer (env_git_pos is that
+     * newline): a blank line, the "snapshot" caveat, the section. */
+    size_t ins_cap = strlen(section) + 128;
+    char *ins = malloc(ins_cap);
+    if (!ins) {
+        free(section);
+        return -1;
+    }
+    int ilen = snprintf(ins, ins_cap,
+                        "\n\nGit status (snapshot at conversation start - "
+                        "may be outdated):\n%s",
+                        section);
+    free(section);
+    if (ilen <= 0) {
+        free(ins);
+        return -1;
+    }
+    if (insert_at(c, c->env_git_pos, ins, (size_t)ilen) != 0) {
+        free(ins);
+        return -1;
+    }
+    free(ins);
+    /* The footer moved with the tail; keep the position for a no-op
+     * second call (the agent applies once) and for clarity. */
+    c->env_git_pos += (size_t)ilen;
+    return 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Construction                                                      */
 /* ---------------------------------------------------------------- */
 
@@ -375,6 +656,41 @@ NmContext *nm_context_new(const char *dir, int vision)
 #endif
     }
     strip_trailing_seps(wd);
+
+    /* The <env> block (quoth-context parity): working directory, the
+     * git-repo flag, platform, date. All local and cheap, so it is
+     * assembled HERE — but its git SECTION is a subprocess, spliced in
+     * later by nm_context_env_apply_git (the agent drives that stage,
+     * so a hung `git status` on a monorepo never blocks a chat send).
+     * The block sits between the capability clause and the project
+     * block, quoth's order. */
+    if (wd[0]) {
+        snprintf(c->wd, sizeof(c->wd), "%s", wd);
+        char gitprobe[NM_CONTEXT_DIR_MAX + 16];
+        path_join(gitprobe, sizeof(gitprobe), wd, ".git");
+        c->env_git_wanted = path_exists(gitprobe);
+
+        char date[32];
+        today(date, sizeof(date));
+        char env[NM_CONTEXT_DIR_MAX + 256];
+        int n = snprintf(env, sizeof(env),
+                         "\n\n<env>\n"
+                         "Working directory: %s\n"
+                         "Is directory a git repo: %s\n"
+                         "Platform: %s\n"
+                         "Today's date: %s\n"
+                         "</env>",
+                         wd, c->env_git_wanted ? "yes" : "no",
+                         platform_name(), date);
+        if (n < 0 || (size_t)n >= sizeof(env) ||
+            append(c, env, (size_t)n) != 0) {
+            nm_context_free(c);
+            return NULL;
+        }
+        /* The git section's insertion point: the newline that opens the
+         * "\n</env>" footer. */
+        c->env_git_pos = c->len - strlen("\n</env>");
+    }
 
     /* Walk up from the working directory, collecting the chain (cwd
      * first), stopping at the project root — the nearest ancestor

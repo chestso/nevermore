@@ -2664,18 +2664,27 @@ static void ps_join_command(char *dst, size_t cap, const char *cmd)
 /* /ps: the human's window on process jobs. Background output is the
  * MODEL's to poll (write_stdin) and is deliberately never streamed into
  * the transcript, so this is how a person sees what is running, what it
- * exited with, and how much output is waiting. */
+ * exited with, and how much output is waiting. Hidden jobs (nevermore's
+ * own construction-time stages — the context <env> git stage) are
+ * skipped: they are not processes the user started or can usefully
+ * kill. */
 static void print_jobs(NmChatApp *app)
 {
-    int n = nm_proc_count();
+    int n = 0;
+    int total = nm_proc_count();
+    for (int i = 0; i < total; i++) {
+        NmProc *p = nm_proc_at(i);
+        if (p && !nm_proc_hidden(p))
+            n++;
+    }
     if (n <= 0) {
         sys_line(app, "no process jobs (exec_command starts one)");
         return;
     }
     sys_line(app, "%d process job%s:", n, n == 1 ? "" : "s");
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < total; i++) {
         NmProc *p = nm_proc_at(i);
-        if (!p)
+        if (!p || nm_proc_hidden(p))
             continue;
         char cmd[NM_PS_CMD_CAP];
         char size[24];

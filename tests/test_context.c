@@ -117,7 +117,10 @@ static void proj_path(char *out, size_t cap, const char *proj,
 /* Tests                                                             */
 /* ---------------------------------------------------------------- */
 
-/* No files anywhere: the base prompt alone, no block scaffolding. */
+/* No files anywhere: the base prompt + the <env> block (always present
+ * — it describes the environment, not the project), and no block
+ * scaffolding. The git SECTION is absent: no stage has run, and the
+ * block's repo flag is what a stage would fill. */
 static void test_no_context_files_base_prompt_only(void)
 {
     char proj[600];
@@ -126,8 +129,13 @@ static void test_no_context_files_base_prompt_only(void)
     NmContext *c = nm_context_new(proj, 0);
     ASSERT_NOT_NULL(c);
     const char *sp = nm_context_system_prompt(c);
-    ASSERT_STR_EQ(sp, nm_context_base_system_prompt());
+    const char *base = nm_context_base_system_prompt();
+    ASSERT_TRUE(strncmp(sp, base, strlen(base)) == 0);
     ASSERT_TRUE(strstr(sp, "project_context") == NULL);
+    ASSERT_TRUE(strstr(sp, "<env>") != NULL);
+    ASSERT_TRUE(strstr(sp, "Is directory a git repo: yes") != NULL);
+    ASSERT_TRUE(strstr(sp, "</env>") != NULL);
+    ASSERT_TRUE(strstr(sp, "Git status") == NULL);
     nm_context_free(c);
 }
 
@@ -273,7 +281,8 @@ static void test_global_file_comes_first(void)
     nm_context_free(c);
 }
 
-/* A blank file is not context: the block is omitted entirely. */
+/* A blank file is not context: the project block is omitted entirely
+ * (the <env> block is unaffected — it is not project context). */
 static void test_blank_file_omits_block(void)
 {
     char proj[600];
@@ -284,8 +293,9 @@ static void test_blank_file_omits_block(void)
 
     NmContext *c = nm_context_new(proj, 0);
     const char *sp = nm_context_system_prompt(c);
-    ASSERT_STR_EQ(sp, nm_context_base_system_prompt());
     ASSERT_TRUE(strstr(sp, "project_context") == NULL);
+    ASSERT_TRUE(strstr(sp, "<env>") != NULL);
+    ASSERT_TRUE(strstr(sp, "</env>") != NULL);
     nm_context_free(c);
 }
 
@@ -413,8 +423,9 @@ static void test_vision_clause_precedes_the_project_block(void)
     nm_context_free(c);
 }
 
-/* The gate: text-only (0) and unknown (-1) models get the base prompt
- * unchanged — the prompt never claims a capability we cannot confirm. */
+/* The gate: text-only (0) and unknown (-1) models get the capability
+ * clause omitted — the prompt never claims a capability we cannot
+ * confirm (the <env> block is still there). */
 static void test_vision_clause_gated_on_the_catalog_flag(void)
 {
     char proj[600];
@@ -422,15 +433,194 @@ static void test_vision_clause_gated_on_the_catalog_flag(void)
 
     NmContext *text_only = nm_context_new(proj, 0);
     ASSERT_NOT_NULL(text_only);
-    ASSERT_STR_EQ(nm_context_system_prompt(text_only),
-                  nm_context_base_system_prompt());
+    const char *sp0 = nm_context_system_prompt(text_only);
+    ASSERT_TRUE(strncmp(sp0, nm_context_base_system_prompt(),
+                        strlen(nm_context_base_system_prompt())) == 0);
+    ASSERT_TRUE(strstr(sp0, "You can see images") == NULL);
+    ASSERT_TRUE(strstr(sp0, "<env>") != NULL);
     nm_context_free(text_only);
 
     NmContext *unknown = nm_context_new(proj, -1);
     ASSERT_NOT_NULL(unknown);
-    ASSERT_STR_EQ(nm_context_system_prompt(unknown),
-                  nm_context_base_system_prompt());
+    const char *spu = nm_context_system_prompt(unknown);
+    ASSERT_TRUE(strncmp(spu, nm_context_base_system_prompt(),
+                        strlen(nm_context_base_system_prompt())) == 0);
+    ASSERT_TRUE(strstr(spu, "You can see images") == NULL);
     nm_context_free(unknown);
+}
+
+/* ---------------------------------------------------------------- */
+/* The <env> block + its async git section                           */
+/* ---------------------------------------------------------------- */
+
+/* Build the marker-delimited stage output the git command produces. */
+static void git_output(char *out, size_t cap, const char *branch,
+                       const char *status, const char *commits)
+{
+    snprintf(out, cap,
+             "NM_BRANCH_MARKER\n%s\nNM_STATUS_MARKER\n%s\n"
+             "NM_COMMITS_MARKER\n%s\n",
+             branch, status, commits);
+}
+
+/* The block names the working directory, the repo flag, the platform
+ * and the date — and nothing about git until a stage lands. */
+static void test_env_block_names_the_environment(void)
+{
+    char proj[600];
+    setup_tree("env-basic", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(c);
+    const char *sp = nm_context_system_prompt(c);
+
+    ASSERT_NOT_NULL(strstr(sp, "<env>"));
+    ASSERT_NOT_NULL(strstr(sp, "</env>"));
+    char line[700];
+    snprintf(line, sizeof(line), "Working directory: %s", proj);
+    ASSERT_NOT_NULL(strstr(sp, line));
+    ASSERT_NOT_NULL(strstr(sp, "Is directory a git repo: yes"));
+    ASSERT_NOT_NULL(strstr(sp, "Platform: "));
+    ASSERT_NOT_NULL(strstr(sp, "Today's date: "));
+    /* No git section yet (no stage ran). */
+    ASSERT_NULL(strstr(sp, "Git status"));
+    /* The block is the context's, not a project block. */
+    ASSERT_NULL(strstr(sp, "project_context"));
+    nm_context_free(c);
+}
+
+/* A non-git working directory wants no stage at all, and the flag says
+ * so. */
+static void test_env_git_absent_when_not_a_repo(void)
+{
+    char proj[600];
+    setup_tree("env-nogit", proj, sizeof(proj));
+    char p[600];
+    proj_path(p, sizeof(p), proj, ".git");
+    rmdir(p); /* this test is the non-repo case */
+
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_context_env_git_pending(c), 0);
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp, "Is directory a git repo: no"));
+    /* The stage command is still available; it is just not wanted. */
+    ASSERT_NOT_NULL(nm_context_env_git_command());
+    ASSERT_TRUE(strlen(nm_context_env_git_command()) > 0);
+    nm_context_free(c);
+}
+
+/* A repo wants the stage, and its cwd is the working directory. */
+static void test_env_git_wanted_in_a_repo(void)
+{
+    char proj[600];
+    setup_tree("env-git", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_context_env_git_pending(c), 1);
+    ASSERT_STR_EQ(nm_context_env_cwd(c), proj);
+    nm_context_free(c);
+}
+
+/* Applying a marker-delimited stage splices the section INSIDE the
+ * <env> block, after the date and before the footer. */
+static void test_env_git_section_is_spliced(void)
+{
+    char proj[600];
+    setup_tree("env-splice", proj, sizeof(proj));
+    char p[600];
+    proj_path(p, sizeof(p), proj, "AGENTS.md");
+    write_file_at(p, "PROJECT-MARKER\n");
+
+    NmContext *c = nm_context_new(proj, 0);
+    char out[512];
+    git_output(out, sizeof(out), "main", " M src/foo.c\n?? new.txt\n",
+               "abc1234 first\n def5678 second");
+    ASSERT_EQ(nm_context_env_apply_git(c, out), 0);
+
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp,
+                           "Git status (snapshot at conversation start - may be outdated):"));
+    ASSERT_NOT_NULL(strstr(sp, "Current branch: main"));
+    ASSERT_NOT_NULL(strstr(sp, "Status:\n M src/foo.c"));
+    ASSERT_NOT_NULL(strstr(sp, "?? new.txt"));
+    ASSERT_NOT_NULL(strstr(sp, "Recent commits:\nabc1234 first"));
+
+    /* The section sits after the date, before </env>, and the project
+     * block still follows the (now longer) env block. */
+    const char *date = strstr(sp, "Today's date:");
+    const char *git = strstr(sp, "Git status (snapshot");
+    const char *close = strstr(sp, "</env>");
+    const char *projblk = strstr(sp, "# Project-Specific Context");
+    ASSERT_NOT_NULL(date);
+    ASSERT_NOT_NULL(git);
+    ASSERT_NOT_NULL(close);
+    ASSERT_NOT_NULL(projblk);
+    ASSERT_TRUE(date < git);
+    ASSERT_TRUE(git < close);
+    ASSERT_TRUE(close < projblk);
+    nm_context_free(c);
+}
+
+/* An empty status section reads "Status: clean" (quoth's shape). */
+static void test_env_git_clean_status(void)
+{
+    char proj[600];
+    setup_tree("env-clean", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 0);
+    char out[512];
+    git_output(out, sizeof(out), "main", "", "abc1234 only commit");
+    ASSERT_EQ(nm_context_env_apply_git(c, out), 0);
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp, "Status: clean"));
+    ASSERT_NOT_NULL(strstr(sp, "Current branch: main"));
+    nm_context_free(c);
+}
+
+/* The status list is capped at 20 lines (quoth's `head -20`), applied
+ * while parsing so it holds on cmd.exe too. */
+static void test_env_git_status_is_capped(void)
+{
+    char proj[600];
+    setup_tree("env-cap", proj, sizeof(proj));
+
+    char status[2048];
+    status[0] = '\0';
+    for (int i = 0; i < 25; i++) {
+        char one[32];
+        snprintf(one, sizeof(one), " M file%02d.c\n", i);
+        strncat(status, one, sizeof(status) - strlen(status) - 1);
+    }
+    NmContext *c = nm_context_new(proj, 0);
+    char out[4096];
+    git_output(out, sizeof(out), "main", status, "abc1234");
+    ASSERT_EQ(nm_context_env_apply_git(c, out), 0);
+
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp, " M file00.c"));
+    ASSERT_NOT_NULL(strstr(sp, " M file19.c"));
+    ASSERT_NULL(strstr(sp, " M file20.c"));
+    ASSERT_NULL(strstr(sp, " M file24.c"));
+    nm_context_free(c);
+}
+
+/* A stage that produced no markers (git missing, a garbled stream)
+ * degrades to the gitless prompt — never a partial section. */
+static void test_env_git_garbled_output_is_gitless(void)
+{
+    char proj[600];
+    setup_tree("env-garbled", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_EQ(nm_context_env_apply_git(c, "fatal: not a git repository\n"), 0);
+    ASSERT_EQ(nm_context_env_apply_git(c, ""), 0);
+    ASSERT_EQ(nm_context_env_apply_git(c, NULL), 0);
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NULL(strstr(sp, "Git status"));
+    ASSERT_NOT_NULL(strstr(sp, "</env>"));
+    nm_context_free(c);
 }
 
 int main(void)
@@ -450,5 +640,12 @@ int main(void)
     RUN_TEST(test_vision_clause_follows_the_identity);
     RUN_TEST(test_vision_clause_precedes_the_project_block);
     RUN_TEST(test_vision_clause_gated_on_the_catalog_flag);
+    RUN_TEST(test_env_block_names_the_environment);
+    RUN_TEST(test_env_git_absent_when_not_a_repo);
+    RUN_TEST(test_env_git_wanted_in_a_repo);
+    RUN_TEST(test_env_git_section_is_spliced);
+    RUN_TEST(test_env_git_clean_status);
+    RUN_TEST(test_env_git_status_is_capped);
+    RUN_TEST(test_env_git_garbled_output_is_gitless);
     TEST_SUMMARY();
 }

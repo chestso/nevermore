@@ -40,6 +40,53 @@
  * `reasoning_echo` from; installed in main(). */
 static NmConfig *g_cfg;
 
+/* setenv with the Windows spelling folded in (the per-test-file helper
+ * the other binaries carry). */
+static void test_setenv(const char *name, const char *value)
+{
+#ifdef _WIN32
+    _putenv_s(name, value);
+#else
+    setenv(name, value, 1);
+#endif
+}
+
+/* A fake `git` for the <env> stage's test: answers each of the stage's
+ * three subcommands with its own canned section, so the agent-side test
+ * needs neither a real repository nor a real git. The shell differs by
+ * platform (the job layer runs `sh -c` on POSIX, `cmd.exe /d /c` on
+ * Windows, where PATHEXT finds the `.cmd`). */
+static void write_fake_git(const char *dir)
+{
+    char path[800];
+#ifdef _WIN32
+    snprintf(path, sizeof(path), "%s/git.cmd", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    fputs("@echo off\r\n"
+          "if \"%1\"==\"branch\" echo test-branch\r\n"
+          "if \"%1\"==\"status\" echo M fake.c\r\n"
+          "if \"%1\"==\"log\" echo abc1234 fake commit\r\n",
+          f);
+    fclose(f);
+#else
+    snprintf(path, sizeof(path), "%s/git", dir);
+    FILE *f = fopen(path, "wb");
+    if (!f)
+        return;
+    fputs("#!/bin/sh\n"
+          "case \"$1\" in\n"
+          "  branch) echo test-branch ;;\n"
+          "  status) echo \" M fake.c\" ;;\n"
+          "  log)    echo \"abc1234 fake commit\" ;;\n"
+          "esac\n",
+          f);
+    fclose(f);
+    chmod(path, 0755);
+#endif
+}
+
 /* A job that prints a token and then stays alive — the yield window's
  * silent-child case, in the shell each platform's spawn actually runs. */
 #ifdef _WIN32
@@ -809,6 +856,120 @@ static void test_agent_system_message_carries_agents_md(void)
     remove(agents);
     remove(marker);
     remove(proj);
+}
+
+/* The <env> block's async git stage, agent-side. A `.git` marker plus a
+ * fake `git` on PATH (hermetic — no real repository, no real git) makes
+ * the agent run the stage at construction; the first round WAITS for
+ * it, so the system message carries the spliced section. That assertion
+ * is the proof the deferral worked: a round opened before the stage
+ * landed would carry the gitless prompt and never be reseeded. */
+static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
+{
+    reset_capture();
+
+    char proj[600];
+    char bin[700];
+    char marker[700];
+#ifdef _WIN32
+    snprintf(proj, sizeof(proj), "C:/Users/Public/nm-test-agent-env-%d",
+             (int)getpid());
+#else
+    snprintf(proj, sizeof(proj), "/tmp/nm-test-agent-env-%d", (int)getpid());
+#endif
+    mkdir(proj, 0755);
+    snprintf(bin, sizeof(bin), "%s/bin", proj);
+    mkdir(bin, 0755);
+    snprintf(marker, sizeof(marker), "%s/.git", proj);
+    mkdir(marker, 0755); /* the marker the stage gate reads */
+    write_fake_git(bin);
+
+    /* PATH first, so the stage's shell resolves the fake git. Copy the
+     * old value BEFORE setenv: setenv/putenv may move or free the
+     * environment block the getenv pointer pointed into. */
+    char oldpath[1600];
+    const char *op = getenv("PATH");
+    snprintf(oldpath, sizeof(oldpath), "%s", op ? op : "");
+    char newpath[3200];
+#ifdef _WIN32
+    snprintf(newpath, sizeof(newpath), "%s;%s", bin, oldpath);
+#else
+    snprintf(newpath, sizeof(newpath), "%s:%s", bin, oldpath);
+#endif
+    test_setenv("PATH", newpath);
+
+    /* Root the agent in the project: the env stage's cwd. */
+    char saved[512];
+#ifdef _WIN32
+    _getcwd(saved, (int)sizeof(saved));
+    ASSERT_EQ(_chdir(proj), 0);
+#else
+    ASSERT_NOT_NULL(getcwd(saved, sizeof(saved)));
+    ASSERT_EQ(chdir(proj), 0);
+#endif
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    int rc = nm_agent_turn(agent, "where am I?", NULL, 0);
+
+    /* Restore cwd + PATH best-effort. */
+#ifdef _WIN32
+    int rc_restore = _chdir(saved);
+#else
+    int rc_restore = chdir(saved);
+#endif
+    (void)rc_restore;
+    test_setenv("PATH", oldpath);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(g_n_requests, 1);
+    /* The <env> block rode the system message … */
+    ASSERT_TRUE(strstr(g_requests[0], "<env>") != NULL);
+    /* … and it carries the section the stage spliced in. */
+    ASSERT_TRUE(strstr(g_requests[0], "Current branch: test-branch") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "fake.c") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0], "abc1234 fake commit") != NULL);
+    ASSERT_TRUE(strstr(g_requests[0],
+                       "Git status (snapshot at conversation start") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A non-git working directory spawns no stage at all: the agent builds
+ * (the scratch cwd has no .git) and the job registry stays empty. */
+static void test_agent_env_stage_is_skipped_outside_a_repo(void)
+{
+    nm_proc_reset();
+    const NmProvider *p = nm_provider_by_name("openai");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    ASSERT_EQ(nm_proc_count(), 0); /* no <env> git job */
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
 }
 
 static void test_agent_unknown_tool_reports_error_result(void)
@@ -3759,6 +3920,8 @@ int main(void)
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
+    RUN_TEST(test_agent_env_git_stage_lands_in_the_system_prompt);
+    RUN_TEST(test_agent_env_stage_is_skipped_outside_a_repo);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);

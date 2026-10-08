@@ -76,6 +76,32 @@ NmSession *nm_session_new(const char *system_prompt)
     return s;
 }
 
+int nm_session_set_system(NmSession *s, const char *prompt)
+{
+    if (!s || !prompt)
+        return -1;
+    char *dup = strdup(prompt);
+    if (!dup)
+        return -1;
+    if (s->n > 0 && s->msgs[0].role == NM_ROLE_SYSTEM) {
+        free(s->msgs[0].content);
+        s->msgs[0].content = dup;
+        return 0;
+    }
+    /* No system message yet: insert one at the front (message 0 is the
+     * system prompt by contract, so it must lead). */
+    NmSessionMessage *m = push_slot(s);
+    if (!m) {
+        free(dup);
+        return -1;
+    }
+    memmove(&s->msgs[1], &s->msgs[0], (s->n - 1) * sizeof(*s->msgs));
+    memset(&s->msgs[0], 0, sizeof(s->msgs[0]));
+    s->msgs[0].role = NM_ROLE_SYSTEM;
+    s->msgs[0].content = dup;
+    return 0;
+}
+
 void nm_session_free(NmSession *s)
 {
     if (!s)

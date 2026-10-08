@@ -110,6 +110,22 @@ canonical set by the shared client; where a fact is not reported the
 display degrades (no `⚡`, `session cache: not reported`), it is never
 invented.
 
+Every request's system message is assembled once per chat: the base
+prompt, an `<env>` block (working directory, whether it is a git repo,
+platform, today's date), and a `<project_context>` block built from the
+`AGENTS.md` files that apply to the working directory — the global
+`~/.config/AGENTS.md` first, then each `AGENTS.md` from the project root
+(the nearest ancestor with a `.git`) down to the cwd, so the nearest file
+comes last and wins by recency. Files are labeled with their path and
+the whole block is capped at 32 KiB with an in-band truncation notice.
+Inside a git repo the `<env>` block also carries a git snapshot — the
+current branch, `git status --short` (first 20 lines), and the last three
+commits. That snapshot needs a subprocess, so it runs **asynchronously**
+while you type: the first round waits for it (bounded at 10 s) before the
+prompt goes out, and a hung or failed `git` simply leaves the section out.
+The assembled prompt is then frozen for the chat's life, which is what
+keeps it inside the provider's cached prefix.
+
 ## Configuration
 
 Settings resolve once, lowest to highest:

@@ -47,6 +47,11 @@ struct NmProc
     int live;        /* 1 while the child runs */
     int reaped;
     int exit_code;
+    /* Internal stage (not the model's job): drained by the loop like any
+     * other, but hidden from /ps — nevermore's own construction-time
+     * work (the context <env> git stage) is not a process the user
+     * started or can usefully kill. */
+    int hidden;
     char *cmd;       /* for /ps */
     NmProcLock lock; /* guards buf/len/report_pos/dropped (see above) */
     /* Raw accumulation: bytes [report_pos, len) are unreported. */
@@ -279,6 +284,14 @@ void nm_proc_close_all(void)
 
 int nm_proc_id(const NmProc *p) { return p ? p->id : -1; }
 const char *nm_proc_command(const NmProc *p) { return p ? p->cmd : NULL; }
+
+void nm_proc_set_hidden(NmProc *p, int hidden)
+{
+    if (p)
+        p->hidden = hidden ? 1 : 0;
+}
+
+int nm_proc_hidden(const NmProc *p) { return p ? p->hidden : 0; }
 intptr_t nm_proc_handle(NmProc *p) { return p ? p->handle : -1; }
 
 int nm_proc_source_kind(void)

@@ -75,11 +75,54 @@ NmContext *nm_context_new(const char *dir, int vision);
 void nm_context_free(NmContext *c);
 
 /* The assembled system prompt: base text + the image-capability clause
- * (vision == 1) + optional <project_context> block. Borrowed; stable
- * for the context's lifetime — which is what keeps the clause inside
- * the provider's cached prefix. Never NULL (base text alone when
- * nothing was found). */
+ * (vision == 1) + the <env> block + optional <project_context> block.
+ * Borrowed; stable for the context's lifetime — which is what keeps the
+ * clause inside the provider's cached prefix. Never NULL (base text
+ * alone when nothing was found). */
 const char *nm_context_system_prompt(const NmContext *c);
+
+/* --- the <env> block's async git section ---------------------------
+ *
+ * The <env> block (working directory, git-repo flag, platform, date) is
+ * assembled synchronously at construction — all local, bounded work.
+ * Its git SECTION is not: `git status` on a monorepo can hang for
+ * seconds, so it runs as a subprocess the agent drives from its event
+ * loop (the same discipline quoth-context.el stages it with). The
+ * split of duties: THIS module owns the command and the assembly, the
+ * AGENT owns the process (it owns the event loop's source/step/deadline
+ * seam and the turn lifecycle).
+ *
+ * A non-git working directory has nothing to fetch, so
+ * nm_context_env_git_pending is 0 and the <env> block is already final
+ * (the repo flag says "no"). */
+
+/* 1 when the working directory is a git repo (a git section is wanted),
+ * 0 otherwise. */
+int nm_context_env_git_pending(const NmContext *c);
+
+/* How long the git stage may take before it is abandoned and the prompt
+ * is delivered gitless (quoth-context-git-timeout's 10 s). A hung `git
+ * status` on a monorepo must not hold the first round longer than this;
+ * a fast repo answers in milliseconds, so the bound is only ever seen
+ * when something is wrong. */
+#define NM_CONTEXT_GIT_TIMEOUT_MS 10000
+
+/* The working directory the <env> block names, for the git subprocess's
+ * cwd (borrowed; "" when the context has none). */
+const char *nm_context_env_cwd(const NmContext *c);
+
+/* The one shell command that produces the marker-delimited git section
+ * (branch, `status --short`, recent commits). Run it under a shell in
+ * nm_context_env_cwd; feed its output to nm_context_env_apply_git. */
+const char *nm_context_env_git_command(void);
+
+/* Parse the git stage's marker-delimited output and splice the section
+ * into the assembled prompt's <env> block. A NULL/empty/garbled output
+ * (git unavailable, a failed stage, an abandoned timeout) leaves the
+ * prompt gitless — the same degrade quoth takes. Idempotent per
+ * context: applying twice would duplicate the section, so the agent
+ * calls it once. Returns 0, or -1 on OOM. */
+int nm_context_env_apply_git(NmContext *c, const char *output);
 
 /* The base prompt with no context files (exposed for the tests and
  * for callers that want the plain text). */
