@@ -47,6 +47,7 @@
 
 #include <boba/ansi_sequences.h>
 #include <boba/components/list_popup.h>
+#include <boba/components/statusline.h>
 #include <boba/dynamic_buffer.h>
 #include <boba/stream.h>
 #include <boba/unicode.h>
@@ -140,6 +141,12 @@ struct NmChatApp
     TuiListPopup *popup;
     PopupKind popup_kind;
 
+    /* The status row (spinner glyph + context gauge + separator rule +
+     * the right-aligned identity block): boba's statusline component,
+     * DECLARED here (compose_status) and laid out by boba against the
+     * terminal width. It used to be a field of the text input. */
+    TuiStatusLine *status;
+
     int term_w;
     int term_h;
 
@@ -168,15 +175,6 @@ struct NmChatApp
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
     int tool_running;          /* a tool call is in flight (START seen) */
-    /* The input's status line (P2): spinner glyph + context gauge +
-     * separator rule, composed into ONE reused buffer. status_last is
-     * the change-detection copy — boba's setter re-copies every span
-     * string, so it runs only when the bytes actually changed
-     * (memory-reuse principle). Sized for the chrome's widest span set
-     * (`⠋ ctx 999.9M/999.9M ⚡100.0% `) plus the rule fill out to
-     * NM_STATUS_RULE_MAX_COLS columns (3 bytes each). */
-    char status_text[896];
-    char status_last[896];
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
@@ -694,7 +692,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
         if (image_id >= 0 && model_vision(app, app->provider) == 0)
             sys_line(app, "note: %s is text-only — the provider strips the "
                           "image read_file attached",
-                     app->model ? app->model : "(no model)");
+                     nm_chat_app_model_label(app));
     }
     tui_runtime_wakeup(app->rt);
 }
@@ -783,7 +781,7 @@ static void warn_text_only(NmChatApp *app)
         return;
     sys_line(app, "note: %s is text-only — the provider strips image "
                   "content (pick a vision model with /model)",
-             app->model ? app->model : "(no model)");
+             nm_chat_app_model_label(app));
 }
 
 /* The same note for a /model switch on a conversation that already
@@ -795,7 +793,7 @@ static void warn_images_on_text_only(NmChatApp *app)
         return;
     sys_line(app, "note: %s is text-only — the provider strips the %zu "
                   "image%s in this conversation",
-             app->model ? app->model : "(no model)", n, n == 1 ? "" : "s");
+             nm_chat_app_model_label(app), n, n == 1 ? "" : "s");
 }
 
 static int pending_push(NmChatApp *app, size_t id)
@@ -1225,6 +1223,14 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
                               nm_color_popup_item());              /* item */
     tui_list_popup_set_meta_color(app->popup, nm_color_popup_meta());
 
+    /* The status row: boba's component, declared from the app's live
+     * state on every frame (compose_status) and laid out by boba against
+     * the terminal width. */
+    app->status = tui_statusline_create();
+    if (!app->status)
+        goto oom;
+    tui_statusline_set_terminal_width(app->status, app->term_w);
+
     if (build_agent(app, provider) != 0)
         goto oom;
 
@@ -1249,6 +1255,7 @@ void nm_chat_app_free(NmChatApp *app)
         nm_config_set_store(NULL);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
+    tui_statusline_free(app->status);
     nm_source_free(app->catalog_src);                  /* an in-flight fetch goes with it */
     nm_markdown_render_state_free(&app->render_state); /* image slot */
     if (app->agent)
@@ -1599,6 +1606,30 @@ const char *nm_chat_app_model(const NmChatApp *app)
 const char *nm_chat_app_provider(const NmChatApp *app)
 {
     return app && app->provider ? app->provider->name : NULL;
+}
+
+/* The ONE "(no model)" spelling: a model that is unset is named, never
+ * rendered as an empty string. */
+#define NM_NO_MODEL_LABEL "(no model)"
+
+const char *nm_chat_app_model_label(const NmChatApp *app)
+{
+    return (app && app->model && *app->model) ? app->model : NM_NO_MODEL_LABEL;
+}
+
+/* The app's identity, `<provider> · <label>` — the ONE spelling of the
+ * pair, consumed by the status row's right-aligned block and by the
+ * startup banner. U+00B7 MIDDLE DOT is the banner's join; a `/` would be
+ * a second spelling of the same tuple (and openrouter ids contain
+ * slashes), `:` collides with the tier-explicit provider names
+ * (ollama:local, opencode:zen). */
+void nm_chat_app_identity(const NmChatApp *app, char *buf, size_t cap)
+{
+    if (!buf || cap == 0)
+        return;
+    const char *provider = nm_chat_app_provider(app);
+    snprintf(buf, cap, "%s · %s", provider ? provider : "?",
+             nm_chat_app_model_label(app));
 }
 
 NmAgent *nm_chat_app_agent(const NmChatApp *app)
@@ -3117,15 +3148,13 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
      * runs, so clearing happens after. Splitting the echo would
      * double-print the user's line.
      *
-     * Chrome is live, not history: the status row (spinner/gauge/rule)
-     * sits ABOVE the prompt in the frame, so finishing the frame would
-     * strand that row in the scrollback above the echoed line. Suppress
-     * the status line for the frame submit finalizes — the flag holds
-     * across the flush whose view would re-install it — and invalidate
-     * status_last so the next refresh repaints the row below. */
+     * Chrome is live, not history: the status row (spinner/gauge/rule/
+     * identity) sits ABOVE the prompt in the frame, so finishing the
+     * frame would strand that row in the scrollback above the echoed
+     * line. The flag is the whole mechanism: the composer declares no
+     * row for the frames it covers, so there is nothing to strand — and
+     * the next frame declares the row again. */
     app->submitting = 1;
-    tui_textinput_set_status_line(app->input, NULL, 0);
-    app->status_last[0] = '\0';
 
     send_msg(app, tui_msg_transcript_submit(saved, strlen(saved)));
     tui_runtime_flush(app->rt);
@@ -3398,6 +3427,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         app->term_h = msg.data.size.height;
         tui_textinput_set_terminal_width(app->input, app->term_w);
         tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
+        tui_statusline_set_terminal_width(app->status, app->term_w);
         app->render_state.width = app->term_w; /* image display math */
         tui_transcript_update(app->transcript, msg);
         return tui_update_result_none();
@@ -3467,45 +3497,8 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 }
 
 /* ---------------------------------------------------------------- */
-/* Input status line (P2): spinner + gauge + label + separator rule  */
+/* Status row (P2): spinner + gauge + separator rule + identity      */
 /* ---------------------------------------------------------------- */
-
-/* One composed status-line span. */
-typedef struct StatusSpan
-{
-    size_t off; /* into the app's reused status_text buffer */
-    size_t len;
-    TuiColor color;
-} StatusSpan;
-
-/* The separator rule's column cap. The rule fills the status row out to
- * the terminal width so the row doubles as the separator between the
- * transcript and the input; the cap keeps the reused buffer fixed-size
- * (a terminal wider than this gets a rule that stops early — cosmetic,
- * never a correctness issue, and boba's EL clears the tail either way). */
-#define NM_STATUS_RULE_MAX_COLS 240
-
-/* Append one span's text (plus the separator space that follows it) to
- * the reused composition buffer and record its position/color. Sizes
- * here are far below the cap, so truncation is a formality. */
-static size_t status_add(char *buf, size_t cap, size_t o, StatusSpan *sp,
-                         size_t *n_sp, TuiColor color, const char *fmt, ...)
-{
-    if (o >= cap || *n_sp >= 3)
-        return o;
-    va_list ap;
-    va_start(ap, fmt);
-    int w = vsnprintf(buf + o, cap - o, fmt, ap);
-    va_end(ap);
-    if (w <= 0)
-        return o;
-    size_t add = (size_t)w >= cap - o ? cap - o - 1 : (size_t)w;
-    sp[*n_sp].off = o;
-    sp[*n_sp].len = add;
-    sp[*n_sp].color = color;
-    (*n_sp)++;
-    return o + add;
-}
 
 /* The gauge text: `ctx <used>/<limit>`, with the SESSION's cache-read
  * rate appended when any round has reported a cached count. Both ctx
@@ -3550,28 +3543,57 @@ static TuiColor gauge_color(const NmChatApp *app)
     }
 }
 
-/* Compose and install the input's status line from the app's current
- * state, before every tui_textinput_view. Span order: [spinner glyph]
- * [context gauge] [separator rule] — the gauge is the row's one fixed
- * landmark (only the glyph sits left of it, and it is a constant
- * column). Idle: the gauge alone plus the rule (Q4). The row is the
- * input's own, ABOVE the prompt, so its width is nobody's geometry: the
- * prompt column never moves when the chrome changes. Change-detected
- * against the last composition so boba re-copies only on a real change.
+/* One declared segment, spelled once so the four below read as the row
+ * they compose. */
+static TuiSegment status_segment(const char *text, TuiSegmentAlign align,
+                                 int priority, int min_cols, int pad_left,
+                                 TuiColor color)
+{
+    TuiSegment s;
+    memset(&s, 0, sizeof(s));
+    s.text = text;
+    s.align = align;
+    s.priority = priority;
+    s.min_cols = min_cols;
+    s.pad_left = pad_left;
+    s.style = tui_style_foreground(tui_style_new(), color);
+    return s;
+}
+
+/* DECLARE the status row from the app's live state, before every
+ * tui_textinput_view. The row, in declaration order: [spinner glyph]
+ * [context gauge] [separator rule] [identity].
+ *
+ * boba owns the columns and the app owns the content, so the "what gives
+ * when the row is narrow" ladder is a DECLARATION, not app arithmetic:
+ * the glyph and the gauge are LEFT and FIXED (priority 0 — the row's
+ * chrome is never cut), the rule is a FILL with priority 1, and the
+ * identity is RIGHT with priority 2, a one-column floor and a one-column
+ * pad. So the identity elides before the rule gives, the rule gives
+ * before the chrome, and the row still reads as the separator between
+ * the transcript and the input. boba also change-detects the declaration
+ * set, so an unchanged row costs no copy and no relayout — what the
+ * app's own status_last/strcmp pair used to buy.
  *
  * WHAT the turn is doing is the spinner's TIER, not a text label: the
  * braille tier animates while the model streams, the charset tier while
  * a tool runs (nm_spinner_set_state) — so the glyph alone says
  * "thinking" or "executing", with no word beside it to go stale
  * between states. */
-static void refresh_status_line(NmChatApp *app)
+static void compose_status(NmChatApp *app)
 {
-    if (!app || !app->input || !app->agent)
+    if (!app || !app->status || !app->agent)
         return;
     /* The submit frame carries no chrome: the status row is live, and
-     * finalizing it would strand it in the scrollback (see submit). */
-    if (app->submitting)
+     * finalizing it would strand it in the scrollback (see submit). An
+     * empty declaration IS no row — boba's height goes to 0 and its view
+     * paints nothing — so the frame submit finalizes has no chrome row
+     * to strand, and the composer's cursor offset follows from the same
+     * height. */
+    if (app->submitting) {
+        tui_statusline_set_segments(app->status, NULL, 0);
         return;
+    }
 
     NmAgentState st = nm_agent_state(app->agent);
     int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
@@ -3580,51 +3602,37 @@ static void refresh_status_line(NmChatApp *app)
      * idle row glyphless. */
     const char *glyph = busy ? app->spinner_frame : NULL;
 
-    char gauge[48];
+    /* The gauge carries its own trailing space: the spacing between the
+     * row's left segments is CONTENT here (the app owns the text), while
+     * the identity's gap is the declaration's pad_left. */
+    char gauge[64];
     compose_gauge(app, gauge, sizeof(gauge));
-
-    char *buf = app->status_text;
-    StatusSpan sp[3];
-    size_t n_sp = 0, o = 0;
-    if (glyph && *glyph)
-        o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
-                       nm_color_spinner(), "%s ", glyph);
-    o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
-                   gauge_color(app), "%s ", gauge);
-    buf[o] = '\0';
-
-    /* The separator rule: fill the rest of the row with `─`, so the status
-     * row divides the transcript from the input. Capped by the terminal
-     * width and the buffer's fixed size. */
-    int width = (int)tui_utf8_display_width(buf);
-    int rule = (app->term_w > 0 ? app->term_w : 80) - width;
-    if (rule > NM_STATUS_RULE_MAX_COLS)
-        rule = NM_STATUS_RULE_MAX_COLS;
-    if (rule > 0 && o + (size_t)rule * 3 + 1 <= sizeof(app->status_text)) {
-        size_t off = o;
-        for (int i = 0; i < rule; i++) {
-            buf[o++] = (char)0xe2;
-            buf[o++] = (char)0x80;
-            buf[o++] = (char)0x94;
-        }
-        buf[o] = '\0';
-        sp[n_sp].off = off;
-        sp[n_sp].len = o - off;
-        sp[n_sp].color = nm_color_gutter();
-        n_sp++;
+    size_t glen = strlen(gauge);
+    if (glen + 2 <= sizeof(gauge)) {
+        gauge[glen] = ' ';
+        gauge[glen + 1] = '\0';
     }
 
-    if (strcmp(buf, app->status_last) == 0)
-        return; /* unchanged: no re-copy, no re-alloc in boba */
-    snprintf(app->status_last, sizeof(app->status_last), "%s", buf);
+    char identity[256];
+    nm_chat_app_identity(app, identity, sizeof(identity));
 
-    TuiSpan spans[3];
-    for (size_t i = 0; i < n_sp; i++) {
-        spans[i].text = buf + sp[i].off;
-        spans[i].len = sp[i].len;
-        spans[i].style = tui_style_foreground(tui_style_new(), sp[i].color);
+    TuiSegment segs[4];
+    size_t n = 0;
+    char glyph_text[16];
+    if (glyph && *glyph) {
+        snprintf(glyph_text, sizeof(glyph_text), "%s ", glyph);
+        segs[n++] = status_segment(glyph_text, TUI_SEGMENT_LEFT, 0, 0, 0,
+                                   nm_color_spinner());
     }
-    tui_textinput_set_status_line(app->input, spans, n_sp);
+    segs[n++] =
+        status_segment(gauge, TUI_SEGMENT_LEFT, 0, 0, 0, gauge_color(app));
+    segs[n++] =
+        status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
+                       nm_color_gutter());
+    segs[n++] = status_segment(identity, TUI_SEGMENT_RIGHT, 2, 1, 1,
+                               nm_color_status_identity());
+
+    tui_statusline_set_segments(app->status, segs, n);
 }
 
 /* ---------------------------------------------------------------- */
@@ -3668,7 +3676,7 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     int width = app->term_w > 0 ? app->term_w : 80;
 
     /* The transcript is always drawn (live blocks can outlive a busy
-     * state), then the input area (status line + prompt) and the popup.
+     * state), then the input area (status row + prompt) and the popup.
      * On an empty live region rows == 0 and this reduces to the old
      * behavior (a bare \r + EL, no phantom row). */
     int rows = tui_transcript_live_rows(app->transcript, width, budget);
@@ -3679,10 +3687,18 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
     dynamic_buffer_append_str(out, EL_TO_END);
 
-    /* Spinner glyph + context gauge + separator rule, on the
-     * input's own row ABOVE the prompt (the input row is always painted:
-     * R1). */
-    refresh_status_line(app);
+    /* The status row: DECLARED here (boba lays it out) and painted where
+     * the cursor is — the transcript's rows, then the chrome row, then
+     * the input (the input's own leading \r + EL clears its first row,
+     * exactly as the separator the input used to emit did). The composer
+     * owns the separator and the cursor offset: the component is
+     * placement-agnostic and knows no frame row of its own. */
+    compose_status(app);
+    int chrome = tui_statusline_get_height(app->status);
+    if (chrome > 0) {
+        tui_statusline_view(app->status, out);
+        dynamic_buffer_append_str(out, "\r\n");
+    }
     tui_textinput_view(app->input, out);
     if (tui_list_popup_is_visible(app->popup)) {
         dynamic_buffer_append_str(out, "\r\n");
@@ -3698,10 +3714,11 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
      * terminal that answers nothing resolves conservatively (markers)
      * within the probe's 250 ms deadline. */
     v.probe_terminal = 1;
-    /* The cursor is the textinput's (its row already counts the status
-     * line below boba's cursor_pos), offset by the transcript's live rows
-     * — never hidden (the input always gathers the next prompt). */
+    /* The cursor is the textinput's — which returns the INPUT's own rows
+     * (it no longer carries chrome) — offset by the transcript's live
+     * rows and the status row the composer painted this frame. Never
+     * hidden (the input always gathers the next prompt). */
     TuiCursor c = tui_textinput_cursor_pos(app->input);
-    v.cursor = tui_cursor_at(c.row + rows, c.col);
+    v.cursor = tui_cursor_at(c.row + chrome + rows, c.col);
     return v;
 }

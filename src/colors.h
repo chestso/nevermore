@@ -211,6 +211,15 @@ static inline TuiColor nm_color_spinner(void)
                          NM_DRACULA_YELLOW_B);
 }
 
+/* The status row's right-aligned identity block (`provider · model`):
+ * Dracula Foreground. The rule and the chrome are structure; this is the
+ * one hard fact the row states, so it reads as content, not as chrome
+ * (nm_color_gutter's Comment is the row's own muted role). */
+static inline TuiColor nm_color_status_identity(void)
+{
+    return tui_color_rgb(NM_DRACULA_FG_R, NM_DRACULA_FG_G, NM_DRACULA_FG_B);
+}
+
 /* ------------------------------------------------------------------ */
 /* TuiAttr constructors (renderers)                                    */
 /* ------------------------------------------------------------------ */

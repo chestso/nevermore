@@ -731,22 +731,108 @@ static char *span_bytes(TuiColor color, const char *text)
     return tui_style_render(&s, text);
 }
 
-/* The status row's separator rule: `─` filling the row to the terminal
- * width (80 in these tests) after a chrome of `chrome` plain text. The
- * rule is what makes the status row double as the transcript/input
- * separator. Caller frees. */
-static char *status_rule_bytes(const char *chrome)
+/* The status row's right-hand half, exactly as boba's layout paints it:
+ * the rule filling the slack (gutter Comment), then the identity
+ * segment's own pad_left blank and its text (nm_color_status_identity).
+ * `left` is the row's left chrome text and `identity` the identity block
+ * — the row's width is the harness's terminal (80), so the rule takes
+ * what is left of it. Caller frees. */
+static char *status_row_bytes(const char *left, const char *identity)
 {
-    int n = 80 - (int)tui_utf8_display_width(chrome);
-    static char rule[240 * 3 + 1];
+    int rule = 80 - (int)tui_utf8_display_width(left) - 1 /* pad_left */ -
+               (int)tui_utf8_display_width(identity);
+    if (rule < 1)
+        rule = 1;
+    char rule_text[256 * 3 + 1];
     size_t o = 0;
-    for (int i = 0; i < n; i++) {
-        rule[o++] = (char)0xe2;
-        rule[o++] = (char)0x80;
-        rule[o++] = (char)0x94;
+    for (int i = 0; i < rule; i++) {
+        rule_text[o++] = (char)0xe2;
+        rule_text[o++] = (char)0x94;
+        rule_text[o++] = (char)0x80; /* U+2500 */
     }
-    rule[o] = '\0';
-    return span_bytes(nm_color_gutter(), rule);
+    rule_text[o] = '\0';
+
+    char ident_text[512];
+    snprintf(ident_text, sizeof(ident_text), " %s", identity);
+
+    char *rule_span = span_bytes(nm_color_gutter(), rule_text);
+    char *ident_span = span_bytes(nm_color_status_identity(), ident_text);
+    if (!rule_span || !ident_span) {
+        free(rule_span);
+        free(ident_span);
+        return NULL;
+    }
+    size_t n = strlen(rule_span) + strlen(ident_span) + 1;
+    char *row = (char *)malloc(n);
+    if (row)
+        snprintf(row, n, "%s%s", rule_span, ident_span);
+    free(rule_span);
+    free(ident_span);
+    return row;
+}
+
+/* The harness's identity for a provider/model pair: the ONE spelling the
+ * status row's right block and the startup banner share. */
+#define IDENT(p, m) p " \xc2\xb7 " m
+
+/* The frame's POPUP region: everything painted after the input's prompt
+ * (the popup is the last thing the composer paints). The status row's
+ * identity block carries the active model id too, so "the picker does
+ * not list X" must not scan the whole frame. */
+static const char *frame_popup(const char *frame, const char *prompt_span)
+{
+    const char *last = NULL;
+    for (const char *p = strstr(frame, prompt_span); p;
+         p = strstr(p + 1, prompt_span))
+        last = p;
+    return last ? last + strlen(prompt_span) : frame;
+}
+
+/* The status row as the frame paints it: the bytes between the
+ * statusline's own lead and the "\r\n" the composer puts after it (the
+ * input's own lead follows). NULL when the frame carries no chrome row
+ * (the submit frame). Caller frees.
+ *
+ * The prompt span anchors it: the input's lead is the "\r\x1b[K" right
+ * before the prompt, and the row's own lead is the nearest "\r" before
+ * that (the row itself carries no carriage return). */
+static char *frame_status_row(const char *frame, const char *prompt_span)
+{
+    const char *p = strstr(frame, prompt_span);
+    if (!p || p - frame < 6)
+        return NULL;
+    if (memcmp(p - 4, "\r\x1b[K", 4) != 0)
+        return NULL;
+    const char *end = p - 4;
+    if (memcmp(end - 2, "\r\n", 2) != 0)
+        return NULL; /* no chrome row: the input opens the frame's row */
+    end -= 2;
+    const char *start = end;
+    while (start > frame && start[-1] != '\r')
+        start--;
+    if (start == frame || end - start < 3)
+        return NULL;
+    start += 3; /* past the row's own "\x1b[K" (the "\r" is behind us) */
+    size_t n = (size_t)(end - start);
+    char *row = (char *)malloc(n + 1);
+    if (!row)
+        return NULL;
+    memcpy(row, start, n);
+    row[n] = '\0';
+    return row;
+}
+
+/* The SGR the identity block is painted with (its span's prefix), for
+ * "is there any identity on this row?" assertions. Caller frees. */
+static char *status_identity_sgr(void)
+{
+    char *s = span_bytes(nm_color_status_identity(), "x");
+    if (s) {
+        char *x = strchr(s, 'x');
+        if (x)
+            *x = '\0';
+    }
+    return s;
 }
 
 /* ---------------------------------------------------------------- */
@@ -888,16 +974,18 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* The frame's first row is the spinner itself: no leading
      * line separator (the phantom row). */
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
-    /* The busy frame carries the INPUT AREA: its status line (the braille
+    /* The busy frame carries the INPUT AREA: its status row (the braille
      * glyph in the activity role, the context gauge with no usage and no
-     * known limit yet, and the separator rule filling the row) on one
-     * row, then the accent prompt on the next — the input is always where
-     * the next prompt is gathered (R1). What the turn is doing is the
-     * glyph's TIER, so there is no label beside it. */
+     * known limit yet, the separator rule filling the row, and the
+     * right-aligned identity block) on one row, then the accent prompt on
+     * the next — the input is always where the next prompt is gathered
+     * (R1). What the turn is doing is the glyph's TIER, so there is no
+     * label beside it. */
     char *glyph = span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
     char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *rule = status_rule_bytes("\xe2\xa0\x8b ctx -/- ");
+    char *rule =
+        status_row_bytes("\xe2\xa0\x8b ctx -/- ", IDENT("openai", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -908,18 +996,29 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* No busy label anywhere in the paint: the glyph is the whole
      * activity readout. */
     ASSERT_TRUE(strstr(frame, "thinking") == NULL);
-    /* The order: [glyph][gauge][rule] on the status row — the gauge is
-     * the row's one fixed landmark (only the constant-width glyph sits
-     * left of it), and the rule fills the row out to the terminal
-     * width. */
+    /* The order: [glyph][gauge][rule][identity] on the status row — the
+     * gauge is the row's one fixed landmark (only the constant-width
+     * glyph sits left of it), the rule fills the row out to the terminal
+     * width, and the identity closes it. */
     char joined[512];
     snprintf(joined, sizeof(joined), "%s%s", glyph, gauge);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
     ASSERT_TRUE(strstr(frame, rule) != NULL);
+    /* The row is exactly the terminal width and the identity's last
+     * column is the row's last column: the right edge is flush. */
+    char ident_text[128];
+    snprintf(ident_text, sizeof(ident_text), " %s",
+             IDENT("openai", "test-model"));
+    char *identity = span_bytes(nm_color_status_identity(), ident_text);
+    ASSERT_NOT_NULL(identity);
+    ASSERT_TRUE(strstr(frame, identity) != NULL);
+    free(identity);
     /* The prompt opens the NEXT row — the status row is a separator, so
-     * the prompt never shares it. */
+     * the prompt never shares it. The composer emits the row, then its
+     * own "\r\n"; the input's leading "\r" + EL clears the row it lands
+     * on (the separator the input used to emit itself). */
     char next_row[512];
-    snprintf(next_row, sizeof(next_row), "\r\n\033[K%s", prompt);
+    snprintf(next_row, sizeof(next_row), "\r\n\r\033[K%s", prompt);
     ASSERT_TRUE(strstr(frame, next_row) != NULL);
     free(glyph);
     free(gauge);
@@ -1010,9 +1109,9 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 /* Context gauge (P2): provider-reported usage in the status line    */
 /* ---------------------------------------------------------------- */
 
-/* The idle frame carries the gauge alone plus the rule (Q4) and it says
- * "unknown" honestly: no usage reported yet, and the catalog carries no
- * window for this model. */
+/* The idle frame carries the gauge, the rule and the identity (Q4) and it
+ * says "unknown" honestly: no usage reported yet, and the catalog carries
+ * no window for this model. */
 static void test_context_gauge_unknown_reads_as_dash(void)
 {
     AppHarness *h = harness_new("openai", "test-model", NULL);
@@ -1022,18 +1121,18 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *rule = status_rule_bytes("ctx -/- ");
+    char *rule = status_row_bytes("ctx -/- ", IDENT("openai", "test-model"));
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
-    /* The idle status row is the gauge alone plus the rule, with no slot
-     * and no busy chrome (Q4); the prompt opens the NEXT row, so the
+    /* The idle status row is the gauge, the rule and the identity, with no
+     * slot and no busy chrome (Q4); the prompt opens the NEXT row, so the
      * gauge's width never moves it. */
     char joined[512];
     snprintf(joined, sizeof(joined), "%s%s", gauge, rule);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
     char next_row[512];
-    snprintf(next_row, sizeof(next_row), "\r\n\033[K%s", prompt);
+    snprintf(next_row, sizeof(next_row), "\r\n\r\033[K%s", prompt);
     ASSERT_TRUE(strstr(frame, next_row) != NULL);
     free(gauge);
     free(prompt);
@@ -1311,6 +1410,215 @@ static void test_context_gauge_warns_near_the_limit(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* Status row identity: the right-aligned `provider · model` block   */
+/* ---------------------------------------------------------------- */
+
+/* The identity block's model follows /model, and the row it lands in is
+ * re-declared (boba's change detection is on the declarations, so a new
+ * model id is a new row). */
+static void test_status_row_identity_follows_model(void)
+{
+    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    ASSERT_NOT_NULL(h);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *before = span_bytes(nm_color_status_identity(),
+                              " " IDENT("openai", "gpt-4o"));
+    ASSERT_NOT_NULL(before);
+    ASSERT_TRUE(strstr(frame, before) != NULL);
+    free(before);
+
+    harness_type(h, "/model gpt-5");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-5");
+
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *after =
+        span_bytes(nm_color_status_identity(), " " IDENT("openai", "gpt-5"));
+    ASSERT_NOT_NULL(after);
+    ASSERT_TRUE(strstr(frame, after) != NULL);
+    /* The old identity is gone (the declarations changed, not just the
+     * text inside one of them). */
+    ASSERT_TRUE(strstr(frame, IDENT("openai", "gpt-4o")) == NULL);
+    free(after);
+
+    harness_free(h);
+}
+
+/* A /provider switch re-resolves the model for the NEW provider: the
+ * identity follows the provider, and a provider with no model memory
+ * shows the honest "(no model)" rather than the previous provider's id
+ * (the store is the per-provider model memory — see switch_provider). */
+static void test_status_row_identity_follows_provider(void)
+{
+    pin_cfg_paths("statusrow-provider");
+    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h); /* an empty store: no model memory */
+
+    harness_type(h, "/provider ollama:local");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *identity = span_bytes(nm_color_status_identity(),
+                                " " IDENT("ollama:local", "(no model)"));
+    ASSERT_NOT_NULL(identity);
+    ASSERT_TRUE(strstr(frame, identity) != NULL);
+    /* The previous provider's id is nowhere on the row. */
+    ASSERT_TRUE(strstr(frame, IDENT("openai", "gpt-4o")) == NULL);
+    free(identity);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* A model that was never set reads as the ONE "(no model)" spelling —
+ * the row never shows an empty identity. */
+static void test_status_row_identity_no_model(void)
+{
+    AppHarness *h = harness_new("openai", NULL, NULL);
+    ASSERT_NOT_NULL(h);
+    ASSERT_NULL(nm_chat_app_model(h->app));
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *identity = span_bytes(nm_color_status_identity(),
+                                " " IDENT("openai", "(no model)"));
+    ASSERT_NOT_NULL(identity);
+    ASSERT_TRUE(strstr(frame, identity) != NULL);
+    free(identity);
+
+    /* The label seam is the same spelling the notices use. */
+    ASSERT_STR_EQ(nm_chat_app_model_label(h->app), "(no model)");
+
+    harness_free(h);
+}
+
+/* A narrow terminal: boba elides the identity (head kept, `…`-marked)
+ * before it touches the rule, and the chrome (the gauge) is never cut.
+ * The row is still exactly the terminal width. */
+static void test_status_row_identity_elides_on_narrow_terminal(void)
+{
+    /* A long, catalog-unknown id: the identity is 57 columns and the left
+     * chrome 8 (the gauge reads "ctx -/- ", no known window). */
+    AppHarness *h = harness_new(
+        "openrouter", "vendor/very-long-model-identifier-abcdefghij", NULL);
+    ASSERT_NOT_NULL(h);
+    tui_runtime_send(h->rt, tui_msg_window_size(46, 24));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 46u);
+
+    /* The gauge is untouched (its own span, at full text). */
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(row, gauge) != NULL);
+    free(gauge);
+    /* The rule survives (at least one column) ... */
+    ASSERT_TRUE(strstr(row, "\xe2\x94\x80") != NULL);
+    /* ... and the identity is elided, head kept and marked. */
+    ASSERT_TRUE(strstr(row, "openrouter \xc2\xb7 vendor/very-long-") != NULL);
+    ASSERT_TRUE(strstr(row, "\xe2\x80\xa6") != NULL);
+    ASSERT_TRUE(strstr(row, "abcdefghij") == NULL);
+    free(prompt);
+    free(row);
+
+    harness_free(h);
+}
+
+/* Narrower still: the identity gives everything, is dropped whole, and
+ * the row falls back to [chrome][rule] — the separator contract is the
+ * last thing standing. */
+static void test_status_row_identity_dropped_when_short(void)
+{
+    AppHarness *h = harness_new(
+        "openrouter", "vendor/very-long-model-identifier-abcdefghij", NULL);
+    ASSERT_NOT_NULL(h);
+    tui_runtime_send(h->rt, tui_msg_window_size(10, 24));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 10u);
+    ASSERT_TRUE(strstr(row, "openrouter") == NULL);
+    ASSERT_TRUE(strstr(row, "vendor/") == NULL);
+    /* No identity bytes at all — not even the elided head or the pad. */
+    char *sgr = status_identity_sgr();
+    ASSERT_NOT_NULL(sgr);
+    ASSERT_TRUE(strstr(row, sgr) == NULL);
+    free(sgr);
+    /* The chrome is whole and the rule fills what is left. */
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(row, gauge) != NULL);
+    free(gauge);
+    free(prompt);
+    free(row);
+
+    harness_free(h);
+}
+
+/* The composer owns the cursor's chrome offset: boba's textinput reports
+ * its OWN rows (it no longer counts a status row), so the view declares
+ * the input's row PLUS the chrome row it painted. The placement is
+ * measured from the frame's END, and the chrome row sits above the
+ * cursor, so the offset cancels in the emitted bytes — what this guards
+ * is that the composed frame still places the cursor on the INPUT's row:
+ * with a two-row input and the cursor moved back to the first, the frame
+ * moves up exactly ONE row. Two would mean the chrome row was counted
+ * twice; zero would mean the cursor was declared on the chrome row
+ * (which is what forgetting the offset would do). */
+static void test_status_row_cursor_lands_on_the_input_row(void)
+{
+    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "one");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    harness_type(h, "two");
+    /* Up: the cursor leaves the second input row for the first. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_UP, 0, 0));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    /* The cursor placement is the runtime's, not the frame buffer's: the
+     * repaint brackets the frame with hide/show-cursor, so read the raw
+     * output. */
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    const char *show = NULL;
+    for (const char *p = strstr(out, "\x1b[?25h"); p;
+         p = strstr(p + 1, "\x1b[?25h"))
+        show = p;
+    ASSERT_NOT_NULL(show);
+    /* Walk back to the up-move that opens the placement (the forward, when
+     * there is one, ends in 'C'; the input's text holds no 'A'). */
+    const char *q = show;
+    while (q > out && q[-1] != 'A')
+        q--;
+    ASSERT_TRUE(q - out >= 4);
+    ASSERT_TRUE(memcmp(q - 4, "\x1b[1A", 4) == 0);
+
+    harness_free(h);
+}
+
 /* While a turn is in flight the input row is still there and still
  * gathers input: keys edit the buffer (R1), Enter is a silent no-op
  * (Q3), and Ctrl+C remains the interrupt. */
@@ -1497,10 +1805,16 @@ static void test_model_picker_no_match_prints_nothing(void)
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    /* No match: no popup; a note prints instead; model unchanged. */
+    /* No match: no popup; a note prints instead; model unchanged. The
+     * status row's identity block carries the active model id, so the
+     * absence is asserted on the frame's POPUP region. */
     harness_type(h, "/model zzz-no-such-model");
     harness_enter(h);
-    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "gpt-oss") == NULL);
+    const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    ASSERT_TRUE(strstr(frame_popup(frame, prompt), "gpt-oss") == NULL);
+    free(prompt);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
     ASSERT_TRUE(strstr(harness_read(h), "no models") != NULL);
 
@@ -5554,8 +5868,14 @@ static void test_model_picker_capability_query_img(void)
     harness_type(h, "/model @img");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") != NULL);
-    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
+    /* Not in the LIST: the identity block names the active model, so the
+     * absence is asserted on the popup region. */
+    ASSERT_TRUE(strstr(popup, "~openai/gpt-astra-latest") == NULL);
+    free(prompt);
 
     /* The sole match: Enter composes it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
@@ -5578,10 +5898,16 @@ static void test_model_picker_capability_query_tools(void)
     harness_type(h, "/model @tools");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
     ASSERT_TRUE(strstr(frame, "🔧️") != NULL);
-    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
-    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+    /* The identity block names the active model: assert the absences on
+     * the popup region (what the picker LISTS). */
+    ASSERT_TRUE(strstr(popup, "~openai/gpt-astra-latest") == NULL);
+    ASSERT_TRUE(strstr(popup, "google/gemini-3.1-flash-lite-image") == NULL);
+    free(prompt);
 
     /* The sole match: Enter composes the bare id (no meta in the value). */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
@@ -5715,9 +6041,15 @@ static void test_model_picker_grammar_ctx_range(void)
     harness_type(h, "/model ctx:>64k ctx:<1M");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
-    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
+    /* The active model is out of the RANGE — absent from the list, though
+     * the identity block still names it. */
+    ASSERT_TRUE(strstr(popup, "~openai/gpt-astra-latest") == NULL);
     ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+    free(prompt);
     harness_free(h);
 }
 
@@ -5867,9 +6199,15 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
     ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
-    ASSERT_TRUE(strstr(frame, "filler-000") == NULL);
+    /* The active filler is named by the identity block, not listed: the
+     * absence is asserted on the popup region. */
+    ASSERT_TRUE(strstr(popup, "filler-000") == NULL);
+    free(prompt);
 
     /* The unfiltered cut: a plain query must find a deep row too. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
@@ -6114,6 +6452,12 @@ int main(void)
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
+    RUN_TEST(test_status_row_identity_follows_model);
+    RUN_TEST(test_status_row_identity_follows_provider);
+    RUN_TEST(test_status_row_identity_no_model);
+    RUN_TEST(test_status_row_identity_elides_on_narrow_terminal);
+    RUN_TEST(test_status_row_identity_dropped_when_short);
+    RUN_TEST(test_status_row_cursor_lands_on_the_input_row);
     RUN_TEST(test_busy_input_gathers_type_ahead);
     RUN_TEST(test_quit_command_quits);
     RUN_TEST(test_model_command_sets_model);

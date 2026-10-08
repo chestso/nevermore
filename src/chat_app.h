@@ -156,6 +156,15 @@ const char *nm_chat_app_model(const NmChatApp *app);
 const char *nm_chat_app_provider(const NmChatApp *app);
 NmAgent *nm_chat_app_agent(const NmChatApp *app);
 
+/* The model's display label: the id, or the ONE "(no model)" spelling
+ * (never an empty string). The status row and the notices share it. */
+const char *nm_chat_app_model_label(const NmChatApp *app);
+
+/* The app's identity, `<provider> · <label>` (U+00B7): the status row's
+ * right-aligned block and the startup banner's one spelling of the same
+ * tuple. Truncated at `cap` rather than overflowed. */
+void nm_chat_app_identity(const NmChatApp *app, char *buf, size_t cap);
+
 /* The prompt's textinput (main.c wires history load/save to it). */
 TuiTextInput *nm_chat_app_textinput(NmChatApp *app);
 

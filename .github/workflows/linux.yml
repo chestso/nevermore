@@ -35,26 +35,27 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the list popup's metadata column —
-          # tui_list_popup_set_items_meta / set_meta_color, the model
-          # picker's capability badges + context window — plus the
-          # image tier's kitty transport — a=T with s/v, without which
-          # an IMAGE unit reserves its rows and places nothing — and the
-          # earlier APIs this repo already depends on: the input's
-          # status line
-          # (components/textinput.h's TuiSpan +
-          # tui_textinput_set_status_line, nevermore's spinner/context
-          # gauge/separator rule), the explicit image unit message
-          # (tui_msg_stream_image), the display-column metrics fix that
-          # lands the cursor on the right cell when a prompt is two
-          # cells wide, the inline-frame reflow-erase fix so a terminal
-          # resize no longer strands the frame's top rows, and the
-          # Windows stdin-reader teardown fix this repo's Windows loop
-          # inherits).
+          # new boba API (currently the status line component —
+          # components/statusline.h's TuiStatusLine + TuiSegment, which
+          # the app DECLARES and boba lays out, replacing the text
+          # input's status line: TuiSpan and
+          # tui_textinput_set_status_line are gone, and the input no
+          # longer counts a chrome row — plus the list popup's metadata
+          # column — tui_list_popup_set_items_meta / set_meta_color, the
+          # model picker's capability badges + context window — and the
+          # earlier APIs this repo already depends on: the image tier's
+          # kitty transport (a=T with s/v, without which an IMAGE unit
+          # reserves its rows and places nothing), the explicit image
+          # unit message (tui_msg_stream_image), the display-column
+          # metrics fix that lands the cursor on the right cell when a
+          # prompt is two cells wide, the inline-frame reflow-erase fix
+          # so a terminal resize no longer strands the frame's top rows,
+          # and the Windows stdin-reader teardown fix this repo's
+          # Windows loop inherits).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: e986611115c05405f12570db9d80b50e00c2d57f
+          ref: d63759ebd3f9b208a3c781682275008823e99282
           path: boba
           fetch-depth: 0
 

@@ -76,7 +76,7 @@ entry counts.
 
 The input row is always on screen, busy or not: it gathers the next
 prompt while a turn runs (keys edit it; Enter is a no-op until the turn
-ends; Ctrl+C interrupts). Above the prompt its status line carries the
+ends; Ctrl+C interrupts). Above the prompt its status row carries the
 context gauge, `ctx <used>/<limit>`, where the used count is the prompt
 the provider last reported and the limit the active model's catalog
 window — plus, once some round has reported a cache read, the session's
@@ -85,10 +85,15 @@ from the provider's prefix cache, accumulated over every completed round
 that reported a read count (a round that omits the field is left out of
 the rate, never counted as a miss). The write side is tracked separately
 and not rated. An unknown number reads as `-`, never an estimate, and
-the `⚡` marker is simply absent until a read count exists. `thinking…` /
-`executing <tool>…` rides the same row while a turn is in flight.
-`/context` prints the exact breakdown — the last round's numbers plus the
-session totals, the cache read (and its rate), and the cache write count.
+the `⚡` marker is simply absent until a read count exists. The row's
+right end names the endpoint it is talking to — `provider · model` —
+elided from the tail when the terminal is narrow, and dropped when there
+is no room for it at all; what the turn is DOING is the spinner glyph at
+the row's left (the braille tier animates while the model streams, the
+charset tier while a tool runs), so there is no word beside it to go
+stale between states. `/context` prints the exact breakdown — the last
+round's numbers plus the session totals, the cache read (and its rate),
+and the cache write count.
 
 Providers differ in what they report: OpenAI, Hyper, OpenRouter and the
 OpenCode tiers report a cache read (`prompt_tokens_details.cached_tokens`)
