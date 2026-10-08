@@ -1247,8 +1247,16 @@ static void test_agent_exec_command_yields_job(void)
     ASSERT_EQ(nm_agent_step(agent), 0); /* begins the job */
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(agent_fd(agent) >= 0); /* the job's readiness handle */
+    /* The tick deadline IS the tool's yield window — the 400 ms asked
+     * for on POSIX, raised to Codex's 10 s Windows floor
+     * (WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS) on Windows, where a
+     * sub-10 s initial-exec request is never honored. */
     int wait = nm_agent_next_timeout_ms(agent);
+#ifdef _WIN32
+    ASSERT_TRUE(wait > 9000 && wait <= 10000);
+#else
     ASSERT_TRUE(wait >= 0 && wait <= 400);
+#endif
 
     /* Finish the round: the window closes, the job id is reported. */
     ASSERT_EQ(agent_drive(agent, 20000), 0);
