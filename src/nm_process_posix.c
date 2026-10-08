@@ -1,12 +1,14 @@
 /* nm_process_posix.c - PTY-backed process jobs (POSIX)
  *
  * The OS half of the process layer: spawn a command on a PTY with a
- * sanitized environment, non-blocking read/write on the master, and
+ * sanitized environment (under /bin/sh unless the caller names another
+ * shell — see NmProcShell), non-blocking read/write on the master, and
  * group-kill/reap.  fork/exec (not posix_spawn) because a PTY job
  * needs child-side setsid + TIOCSCTTY to acquire the tty as its
  * controlling terminal — work posix_spawn's file actions cannot
  * express.  The child calls only async-signal-safe functions before
- * exec.
+ * exec — including the one-line diagnostic it writes when the exec
+ * itself fails (the neutral layer's "why 127?" answer).
  *
  * The readiness handle is the master fd (NM_SRC_FD): an fd is pollable
  * for a PTY, so nothing else is needed here — the neutral layer reads

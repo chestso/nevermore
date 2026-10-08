@@ -1,7 +1,8 @@
 /* nm_process_win.c - process jobs on Windows (pipes + Job Object + reader)
  *
  * The OS half of the process layer on Windows.  A job is a shell
- * (`cmd.exe /d /c`) with merged stdout+stderr on one anonymous pipe and
+ * (`cmd.exe /d /c` unless the caller names another — see NmProcShell)
+ * with merged stdout+stderr on one anonymous pipe and
  * a second pipe for stdin (never the terminal — the POSIX /dev/null
  * decision; see AGENTS.md), assigned to a Job Object so a group kill is
  * `TerminateJobObject` (the analogue of the POSIX process-group
