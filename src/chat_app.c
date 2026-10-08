@@ -167,14 +167,14 @@ struct NmChatApp
     NmAgent *agent;
     NmSpinner *spinner;
     const char *spinner_frame; /* last ticked frame (static string) */
-    char *current_tool;        /* RUNNING_TOOL label hint */
-    /* The input's status line (P2): spinner glyph + context gauge + busy
-     * label + separator rule, composed into ONE reused buffer.
-     * status_last is the change-detection copy — boba's setter re-copies
-     * every span string, so it runs only when the bytes actually changed
+    int tool_running;          /* a tool call is in flight (START seen) */
+    /* The input's status line (P2): spinner glyph + context gauge +
+     * separator rule, composed into ONE reused buffer. status_last is
+     * the change-detection copy — boba's setter re-copies every span
+     * string, so it runs only when the bytes actually changed
      * (memory-reuse principle). Sized for the chrome's widest span set
-     * (`⠋ ctx 999.9M/999.9M ⚡100.0% executing tool… `) plus the rule
-     * fill out to NM_STATUS_RULE_MAX_COLS columns (3 bytes each). */
+     * (`⠋ ctx 999.9M/999.9M ⚡100.0% `) plus the rule fill out to
+     * NM_STATUS_RULE_MAX_COLS columns (3 bytes each). */
     char status_text[896];
     char status_last[896];
     /* Reused across tool results: the styled multi-line result body
@@ -648,7 +648,6 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
     NmChatApp *app = s_app;
     if (!app)
         return;
-    const char *name = tool && tool->name ? tool->name : "?";
 
     if (event == NM_TOOL_EVENT_START) {
         /* A tool round boundary ends the streams (replaces flush_tail):
@@ -656,8 +655,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
          * round, in commit order. */
         stream_end_all(app);
         sys_tool_plan(app, tool, args_json);
-        free(app->current_tool);
-        app->current_tool = strdup(name);
+        app->tool_running = 1;
     } else {
         sys_tool_result(app, result ? result->output : "",
                         result ? result->status : NM_TOOL_ERR);
@@ -677,8 +675,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                 posted = 1;
             }
         }
-        free(app->current_tool);
-        app->current_tool = NULL;
+        app->tool_running = 0;
         /* One blank line closes THIS tool block (principle 4), so a
          * round's consecutive calls are visually separated and the
          * answer is never glued to the last result. Emitted per call,
@@ -714,9 +711,9 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
      * END event in on_tool). A block whose END never arrives — a fatal
      * error or a cancel while the announced call was running — still
      * needs one, or the error/interrupt line glues itself to the plan.
-     * current_tool is the signal: set at START, cleared at END. */
+     * tool_running is the signal: set at START, cleared at END. */
     if (state == NM_AGENT_ERROR || state == NM_AGENT_IDLE) {
-        if (app->current_tool)
+        if (app->tool_running)
             sys_blank(app);
     }
 
@@ -741,8 +738,7 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
         break;
     }
 
-    free(app->current_tool);
-    app->current_tool = NULL;
+    app->tool_running = 0;
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1269,7 +1265,6 @@ void nm_chat_app_free(NmChatApp *app)
     free(app->model);
     free(app->base_url);
     free(app->api_key);
-    free(app->current_tool);
     free(app->pending_images);
     free(app->pending_displayed);
     for (int i = 0; i < NM_STREAM_COUNT; i++)
@@ -3496,7 +3491,7 @@ typedef struct StatusSpan
 static size_t status_add(char *buf, size_t cap, size_t o, StatusSpan *sp,
                          size_t *n_sp, TuiColor color, const char *fmt, ...)
 {
-    if (o >= cap || *n_sp >= 4)
+    if (o >= cap || *n_sp >= 3)
         return o;
     va_list ap;
     va_start(ap, fmt);
@@ -3556,15 +3551,19 @@ static TuiColor gauge_color(const NmChatApp *app)
 }
 
 /* Compose and install the input's status line from the app's current
- * state, before every tui_textinput_view. Span order (Q1 = (b), no
- * fixed-width slots): [spinner glyph] [context gauge] [busy label]
- * [separator rule] — the gauge is the row's one fixed landmark (the label
- * right of it varies in width several times per tool-heavy turn, and only
- * the spans RIGHT of a change move). Idle: the gauge alone plus the rule
- * (Q4). The row is the input's own, ABOVE the prompt, so its width is
- * nobody's geometry: the prompt column never moves when the chrome
- * changes. Change-detected against the last composition so boba re-copies
- * only on a real change. */
+ * state, before every tui_textinput_view. Span order: [spinner glyph]
+ * [context gauge] [separator rule] — the gauge is the row's one fixed
+ * landmark (only the glyph sits left of it, and it is a constant
+ * column). Idle: the gauge alone plus the rule (Q4). The row is the
+ * input's own, ABOVE the prompt, so its width is nobody's geometry: the
+ * prompt column never moves when the chrome changes. Change-detected
+ * against the last composition so boba re-copies only on a real change.
+ *
+ * WHAT the turn is doing is the spinner's TIER, not a text label: the
+ * braille tier animates while the model streams, the charset tier while
+ * a tool runs (nm_spinner_set_state) — so the glyph alone says
+ * "thinking" or "executing", with no word beside it to go stale
+ * between states. */
 static void refresh_status_line(NmChatApp *app)
 {
     if (!app || !app->input || !app->agent)
@@ -3576,31 +3575,22 @@ static void refresh_status_line(NmChatApp *app)
 
     NmAgentState st = nm_agent_state(app->agent);
     int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
+    /* spinner_frame is a stale frame once the animation stops (a NULL
+     * tick does not overwrite it), so the busy check is what keeps an
+     * idle row glyphless. */
     const char *glyph = busy ? app->spinner_frame : NULL;
 
     char gauge[48];
     compose_gauge(app, gauge, sizeof(gauge));
 
-    char label[64] = "";
-    if (busy) {
-        if (st == NM_AGENT_RUNNING_TOOL)
-            snprintf(label, sizeof(label), "executing %s…",
-                     app->current_tool ? app->current_tool : "tool");
-        else
-            snprintf(label, sizeof(label), "thinking…");
-    }
-
     char *buf = app->status_text;
-    StatusSpan sp[4];
+    StatusSpan sp[3];
     size_t n_sp = 0, o = 0;
     if (glyph && *glyph)
         o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
                        nm_color_spinner(), "%s ", glyph);
     o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
                    gauge_color(app), "%s ", gauge);
-    if (busy)
-        o = status_add(buf, sizeof(app->status_text), o, sp, &n_sp,
-                       nm_color_gutter(), "%s ", label);
     buf[o] = '\0';
 
     /* The separator rule: fill the rest of the row with `─`, so the status
@@ -3628,7 +3618,7 @@ static void refresh_status_line(NmChatApp *app)
         return; /* unchanged: no re-copy, no re-alloc in boba */
     snprintf(app->status_last, sizeof(app->status_last), "%s", buf);
 
-    TuiSpan spans[4];
+    TuiSpan spans[3];
     for (size_t i = 0; i < n_sp; i++) {
         spans[i].text = buf + sp[i].off;
         spans[i].len = sp[i].len;
@@ -3689,7 +3679,7 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
         dynamic_buffer_append_str(out, "\r");
     dynamic_buffer_append_str(out, EL_TO_END);
 
-    /* Spinner glyph + context gauge + busy label + separator rule, on the
+    /* Spinner glyph + context gauge + separator rule, on the
      * input's own row ABOVE the prompt (the input row is always painted:
      * R1). */
     refresh_status_line(app);

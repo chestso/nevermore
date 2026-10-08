@@ -890,28 +890,30 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
     /* The busy frame carries the INPUT AREA: its status line (the braille
      * glyph in the activity role, the context gauge with no usage and no
-     * known limit yet, the busy label, and the separator rule filling the
-     * row) on one row, then the accent prompt on the next — the input is
-     * always where the next prompt is gathered (R1). */
+     * known limit yet, and the separator rule filling the row) on one
+     * row, then the accent prompt on the next — the input is always where
+     * the next prompt is gathered (R1). What the turn is doing is the
+     * glyph's TIER, so there is no label beside it. */
     char *glyph = span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
     char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
-    char *label = span_bytes(nm_color_gutter(), "thinking… ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *rule = status_rule_bytes("\xe2\xa0\x8b ctx -/- thinking… ");
+    char *rule = status_rule_bytes("\xe2\xa0\x8b ctx -/- ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
-    ASSERT_NOT_NULL(label);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
-    ASSERT_TRUE(strstr(frame, label) != NULL);
     ASSERT_TRUE(strstr(frame, prompt) != NULL);
-    /* The order is (b): [glyph][gauge][label][rule] on the status row —
-     * the gauge is the row's one fixed landmark, the label rides to its
-     * right, and the rule fills the row out to the terminal width. */
+    /* No busy label anywhere in the paint: the glyph is the whole
+     * activity readout. */
+    ASSERT_TRUE(strstr(frame, "thinking") == NULL);
+    /* The order: [glyph][gauge][rule] on the status row — the gauge is
+     * the row's one fixed landmark (only the constant-width glyph sits
+     * left of it), and the rule fills the row out to the terminal
+     * width. */
     char joined[512];
-    snprintf(joined, sizeof(joined), "%s%s%s", glyph, gauge, label);
+    snprintf(joined, sizeof(joined), "%s%s", glyph, gauge);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
     ASSERT_TRUE(strstr(frame, rule) != NULL);
     /* The prompt opens the NEXT row — the status row is a separator, so
@@ -921,7 +923,6 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     ASSERT_TRUE(strstr(frame, next_row) != NULL);
     free(glyph);
     free(gauge);
-    free(label);
     free(prompt);
     free(rule);
     /* And once the tail grows, the tail row is frame row 0 too —
@@ -2318,21 +2319,22 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(app_fd(h->app) >= 0);
 
-    /* The gutter paints "executing run_command…" while the child runs:
-     * the charset-tier glyph in the activity role, the gauge, then the
-     * label muted Comment — all on the input's status row. */
+    /* The status row while a child runs carries the CHARSET-tier glyph
+     * in the activity role (the tool tier, vs the braille streaming
+     * tier): the tier is the whole "what is it doing" readout, so no
+     * label follows it. The gauge is still the row's landmark. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    ASSERT_TRUE(strstr(frame, "executing") != NULL);
+    ASSERT_TRUE(strstr(frame, "executing") == NULL);
     char *glyph = span_bytes(nm_color_spinner(), "\xc2\xb7 ");
-    char *label = span_bytes(nm_color_gutter(), "executing run_command… ");
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     ASSERT_NOT_NULL(glyph);
-    ASSERT_NOT_NULL(label);
+    ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
-    ASSERT_TRUE(strstr(frame, label) != NULL);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(glyph);
-    free(label);
+    free(gauge);
 
     /* And the turn completes, with the command output committed. */
     ASSERT_EQ(harness_drive(h, 2000), 0);
@@ -4601,8 +4603,9 @@ static void test_ps_command_column_elides_safely(void)
 }
 
 /* The exec spinner tier: while exec_command's yield window is open the
- * status row reads "executing exec_command…" in the activity role — the
- * same tier run_command gets (P4's spinner item). */
+ * status row animates the CHARSET tier's glyph — the same tier
+ * run_command gets (P4's spinner item), and now the only readout of
+ * it. */
 static void test_exec_command_spinner_tier(void)
 {
     struct ServerScript sc;
@@ -4653,12 +4656,17 @@ static void test_exec_command_spinner_tier(void)
     ASSERT_TRUE(app_fd(h->app) >= 0);
 
     /* The yield window is open (a silent child): the spinner still
-     * animates, tier "executing exec_command". */
+     * animates, in the tool tier — a charset glyph in the activity
+     * role, and no label beside it. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER) != NULL);
-    ASSERT_TRUE(strstr(frame, "executing exec_command") != NULL);
+    char *glyph = span_bytes(nm_color_spinner(), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(glyph);
+    ASSERT_TRUE(strstr(frame, glyph) != NULL);
+    free(glyph);
+    ASSERT_TRUE(strstr(frame, "executing") == NULL);
 
     /* The window stays open on a silent child; interrupting the turn
      * returns the UI to idle and LEAVES THE JOB ALIVE (P3's whole
