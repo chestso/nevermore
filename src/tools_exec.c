@@ -729,50 +729,12 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
     } while (0)
 #endif
 
-/* Blocking readiness wait for the direct-call pump. The event-driven
- * path (the agent) never reaches it — boba's fill/ready callbacks or
- * nm_agent_turn own the wait; this only serves nm_toolset_execute
- * callers (tests, tools driven without a loop). The timeout keeps the
- * yield deadline checkable even when the source never becomes ready. */
-static void wait_source(const NmSource *s, int timeout_ms)
-{
-#ifdef _WIN32
-    if (s->kind == NM_SRC_HANDLE) {
-        /* A processing job's readiness is an auto-reset event: waiting
-         * on it consumes the signal, exactly as boba's wait set does. */
-        WaitForSingleObject((HANDLE)s->handle, (DWORD)timeout_ms);
-        return;
-    }
-    fd_set r, w;
-    FD_ZERO(&r);
-    FD_ZERO(&w);
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (s->flags & NM_INTEREST_READ)
-        FD_SET((SOCKET)s->handle, &r);
-    if (s->flags & NM_INTEREST_WRITE)
-        FD_SET((SOCKET)s->handle, &w);
-    select(0, (s->flags & NM_INTEREST_READ) ? &r : NULL,
-           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#else
-    fd_set r, w;
-    FD_ZERO(&r);
-    FD_ZERO(&w);
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    int fd = (int)s->handle;
-    if (s->flags & NM_INTEREST_READ)
-        FD_SET(fd, &r);
-    if (s->flags & NM_INTEREST_WRITE)
-        FD_SET(fd, &w);
-    select(fd + 1, (s->flags & NM_INTEREST_READ) ? &r : NULL,
-           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#endif
-}
-
-/* Drive one call to terminal state with real readiness waits. */
+/* Drive one call to terminal state with real readiness waits (the shared
+ * blocking wait, nm_source_wait_any — one implementation for every
+ * blocking drive). The event-driven path (the agent) never reaches this;
+ * it only serves nm_toolset_execute callers (tests, tools driven without
+ * a loop). The timeout keeps the yield deadline checkable even when the
+ * source never becomes ready. */
 static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
                                                    const char *, void *),
                               NmToolStatus (*step)(NmToolExec *,
@@ -797,7 +759,7 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
         if (wait <= 0 || wait > 1000)
             wait = 1000; /* at most a second between deadline checks */
         if (have && src.handle >= 0 && src.flags)
-            wait_source(&src, wait);
+            nm_source_wait_any(&src, 1, wait);
         else
             exec_sleep_ms(wait < 10 ? 10 : wait);
     }

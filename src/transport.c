@@ -636,37 +636,146 @@ int nm_socket_source_kind(void)
 #endif
 }
 
-int nm_source_wait(NmSource s, int timeout_ms)
-{
-    if (s.handle < 0 || s.flags == 0 || timeout_ms < 0)
-        return -1;
-    if (s.kind == NM_SRC_HANDLE)
-        return -1; /* not a select() target (a Windows job's event) */
+#ifdef _WIN32
+/* The mixed-set poll slice: a Windows wait set holding both sockets and
+ * waitable handles cannot be waited on in one call, so the sockets get
+ * the select and the handles are polled between slices (≤ 20 wakeups/s,
+ * only while a background job is live). */
+#define NM_SRC_MIXED_SLICE_MS 50
 
+/* The set-size bound: the source pool is 32 (boba's TUI_IO_SOURCE_MAX),
+ * and WaitForMultipleObjects refuses more than 64. */
+#define NM_SRC_WAIT_MAX 64
+
+/* select() over the socket sources of `set`: 0 = ready, 1 = timed out
+ * (or interrupted, which the caller re-loops), -1 = error / nothing to
+ * wait on. */
+static int wait_sockets_win(const NmSource *const *set, size_t n,
+                            int timeout_ms)
+{
     fd_set r, w;
     FD_ZERO(&r);
     FD_ZERO(&w);
-    int any_r = (s.flags & NM_INTEREST_READ) != 0;
-    int any_w = (s.flags & NM_INTEREST_WRITE) != 0;
-#ifdef _WIN32
-    if (any_r)
-        FD_SET((SOCKET)s.handle, &r);
-    if (any_w)
-        FD_SET((SOCKET)s.handle, &w);
-#else
-    if (any_r)
-        FD_SET((int)s.handle, &r);
-    if (any_w)
-        FD_SET((int)s.handle, &w);
-#endif
-
+    int any = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (set[i]->handle < 0 || set[i]->flags == 0)
+            continue;
+        if (set[i]->flags & NM_INTEREST_READ)
+            FD_SET((SOCKET)set[i]->handle, &r);
+        if (set[i]->flags & NM_INTEREST_WRITE)
+            FD_SET((SOCKET)set[i]->handle, &w);
+        any = 1;
+    }
+    if (!any)
+        return -1;
     struct timeval tv;
     tv.tv_sec = timeout_ms / 1000;
     tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int rc = select(0, &r, &w, NULL, &tv);
+    if (rc > 0)
+        return 0;
+    if (rc == 0)
+        return 1;
+    /* A WSAEINTR (a console event, a signal) is a spurious wake: report
+     * it as a timeout and let the caller's loop come back. */
+    return WSAGetLastError() == WSAEINTR ? 1 : -1;
+}
+#endif
+
+/* Blocking wait for the first ready source in `set`, up to `timeout_ms`:
+ * 0 = a source is ready, 1 = timeout, -1 = error / nothing to wait on.
+ * Every kind is handled — a POSIX fd, a Windows SOCKET, a Windows
+ * HANDLE (a job's auto-reset event).  This is the ONE readiness wait for
+ * the BLOCKING drives (ask mode's turn pump, a tool's direct-call pump,
+ * a one-shot fetch); the event-driven path never reaches it (boba owns
+ * that wait).  A timeout is a normal answer, not a failure: the caller
+ * loops and re-checks its deadline, which is what keeps a silent peer
+ * (and a silent child) bounded. */
+int nm_source_wait_any(const NmSource *set, size_t n, int timeout_ms)
+{
+    if (!set || n == 0 || timeout_ms < 0)
+        return -1;
+
 #ifdef _WIN32
-    return select(0, any_r ? &r : NULL, any_w ? &w : NULL, NULL, &tv);
+    /* A Windows set can hold SOCKETs and waitable HANDLEs at once, and
+     * NO single call waits on both (select takes no events,
+     * WaitForMultipleObjects takes no sockets).  All-sockets and
+     * all-handles get one call each; a MIXED set gives the sockets a
+     * slice of select and polls the handles between slices — the
+     * streaming path keeps its immediate wakeups, and a job's event
+     * (which only needs "the child must not block") is serviced at
+     * ≤ NM_SRC_MIXED_SLICE_MS. */
+    if (n > NM_SRC_WAIT_MAX)
+        return -1;
+    HANDLE hs[NM_SRC_WAIT_MAX];
+    const NmSource *socks[NM_SRC_WAIT_MAX];
+    size_t nh = 0, ns = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (set[i].handle < 0 || set[i].flags == 0)
+            continue;
+        if (set[i].kind == NM_SRC_HANDLE)
+            hs[nh++] = (HANDLE)set[i].handle;
+        else
+            socks[ns++] = &set[i];
+    }
+    if (nh == 0 && ns == 0)
+        return -1;
+    if (nh == 0)
+        return wait_sockets_win(socks, ns, timeout_ms);
+    if (ns == 0) {
+        DWORD w = WaitForMultipleObjects((DWORD)nh, hs, FALSE,
+                                         (DWORD)timeout_ms);
+        if (w == WAIT_TIMEOUT)
+            return 1;
+        return w == WAIT_FAILED ? -1 : 0;
+    }
+    int left = timeout_ms;
+    for (;;) {
+        int slice = left < NM_SRC_MIXED_SLICE_MS ? left : NM_SRC_MIXED_SLICE_MS;
+        int rc = wait_sockets_win(socks, ns, slice);
+        if (rc == 0)
+            return 0;
+        if (rc < 0)
+            return -1;
+        DWORD w = WaitForMultipleObjects((DWORD)nh, hs, FALSE, 0);
+        if (w != WAIT_TIMEOUT)
+            return w == WAIT_FAILED ? -1 : 0;
+        if (left <= slice)
+            return 1; /* the budget is spent */
+        left -= slice;
+    }
 #else
-    return select((int)s.handle + 1, any_r ? &r : NULL,
-                  any_w ? &w : NULL, NULL, &tv);
+    /* POSIX: every kind is a pollable descriptor, so the set is native
+     * and the wait is exact (the pool is 32 sources, far under
+     * FD_SETSIZE). */
+    fd_set r, w;
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    int maxfd = -1;
+    int any = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (set[i].handle < 0 || set[i].flags == 0)
+            continue;
+        int fd = (int)set[i].handle;
+        if (set[i].flags & NM_INTEREST_READ)
+            FD_SET(fd, &r);
+        if (set[i].flags & NM_INTEREST_WRITE)
+            FD_SET(fd, &w);
+        if (fd > maxfd)
+            maxfd = fd;
+        any = 1;
+    }
+    if (!any)
+        return -1;
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    int rc;
+    do {
+        rc = select(maxfd + 1, &r, &w, NULL, &tv);
+    } while (rc < 0 && errno == EINTR); /* a SIGWINCH lands mid-wait */
+    if (rc > 0)
+        return 0;
+    return rc == 0 ? 1 : -1;
 #endif
 }

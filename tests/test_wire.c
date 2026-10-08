@@ -16,6 +16,7 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <unistd.h>
 #endif
 #include <pthread.h>
@@ -1274,6 +1275,133 @@ static void test_family_skip_names_itself_in_the_failure(void)
     knobs_clear_family_policy();
 }
 
+/* ---------------------------------------------------------------- */
+/* nm_source_wait_any: the ONE blocking readiness wait              */
+/* ---------------------------------------------------------------- */
+
+/* Wall-clock milliseconds (clock() would measure CPU time, which a
+ * blocking wait does not consume). */
+#ifdef _WIN32
+static long wait_ms_now(void) { return (long)GetTickCount64(); }
+#else
+static long wait_ms_now(void)
+{
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+}
+#endif
+
+/* A client connection to a loopback listener: what makes that listener
+ * READABLE (and, un-accepted, keeps it that way). */
+static int connect_loopback(int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons((unsigned short)port);
+    if (connect(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* One wait for a SET, every kind, one honest answer: 0 ready, 1
+ * timeout, -1 nothing to wait on. The budget really passes on a timeout
+ * (a caller re-checks its deadline on that answer, so a "timeout" that
+ * returns immediately would spin the pump). */
+static void test_source_wait_any_readiness(void)
+{
+    int port = 0;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    NmSource listener = { (intptr_t)lfd, NM_INTEREST_READ,
+                          nm_socket_source_kind() };
+
+    long t0 = wait_ms_now();
+    ASSERT_EQ(nm_source_wait_any(&listener, 1, 300), 1); /* idle: timeout */
+    ASSERT_TRUE(wait_ms_now() - t0 >= 200);
+
+    /* A pending connection is readiness: prompt, not budget-bound. */
+    int cfd = connect_loopback(port);
+    ASSERT_TRUE(cfd >= 0);
+    t0 = wait_ms_now();
+    ASSERT_EQ(nm_source_wait_any(&listener, 1, 5000), 0);
+    ASSERT_TRUE(wait_ms_now() - t0 < 2000);
+
+    /* A SET is satisfied by ANY member: a ready listener next to an idle
+     * one (a second listener nobody dials). */
+    int port2 = 0;
+    int lfd2 = server_bind(&port2);
+    ASSERT_TRUE(lfd2 >= 0);
+    NmSource set[2] = {
+        { (intptr_t)lfd2, NM_INTEREST_READ, nm_socket_source_kind() },
+        { (intptr_t)lfd, NM_INTEREST_READ, nm_socket_source_kind() },
+    };
+    int cfd2 = connect_loopback(port);
+    ASSERT_TRUE(cfd2 >= 0);
+    ASSERT_EQ(nm_source_wait_any(set, 2, 5000), 0);
+
+    /* Degenerate sets and a negative budget are refusals, never a
+     * hang: an exhausted handle is not a wait target. */
+    NmSource dead = { -1, NM_INTEREST_READ, NM_SRC_FD };
+    ASSERT_EQ(nm_source_wait_any(&dead, 1, 10), -1);
+    ASSERT_EQ(nm_source_wait_any(&dead, 0, 10), -1);
+    ASSERT_EQ(nm_source_wait_any(NULL, 1, 10), -1);
+    ASSERT_EQ(nm_source_wait_any(&listener, 1, -1), -1);
+
+    close(cfd2);
+    close(cfd);
+    close(lfd2);
+    close(lfd);
+}
+
+#ifdef _WIN32
+/* A Windows set can hold a SOCKET and a waitable HANDLE at once, and no
+ * single call waits on both (select takes no events,
+ * WaitForMultipleObjects takes no sockets): the mixed path slices the
+ * select and polls the handles, so a signalled event still wins well
+ * inside the budget. */
+static void test_source_wait_any_mixed_set(void)
+{
+    int port = 0;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    HANDLE ev = CreateEventW(NULL, FALSE, FALSE, NULL); /* auto-reset */
+    ASSERT_NOT_NULL(ev);
+    NmSource set[2] = {
+        { (intptr_t)lfd, NM_INTEREST_READ, NM_SRC_SOCKET },
+        { (intptr_t)ev, NM_INTEREST_READ, NM_SRC_HANDLE },
+    };
+
+    /* Idle socket + unsignalled event: the whole budget, then a
+     * timeout. */
+    long t0 = wait_ms_now();
+    ASSERT_EQ(nm_source_wait_any(set, 2, 400), 1);
+    ASSERT_TRUE(wait_ms_now() - t0 >= 300);
+
+    SetEvent(ev);
+    t0 = wait_ms_now();
+    ASSERT_EQ(nm_source_wait_any(set, 2, 5000), 0);
+    ASSERT_TRUE(wait_ms_now() - t0 < 1000);
+
+    /* Handles alone take the single WaitForMultipleObjects path, and the
+     * wait consumes the auto-reset signal. */
+    NmSource only[1] = { { (intptr_t)ev, NM_INTEREST_READ, NM_SRC_HANDLE } };
+    ASSERT_EQ(nm_source_wait_any(only, 1, 300), 1); /* already consumed */
+    SetEvent(ev);
+    ASSERT_EQ(nm_source_wait_any(only, 1, 5000), 0);
+
+    CloseHandle(ev);
+    close(lfd);
+}
+#endif
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1311,5 +1439,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_family_skip_never_makes_a_name_unreachable);
     RUN_TEST(test_family_skip_policy_off_is_inert);
     RUN_TEST(test_family_skip_names_itself_in_the_failure);
+    RUN_TEST(test_source_wait_any_readiness);
+#ifdef _WIN32
+    RUN_TEST(test_source_wait_any_mixed_set);
+#endif
     TEST_SUMMARY();
 }

@@ -180,6 +180,16 @@ NmProc *nm_proc_by_handle(intptr_t handle);
 int nm_proc_count(void);
 NmProc *nm_proc_at(int i);
 
+/* Fill `out` (up to `cap`) with one READ source per registered job whose
+ * readiness handle is still live, skipping `skip` — the caller's OWN
+ * active handle: a duplicated handle across wait slots is undefined, and
+ * a Windows WaitForMultipleObjects refuses duplicates outright.  Returns
+ * the count.  This is the ONE answer to "which jobs must this loop
+ * drain": the TUI's fill callback (nm_chat_app_interest) and ask mode's
+ * blocking pump both read it, because a job left out of a wait set is a
+ * child blocked on a full pipe. */
+size_t nm_proc_interest(NmSource *out, size_t cap, intptr_t skip);
+
 /* Close and free every registered job (teardown / app exit). */
 void nm_proc_close_all(void);
 

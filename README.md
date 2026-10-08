@@ -432,7 +432,10 @@ You watch the same jobs from the chat:
 ```
 
 The spinner keeps ticking while a command runs, so a silent child never
-looks like a hang.
+looks like a hang. Ask mode (`nevermore ask`) drains the same jobs while
+its turn streams — the blocking pump waits on the live round AND every
+registered job — so a chatty background command is never left wedged
+mid-write waiting for the next tool call to read it.
 
 Jobs run on both platforms, over the shell each one's spawn uses
 (`/bin/sh -c` on POSIX; `cmd.exe /d /c` on Windows, whose jobs are

@@ -229,14 +229,20 @@ typedef struct NmSource
  * the event loop (a chat stream, a catalog fetch) agrees. */
 int nm_socket_source_kind(void);
 
-/* Blocking wait for ONE source (a socket fd), up to `timeout_ms`; 0
- * when it became ready, > 0 on timeout, -1 on error / an unsupported
- * kind. The ONE readiness wait for the BLOCKING drives — a one-shot
- * CLI's catalog fetch, a tool's direct-call pump; the event-driven
- * path never reaches it (boba owns the wait). A timeout is a normal
- * answer, not a failure: the caller loops and re-checks its deadline,
- * which is what keeps a silent peer bounded. */
-int nm_source_wait(NmSource s, int timeout_ms);
+/* Blocking wait for the first ready source in `set`, up to `timeout_ms`:
+ * 0 = a source is ready, 1 = timeout, -1 = error / nothing to wait on.
+ * Every kind is handled — a POSIX fd, a Windows SOCKET, a Windows
+ * HANDLE (a job's auto-reset event); on Windows a set that MIXES
+ * sockets and handles is served by a short select slice with the
+ * handles polled between slices, because no single call waits on both.
+ * This is the ONE readiness wait for the BLOCKING drives — a one-shot
+ * CLI's catalog fetch, a tool's direct-call pump, ask mode's turn pump
+ * (which is why it takes a SET: a job left out of the wait set is a
+ * child blocked on a full pipe); the event-driven path never reaches it
+ * (boba owns that wait).  A timeout is a normal answer, not a failure:
+ * the caller loops and re-checks its deadline, which is what keeps a
+ * silent peer bounded. */
+int nm_source_wait_any(const NmSource *set, size_t n, int timeout_ms);
 
 /* Current wait interest for the event loop: {handle, flags, kind} —
  * handle is -1 when there is nothing to wait on. Each connection

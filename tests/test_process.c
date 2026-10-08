@@ -746,6 +746,59 @@ static void test_unexecutable_shell_names_the_reason(void)
 }
 #endif /* !_WIN32 */
 
+/* ---------------------------------------------------------------- */
+/* The loop's job set (nm_proc_interest)                            */
+/* ---------------------------------------------------------------- */
+
+/* ONE answer to "which jobs must this loop drain": a READ source per
+ * live registered job, the caller's own handle skipped (a duplicated
+ * handle across wait slots is undefined), an exhausted handle excluded
+ * (a reaped job must not stay in a wait set), and the cap truncating
+ * rather than overflowing. */
+static void test_interest_enumeration(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id1 = -1, id2 = -1;
+    NmProc *a = nm_proc_start(TEST_LONG, NULL, NULL, &id1, err, sizeof(err));
+    ASSERT_NOT_NULL(a);
+    NmProc *b = nm_proc_start(TEST_LONG, NULL, NULL, &id2, err, sizeof(err));
+    ASSERT_NOT_NULL(b);
+
+    NmSource out[4];
+    size_t n = nm_proc_interest(out, 4, -1);
+    ASSERT_EQ(n, 2);
+    ASSERT_EQ(out[0].kind, nm_proc_source_kind());
+    ASSERT_TRUE((out[0].flags & NM_INTEREST_READ) != 0);
+    ASSERT_TRUE(out[0].handle != out[1].handle);
+    ASSERT_TRUE(nm_proc_by_handle(out[0].handle) != NULL);
+    ASSERT_TRUE(nm_proc_by_handle(out[1].handle) != NULL);
+
+    /* The cap truncates: a small one degrades to "jobs drain a cycle
+     * later", never to an overflow. */
+    ASSERT_EQ(nm_proc_interest(out, 1, -1), 1);
+
+    /* `skip` is the caller's own source handle — for an active
+     * exec_command that IS its job's handle. */
+    n = nm_proc_interest(out, 4, nm_proc_handle(a));
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(out[0].handle, nm_proc_handle(b));
+
+    /* Degenerate calls answer 0, never a bogus entry. */
+    ASSERT_EQ(nm_proc_interest(out, 0, -1), 0);
+    ASSERT_EQ(nm_proc_interest(NULL, 4, -1), 0);
+
+    /* An exhausted handle drops out: a reaped job is not a wait
+     * target. */
+    nm_proc_close(a);
+    n = nm_proc_interest(out, 4, -1);
+    ASSERT_EQ(n, 1);
+    ASSERT_EQ(out[0].handle, nm_proc_handle(b));
+
+    nm_proc_close(b);
+    ASSERT_EQ(nm_proc_interest(out, 4, -1), 0);
+}
+
 int main(void)
 {
     nm_proc_reset();
@@ -762,6 +815,7 @@ int main(void)
     RUN_TEST(test_job_cap);
     RUN_TEST(test_registry_iteration);
     RUN_TEST(test_empty_command_is_rejected);
+    RUN_TEST(test_interest_enumeration);
     RUN_TEST(test_shell_flag_table);
     RUN_TEST(test_shell_classification);
     RUN_TEST(test_named_shell_runs_the_command);

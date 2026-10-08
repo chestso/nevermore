@@ -136,6 +136,12 @@ struct ServerScript
     int n_rounds;
     int port;
     int fd;
+    /* Hold the round OPEN this long before the chunked terminator: the
+     * client is streaming (waits for more bytes) while the loop keeps
+     * running, which is what lets a test observe the pump's work — e.g.
+     * a background job drained mid-round. Without it every round ends
+     * in the same millisecond it was scripted. */
+    int hold_ms;
 };
 
 static void *agent_server_thread(void *arg)
@@ -207,6 +213,8 @@ static void *agent_server_thread(void *arg)
             }
             off += ev_len;
         }
+        if (sc->hold_ms > 0)
+            usleep((unsigned)sc->hold_ms * 1000);
         send(cfd, "0\r\n\r\n", 5, 0);
         close(cfd);
     }
@@ -1364,6 +1372,128 @@ static void test_agent_turn_runs_async_command(void)
     ASSERT_STR_EQ(g_tool_seq, "SE");
     ASSERT_TRUE(strstr(g_tool_output, "hi-async") != NULL);
 
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A background job that prints far more than a pipe buffer holds
+ * (~250 KB): without a drain the child blocks mid-write and never
+ * finishes, which is exactly the state the ask pump must prevent. */
+#ifdef _WIN32
+#define NOISY_BG_CMD                    \
+    "for /l %i in (1,1,4000) do @echo " \
+    "0123456789012345678901234567890123456789012345678901234567890"
+#else
+#define NOISY_BG_CMD                                                  \
+    "i=0; while [ $i -lt 4000 ]; do echo "                            \
+    "0123456789012345678901234567890123456789012345678901234567890; " \
+    "i=$((i+1)); done"
+#endif
+
+/* The scripted round of the two tests below: content + finish_reason,
+ * NO [DONE] — so the round ends at the chunked terminator AFTER the
+ * hold (with neither marker an EOF reads as a truncated stream). */
+#define HELD_ROUND_SSE                                                 \
+    "data: {\"choices\":[{\"delta\":{\"content\":\"thinking\"}}]}\n\n" \
+    "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"
+
+/* Ask mode's pump waits on a SET — the stream PLUS every registered job
+ * (nm_proc_interest) — so a chatty background job is drained while the
+ * round is still streaming. Nothing in this test drains the job by
+ * hand: the buffer can only be filled by the pump. (On POSIX that is
+ * literal — nm_proc_drain is the only reader of the PTY master, and the
+ * pipe buffer is what the child would block on; Windows's per-job
+ * reader thread feeds the job off-loop, so the assertion there is on
+ * the same shape, not on the same mechanism.) */
+static void test_agent_turn_drains_a_background_job(void)
+{
+    reset_capture();
+    nm_proc_reset();
+
+    char err[128];
+    int id = -1;
+    NmProc *job = nm_proc_start(NOISY_BG_CMD, NULL, NULL, &id, err,
+                                sizeof(err));
+    ASSERT_NOT_NULL(job);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.hold_ms = 2000; /* the round stays open while the child prints */
+    sc.sse[0] = HELD_ROUND_SSE;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "keep the stream open", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    /* Past a pipe buffer: the child could not have got here blocked. */
+    ASSERT_TRUE(nm_proc_buffered(job) > 64 * 1024);
+
+    nm_proc_close(job);
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The same shape from the other side: a background child that EXITED
+ * mid-round is reaped by the pump's drain pass (the ask pump is that
+ * drive's one reap point), so it is not still "running" at turn end
+ * waiting for teardown. */
+static void test_agent_turn_reaps_an_exited_background_job(void)
+{
+    reset_capture();
+    nm_proc_reset();
+
+    char err[128];
+    int id = -1;
+    NmProc *job = nm_proc_start(NOISY_BG_CMD, NULL, NULL, &id, err,
+                                sizeof(err));
+    ASSERT_NOT_NULL(job);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.hold_ms = 2000;
+    sc.sse[0] = HELD_ROUND_SSE;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "keep the stream open", NULL, 0), 0);
+    /* 0 — not -1 ("still running"): the child wrote everything, exited,
+     * and the pump reaped it while the round was open. */
+    ASSERT_EQ(nm_proc_exit(job), 0);
+    ASSERT_EQ(nm_proc_live(job), 0);
+
+    nm_proc_close(job);
     nm_agent_free(agent);
     nm_toolset_free(tools);
     pthread_join(th, NULL);
@@ -4352,6 +4482,8 @@ int main(void)
     RUN_TEST(test_agent_exec_command_yields_job);
     RUN_TEST(test_agent_run_command_is_async);
     RUN_TEST(test_agent_turn_runs_async_command);
+    RUN_TEST(test_agent_turn_drains_a_background_job);
+    RUN_TEST(test_agent_turn_reaps_an_exited_background_job);
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
     RUN_TEST(test_agent_error_message_is_informative);

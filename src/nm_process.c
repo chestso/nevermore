@@ -462,6 +462,29 @@ NmProc *nm_proc_at(int i)
     return NULL;
 }
 
+size_t nm_proc_interest(NmSource *out, size_t cap, intptr_t skip)
+{
+    if (!out || cap == 0)
+        return 0;
+    size_t n = 0;
+    for (int i = 0; i < g_max_jobs && n < cap; i++) {
+        NmProc *p = g_jobs[i];
+        if (!p)
+            continue;
+        intptr_t h = nm_proc_handle(p);
+        /* An exhausted handle (-1: the child's stream closed, or it was
+         * reaped) is not a wait target, and `skip` is the caller's own
+         * source — the active exec's handle IS its job's handle. */
+        if (h < 0 || h == skip)
+            continue;
+        out[n].handle = h;
+        out[n].flags = NM_INTEREST_READ;
+        out[n].kind = nm_proc_source_kind();
+        n++;
+    }
+    return n;
+}
+
 /* ---------------------------------------------------------------- */
 /* Output buffer                                                    */
 /* ---------------------------------------------------------------- */

@@ -2316,7 +2316,7 @@ static void test_catalog_fetch_carries_extra_headers(void)
             break;
         NmSource src = nm_fetch_source(f);
         ASSERT_TRUE(src.handle >= 0);
-        nm_source_wait(src, 50);
+        nm_source_wait_any(&src, 1, 50);
     }
     NmJson *doc = nm_fetch_take(f);
     ASSERT_NOT_NULL(doc);

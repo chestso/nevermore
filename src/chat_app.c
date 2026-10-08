@@ -1476,20 +1476,13 @@ size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
     if (agent.handle >= 0 && agent.flags) {
         out[n++] = agent;
     }
-
-    int jobs = nm_proc_count();
-    for (int i = 0; i < jobs && n < cap; i++) {
-        NmProc *p = nm_proc_at(i);
-        if (!p)
-            continue;
-        intptr_t h = nm_proc_handle(p);
-        if (h < 0 || h == agent.handle)
-            continue; /* dedupe: the active exec's handle is already here */
-        out[n].handle = h;
-        out[n].flags = NM_INTEREST_READ;
-        out[n].kind = nm_proc_source_kind();
-        n++;
-    }
+    /* The job tail comes from the process registry's ONE enumeration
+     * (nm_proc_interest), skipping the agent's own handle — an active
+     * exec_command's handle IS its job's handle, and a duplicated
+     * handle across slots is undefined (a Windows wait set refuses
+     * duplicates outright). */
+    if (n < cap)
+        n += nm_proc_interest(out + n, cap - n, agent.handle);
     return n;
 }
 

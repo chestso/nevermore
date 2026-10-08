@@ -1824,6 +1824,11 @@ void nm_agent_cancel(NmAgent *a)
 /* Blocking turn (ask mode): start + pump                            */
 /* ---------------------------------------------------------------- */
 
+/* The ask pump's wait set: the agent's own stream/tool source plus every
+ * registered job (nm_proc_interest) — the same "every job must stay
+ * subscribed" rule the app's fill callback states, in blocking form. */
+#define NM_AGENT_WAIT_MAX (NM_PROC_MAX_JOBS + 1)
+
 int nm_agent_turn(NmAgent *a, const char *user_input,
                   const size_t *image_ids, size_t n_images)
 {
@@ -1833,8 +1838,9 @@ int nm_agent_turn(NmAgent *a, const char *user_input,
     /* Pump: step until the turn leaves the busy states. PENDING steps
      * wait on the stream's CURRENT interest bits (connect/send phases
      * wait writability, the response phase waits readability — the
-     * same bits boba's fill callback declares); the tool phase needs
-     * no I/O, so its steps run back-to-back.
+     * same bits boba's fill callback declares), on the source the pause
+     * belongs to (the agent's stream, an async tool, the <env> stage),
+     * AND on every registered job.
      *
      * The wait is the deadline seam (nm_agent_next_timeout_ms), not a
      * fixed poll: a tool with a job yield window (exec_command's
@@ -1846,47 +1852,39 @@ int nm_agent_turn(NmAgent *a, const char *user_input,
         NmAgentState st = a->state;
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
             break;
-        NmSource src = nm_agent_source(a);
-        if (src.handle >= 0 && src.flags) {
-            int wait_ms = nm_agent_next_timeout_ms(a);
-            if (wait_ms < 0)
-                wait_ms = 10; /* purely readiness-driven: short poll */
-            else if (wait_ms > 1000)
-                wait_ms = 1000; /* the deadline is the bound; stay live */
-#ifdef _WIN32
-            if (src.kind == NM_SRC_HANDLE) {
-                /* A process job's readiness is an auto-reset event, which
-                 * select() cannot wait on: wait it directly (the wait
-                 * consumes the signal, as boba's wait set does). */
-                WaitForSingleObject((HANDLE)src.handle, (DWORD)wait_ms);
-            } else {
-                fd_set r, w;
-                FD_ZERO(&r);
-                FD_ZERO(&w);
-                struct timeval tv = { wait_ms / 1000,
-                                      (wait_ms % 1000) * 1000 };
-                if (src.flags & NM_INTEREST_READ)
-                    FD_SET((SOCKET)src.handle, &r);
-                if (src.flags & NM_INTEREST_WRITE)
-                    FD_SET((SOCKET)src.handle, &w);
-                select(0, (src.flags & NM_INTEREST_READ) ? &r : NULL,
-                       (src.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL,
-                       &tv);
-            }
-#else
-            fd_set r, w;
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            struct timeval tv = { wait_ms / 1000, (wait_ms % 1000) * 1000 };
-            if (src.flags & NM_INTEREST_READ)
-                FD_SET((int)src.handle, &r);
-            if (src.flags & NM_INTEREST_WRITE)
-                FD_SET((int)src.handle, &w);
-            select((int)src.handle + 1, &r, &w, NULL, &tv);
-#endif
-        } else if (src.handle >= 0) {
-            nm_usleep(10 * 1000); /* stream with no wait interest: brief */
-        }
+
+        /* The SET: the pause's own source first (the agent's stream, an
+         * async tool, the <env> stage), then every registered job.  A
+         * job a live tool call is driving is already in here as that
+         * call's source, so nm_proc_interest skips the handle — a
+         * duplicated handle across wait slots is undefined. */
+        NmSource own = nm_agent_source(a);
+        NmSource set[NM_AGENT_WAIT_MAX];
+        size_t n = 0;
+        if (own.handle >= 0 && own.flags)
+            set[n++] = own;
+        n += nm_proc_interest(set + n, NM_AGENT_WAIT_MAX - n, own.handle);
+
+        int wait_ms = nm_agent_next_timeout_ms(a);
+        if (wait_ms < 0)
+            wait_ms = 10; /* purely readiness-driven: short poll */
+        else if (wait_ms > 1000)
+            wait_ms = 1000; /* the deadline is the bound; stay live */
+
+        if (n == 0)
+            nm_usleep(10 * 1000); /* nothing to wait on: brief */
+        else if (nm_source_wait_any(set, n, wait_ms) < 0)
+            nm_usleep(10 * 1000); /* no waitable source / wait failed */
+
+        /* Drain EVERY registered job, not just the one that woke us: a
+         * drain is a non-blocking read that returns on EAGAIN, the
+         * registry is capped at 31, and the pump keeps no per-source
+         * dispatch table.  It is also this drive's ONE reap point — an
+         * exited background child flips to not-live here instead of
+         * waiting for teardown. */
+        for (int i = 0, jobs = nm_proc_count(); i < jobs; i++)
+            nm_proc_drain(nm_proc_at(i));
+
         if (nm_agent_step(a) != 0)
             return -1;
     }

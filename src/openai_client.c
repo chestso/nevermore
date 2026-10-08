@@ -1566,6 +1566,6 @@ NmCatalogStatus nm_catalog_run(const NmProvider *p)
                 p->models_end(p);
             return NM_CATALOG_ERR;
         }
-        nm_source_wait(src, NM_FETCH_SLICE_MS);
+        nm_source_wait_any(&src, 1, NM_FETCH_SLICE_MS);
     }
 }
