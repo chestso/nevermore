@@ -1,8 +1,6 @@
 # nevermore
 
-An interactive coding agent in pure C — quoth's spoken-word sibling.
-
-_"Quoth the raven: nevermore."_
+An interactive coding agent in pure C.
 
 nevermore chats with AI models (Charm Hyper, Ollama local daemon and
 Ollama Cloud, OpenAI, OpenRouter, OpenCode Go and Zen) from a
@@ -21,7 +19,7 @@ Pre-alpha. No backwards-compatibility constraint.
 
 ## Build
 
-Autotools, house style:
+Autotools:
 
 ```sh
 ./autogen.sh
@@ -33,18 +31,9 @@ make check
 make install
 ```
 
-Or from the chestso monorepo root: `make nevermore`.
-
 Dependencies:
 
 - **boba** (required) — TUI runtime, textinput, styles
-- **stb** (required) — `stb_image.h` + `stb_image_write.h` (public
-  domain, single-file) decode/encode the image-transcode lane
-  (JPEG → PNG for kitty-graphics terminals). Not committed:
-  `configure` auto-fetches them into `third_party/stb/` via
-  `scripts/fetch-stb.sh` (pinned commit, needs network on the first
-  configure — same as the `coffer` sibling). See
-  `docs/VISION-PLAN.md`.
 - **TLS** (optional, per-OS, never libcurl) — Schannel on Windows,
   Secure Transport on macOS, mbedTLS (≥ 2.28) or OpenSSL on Linux;
   `--with-tls=none` builds a plain-HTTP-only client (fine against a
@@ -436,11 +425,22 @@ src/                the nevermore binary: entry point, config, providers,
                     CLI app, no library)
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
 tools/wire-replay/  replay server for captured wire dumps (Python)
-docs/               wire specs ported from quoth + platform notes
+docs/               wire specs + platform notes
 data/               static model catalogs
 ```
 
 See [docs/PORTTY.md](docs/PORTTY.md) for the terminal-feature matrix.
+
+## Attributions
+
+- **stb** — `stb_image.h` and `stb_image_write.h` by Sean Barrett
+  (public domain / Unlicense) decode and re-encode the image-transcode
+  lane (a JPEG handed to a kitty-graphics terminal becomes a PNG).
+  Nothing to install: they are single-file headers, fetched into
+  `third_party/stb/` by `scripts/fetch-stb.sh` on the first
+  `configure` (a pinned commit, so that first configure needs
+  network), and never committed to the tree. See
+  [docs/VISION-PLAN.md](docs/VISION-PLAN.md).
 
 ## License
 
