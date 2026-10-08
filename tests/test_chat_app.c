@@ -5792,6 +5792,14 @@ static void *big_catalog_server_thread(void *arg)
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(big_catalog_body));
+    /* Hold the reply briefly. The picker's point is the ASYNC gap: /model
+     * must return with the fetch still in flight. Loopback is fast enough
+     * that the reply can already be sitting in the client's socket when
+     * its first step looks — and under ASan (a slower, instrumented
+     * client; this thread is not instrumented) that is the COMMON case,
+     * which made the "loading the …" assertion flake. The hold makes the
+     * pending state deterministic instead of a race. */
+    usleep(200 * 1000);
     send(cfd, head, (size_t)hl, 0);
     size_t off = 0, bl = strlen(big_catalog_body);
     while (off < bl) {
