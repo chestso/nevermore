@@ -219,6 +219,7 @@ const struct NmProvider nm_openai_provider = {
     "openai",
     OPENAI_DEFAULT_BASE,
     "openai.com",
+    NM_REASONING_ECHO_OFF,
     openai_chat,
     openai_chat_begin,
     nm_openai_chat_step,

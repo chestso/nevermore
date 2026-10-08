@@ -296,7 +296,10 @@ const struct NmProvider nm_opencode_provider = {
     NM_PROVIDER_OPENCODE,
     "opencode:go", /* Go is the working tier; the noun carries it */
     OPENCODE_GO_DEFAULT,
-    "opencode.ai", /* one authinfo line covers both tiers */
+    "opencode.ai",           /* one authinfo line covers both tiers */
+    NM_REASONING_ECHO_TOOLS, /* the deepseek endpoint 400s a replayed
+                              * tool-call turn without the trace
+                              * (docs/OPENCODE-API.md §3) */
     nm_opencode_chat,
     nm_opencode_chat_begin,
     nm_openai_chat_step,

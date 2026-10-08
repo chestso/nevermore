@@ -3639,6 +3639,30 @@ static void test_config_command_reports_and_resets(void)
     harness_free(h);
 }
 
+/* The /config row for a key the PROVIDER dictates: on opencode:go the
+ * reasoning_echo row shows `tools` + "(provider default)", not the
+ * `off` the bare key would report — the wire requirement is what the
+ * next request uses. (The override path — a set value winning — is
+ * covered by test_agent_reasoning_echo_user_overrides_provider.) */
+static void test_config_shows_provider_default_echo(void)
+{
+    pin_cfg_paths("provdefault");
+    AppHarness *h = harness_new("opencode:go", "deepseek-v4.1-flash", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "reasoning_echo"));
+    ASSERT_NOT_NULL(strstr(out, "(provider default)"));
+    /* The row reports the provider's mode, not the built-in `off`. */
+    ASSERT_NOT_NULL(strstr(out, "reasoning_echo       tools"));
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 /* A model pick is remembered PER PROVIDER: /model writes
  * `model.<provider>`, a switch re-resolves for the new provider (no
  * memory = the ask, never the previous provider's id), and switching
@@ -5938,6 +5962,7 @@ int main(void)
     RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
+    RUN_TEST(test_config_shows_provider_default_echo);
     RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_model_memory_is_per_provider);
     RUN_TEST(test_send_without_model_is_refused);

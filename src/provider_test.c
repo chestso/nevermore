@@ -129,6 +129,7 @@ const struct NmProvider nm_test_provider = {
     "test:replay",
     TEST_REPLAY_DEFAULT,
     NULL, /* no authinfo machine */
+    NM_REASONING_ECHO_OFF,
     test_replay_chat,
     test_replay_chat_begin,
     nm_openai_chat_step,

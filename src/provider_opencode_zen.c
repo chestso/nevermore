@@ -27,6 +27,7 @@ const struct NmProvider nm_opencode_zen_provider = {
     "opencode:zen",
     "https://opencode.ai/zen/v1",
     "opencode.ai",
+    NM_REASONING_ECHO_OFF, /* Zen: unprobed — the 400 was observed on Go */
     nm_opencode_chat,
     nm_opencode_chat_begin,
     nm_openai_chat_step,

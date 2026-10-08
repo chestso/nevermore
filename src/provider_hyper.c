@@ -358,6 +358,8 @@ const struct NmProvider nm_hyper_provider = {
     "hyper",
     HYPER_DEFAULT_BASE,
     "hyper.charm.land",
+    NM_REASONING_ECHO_OFF, /* probed: hyper does NOT require the echo
+                            * (docs/HYPER-API.md §3.5) */
     hyper_chat,
     hyper_chat_begin,
     nm_openai_chat_step,

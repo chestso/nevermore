@@ -180,6 +180,30 @@ static void test_provider_names_are_tier_qualified(void)
     }
 }
 
+/* The provider declares its wire's reasoning-echo requirement (the
+ * store's `reasoning_echo` key is the user's override; see
+ * nm_agent_reasoning_echo). Only opencode:go's deepseek endpoint is
+ * probed to need it (docs/OPENCODE-API.md §3); hyper is probed NOT to
+ * (docs/HYPER-API.md §3.5); the rest say nothing (OFF). */
+static void test_provider_reasoning_echo_declarations(void)
+{
+    const NmProvider *go = nm_provider_by_name("opencode:go");
+    ASSERT_NOT_NULL(go);
+    ASSERT_EQ(go->reasoning_echo, NM_REASONING_ECHO_TOOLS);
+
+    const NmProvider *providers[NM_PROVIDER_MAX];
+    size_t n = 0;
+    nm_provider_list(providers, &n);
+    ASSERT_TRUE(n > 0);
+    for (size_t i = 0; i < n; i++) {
+        if (providers[i] == go)
+            continue;
+        /* Every other provider declares no opinion (the zero value) —
+         * the echo stays off unless the user opts in. */
+        ASSERT_EQ(providers[i]->reasoning_echo, NM_REASONING_ECHO_OFF);
+    }
+}
+
 static void test_provider_api_key_env_then_authinfo(void)
 {
     const NmProvider *p = nm_provider_by_name("openai");
@@ -1570,6 +1594,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
+    RUN_TEST(test_provider_reasoning_echo_declarations);
     RUN_TEST(test_provider_authinfo_machines);
     RUN_TEST(test_provider_api_key_env_then_authinfo);
     /* Fetch BEFORE the fallback test: the live catalog cache is

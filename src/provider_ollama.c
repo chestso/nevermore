@@ -419,6 +419,7 @@ const struct NmProvider nm_ollama_provider = {
     "ollama:cloud",
     OLLAMA_CLOUD_DEFAULT,
     "ollama.com",
+    NM_REASONING_ECHO_OFF,
     nm_ollama_chat,
     nm_ollama_chat_begin,
     nm_openai_chat_step,

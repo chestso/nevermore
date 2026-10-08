@@ -51,6 +51,13 @@
  * precisely so the two can meet in one TU.) */
 #include "transport.h"
 
+/* NmReasoningEcho: the provider declares its wire's echo requirement
+ * (reasoning_echo below) using the SAME value space the store's
+ * `reasoning_echo` key resolves to — one vocabulary, so a provider
+ * default and a user override cannot mean different things.
+ * nm_config.h is self-contained (stddef only), so this adds no cycle. */
+#include "nm_config.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -342,6 +349,21 @@ struct NmProvider
      * NULL when the provider has no authinfo machine (ollama:local:
      * the daemon is keyless by construction). */
     const char *authinfo_machine;
+
+    /* Does this provider's WIRE need the reasoning trace echoed back
+     * on replayed assistant messages (an NmReasoningEcho from
+     * nm_config.h; the zero value NM_REASONING_ECHO_OFF = "no
+     * opinion", so a provider that says nothing is unchanged)? A
+     * provider whose upstream refuses a replayed tool-call turn that
+     * omits `reasoning_content` declares NM_REASONING_ECHO_TOOLS
+     * here, so the requirement rides the wire instead of the user
+     * having to know it: agent.c's nm_agent_reasoning_echo takes this
+     * as the DEFAULT and the store's `reasoning_echo` key as the
+     * override (an explicit user setting always wins). Probed sources
+     * in the field's consumers: opencode:go's deepseek endpoint
+     * (docs/OPENCODE-API.md §3) requires it; hyper does NOT (a live
+     * probe, docs/HYPER-API.md §3.5). */
+    NmReasoningEcho reasoning_echo;
 
     /* Streaming chat completion. Blocking; on_delta fires from inside. */
     NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,

@@ -264,16 +264,20 @@ lands on `deepseek` (roughly half the attempts during this probe).
 Echoing is validation-safe everywhere probed: the tolerant endpoints
 and this one accept the field wherever it is present, including on
 plain assistant messages, and an empty string is enough for a round
-whose trace the client did not keep. Nevermore's echo-back is **off by
-default**, and it is granular — `off` / `tools` (only the messages
-carrying `tool_calls`: the smallest setting this route accepts) /
-`all` (every assistant message with a trace) — via the store's
+whose trace the client did not keep. Nevermore's `opencode:go` provider
+**declares** this requirement itself (`NM_REASONING_ECHO_TOOLS`), so the
+echo is on by default there — the wire says what it needs, and the user
+does not have to know. It is granular — `off` / `tools` (only the
+messages carrying `tool_calls`: the smallest setting this route accepts)
+/ `all` (every assistant message with a trace) — and the store's
 `reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
-`/config set reasoning_echo tools`. That is the exact shape of the bug this
+`/config set reasoning_echo off|tools|all` overrides the provider
+default. That is the exact shape of the bug this
 section was probed for: a nevermore tool round on `opencode:go` +
 `deepseek-v4.1-flash` fails with that 400, the next attempt succeeds,
-and the failure returns a few rounds later; `reasoning_echo = tools` ends
-it. One client-side caveat that follows from prefix caching: once a
+and the failure returns a few rounds later; the provider default (or an
+explicit `reasoning_echo = tools`) ends it. One client-side caveat that
+follows from prefix caching: once a
 request has actually carried a trace, the mode must not change
 mid-conversation (a prefix that gains or loses the field is a
 different prefix) — nevermore freezes it for the chat

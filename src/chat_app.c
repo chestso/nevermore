@@ -2423,10 +2423,20 @@ static void print_config(NmChatApp *app)
          * prefix that gains or loses the field is a different prefix —
          * prompt cache). Show what the NEXT request will use, not what
          * the store says. */
-        if (strcmp(k, NM_CFG_KEY_REASONING_ECHO) == 0 && app->agent &&
-            nm_agent_reasoning_echo_frozen(app->agent)) {
-            v = nm_config_reasoning_echo_name(nm_agent_reasoning_echo(app->agent));
-            layer = "frozen this chat";
+        if (strcmp(k, NM_CFG_KEY_REASONING_ECHO) == 0 && app->agent) {
+            NmReasoningEcho eff = nm_agent_reasoning_echo(app->agent);
+            if (nm_agent_reasoning_echo_frozen(app->agent)) {
+                v = nm_config_reasoning_echo_name(eff);
+                layer = "frozen this chat";
+            } else if (src == NM_CFG_DEFAULT && app->provider &&
+                       app->provider->reasoning_echo != NM_REASONING_ECHO_OFF) {
+                /* The store is at its built-in default, so the
+                 * provider's own wire requirement (opencode:go's
+                 * deepseek endpoint) is what the next request uses —
+                 * not the `off` the key would report. */
+                v = nm_config_reasoning_echo_name(eff);
+                layer = "provider default";
+            }
         }
         /* A latched family is INERT while the policy is off: the walk
          * neither earns nor honours it (family_skip is the one switch
@@ -2464,10 +2474,12 @@ static void note_frozen_echo(NmChatApp *app, const char *key)
         !nm_agent_reasoning_echo_frozen(app->agent))
         return;
     NmReasoningEcho frozen = nm_agent_reasoning_echo(app->agent);
-    const char *eff = nm_config_resolve(app->cfg, NM_CFG_KEY_REASONING_ECHO, NULL);
-    char canon[16] = "";
-    nm_config_reasoning_echo_canon(eff ? eff : "", canon, sizeof(canon));
-    if (strcmp(canon, nm_config_reasoning_echo_name(frozen)) != 0)
+    /* What the change WOULD do (the store's key, else the provider's
+     * declaration) — the agent's own resolution with the freeze
+     * ignored, so a reset back to the provider default (which leaves
+     * the effective mode unchanged) is correctly silent. */
+    NmReasoningEcho after = nm_agent_reasoning_echo_next(app->agent);
+    if (after != frozen)
         sys_line(app, "config: the reasoning echo is frozen at '%s' for "
                       "this conversation (a request already carried a "
                       "trace) — the change applies to the next chat",

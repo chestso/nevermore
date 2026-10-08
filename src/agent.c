@@ -562,19 +562,36 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
 }
 
 /* The echo mode in force. Before anything has been sent this is the
+ * provider's own declaration when the store is at its built-in default
+ * — a provider whose wire 400s a replayed tool-call turn without the
+ * trace declares it (opencode:go; docs/OPENCODE-API.md §3) — else the
  * store's `reasoning_echo` key, resolved at the point of use (OFF by
  * default — the trace is received and displayed either way); from the
  * first request that actually carried a trace it is the mode frozen at
  * that moment, whatever the store says now. See agent.h for why the
  * freeze is not optional (a prefix that gains or loses the field is a
  * different prefix: prompt cache + the replay check the echo answers)
- * and docs/OPENCODE-API.md §3 for the observed failure behind `tools`. */
+ * and docs/OPENCODE-API.md §3 for the observed failure behind `tools`.
+ *
+ * The layer order is deliberate: an explicit user setting (any layer
+ * above the built-in default) OVERRIDES the provider, so a user who
+ * wants `off` on opencode:go gets it; the provider only fills the
+ * default. */
+NmReasoningEcho nm_agent_reasoning_echo_next(const NmAgent *a)
+{
+    NmConfig *c = nm_config_store();
+    if (c && nm_config_source(c, NM_CFG_KEY_REASONING_ECHO) != NM_CFG_DEFAULT)
+        return nm_config_reasoning_echo_mode(c);
+    if (a && a->provider)
+        return a->provider->reasoning_echo; /* OFF = the provider has no opinion */
+    return c ? nm_config_reasoning_echo_mode(c) : NM_REASONING_ECHO_OFF;
+}
+
 NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a)
 {
     if (a && a->reasoning_echo_frozen)
         return a->reasoning_echo_mode;
-    NmConfig *c = nm_config_store();
-    return c ? nm_config_reasoning_echo_mode(c) : NM_REASONING_ECHO_OFF;
+    return nm_agent_reasoning_echo_next(a);
 }
 
 int nm_agent_reasoning_echo_frozen(const NmAgent *a)

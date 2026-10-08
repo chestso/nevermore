@@ -1433,6 +1433,110 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     remove(FIXTURE);
 }
 
+/* The provider's own wire requirement is the DEFAULT: opencode:go's
+ * `deepseek` endpoint 400s a replayed tool-call turn that omits
+ * `reasoning_content` (docs/OPENCODE-API.md §3), so the provider
+ * declares NM_REASONING_ECHO_TOOLS and the agent honours it with NO
+ * store key set — the requirement rides the wire, not the user's
+ * config. Same scripted tool round as the opt-in test above. */
+static void test_agent_reasoning_echo_provider_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"let me think \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"about the edit\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("opencode:go");
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(p->reasoning_echo, NM_REASONING_ECHO_TOOLS);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* No store key set: the provider's declaration is the mode. */
+    ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_REASONING_ECHO),
+              NM_CFG_DEFAULT);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "all done");
+
+    /* The tool-call round goes back WITH the trace, unprompted. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
+/* An explicit user setting OVERRIDES the provider default: `off` on
+ * opencode:go (a provider that declares TOOLS) keeps the trace off the
+ * wire. */
+static void test_agent_reasoning_echo_user_overrides_provider(void)
+{
+    reset_capture();
+    write_fixture();
+
+    const NmProvider *p = nm_provider_by_name("opencode:go");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+
+    /* No key: the provider default applies. */
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_reasoning_echo_next(agent), NM_REASONING_ECHO_TOOLS);
+    /* An explicit store value wins over the provider. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
+    ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_REASONING_ECHO),
+              NM_CFG_RUNTIME);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(nm_agent_reasoning_echo_next(agent), NM_REASONING_ECHO_OFF);
+    /* `all` too. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_reasoning_echo_next(agent), NM_REASONING_ECHO_ALL);
+
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    remove(FIXTURE);
+}
+
 /* The mode's SCOPE: `tools` re-sends only the traces riding messages
  * that carry tool_calls — the case the upstream replay check actually
  * bites (docs/OPENCODE-API.md §3) — never a plain answer's. Scripted:
@@ -3686,6 +3790,8 @@ int main(void)
     RUN_TEST(test_agent_next_timeout_ms_reports_tool_deadline);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_reasoning_not_echoed_by_default);
+    RUN_TEST(test_agent_reasoning_echo_provider_default);
+    RUN_TEST(test_agent_reasoning_echo_user_overrides_provider);
     RUN_TEST(test_agent_reasoning_echo_tools_scope);
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);

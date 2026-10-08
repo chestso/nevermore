@@ -178,14 +178,23 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 /* Reasoning echo-back: which assistant messages riding a later request
  * carry their trace as "reasoning_content" — the store's
  * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / ALL (see
- * nm_config.h for what each mode means). The agent keeps no copy: it
- * resolves the store at the point of use. The trace is received,
- * displayed and kept in the session in every mode — the mode decides
- * only what goes back on the wire. `tools`/`all` attach the field to
- * EVERY tool-call message, the round's trace or "" when the round
- * streamed none: the replay check tests the field's presence, so a
- * trace-less tool round must still ride back an empty
+ * nm_config.h for what each mode means), with the provider's own
+ * declaration (NmProvider.reasoning_echo) as the DEFAULT. The agent
+ * keeps no copy: it resolves at the point of use. The trace is
+ * received, displayed and kept in the session in every mode — the mode
+ * decides only what goes back on the wire. `tools`/`all` attach the
+ * field to EVERY tool-call message, the round's trace or "" when the
+ * round streamed none: the replay check tests the field's presence, so
+ * a trace-less tool round must still ride back an empty
  * `reasoning_content` (docs/OPENCODE-API.md §3).
+ *
+ * THE PROVIDER DECIDES, THE USER OVERRIDES. A provider whose wire 400s
+ * a replayed tool-call turn that omits the field declares it
+ * (opencode:go: NM_REASONING_ECHO_TOOLS), and that declaration is the
+ * default — the requirement rides the wire, so the user need not know
+ * it. The store's `reasoning_echo` key is the override: when any layer
+ * above the built-in default sets it, that wins (so an explicit `off`
+ * on opencode:go is honoured).
  *
  * FROZEN ONCE SENT. The mode may change freely while no request has
  * carried a trace yet (there is nothing on the wire to invalidate).
@@ -196,19 +205,26 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * can re-trip DeepSeek's thinking-mode replay check — the very failure
  * the echo exists to avoid (docs/OPENCODE-API.md §3). A change after
  * the latch applies to the next chat (a fresh agent).
- * nm_agent_reasoning_echo reports the mode in force (store or latch);
- * nm_agent_reasoning_echo_frozen says which it was.
+ * nm_agent_reasoning_echo reports the mode in force (store, provider
+ * default, or latch); nm_agent_reasoning_echo_frozen says which it was.
  *
  * NOTE (why the mode exists at all): the echo was offered for
  * docs/HYPER-API.md's claim that a trace "must be echoed back" on any
- * request carrying the turn — an inherited, hand-written doc claim,
- * not something nevermore had observed. It is now OBSERVED elsewhere:
- * opencode:go load-balances one model id across upstreams and one of
- * them 400s a tool-call turn replayed without its trace, which is what
- * `tools` answers. Whether hyper itself needs the field is still open
- * (a live hyper probe is what would settle it); `all` stays available
- * as the faithful-if-expensive mode. */
+ * request carrying the turn — an inherited, hand-written doc claim.
+ * A live hyper probe (2026-10-08) DISPROVED it for hyper: six reasoning
+ * models across every taxonomy class answered 200 with the field both
+ * echoed and omitted, so hyper declares NM_REASONING_ECHO_OFF. The rule
+ * IS real on opencode:go's deepseek endpoint (docs/OPENCODE-API.md §3),
+ * which is what `tools` answers. */
 NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a);
+
+/* The mode the NEXT chat would use — nm_agent_reasoning_echo's
+ * resolution (provider declaration as the default, the store's key as
+ * the override) with the freeze ignored. What a UI needs to say what a
+ * change WOULD do: before the latch it equals nm_agent_reasoning_echo;
+ * after it, comparing this to the frozen mode tells whether a change is
+ * being overridden (see chat_app.c's note_frozen_echo). */
+NmReasoningEcho nm_agent_reasoning_echo_next(const NmAgent *a);
 
 /* Is the echo mode frozen for this conversation (has a request already
  * carried a trace)? A UI that shows or changes the setting needs this

@@ -227,10 +227,14 @@ policy is off.
 thinking trace is re-sent to the
 provider as `reasoning_content` on the assistant messages of later
 requests. The trace is always received, shown (dimmed) and kept in the
-session; only the wire changes. `off` (default) sends none, `tools`
-sends the ones on messages that carry `tool_calls` — what DeepSeek's
-thinking-mode replay check demands, so a `deepseek` model on
-`opencode:go` stops returning an intermittent 400 on tool rounds —
+session; only the wire changes. The **provider decides the default** —
+a provider whose wire 400s a replayed tool-call turn that omits the
+field declares it, and `opencode:go` declares `tools` (its `deepseek`
+endpoint is the one probed to demand it, so a `deepseek` model on
+`opencode:go` stops returning an intermittent 400 on tool rounds) — and
+this key is the override, winning whenever it is set at any layer.
+`off` sends none, `tools`
+sends the ones on messages that carry `tool_calls` —
 and `all` sends every trace. (`on`/`true`/`1` are accepted for `all`.)
 Once a request has actually carried a trace the mode is **frozen for
 that chat**: a prefix that gains or loses the field is a different

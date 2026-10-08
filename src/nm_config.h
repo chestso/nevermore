@@ -92,6 +92,14 @@ extern "C" {
  * the file, the shadow, the env layer and /config all read the same.
  * Env spelling: NEVERMORE_REASONING_ECHO.
  *
+ * This key is the OVERRIDE; a provider whose WIRE needs the echo
+ * declares it (NmProvider.reasoning_echo) and that declaration is the
+ * DEFAULT. So the built-in default above applies only to a provider
+ * with no opinion: opencode:go declares `tools` (its deepseek endpoint
+ * is the one observed to 400), and an explicit value set here — any
+ * layer above the built-in default — always wins. Resolution:
+ * nm_agent_reasoning_echo.
+ *
  * Once a request has actually carried a trace, the mode is FROZEN for
  * that conversation (the agent latches it — see
  * nm_agent_reasoning_echo_frozen): a request prefix that gains or loses
