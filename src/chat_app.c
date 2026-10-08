@@ -104,18 +104,18 @@ typedef enum
 } PopupKind;
 
 /* Capability query bits for the model picker (`/model @vision`,
- * `/model @img`, `/model @tool`): a catalog-side filter, distinct from
+ * `/model @img`, `/model @tools`): a catalog-side filter, distinct from
  * the popup's text filter over ids. */
 #define NM_CAP_VISION 1u
 #define NM_CAP_IMAGE  2u
-#define NM_CAP_TOOL   4u
+#define NM_CAP_TOOLS  4u
 
 /* The model picker's catalog filter: ONE parsed `/model` argument.
  * Grammar v2 — free text plus typed tokens, so a query can combine
  * ("/model gpt tag:vision ctx:>128k"):
  *
  *   <text>      id substring (the popup's own text filter)
- *   @cap        a capability CLAIM: @vision / @img / @tool
+ *   @cap        a capability CLAIM: @vision / @img / @tools
  *   tag:NAME    the entry carries the tag (NmEntry.tags)
  *   ctx:<op>N   context window: >N >=N <N <=N =N (k/M suffix ok)
  *
@@ -1647,7 +1647,7 @@ static void print_help(NmChatApp *app)
                   "  /model [id|query]  show, set, or pick a model (! id = exact;\n"
                   "                     remembered per provider)\n"
                   "  /model @vision     pick among vision models (@img = image-gen,\n"
-                  "                     @tool = tool use; combine with text,\n"
+                  "                     @tools = tool use; combine with text,\n"
                   "                     tag:NAME and ctx:>128k, e.g.\n"
                   "                     /model gpt tag:vision ctx:>128k)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
@@ -1835,8 +1835,8 @@ static unsigned capability_token(const char *tok)
     if (strcmp(tok, "img") == 0 || strcmp(tok, "image") == 0 ||
         strcmp(tok, "imagegen") == 0 || strcmp(tok, "image_gen") == 0)
         return NM_CAP_IMAGE;
-    if (strcmp(tok, "tool") == 0 || strcmp(tok, "tools") == 0)
-        return NM_CAP_TOOL;
+    if (strcmp(tok, "tools") == 0)
+        return NM_CAP_TOOLS;
     return 0;
 }
 
@@ -1978,7 +1978,7 @@ static int model_query_parse(const char *arg, ModelQuery *q, char *err,
             if (!bit) {
                 snprintf(err, errcap,
                          "model: unknown capability '%s' — one of @vision, "
-                         "@img, @tool",
+                         "@img, @tools",
                          cap);
                 return -1;
             }
@@ -2154,7 +2154,7 @@ static int model_query_match(const ModelQuery *q, const NmEntry *m)
      * the view, the badge and the wire gate agree: 0 ("says nothing")
      * and -1 ("listed without tools") both fail it — a query answers
      * with models that CLAIM the capability. */
-    if ((q->cap & NM_CAP_TOOL) && m->tools != 1)
+    if ((q->cap & NM_CAP_TOOLS) && m->tools != 1)
         return 0;
     if (q->tag[0] && !entry_has_tag(m, q->tag))
         return 0;
@@ -2180,7 +2180,7 @@ static void report_no_models(NmChatApp *app, const ModelQuery *q)
         sys_line(app, "no vision models in the catalog");
     else if (cap_only && q->cap == NM_CAP_IMAGE)
         sys_line(app, "no image-generating models in the catalog");
-    else if (cap_only && q->cap == NM_CAP_TOOL)
+    else if (cap_only && q->cap == NM_CAP_TOOLS)
         sys_line(app, "no tool-capable models in the catalog");
     else
         sys_line(app, "no models match the filter");

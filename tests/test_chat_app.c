@@ -5512,18 +5512,17 @@ static void test_model_picker_capability_query_img(void)
     harness_free(h);
 }
 
-/* "/model @tool" opens the picker filtered to the models whose catalog
+/* "/model @tools" opens the picker filtered to the models whose catalog
  * CLAIMS tool use (tools == 1) — the same claim the 🔧 badge shows. The
  * vision model (tools == 0, "the catalog says nothing") and the image
  * generator (tools == -1, "listed without tools") both drop out, and
- * neither is a "no tools" answer either (a query answers with claims).
- * Alias `@tools` maps to the same bit. */
-static void test_model_picker_capability_query_tool(void)
+ * neither is a "no tools" answer either (a query answers with claims). */
+static void test_model_picker_capability_query_tools(void)
 {
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @tool");
+    harness_type(h, "/model @tools");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
@@ -5539,10 +5538,9 @@ static void test_model_picker_capability_query_tool(void)
     harness_free(h);
 }
 
-/* The `@tools` alias resolves to the tool filter; a catalog with no
- * tool claim at all answers with the empty-catalog note, never a
- * silent empty modal. */
-static void test_model_picker_capability_query_tools_alias_and_empty(void)
+/* A catalog with no tool claim at all answers the `@tools` filter with
+ * the empty-catalog note, never a silent empty modal. */
+static void test_model_picker_capability_query_tools_empty(void)
 {
     /* ollama's static catalog claims no tools (all 0 = "says
      * nothing"), so the tool filter finds nothing. */
@@ -5989,8 +5987,8 @@ int main(void)
     RUN_TEST(test_save_without_images);
     RUN_TEST(test_model_picker_shows_capability_metadata);
     RUN_TEST(test_model_picker_capability_query_img);
-    RUN_TEST(test_model_picker_capability_query_tool);
-    RUN_TEST(test_model_picker_capability_query_tools_alias_and_empty);
+    RUN_TEST(test_model_picker_capability_query_tools);
+    RUN_TEST(test_model_picker_capability_query_tools_empty);
     RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);

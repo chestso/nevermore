@@ -29,7 +29,7 @@
 
 /* Static fallback catalog (subset of data/nm-openrouter-models.json).
  * The three rows are the picker's own fixture for NmModel.tools'
- * tri-state (1 / 0 / -1), so a badge or a `/model @tool` answer can be
+ * tri-state (1 / 0 / -1), so a badge or a `/model @tools` answer can be
  * asserted offline:
  *   - GPT Astra (vision, 1M ctx) is the tools == 0 row: the catalog
  *     says nothing, so the agent keeps the toolset and the picker shows
