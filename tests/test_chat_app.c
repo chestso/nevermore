@@ -4462,6 +4462,26 @@ static void test_ps_lists_and_kill_removes(void)
     free(clean);
     ASSERT_EQ(nm_proc_count(), 0);
 
+    /* A HIDDEN job (nevermore's own machinery — the context <env> git
+     * stage, a Windows run_command) is drained like any other but never
+     * listed: /ps is the window on jobs the USER started. */
+    int id_hidden = -1;
+    ASSERT_NOT_NULL(nm_proc_start("echo HIDDEN-MARKER; sleep 30", NULL,
+                                  &id_hidden, err, sizeof(err)));
+    ASSERT_EQ(nm_proc_count(), 1);
+    NmProc *hid = nm_proc_find(id_hidden);
+    ASSERT_NOT_NULL(hid);
+    nm_proc_set_hidden(hid, 1);
+    harness_type(h, "/ps");
+    harness_enter(h);
+    clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "no process jobs") != NULL);
+    ASSERT_NULL(strstr(clean, "HIDDEN-MARKER"));
+    free(clean);
+    nm_proc_close(hid);
+    ASSERT_EQ(nm_proc_count(), 0);
+
     /* Back to the empty note. */
     harness_type(h, "/ps");
     harness_enter(h);

@@ -342,6 +342,13 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     free(cmd);
     if (!p)
         return NULL; /* spawn failed: execute reports it verbatim */
+    /* Hidden: on POSIX run_command is a bespoke pipe that never touches
+     * the job registry, so it is invisible to /ps and unkillable there;
+     * on Windows it IS a job (a one-shot command and a long-lived job
+     * are the same mechanism here), so mark it hidden to keep the two
+     * platforms the same from the user's side — a run_command is the
+     * tool's own machinery, never a job the model polls. */
+    nm_proc_set_hidden(p, 1);
     /* No stdin, exactly like the synchronous path's NUL handle: the
      * job's stdin is a live pipe, so it must be closed for the child to
      * see EOF instead of blocking on a read forever. */

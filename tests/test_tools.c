@@ -3555,6 +3555,13 @@ static void test_run_command_async_on_windows(void)
     ASSERT_EQ(src.kind, NM_SRC_HANDLE);
     ASSERT_EQ(src.flags, NM_INTEREST_READ);
 
+    /* The job is HIDDEN: on POSIX run_command is a bespoke pipe that
+     * never enters the registry at all, so hiding the Windows job keeps
+     * /ps identical on both platforms — a run_command is the tool's own
+     * machinery, never a job the model polls or the user kills. */
+    ASSERT_EQ(nm_proc_count(), 1);
+    ASSERT_EQ(nm_proc_hidden(nm_proc_at(0)), 1);
+
     /* First step: the child is asleep, so RUNNING — never a blocking
      * read of the whole command. */
     NmToolResult r = { 0 };

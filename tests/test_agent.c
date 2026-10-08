@@ -95,6 +95,22 @@ static void write_fake_git(const char *dir)
 #define JOB_TOKEN_CMD "echo booting; sleep 30"
 #endif
 
+/* A SHORT command for the async run_command tests: it must still be
+ * running when the tool phase's first step returns (so the test can
+ * observe the live source), then print its token and exit — in each
+ * platform's own shell (cmd.exe has no `sleep`, and `;` is not its
+ * separator). */
+#ifdef _WIN32
+#define ASYNC_CMD "ping -n 2 127.0.0.1 >nul & echo hi-async"
+#else
+#define ASYNC_CMD "sleep 0.3; echo hi-async"
+#endif
+
+/* The agent's live source handle. NOT agent_fd: a Windows job's
+ * readiness object is a HANDLE, which does not fit an int, so the
+ * truncated form agent_fd returns can read negative. */
+static intptr_t agent_handle(NmAgent *a) { return nm_agent_source(a).handle; }
+
 /* ---------------------------------------------------------------- */
 /* Canned server: N scripted rounds, requests captured                */
 /* ---------------------------------------------------------------- */
@@ -1208,11 +1224,13 @@ static void test_agent_announces_each_tool_as_it_runs(void)
     remove(FIXTURE);
 }
 
-#ifndef _WIN32
-/* run_command runs asynchronously: a tool round yields an fd (the
- * child's output pipe) while the state stays RUNNING_TOOL, instead of
- * blocking the event loop; the turn still completes with the command's
- * output as the result. */
+/* run_command runs asynchronously: a tool round yields a waitable
+ * source (the child's pipe on POSIX, the job's readiness event on
+ * Windows) while the state stays RUNNING_TOOL, instead of blocking the
+ * event loop; the turn still completes with the command's output as the
+ * result. Both platforms have the async seam (POSIX since 2026-09-17;
+ * Windows since P5b's process layer, whose pipe-reader thread is what
+ * made a waitable job HANDLE possible). */
 static void test_agent_run_command_is_async(void)
 {
     reset_capture();
@@ -1224,7 +1242,7 @@ static void test_agent_run_command_is_async(void)
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
         "{\"name\":\"run_command\",\"arguments\":"
-        "\"{\\\"cmd\\\":\\\"sleep 0.3; echo hi-async\\\"}\"}}]}}]}\n\n"
+        "\"{\\\"cmd\\\":\\\"" ASYNC_CMD "\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
@@ -1250,7 +1268,9 @@ static void test_agent_run_command_is_async(void)
     ASSERT_EQ(nm_agent_start(agent, "poke the shell", NULL, 0), 0);
 
     /* Drive the stream round until the tool phase begins (the round's
-     * final step announces the call and sets RUNNING_TOOL). */
+     * final step announces the call and sets RUNNING_TOOL). The stream
+     * source is a socket on every platform, so the raw select is fine
+     * here — the TOOL's source is not (see below). */
     int spins = 0;
     while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
         int fd = agent_fd(agent);
@@ -1271,11 +1291,11 @@ static void test_agent_run_command_is_async(void)
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
 
-    /* The NEXT step starts the exec and yields an fd (the child's
-     * pipe), not a blocked call. */
+    /* The NEXT step starts the exec and yields a live source (the
+     * child's pipe / the job's event), not a blocked call. */
     ASSERT_EQ(nm_agent_step(agent), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
-    ASSERT_TRUE(agent_fd(agent) >= 0);
+    ASSERT_TRUE(agent_handle(agent) >= 0);
     ASSERT_TRUE((agent_interest(agent) & NM_INTEREST_READ) != 0);
 
     /* Finish the turn. */
@@ -1291,7 +1311,8 @@ static void test_agent_run_command_is_async(void)
 }
 
 /* The blocking pump (ask mode) drives the same async path: it must wait
- * on the child's pipe and return DONE. */
+ * on the child's pipe (POSIX) / the job's event (Windows) and return
+ * DONE. */
 static void test_agent_turn_runs_async_command(void)
 {
     reset_capture();
@@ -1303,7 +1324,7 @@ static void test_agent_turn_runs_async_command(void)
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
         "{\"name\":\"run_command\",\"arguments\":"
-        "\"{\\\"cmd\\\":\\\"sleep 0.2; echo hi-async\\\"}\"}}]}}]}\n\n"
+        "\"{\\\"cmd\\\":\\\"" ASYNC_CMD "\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
@@ -1337,8 +1358,6 @@ static void test_agent_turn_runs_async_command(void)
     pthread_join(th, NULL);
     close(sc.fd);
 }
-
-#endif /* !_WIN32: run_command's async seam is POSIX-only */
 
 /* The process-job tools through the agent: exec_command's yield
  * window is a tool deadline, so the loop re-steps a SILENT child (no fd
@@ -3934,10 +3953,8 @@ int main(void)
     RUN_TEST(test_agent_step_driven_full_loop);
     RUN_TEST(test_agent_announces_each_tool_as_it_runs);
     RUN_TEST(test_agent_exec_command_yields_job);
-#ifndef _WIN32
     RUN_TEST(test_agent_run_command_is_async);
     RUN_TEST(test_agent_turn_runs_async_command);
-#endif
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
     RUN_TEST(test_agent_error_message_is_informative);
