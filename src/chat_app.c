@@ -103,6 +103,35 @@ typedef enum
     POPUP_COMMANDS   /* Tab on a "/..." word: insert the completion */
 } PopupKind;
 
+/* Capability query bits for the model picker (`/model @vision`,
+ * `/model @img`, `/model @tool`): a catalog-side filter, distinct from
+ * the popup's text filter over ids. */
+#define NM_CAP_VISION 1u
+#define NM_CAP_IMAGE  2u
+#define NM_CAP_TOOL   4u
+
+/* The model picker's catalog filter: ONE parsed `/model` argument.
+ * Grammar v2 — free text plus typed tokens, so a query can combine
+ * ("/model gpt tag:vision ctx:>128k"):
+ *
+ *   <text>      id substring (the popup's own text filter)
+ *   @cap        a capability CLAIM: @vision / @img / @tool
+ *   tag:NAME    the entry carries the tag (NmEntry.tags)
+ *   ctx:<op>N   context window: >N >=N <N <=N =N (k/M suffix ok)
+ *
+ * `model_query_parse` is the one scanner; a malformed token is a
+ * refusal (a named error), never a silent id query. A v1 argument
+ * (bare text, or a lone @cap) parses to the same filter it always
+ * did. */
+typedef struct
+{
+    char text[128]; /* id substring, "" = none */
+    unsigned cap;   /* NM_CAP_* bits */
+    char tag[64];   /* the entry must carry this tag, "" = none */
+    long ctx_min;   /* inclusive lower bound, 0 = none */
+    long ctx_max;   /* inclusive upper bound, 0 = none */
+} ModelQuery;
+
 struct NmChatApp
 {
     TuiModel base;
@@ -229,11 +258,11 @@ struct NmChatApp
     /* The model-catalog fetch in flight (the /model popup's
      * non-blocking path). A catalog SOURCE (src/source.h) owns the
      * fetch: its begin/step/fd drive the provider's async seam, and
-     * the popup opens when it lands. The query/cap are remembered so
-     * the popup opens with the filter the user asked for. */
+     * the popup opens when it lands. The parsed query (ModelQuery) is
+     * remembered so the popup opens with the filter the user asked
+     * for. */
     NmListSource *catalog_src;
-    char catalog_query[128];
-    unsigned catalog_cap;
+    ModelQuery catalog_query;
 };
 
 /* The singleton (see file header). */
@@ -258,7 +287,7 @@ static int model_vision(const NmChatApp *app, const NmProvider *p);
  * loop's fd-ready and tick drive it. */
 static void catalog_step(NmChatApp *app);
 static void show_models_popup(NmChatApp *app, NmListSource *s,
-                              const char *query, unsigned cap);
+                              const ModelQuery *q);
 
 /* ---------------------------------------------------------------- */
 /* Transcript writers (boba's streaming IR owns the scrollback)     */
@@ -1618,7 +1647,9 @@ static void print_help(NmChatApp *app)
                   "  /model [id|query]  show, set, or pick a model (! id = exact;\n"
                   "                     remembered per provider)\n"
                   "  /model @vision     pick among vision models (@img = image-gen,\n"
-                  "                     @tool = tool use)\n"
+                  "                     @tool = tool use; combine with text,\n"
+                  "                     tag:NAME and ctx:>128k, e.g.\n"
+                  "                     /model gpt tag:vision ctx:>128k)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
                   "  /config            every setting, its value + source\n"
@@ -1795,13 +1826,6 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
     return 1;
 }
 
-/* Capability query bits for the model picker (`/model @vision`,
- * `/model @img`, `/model @tool`): a catalog-side filter, distinct from
- * the popup's text filter over ids. */
-#define NM_CAP_VISION 1u
-#define NM_CAP_IMAGE  2u
-#define NM_CAP_TOOL   4u
-
 /* Parse the text after a picker `@` (the capability token). Known
  * spellings map to a bit; 0 when unknown. */
 static unsigned capability_token(const char *tok)
@@ -1814,6 +1838,194 @@ static unsigned capability_token(const char *tok)
     if (strcmp(tok, "tool") == 0 || strcmp(tok, "tools") == 0)
         return NM_CAP_TOOL;
     return 0;
+}
+
+/* Case-insensitive ASCII equality. Character-level (no strcasecmp, no
+ * locale): tags are lowercase, but a person may not be. */
+static int ascii_ieq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + 32);
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
+}
+
+/* Does the entry carry `tag`? (NmEntry.tags, case-insensitive.) */
+static int entry_has_tag(const NmEntry *m, const char *tag)
+{
+    for (size_t i = 0; i < m->n_tags; i++) {
+        if (m->tags && m->tags[i] && ascii_ieq(m->tags[i], tag))
+            return 1;
+    }
+    return 0;
+}
+
+/* Parse a token count with an optional k/M suffix ("128k", "1M",
+ * "200000"). The suffix is 1000/1000000 — the SAME base the picker's
+ * `format_tokens` renders the column with, so `ctx:>128k` reads a
+ * "128k" row the way the user sees it. 0 on success, -1 on a malformed
+ * or overflowing number. */
+static int parse_token_count(const char *s, long *out)
+{
+    if (!*s)
+        return -1;
+    long v = 0;
+    const char *p = s;
+    for (; *p >= '0' && *p <= '9'; p++) {
+        if (v > 100000000L) /* bound before the *10 overflows */
+            return -1;
+        v = v * 10 + (*p - '0');
+    }
+    long mult = 1;
+    if (*p == 'k' || *p == 'K')
+        mult = 1000, p++;
+    else if (*p == 'M' || *p == 'm')
+        mult = 1000000, p++;
+    if (*p != '\0' || v > 100000000L / mult)
+        return -1;
+    *out = v * mult;
+    return 0;
+}
+
+/* Apply one `ctx:` token (the text after "ctx:"): a comparison against
+ * the entry's context window — >N >=N <N <=N =N (a bare N means "at
+ * least N"), N a k/M-suffixed count. Bounds are inclusive; repeated
+ * tokens intersect (`ctx:>64k ctx:<128k` is a range). 0 on success, -1
+ * with a refusal in `err`. */
+static int apply_ctx_token(ModelQuery *q, const char *spec, char *err,
+                           size_t errcap)
+{
+    enum
+    {
+        OP_GE, /* >=N, and a bare N ("at least") */
+        OP_GT, /* >N  */
+        OP_LE, /* <=N */
+        OP_LT, /* <N  */
+        OP_EQ  /* =N  */
+    } op = OP_GE;
+    const char *n = spec;
+    if (spec[0] == '>' && spec[1] == '=')
+        n = spec + 2;
+    else if (spec[0] == '>')
+        op = OP_GT, n = spec + 1;
+    else if (spec[0] == '<' && spec[1] == '=')
+        op = OP_LE, n = spec + 2;
+    else if (spec[0] == '<')
+        op = OP_LT, n = spec + 1;
+    else if (spec[0] == '=')
+        op = OP_EQ, n = spec + 1;
+
+    long v;
+    if (parse_token_count(n, &v) != 0 || v <= 0) {
+        snprintf(err, errcap,
+                 "model: ctx: expects >N, >=N, <N, <=N or =N (e.g. ctx:>128k)");
+        return -1;
+    }
+    long lo = 0, hi = 0; /* 0 = no bound */
+    switch (op) {
+    case OP_GE:
+        lo = v;
+        break;
+    case OP_GT:
+        lo = v + 1;
+        break;
+    case OP_LE:
+        hi = v;
+        break;
+    case OP_LT:
+        hi = v - 1;
+        break;
+    case OP_EQ:
+        lo = hi = v;
+        break;
+    }
+    if (lo && lo > q->ctx_min)
+        q->ctx_min = lo;
+    if (hi && (q->ctx_max == 0 || hi < q->ctx_max))
+        q->ctx_max = hi;
+    return 0;
+}
+
+/* Parse a `/model` argument into `q` (which the caller zeroes). One
+ * scanner for the whole grammar: `@cap`, `tag:NAME`, `ctx:<op>N`, and
+ * free text (accumulated space-joined into q->text). 0 on success, -1
+ * with a refusal in `err` on a malformed token — never a silent
+ * fallthrough to an id query. */
+static int model_query_parse(const char *arg, ModelQuery *q, char *err,
+                             size_t errcap)
+{
+    const char *p = arg;
+    while (*p) {
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (!*p)
+            break;
+        const char *tok = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        size_t len = (size_t)(p - tok);
+
+        if (tok[0] == '@') {
+            char cap[32];
+            snprintf(cap, sizeof(cap), "%.*s", (int)(len - 1), tok + 1);
+            unsigned bit = capability_token(cap);
+            if (!bit) {
+                snprintf(err, errcap,
+                         "model: unknown capability '%s' — one of @vision, "
+                         "@img, @tool",
+                         cap);
+                return -1;
+            }
+            q->cap |= bit;
+        } else if (len >= 4 && strncmp(tok, "tag:", 4) == 0) {
+            if (len == 4) {
+                snprintf(err, errcap, "model: tag: needs a name (tag:vision)");
+                return -1;
+            }
+            if (q->tag[0]) {
+                snprintf(err, errcap, "model: one tag: filter at a time");
+                return -1;
+            }
+            size_t tlen = len - 4;
+            if (tlen >= sizeof(q->tag))
+                tlen = sizeof(q->tag) - 1;
+            memcpy(q->tag, tok + 4, tlen);
+            q->tag[tlen] = '\0';
+        } else if (len >= 4 && strncmp(tok, "ctx:", 4) == 0) {
+            char spec[32];
+            snprintf(spec, sizeof(spec), "%.*s", (int)(len - 4), tok + 4);
+            if (apply_ctx_token(q, spec, err, errcap) != 0)
+                return -1;
+        } else {
+            /* Free text: accumulate, space-separated. */
+            size_t used = strlen(q->text);
+            if (used && used < sizeof(q->text) - 1) {
+                q->text[used++] = ' ';
+                q->text[used] = '\0';
+            }
+            if (used < sizeof(q->text) - 1) {
+                size_t room = sizeof(q->text) - 1 - used;
+                if (len > room)
+                    len = room;
+                memcpy(q->text + used, tok, len);
+                q->text[used + len] = '\0';
+            }
+        }
+    }
+    return 0;
+}
+
+/* Is the query a plain text filter (no typed token)? The exact-id
+ * escape hatch and the picker's pre-filter path apply only then. */
+static int model_query_is_plain(const ModelQuery *q)
+{
+    return q->cap == 0 && !q->tag[0] && q->ctx_min == 0 && q->ctx_max == 0;
 }
 
 /* Append `s` to a meta column buffer, space-separated. */
@@ -1868,11 +2080,12 @@ static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
 /* Open the models popup over the catalog SOURCE (src/source.h), which
  * drives the provider's async catalog seam — a wire catalog is fetched
  * without ever blocking the event loop: the popup opens when it lands
- * (catalog_step), with the note below for the gap. `query` pre-filters
- * (NULL = none), `cap` is the NM_CAP_* capability filter (0 = every
- * model). Popups are modal: one fetch in flight; a second /model while
- * one runs says so rather than stacking. */
-static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
+ * (catalog_step), with the note below for the gap. `q` is the parsed
+ * catalog filter (ModelQuery: free text, capabilities, tag, context
+ * bounds); a zeroed one is "every model". Popups are modal: one fetch
+ * in flight; a second /model while one runs says so rather than
+ * stacking. */
+static void open_models_popup(NmChatApp *app, const ModelQuery *q)
 {
     if (!app->provider) {
         sys_line(app, "no models in the catalog");
@@ -1899,20 +2112,18 @@ static void open_models_popup(NmChatApp *app, const char *query, unsigned cap)
          * it lands (nm_chat_app_external_ready / tick -> catalog_step),
          * so the UI thread is never blocked on the round trip. */
         app->catalog_src = s;
-        snprintf(app->catalog_query, sizeof(app->catalog_query), "%s",
-                 query ? query : "");
-        app->catalog_cap = cap;
+        app->catalog_query = *q;
         sys_line(app, "loading the %s model catalog…", app->provider->name);
         return;
     }
-    show_models_popup(app, s, query, cap);
+    show_models_popup(app, s, q);
     nm_source_free(s);
 }
 
 /* Drive the in-flight catalog fetch (the event loop's fd-ready, and the
  * tick's deadline). On a terminal status the popup opens with the
- * remembered query/cap — the source already holds the live catalog, or
- * the static fallback when the fetch failed. */
+ * remembered query — the source already holds the live catalog, or the
+ * static fallback when the fetch failed. */
 static void catalog_step(NmChatApp *app)
 {
     if (!app || !app->catalog_src)
@@ -1926,16 +2137,61 @@ static void catalog_step(NmChatApp *app)
         sys_line(app, "note: could not load the live %s catalog — showing "
                       "the built-in list",
                  app->provider ? app->provider->name : "model");
-    show_models_popup(app, s, app->catalog_query, app->catalog_cap);
+    show_models_popup(app, s, &app->catalog_query);
     nm_source_free(s);
+}
+
+/* Does the entry pass the parsed filter? Capabilities, tag and context
+ * bounds all AND together; an unknown context window (-1) never
+ * satisfies a bound (the catalog did not claim one). */
+static int model_query_match(const ModelQuery *q, const NmEntry *m)
+{
+    if ((q->cap & NM_CAP_VISION) && !m->vision)
+        return 0;
+    if ((q->cap & NM_CAP_IMAGE) && !m->image_gen)
+        return 0;
+    /* The tool filter matches the 🔧 badge's own claim (tools == 1), so
+     * the view, the badge and the wire gate agree: 0 ("says nothing")
+     * and -1 ("listed without tools") both fail it — a query answers
+     * with models that CLAIM the capability. */
+    if ((q->cap & NM_CAP_TOOL) && m->tools != 1)
+        return 0;
+    if (q->tag[0] && !entry_has_tag(m, q->tag))
+        return 0;
+    if (q->ctx_min || q->ctx_max) {
+        if (m->context_length < 0)
+            return 0;
+        if (q->ctx_min && m->context_length < q->ctx_min)
+            return 0;
+        if (q->ctx_max && m->context_length > q->ctx_max)
+            return 0;
+    }
+    return 1;
+}
+
+/* The note for a filtered view that matched nothing — a capability-only
+ * query keeps its named answer; anything combined is generic. */
+static void report_no_models(NmChatApp *app, const ModelQuery *q)
+{
+    int cap_only = !q->tag[0] && !q->ctx_min && !q->ctx_max;
+    if (q->text[0])
+        sys_line(app, "no models match '%s'", q->text);
+    else if (cap_only && q->cap == NM_CAP_VISION)
+        sys_line(app, "no vision models in the catalog");
+    else if (cap_only && q->cap == NM_CAP_IMAGE)
+        sys_line(app, "no image-generating models in the catalog");
+    else if (cap_only && q->cap == NM_CAP_TOOL)
+        sys_line(app, "no tool-capable models in the catalog");
+    else
+        sys_line(app, "no models match the filter");
 }
 
 /* Build and show the popup from a source whose fetch has completed.
  * Popups are modal: each row carries a right-aligned metadata column
  * (format_model_meta) — the id is the item's value, the metadata is
  * display-only, so compose never sees it and nothing needs stripping. */
-static void show_models_popup(NmChatApp *app, NmListSource *s, const char *query,
-                              unsigned cap)
+static void show_models_popup(NmChatApp *app, NmListSource *s,
+                              const ModelQuery *q)
 {
     size_t n = 0;
     const NmEntry *models = nm_source_items(s, &n);
@@ -1966,24 +2222,16 @@ static void show_models_popup(NmChatApp *app, NmListSource *s, const char *query
     int count = 0;
     for (size_t i = 0; i < n; i++) {
         const NmEntry *m = &models[i];
-        if ((cap & NM_CAP_VISION) && !m->vision)
-            continue;
-        if ((cap & NM_CAP_IMAGE) && !m->image_gen)
-            continue;
-        /* The tool filter matches the 🔧 badge's own claim (tools == 1),
-         * so the view, the badge and the wire gate agree: 0 ("says
-         * nothing") and -1 ("listed without tools") both fail it —
-         * a query answers with models that CLAIM the capability. */
-        if ((cap & NM_CAP_TOOL) && m->tools != 1)
+        if (!model_query_match(q, m))
             continue;
         rows[count] = m->id;
         format_model_meta(m, metas[count], sizeof(metas[count]));
         merows[count] = metas[count];
         /* The active entry is the caller's prepend; the item VALUE is
          * the bare id (the metadata is a separate column, so there is
-         * nothing to strip and no row-vs-id dedup mismatch). A
-         * capability-filtered view omits the active model when it does
-         * not carry the capability (the answer is about the filter). */
+         * nothing to strip and no row-vs-id dedup mismatch). A filtered
+         * view omits the active model when it does not pass the filter
+         * (the answer is about the filter). */
         if (app->model && strcmp(m->id, app->model) == 0) {
             active = rows[count];
             active_meta = merows[count];
@@ -1992,19 +2240,13 @@ static void show_models_popup(NmChatApp *app, NmListSource *s, const char *query
     }
     if (count == 0) {
         free(block);
-        if (cap == NM_CAP_VISION)
-            sys_line(app, "no vision models in the catalog");
-        else if (cap == NM_CAP_IMAGE)
-            sys_line(app, "no image-generating models in the catalog");
-        else if (cap == NM_CAP_TOOL)
-            sys_line(app, "no tool-capable models in the catalog");
-        else
-            sys_line(app, "no models match '%s'", query ? query : "");
+        report_no_models(app, q);
         return;
     }
+    const char *text = q->text[0] ? q->text : NULL;
     if (!popup_show_with_active(app, POPUP_MODELS, "models", active,
-                                active_meta, rows, merows, count, query)) {
-        sys_line(app, "no models match '%s'", query ? query : "");
+                                active_meta, rows, merows, count, text)) {
+        report_no_models(app, q);
     }
     free(block);
 }
@@ -2612,26 +2854,14 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
     if (NAME_IS("model")) {
         if (!*arg) {
             /* Bare /model: the picker (catalog source, active first). */
-            open_models_popup(app, NULL, 0);
-            return;
-        }
-        /* Capability query: "/model @vision" / "/model @img" /
-         * "/model @tool" opens the picker filtered to models that CLAIM
-         * the capability (the same claim the row badges show). */
-        if (arg[0] == '@') {
-            unsigned cap = capability_token(arg + 1);
-            if (!cap) {
-                sys_line(app, NM_SGR_ERROR "model: unknown capability '%s' "
-                                           "— one of @vision, @img, @tool" NM_SGR_RESET,
-                         arg);
-                return;
-            }
-            open_models_popup(app, NULL, cap);
+            ModelQuery q = { 0 };
+            open_models_popup(app, &q);
             return;
         }
         /* Exact-set escape hatch: "! <id>" sets any id without catalog
          * validation (a local daemon may run private models the
-         * static catalog doesn't know). */
+         * static catalog doesn't know). Checked before the grammar, so
+         * an id carrying ':' or '@' is never mistaken for a token. */
         const char *id = arg;
         if (id[0] == '!') {
             id++;
@@ -2647,32 +2877,46 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             warn_images_on_text_only(app);
             return;
         }
-        /* Validation: refuse an unknown id instead of a silent 404
-         * on the next turn; name the picker. */
-        size_t n = 0;
-        const NmModel *models = app->provider->models(
-            app->provider, app->base_url, endpoint_key(app, app->provider), &n);
-        int found = 0;
-        for (size_t i = 0; i < n; i++) {
-            if (strcmp(models[i].id, arg) == 0) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found) {
-            /* Not an exact id: a query into the picker (pre-filtered
-             * view); a typo can never silently switch anything. */
-            open_models_popup(app, arg, 0);
+        /* Grammar v2 (ModelQuery): free text plus typed tokens —
+         * "@vision" / "tag:vision" / "ctx:>128k" — combine into one
+         * catalog filter. A malformed token is a refusal, never a
+         * silent id query. */
+        ModelQuery q = { 0 };
+        char err[128];
+        if (model_query_parse(arg, &q, err, sizeof(err)) != 0) {
+            sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, err);
             return;
         }
-        nm_agent_set_model(app->agent, arg);
-        free(app->model);
-        app->model = strdup(arg);
-        refresh_context_limit(app);
-        char line[256];
-        snprintf(line, sizeof(line), "model: %s", app->model);
-        persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
-        warn_images_on_text_only(app);
+        /* A plain text argument that names an exact catalog id still
+         * sets it (refuse an unknown id instead of a silent 404 on the
+         * next turn); anything with a typed token opens the picker. */
+        if (model_query_is_plain(&q)) {
+            size_t n = 0;
+            const NmModel *models = app->provider->models(
+                app->provider, app->base_url, endpoint_key(app, app->provider),
+                &n);
+            int found = 0;
+            for (size_t i = 0; i < n; i++) {
+                if (strcmp(models[i].id, q.text) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) {
+                nm_agent_set_model(app->agent, q.text);
+                free(app->model);
+                app->model = strdup(q.text);
+                refresh_context_limit(app);
+                char line[256];
+                snprintf(line, sizeof(line), "model: %s", app->model);
+                persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
+                warn_images_on_text_only(app);
+                return;
+            }
+        }
+        /* Not an exact id: a query into the picker (pre-filtered view);
+         * a typo can never silently switch anything. */
+        open_models_popup(app, &q);
         return;
     }
     if (NAME_IS("provider")) {

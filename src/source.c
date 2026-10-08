@@ -129,8 +129,9 @@ typedef struct
 } CatalogSource;
 
 /* Tags derived from what NmModel already knows: vision support. The
- * v2 metadata grammar (tag:vision …) lands with the picker's search
- * tier; v1 is id/label substring. */
+ * picker's v2 metadata grammar (`/model tag:vision …`, chat_app.c's
+ * ModelQuery) matches these by name; the popup's text filter is a
+ * separate id/label substring. */
 static const char *const vision_tag[] = { "vision", NULL };
 
 /* Rebuild the view from the provider's catalog. NEVER fetches: the

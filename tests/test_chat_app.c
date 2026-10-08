@@ -5613,6 +5613,107 @@ static void test_model_picker_capability_query_unknown(void)
     harness_free(h);
 }
 
+/* Grammar v2: `tag:NAME` filters by the entry's tags (NmEntry.tags),
+ * the same vocabulary `@vision` reads. The openrouter static catalog
+ * tags only the vision model. */
+static void test_model_picker_grammar_tag(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* Case-insensitive: the tag is stored lowercase. */
+    harness_type(h, "/model tag:VISION");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") != NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") == NULL);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "/model ~openai/gpt-astra-latest");
+    harness_free(h);
+}
+
+/* Grammar v2: `ctx:<op>N` bounds the context window (k/M suffix,
+ * 1000-based like the column). `ctx:>1M` keeps only the 1050000-ctx
+ * model; the 131072 one is under the bound and the -1 (unknown) one
+ * never satisfies it. */
+static void test_model_picker_grammar_ctx(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model ctx:>1M");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") != NULL);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") == NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+    harness_free(h);
+}
+
+/* Grammar v2: repeated ctx: tokens intersect — `ctx:>64k ctx:<1M` is
+ * a range, so only the 131072 model lands (1050000 exceeds the upper
+ * bound; -1 has no window). */
+static void test_model_picker_grammar_ctx_range(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model ctx:>64k ctx:<1M");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") == NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") == NULL);
+    harness_free(h);
+}
+
+/* Grammar v2: tokens combine — a capability, a tag and a ctx bound
+ * AND together, and free text rides along. `tag:vision ctx:>128k`
+ * leaves the one model that claims both; adding `@img` (which that
+ * model does not claim) empties the view with the generic note. */
+static void test_model_picker_grammar_combines(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model tag:vision ctx:>128k");
+    harness_enter(h);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") != NULL);
+    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") == NULL);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+
+    harness_type(h, "/model tag:vision @img");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "no models match the filter") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
+
+    harness_free(h);
+}
+
+/* Grammar v2: a malformed token is a refusal (a named error), never a
+ * silent id query — and the model is untouched. */
+static void test_model_picker_grammar_errors(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model ctx:bogus");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "ctx: expects") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
+
+    harness_type(h, "/model tag:");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "tag: needs a name") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
+
+    harness_free(h);
+}
+
 /* Regression: the picker once capped its rows at 128, silently
  * truncating a live catalog — with OpenRouter's (464 entries,
  * Sep 2026) that surfaced as "only one image_gen model", the sole
@@ -5893,6 +5994,11 @@ int main(void)
     RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
+    RUN_TEST(test_model_picker_grammar_tag);
+    RUN_TEST(test_model_picker_grammar_ctx);
+    RUN_TEST(test_model_picker_grammar_ctx_range);
+    RUN_TEST(test_model_picker_grammar_combines);
+    RUN_TEST(test_model_picker_grammar_errors);
     RUN_TEST(test_model_picker_sees_past_the_old_row_cap);
     RUN_TEST(test_recv_image_after_text_opens_its_own_block);
     RUN_TEST(test_tool_read_file_image_renders_under_the_panel);
