@@ -305,6 +305,37 @@ static void test_web_search_happy_path(void)
         strstr(r.output, "Result [engine: duckduckgo, wikipedia, score: 0.4]:"));
     ASSERT_NOT_NULL(strstr(r.output, "Info: Example"));
     ASSERT_NOT_NULL(strstr(r.output, "Suggestions: hello, world"));
+    /* Rendered results are EXTERNAL content: the fact the reminder
+     * framework turns into the web-untrusted boundary (nm_reminder.h). */
+    ASSERT_EQ(r.untrusted, 1);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+    close(s.fd);
+}
+
+/* A response with nothing to render put no external text in context, so
+ * there is no boundary to state: the fact stays 0 (the zero value). */
+static void test_web_search_no_results_is_not_untrusted(void)
+{
+    Srv s;
+    memset(&s, 0, sizeof(s));
+    ws_reset_health();
+    s.fd = server_bind(&s.port);
+    set_response(&s, 200, "OK", "{\"results\":[]}");
+    char base[64];
+    ws_set_url(base_for(s.port, base, sizeof(base)));
+
+    pthread_t th = srv_launch(&s);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(
+        ts, "web_search", "{\"query\":\"nothing at all\"}", NULL);
+    pthread_join(th, NULL);
+
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "(empty)") != NULL);
+    ASSERT_EQ(r.untrusted, 0);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
     close(s.fd);
@@ -404,6 +435,8 @@ static void test_web_search_http_error_then_cached(void)
 
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "HTTP 403"));
+    /* Nothing was fetched into context, so no untrusted-content fact. */
+    ASSERT_EQ(r.untrusted, 0);
     nm_tool_result_free(&r);
 
     /* Second call: cached unreachable, no HTTP request. The server is
@@ -597,6 +630,7 @@ int main(void)
 
     RUN_TEST(test_web_search_is_async);
     RUN_TEST(test_web_search_happy_path);
+    RUN_TEST(test_web_search_no_results_is_not_untrusted);
     RUN_TEST(test_web_search_dedup_and_cap);
     RUN_TEST(test_web_search_extra_params);
     RUN_TEST(test_web_search_http_error_then_cached);

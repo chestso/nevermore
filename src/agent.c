@@ -251,19 +251,43 @@ static void set_error(NmAgent *a, const char *msg)
  * here because a /model switch changes the model without rebuilding
  * the agent, while this value is per-chat on purpose (that is what
  * keeps the clause inside the cached prefix). */
-static int model_vision(const NmProvider *p, const char *model)
+static int model_vision_lookup(const NmModel *models, size_t n,
+                               const char *model)
 {
-    if (!p || !p->models || !model)
-        return -1;
-    size_t n = 0;
-    const NmModel *models = p->models(p, NULL, NULL, &n);
-    if (!models)
+    if (!models || !model)
         return -1;
     for (size_t i = 0; i < n; i++) {
         if (models[i].id && strcmp(models[i].id, model) == 0)
             return models[i].vision;
     }
     return -1;
+}
+
+/* One lookup, two drives (the catalog seam's own shape). The drive
+ * fills `n` BEFORE the lookup reads it — in one expression the read
+ * could be sequenced before the call (argument evaluation order is
+ * unspecified), which silently looked up zero entries. */
+static int model_vision(const NmProvider *p, const char *model)
+{
+    if (!p || !p->models)
+        return -1;
+    size_t n = 0;
+    const NmModel *models = p->models(p, NULL, NULL, &n);
+    return model_vision_lookup(models, n, model);
+}
+
+/* The same flag for a firing point, resolved WITHOUT fetching: the
+ * tool-result path runs inside a step on the UI thread, where the
+ * construction-time drive above (which pumps a live fetch when one is
+ * warranted) would block the event loop. -1 = unknown, which no rule
+ * acts on. */
+static int model_vision_cached(const NmProvider *p, const char *model)
+{
+    if (!p || !p->models_cached)
+        return -1;
+    size_t n = 0;
+    const NmModel *models = p->models_cached(p, &n);
+    return model_vision_lookup(models, n, model);
 }
 
 /* The active model's tool-use claim, from the provider catalog (the
@@ -1451,12 +1475,22 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
     }
 
     /* Reminders about THIS result ride its content (the TOOL channel),
-     * so the panel shows exactly what the model reads. */
+     * so the panel shows exactly what the model reads. The facts are
+     * the result's own (nm_reminder.h): what the tool withheld, whether
+     * the text came from outside the machine, whether an image rode
+     * along, and — for read_file — what the path turned out to be. The
+     * vision flag is resolved from the catalog the UI reads, never
+     * fetched (this runs inside a step on the UI thread). */
     {
         NmReminderFacts f;
         reminder_facts(a, &f);
         f.tool_name = tc->name;
         f.tool_truncated = res->truncated;
+        f.tool_untrusted = res->untrusted;
+        f.tool_image = image_id >= 0;
+        f.model_vision = model_vision_cached(a->provider, a->model);
+        f.read_empty = res->read_state == NM_READ_STATE_EMPTY;
+        f.read_past_eof = res->read_state == NM_READ_STATE_PAST_EOF;
         NmReminderOut out;
         reminders_at(a, NM_REMINDER_POINT_TOOL_RESULT, &f, &out);
         if (out.tool.data && *out.tool.data) {

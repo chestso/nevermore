@@ -117,8 +117,8 @@ size_t nm_reminder_frame(NmReminderBuf *b, const char *text);
 /* Facts and rules                                                   */
 /* ---------------------------------------------------------------- */
 
-#define NM_REMINDER_MAX_RULES 8 /* the table's cap (static-asserted) */
-#define NM_REMINDER_MAX_JOBS  8 /* job ids carried in one reminder */
+#define NM_REMINDER_MAX_RULES 16 /* the table's cap (static-asserted) */
+#define NM_REMINDER_MAX_JOBS  8  /* job ids carried in one reminder */
 #define NM_REMINDER_TEXT_MAX  320
 
 /* What the agent knows when it asks the rules to fire. Every field is
@@ -164,6 +164,29 @@ typedef struct NmReminderFacts
     /* The tool result being finished (TOOL_RESULT rules only). */
     const char *tool_name;
     int tool_truncated; /* 0 none, 1 output clamped, 2 partial read */
+
+    /* The result's output came from OUTSIDE the machine (a web search
+     * result), so its text is data and never instructions — the trust
+     * boundary the model is reminded of per result (Claude Code's
+     * "external source" note). */
+    int tool_untrusted;
+
+    /* The result attached an image to the conversation, and the ACTIVE
+     * model's vision flag from the provider catalog (1 accepts image
+     * parts, 0 text-only, -1 unknown). Together they are the
+     * image-not-seen rule: the picture is in the conversation, the
+     * provider strips it, and without a note the model reasons about a
+     * picture it never received. -1 never fires — the prompt claims no
+     * capability the catalog cannot confirm, and neither does a nudge. */
+    int tool_image;
+    int model_vision;
+
+    /* read_file's finding about the path it was asked for (the
+     * NmReadState values, as two booleans so this header stays free of
+     * tools.h): the path exists with no content, or the requested
+     * offset is past its last line. */
+    int read_empty;
+    int read_past_eof;
 } NmReminderFacts;
 
 /* Where a reminder goes. The choice is per RULE, not per call site:

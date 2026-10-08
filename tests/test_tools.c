@@ -1156,9 +1156,61 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "offset 6 is past the last line (5)") !=
                 NULL);
+    /* The finding behind the message: the file is SHORTER than the
+     * offset (nm_reminder.h's offset-past-eof), and it is not a
+     * truncation — nothing of the file was withheld. */
+    ASSERT_EQ(r.read_state, NM_READ_STATE_PAST_EOF);
+    ASSERT_EQ(r.truncated, 0);
     nm_tool_result_free(&r);
 
     free(path);
+    nm_toolset_free(ts);
+}
+
+/* An empty file is COMPLETE (the empty-file reminder's fact, distinct
+ * from any truncation), and a path that is not a readable file must
+ * FAIL the read. The directory case is the reason the read is checked
+ * for its error flag: a directory opens fine and yields zero bytes with
+ * EISDIR on glibc, so it used to read as an empty file — and with the
+ * empty-file rule, as "the file exists and is empty". */
+static void test_read_file_empty_and_directory(void)
+{
+    char *path = scratch_path("read_empty.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fclose(f); /* zero bytes */
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    free(path);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "(empty)") != NULL);
+    ASSERT_EQ(r.truncated, 0);
+    ASSERT_EQ(r.read_state, NM_READ_STATE_EMPTY);
+    nm_tool_result_free(&r);
+
+    /* A directory is not an empty file: it is named as one, so the
+     * model reaches for list_dir instead of re-reading. */
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(scratch_dir()));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "it is a directory") != NULL);
+    ASSERT_TRUE(strstr(r.output, "list_dir") != NULL);
+    ASSERT_TRUE(strstr(r.output, "(empty)") == NULL);
+    ASSERT_EQ(r.read_state, NM_READ_STATE_NONE);
+    nm_tool_result_free(&r);
+
     nm_toolset_free(ts);
 }
 
@@ -3944,6 +3996,7 @@ int main(void)
     RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);
+    RUN_TEST(test_read_file_empty_and_directory);
     RUN_TEST(test_edit_file_unique_replace);
     RUN_TEST(test_edit_file_writes_astral_escaping);
     RUN_TEST(test_edit_file_ambiguous_fails_loudly);

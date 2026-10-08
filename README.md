@@ -290,8 +290,12 @@ the platform shell, deterministically, whatever this is set to.
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation
 when a condition is met — a tool result that was truncated, a partial
-`read_file` window, the context gauge crossing 85 %/95 %, background
-jobs still running from earlier turns, the last tool round of a turn.
+`read_file` window, a file that turned out to be empty or an offset
+past its last line, an image attached for a model that cannot see it,
+web results that came from outside the machine, the context gauge
+crossing 85 %/95 %, background jobs still running from earlier turns,
+an answer the output limit cut short, the window having dropped earlier
+messages, the last tool round of a turn.
 They are **never silent**: the human sees every one (the user-channel
 ones as a purple `reminder (rule): …` line, the tool-channel ones
 inside the panel's own body, in the same purple role), because the

@@ -39,6 +39,19 @@ typedef enum
     NM_TOOL_ERR          /* it did not; `output` says why */
 } NmToolStatus;
 
+/* read_file's finding about the path it was asked for
+ * (NmToolResult.read_state) — the facts the reminder framework turns
+ * into `empty-file` / `offset-past-eof` (nm_reminder.h). Distinct from
+ * `truncated`: an empty file is COMPLETE (nothing was withheld), and a
+ * past-EOF offset returned nothing at all. The zero value is "nothing
+ * to say", so a tool that never fills it needs no code. */
+typedef enum
+{
+    NM_READ_STATE_NONE = 0,    /* a normal read: no finding */
+    NM_READ_STATE_EMPTY = 1,   /* the path exists and has no content */
+    NM_READ_STATE_PAST_EOF = 2 /* the requested offset is past the last line */
+} NmReadState;
+
 typedef struct NmToolResult
 {
     NmToolStatus status; /* how the call ended. NM_TOOL_ERR unless it did
@@ -65,6 +78,18 @@ typedef struct NmToolResult
      * that cannot truncate leaves it 0 — the zero value means "nothing
      * to say", so a tool that never fills it needs no code. */
     int truncated;
+    /* This output came from OUTSIDE the machine (web_search's fetched
+     * results), so it is untrusted DATA, never harness or user speech:
+     * the reminder framework tells the model not to act on instructions
+     * found in it (nm_reminder.h's `web-untrusted`). 0 = the tool's own
+     * output — a file on this machine, a command's stdout — which is
+     * the zero value, so every other tool needs no code. */
+    int untrusted;
+    /* read_file's own finding about the path (NmReadState): an existing
+     * file with no content, or an offset past its last line. The
+     * reminder framework reads it (`empty-file` / `offset-past-eof`);
+     * NM_READ_STATE_NONE is the zero value. */
+    int read_state;
 } NmToolResult;
 
 typedef enum

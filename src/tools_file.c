@@ -122,14 +122,52 @@ static char *read_file_bytes(const char *path, size_t *len_out)
     char *buf = malloc((size_t)sz + 1);
     if (!buf) {
         fclose(f);
+        errno = ENOMEM;
         return NULL;
     }
     size_t got = fread(buf, 1, (size_t)sz, f);
+    /* A short read with the error flag set is NOT a short file: a
+     * DIRECTORY opens fine and the read goes wrong (glibc fails the
+     * fseek; a host that lets that through returns zero bytes with
+     * EISDIR), so the old read reported a directory as an empty file —
+     * and once the empty-file reminder existed, as "the file exists and
+     * is empty". The read has to fail. */
+    int failed = ferror(f) != 0;
+    int e = errno; /* fread's, before fclose can touch it */
     fclose(f);
+    if (failed) {
+        free(buf);
+        errno = e;
+        return NULL;
+    }
     buf[got] = '\0';
     if (len_out)
         *len_out = got;
     return buf;
+}
+
+/* The one "the read did not happen" result: the path, and WHY. A
+ * directory is named as one, because it is the failure the errno names
+ * worst (glibc's fseek fails with a bare EINVAL before anything notices
+ * EISDIR) and the one the model can act on — list_dir, not a retry.
+ * Everything else carries the platform's own text (a permission, a
+ * vanished file), which the bare "cannot read" used to swallow. */
+static NmToolResult read_failed_result(const char *path)
+{
+    size_t need = strlen(path) + 96;
+    char *msg = malloc(need);
+    if (msg) {
+        struct stat st;
+        if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
+            snprintf(msg, need, "not a file — it is a directory: %s (use "
+                                "list_dir)",
+                     path);
+        else if (errno)
+            snprintf(msg, need, "cannot read %s: %s", path, strerror(errno));
+        else
+            snprintf(msg, need, "cannot read %s", path);
+    }
+    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
 }
 
 /* UTF-8 validity scan (port of quoth's utf8-valid-p): accepts 1-4
@@ -622,12 +660,10 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     size_t len = 0;
     char *text = read_file_bytes(path, &len);
     if (!text) {
-        char *msg = malloc(strlen(path) + 64);
-        if (msg)
-            snprintf(msg, strlen(path) + 64, "cannot read %s", path);
+        NmToolResult r = read_failed_result(path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        return r;
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         /* Not text: say WHAT it is when we can (a container by magic, or
@@ -710,7 +746,12 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        /* The fact behind the message: the file is SHORTER than the
+         * offset, not missing and not unreadable (nm_reminder.h's
+         * offset-past-eof). */
+        return (NmToolResult){ .status = NM_TOOL_ERR,
+                               .output = msg,
+                               .read_state = NM_READ_STATE_PAST_EOF };
     }
 
     /* Walk window lines spending the budget on whole rendered lines. */
@@ -797,6 +838,13 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
      * rule). The window is the stronger statement, so it wins. */
     if (marker_len)
         r.truncated = 2;
+    /* An empty file is COMPLETE — nothing was withheld — but it is
+     * worth saying: the model asked for content and got none, and the
+     * body's "(empty)" reads like a failed or wrong-path read
+     * (nm_reminder.h's empty-file). A DIRECTORY never reaches here: the
+     * read fails now instead of reporting zero bytes. */
+    if (len == 0)
+        r.read_state = NM_READ_STATE_EMPTY;
     free(full);
     free(body);
     free(text);
@@ -857,12 +905,10 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     size_t len = 0;
     char *text = read_file_bytes(path, &len);
     if (!text) {
-        char *msg = malloc(strlen(path) + 64);
-        if (msg)
-            snprintf(msg, strlen(path) + 64, "cannot read %s", path);
+        NmToolResult r = read_failed_result(path);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        return r;
     }
     if (!utf8_valid((const unsigned char *)text, len)) {
         free(text);

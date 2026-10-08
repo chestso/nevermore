@@ -563,6 +563,12 @@ static void ws_finalize(NmToolExec *e)
     normalize(doc, &out, e->max_results);
     nm_json_free(doc);
     e->result = nm_tool_format_result(out.p, 0);
+    /* Rendered results are EXTERNAL content: the model must weigh them
+     * as data, never act on instructions inside them (nm_reminder.h's
+     * `web-untrusted`). A response with nothing to render (no hits, no
+     * infoboxes, no suggestions) put no external text in context, so it
+     * carries no such fact. */
+    e->result.untrusted = out.len > 0 ? 1 : 0;
     free(out.p);
     e->done = 1;
     /* A success leaves `searxng_enabled` on (it was on to get here). */
