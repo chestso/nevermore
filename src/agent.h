@@ -306,6 +306,15 @@ long nm_agent_attach_image(NmAgent *a, const char *path, char *reason,
  * that already carries images). */
 size_t nm_agent_image_count(const NmAgent *a);
 
+/* The conversation's transcript, BORROWED and read-only — the UI's
+ * inspection seam (/session): the counts, the per-message facts and the
+ * markdown save all read it HERE rather than through an accessor per
+ * fact. Const on purpose: the transcript is append-only and the agent
+ * is its only writer, so the UI gets no door to grow or edit it (a
+ * non-const accessor does not exist). NULL until the session does —
+ * no turn has run and nothing is attached. */
+const NmSession *nm_agent_session(const NmAgent *a);
+
 /* The attached image's captured facts (alt name, format, dims, byte
  * count) for the UI's attach line, or NULL when the id is unknown. */
 const NmImage *nm_agent_image(const NmAgent *a, size_t id);

@@ -1021,6 +1021,11 @@ size_t nm_agent_image_count(const NmAgent *a)
     return a ? nm_session_image_count(a->session) : 0;
 }
 
+const NmSession *nm_agent_session(const NmAgent *a)
+{
+    return a ? a->session : NULL;
+}
+
 /* Reset the per-round accumulation (start of each round). */
 static void round_reset(NmAgent *a)
 {

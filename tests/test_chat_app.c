@@ -5884,6 +5884,128 @@ static void test_save_without_images(void)
     harness_free(h);
 }
 
+/* ---------------------------------------------------------------- */
+/* /session — the transcript itself                                  */
+/* ---------------------------------------------------------------- */
+
+/* A chat that has run a turn: /session reports the transcript's shape,
+ * /session list numbers every message, and /session save writes the
+ * markdown the agent would replay (session.c's writer). */
+static void test_session_inspects_and_saves(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi there\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello agent");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+
+    /* Bare /session: the shape at a glance. Message 0 is the assembled
+     * system prompt; the turn added one user and one assistant message.
+     * No image line: this chat has none (the line is omitted, never a
+     * zero count). */
+    harness_type(h, "/session");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "session: 3 messages — 1 user, 1 assistant, "
+                            "0 tool, 1 system") != NULL);
+    ASSERT_TRUE(strstr(out, "/session save [path] writes markdown") != NULL);
+    ASSERT_TRUE(strstr(out, "in the store") == NULL);
+
+    /* /session list: one numbered line per message, in transcript
+     * order, with the content size. */
+    harness_type(h, "/session list");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "  #0   system") != NULL);
+    ASSERT_TRUE(strstr(out, "  #1   user") != NULL);
+    ASSERT_TRUE(strstr(out, "  #2   assistant") != NULL);
+    ASSERT_TRUE(strstr(out, "11 B") != NULL); /* "hello agent" */
+
+    /* The save: an explicit path is taken verbatim (spaces included). */
+    char path[300];
+    snprintf(path, sizeof(path), "%s/nm-chat-session.md", test_scratch_dir());
+    char cmd[340];
+    snprintf(cmd, sizeof(cmd), "/session save %s", path);
+    harness_type(h, cmd);
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "saved session → ") != NULL);
+    ASSERT_TRUE(strstr(out, "3 messages, markdown") != NULL);
+
+    unsigned char got[8192];
+    long n = chat_slurp(path, got, sizeof(got) - 1);
+    ASSERT_TRUE(n > 0);
+    got[n] = '\0';
+    const char *md = (const char *)got;
+    /* The metadata header, then one `## <role>` section per message —
+     * the transcript the agent replays, roles and text intact. */
+    ASSERT_TRUE(strstr(md, "<!-- nevermore session: 3 messages -->") != NULL);
+    ASSERT_TRUE(strstr(md, "## system") != NULL);
+    ASSERT_TRUE(strstr(md, "## user\nhello agent") != NULL);
+    ASSERT_TRUE(strstr(md, "## assistant\nhi there") != NULL);
+    remove(path);
+
+    /* Bare: the deterministic name, the shape /save's image default
+     * has. */
+    harness_type(h, "/session save");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "saved session → nevermore-session.md") != NULL);
+    n = chat_slurp("nevermore-session.md", got, sizeof(got) - 1);
+    ASSERT_TRUE(n > 0);
+    remove("nevermore-session.md");
+
+    /* An unknown subcommand is refused by name, never guessed at. */
+    harness_type(h, "/session bogus");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "session: expected nothing, 'list', or 'save [path]'") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Nothing has been said yet: the commands say so rather than invent a
+ * transcript or write an empty file. */
+static void test_session_without_a_transcript(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    harness_type(h, "/session");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "session: nothing yet — no turn has run") != NULL);
+    harness_type(h, "/session list");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "session: nothing yet — no turn has run") != NULL);
+    harness_type(h, "/session save");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "session: nothing to save — no turn has run") != NULL);
+    /* And nothing was written: the refusal is not a file. */
+    unsigned char probe[64];
+    ASSERT_TRUE(chat_slurp("nevermore-session.md", probe, sizeof(probe)) < 0);
+    harness_free(h);
+}
+
 /* The picker row carries a right-aligned metadata column: the context
  * window and the capability badges (vision 👀, imagegen 🖼). Vision
  * was previously invisible; both badges are POSITIVE claims only. The
@@ -6640,6 +6762,8 @@ int main(void)
     RUN_TEST(test_recv_image_marker_on_dumb_terminal);
     RUN_TEST(test_save_writes_the_received_image);
     RUN_TEST(test_save_without_images);
+    RUN_TEST(test_session_inspects_and_saves);
+    RUN_TEST(test_session_without_a_transcript);
     RUN_TEST(test_model_picker_shows_capability_metadata);
     RUN_TEST(test_model_picker_capability_query_img);
     RUN_TEST(test_model_picker_capability_query_tools);

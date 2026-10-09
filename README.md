@@ -387,6 +387,38 @@ cacheable — the ⚡ rate is input-only by definition), and a received
 image is never refused for size: the wire cap bounds what _you_ send,
 not what the model made.
 
+## The session transcript
+
+The conversation lives in the session, and the session is what rides
+every request — nevermore never trims it (no guessed token budget). You
+can look at it, and keep it, from the chat:
+
+```
+/session           # the shape: messages by role, content size, images
+/session list      # every message, numbered, with its size and notes
+/session save      # the whole transcript as markdown -> nevermore-session.md
+/session save ~/chat.md
+```
+
+`/session` counts message 0 as `system` — it is the assembled prompt,
+so the first thing a chat's transcript holds is the prompt you never
+typed. Before any turn has run there is no session at all, and the
+command says exactly that. `/session list` numbers the messages in
+transcript order and adds the facts a size cannot show (`tool_calls`,
+`reasoning`, `images`), which is how a long chat is read back without
+scrolling: find the message, then ask the model about it. `/session
+save` writes the same transcript as markdown — a
+`<!-- nevermore session: N messages -->` header and one `## <role>`
+section per message, tool results under `## tool (<name>)`. An explicit
+path is taken verbatim (spaces included); bare, the deterministic
+`nevermore-session.md` lands in the cwd. Saving an empty transcript is
+refused, never an empty file.
+
+Images are **not** in the markdown: a data URL is megabytes, and the
+save is an inspection surface, not a backup format. `/save <n>` writes
+one image's own bytes. Loading a saved transcript back is a post-1.0
+item (the writer is the only half that exists).
+
 ## Long-running commands
 
 `exec_command` starts a command that outlives the tool call: a dev

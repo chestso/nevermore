@@ -1736,6 +1736,10 @@ static void print_help(NmChatApp *app)
                   "  /save [n] [path]   write image n (default: the newest)\n"
                   "                     to a file (default: nevermore-image-<n>)\n"
                   "  /save list         every image in this conversation\n"
+                  "  /session           the transcript: message counts, images\n"
+                  "  /session list      every message, numbered\n"
+                  "  /session save [p]  write the transcript as markdown\n"
+                  "                     (default: nevermore-session.md)\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
                   "  /quit              leave (Ctrl+C twice works too)");
@@ -2924,6 +2928,201 @@ static void save_command(NmChatApp *app, const char *arg)
     sys_line(app, "saved image #%zu → %s", id, path);
 }
 
+/* ---------------------------------------------------------------- */
+/* /session — the transcript itself: inspect it, or write it out     */
+/* ---------------------------------------------------------------- */
+
+/* The session belongs to the agent, and this command only ever READS
+ * it: through the const borrow, and on to session.c's markdown writer.
+ * Nothing here mutates the transcript — the append-only rule has no
+ * door in the UI. A save mid-turn is fine (appends land at round
+ * boundaries, on this same thread), so the file is the transcript as of
+ * the last completed round, never a torn one. */
+
+/* The deterministic save name, the shape /save's image default has
+ * (nevermore-image-<n>.<ext>): a bare `/session save` drops it in the
+ * cwd and says where. */
+static const char session_default_path[] = "nevermore-session.md";
+
+static const char *session_role_tag(NmRole r)
+{
+    switch (r) {
+    case NM_ROLE_SYSTEM:
+        return "system";
+    case NM_ROLE_USER:
+        return "user";
+    case NM_ROLE_ASSISTANT:
+        return "assistant";
+    case NM_ROLE_TOOL:
+        return "tool";
+    }
+    return "?";
+}
+
+/* The message facts a reader cannot see from the size alone. */
+static void session_notes(const NmSessionMessage *m, char *buf, size_t cap)
+{
+    size_t len = 0;
+    buf[0] = '\0';
+#define NOTE(s)                                               \
+    do {                                                      \
+        if (len < cap) {                                      \
+            int r = snprintf(buf + len, cap - len, "%s%s",    \
+                             len ? ", " : "", (s));           \
+            if (r > 0)                                        \
+                len += (size_t)r;                             \
+            if (len > cap)                                    \
+                len = cap; /* truncated: nothing more fits */ \
+        }                                                     \
+    } while (0)
+    if (m->tool_calls_json)
+        NOTE("tool_calls");
+    if (m->reasoning && *m->reasoning)
+        NOTE("reasoning");
+    if (m->n_images)
+        NOTE("images");
+    if (m->content && !*m->content)
+        NOTE("empty");
+#undef NOTE
+}
+
+/* Bare /session: the shape of the conversation at a glance. The counts
+ * are the transcript's own (message 0 is the system prompt when the
+ * session has one), and the images are named because they are the ONE
+ * thing a markdown save does not carry. */
+static void session_summary(NmChatApp *app)
+{
+    const NmSession *s = nm_agent_session(app->agent);
+    size_t n = s ? nm_session_len(s) : 0;
+    if (n == 0) {
+        sys_line(app, "session: nothing yet — no turn has run in this chat");
+        return;
+    }
+    size_t n_user = 0, n_assistant = 0, n_tool = 0, n_system = 0, bytes = 0;
+    for (size_t i = 0; i < n; i++) {
+        const NmSessionMessage *m = nm_session_get(s, i);
+        if (!m)
+            continue;
+        switch (m->role) {
+        case NM_ROLE_SYSTEM:
+            n_system++;
+            break;
+        case NM_ROLE_USER:
+            n_user++;
+            break;
+        case NM_ROLE_ASSISTANT:
+            n_assistant++;
+            break;
+        case NM_ROLE_TOOL:
+            n_tool++;
+            break;
+        }
+        if (m->content)
+            bytes += strlen(m->content);
+    }
+    char size[24];
+    nm_size_text(bytes, size, sizeof(size));
+    sys_line(app, "session: %zu messages — %zu user, %zu assistant, %zu tool, "
+                  "%zu system (the prompt), %s of content",
+             n, n_user, n_assistant, n_tool, n_system, size);
+    size_t images = nm_agent_image_count(app->agent);
+    if (images > 0)
+        sys_line(app, "session: %zu image%s in the store — /save <n> writes "
+                      "one to a file (/session save writes no images)",
+                 images, images == 1 ? "" : "s");
+    sys_line(app, "session: /session list names every message; "
+                  "/session save [path] writes markdown (default %s)",
+             session_default_path);
+}
+
+/* /session list: one line per message, numbered in transcript order —
+ * the order the save writes its `## <role>` sections in, so a file read
+ * back lines up with the listing. */
+static void session_list(NmChatApp *app)
+{
+    const NmSession *s = nm_agent_session(app->agent);
+    size_t n = s ? nm_session_len(s) : 0;
+    if (n == 0) {
+        sys_line(app, "session: nothing yet — no turn has run in this chat");
+        return;
+    }
+    sys_line(app, "session: %zu messages — /session save writes them as "
+                  "markdown",
+             n);
+    for (size_t i = 0; i < n; i++) {
+        const NmSessionMessage *m = nm_session_get(s, i);
+        if (!m)
+            continue;
+        char size[24];
+        nm_size_text(m->content ? strlen(m->content) : 0, size, sizeof(size));
+        char notes[64];
+        session_notes(m, notes, sizeof(notes));
+        if (notes[0])
+            sys_line(app, "  #%-3zu %-9s %-14s %9s  %s", i,
+                     session_role_tag(m->role),
+                     m->tool_name ? m->tool_name : "-", size, notes);
+        else
+            sys_line(app, "  #%-3zu %-9s %-14s %9s", i,
+                     session_role_tag(m->role),
+                     m->tool_name ? m->tool_name : "-", size);
+    }
+}
+
+/* /session save [path]: the markdown transcript (session.c's writer).
+ * An explicit path is taken verbatim, spaces included, trailing blanks
+ * trimmed (the /img rule); bare, the deterministic name above. */
+static void session_save(NmChatApp *app, const char *arg)
+{
+    const NmSession *s = nm_agent_session(app->agent);
+    if (!s || nm_session_len(s) == 0) {
+        sys_line(app, NM_SGR_ERROR "session: nothing to save — no turn has "
+                                   "run in this chat" NM_SGR_RESET);
+        return;
+    }
+    char path[1024];
+    const char *p = arg;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (*p) {
+        snprintf(path, sizeof(path), "%s", p);
+        size_t len = strlen(path);
+        while (len > 0 && (path[len - 1] == ' ' || path[len - 1] == '\t'))
+            path[--len] = '\0';
+    } else {
+        snprintf(path, sizeof(path), "%s", session_default_path);
+    }
+    if (nm_session_save(s, path) != 0) {
+        sys_line(app, NM_SGR_ERROR "session: cannot write %s" NM_SGR_RESET,
+                 path);
+        return;
+    }
+    sys_line(app, "saved session → %s (%zu messages, markdown)", path,
+             nm_session_len(s));
+}
+
+static void session_command(NmChatApp *app, const char *arg)
+{
+    const char *p = arg;
+    while (*p == ' ' || *p == '\t')
+        p++;
+    if (!*p) {
+        session_summary(app);
+        return;
+    }
+    if (strncmp(p, "list", 4) == 0 &&
+        (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
+        session_list(app);
+        return;
+    }
+    if (strncmp(p, "save", 4) == 0 &&
+        (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
+        session_save(app, p + 4);
+        return;
+    }
+    sys_line(app, NM_SGR_ERROR "session: expected nothing, 'list', or "
+                               "'save [path]'" NM_SGR_RESET);
+}
+
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
 {
     const char *rest = text + 1; /* past '/' */
@@ -3105,6 +3304,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         save_command(app, arg);
         return;
     }
+    if (NAME_IS("session")) {
+        session_command(app, arg);
+        return;
+    }
     if (NAME_IS("ps")) {
         print_jobs(app);
         return;
@@ -3201,7 +3404,7 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
     (void)word_start;
     static const char *const commands[] = {
         "/help", "/model", "/provider", "/config", "/context", "/img", "/save",
-        "/ps", "/kill", "/quit", NULL
+        "/session", "/ps", "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
