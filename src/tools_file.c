@@ -23,6 +23,15 @@
  * names what was cut instead. All of it flows through the shared
  * truncation seam in tools.c (nm_truncate_tail / nm_clamp_output), so
  * the rendered transcript and the session history see the same bytes.
+ *
+ * read_file also consults the SESSION's file ledger (nm_file_ledger.h,
+ * reached through the call context): a read whose bytes this
+ * conversation already holds — same path, same window, same hash, and
+ * that result still in context — answers with a pointer instead of a
+ * second copy, and a file that is not what the session last read
+ * reports itself as changed. The write tools tell the ledger about
+ * their own writes, so a read after the model's own edit is never
+ * mistaken for somebody else's change.
  */
 
 #include <errno.h>
@@ -41,9 +50,11 @@
 #endif
 
 #include "json.h"
+#include "nm_file_ledger.h"
 #include "nm_image_bytes.h"
 #include "nm_size.h"
 #include "tools.h"
+#include "xxh3.h"
 
 #include "tools_internal.h"
 
@@ -63,18 +74,18 @@ static const char *arg_str(NmJson *args, const char *key)
     return nm_json_str(nm_json_get(args, key));
 }
 
-/* Resolve the `path' arg against `workdir' (the agent's cwd when the
- * arg is absent). Returns a malloc'd absolute path or NULL when the
+/* Resolve the `path' arg against `workdir' (the ctx's, else the process
+ * cwd when the arg is absent). Returns a malloc'd path or NULL when the
  * arg is missing/empty. A leading ~ is expanded via the HOME env var
  * (POSIX; Windows callers pass absolute paths). */
-static char *resolve_path(NmJson *args, void *userdata)
+static char *resolve_path(NmJson *args, const NmToolCtx *ctx)
 {
     const char *path = arg_str(args, "path");
     if (!path || !*path)
         return NULL;
     const char *base = arg_str(args, "workdir");
     if (!base || !*base)
-        base = (const char *)userdata; /* agent cwd */
+        base = ctx ? ctx->workdir : NULL;
     if (!base || !*base)
         base = ".";
 
@@ -964,8 +975,26 @@ static int read_file_image_branch(const char *path, NmToolResult *out)
     return 0;
 }
 
+/* The file's modification time in nanoseconds, where the host has that
+ * resolution (Linux's st_mtim, macOS's st_mtimespec); seconds x 1e9
+ * elsewhere (Windows' struct stat). The ledger uses it only as the
+ * staleness HEURISTIC — the byte hash is what proves a read unchanged
+ * — so a coarse stamp costs a missed nudge, never a wrong skip. */
+static long long stat_mtime_ns(const struct stat *st)
+{
+#if defined(__APPLE__)
+    return (long long)st->st_mtimespec.tv_sec * 1000000000LL +
+           (long long)st->st_mtimespec.tv_nsec;
+#elif defined(_WIN32)
+    return (long long)st->st_mtime * 1000000000LL;
+#else
+    return (long long)st->st_mtim.tv_sec * 1000000000LL +
+           (long long)st->st_mtim.tv_nsec;
+#endif
+}
+
 static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
-                                   void *userdata)
+                                   const NmToolCtx *ctx)
 {
     (void)tool;
     const char *jerr = NULL;
@@ -974,7 +1003,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (!args)
         return nm_tool_result_error("arguments are not a JSON object");
 
-    char *path = resolve_path(args, userdata);
+    char *path = resolve_path(args, ctx);
     if (!path) {
         nm_json_free(args);
         return nm_tool_result_error("missing or empty path");
@@ -984,9 +1013,12 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
      * probe opens it: opening a fifo blocks until a writer arrives, and
      * a synchronous tool call has no timeout to rescue the turn (the
      * same finding as read_file_bytes' and probe_file_size's guards).
-     * read_failed_result names the kind. */
+     * read_failed_result names the kind. The same stat is the identity
+     * the file ledger records below (a failed stat means the read will
+     * fail too, so the ledger simply gets no identity). */
     struct stat pre;
-    if (stat(path, &pre) == 0 && !S_ISREG(pre.st_mode)) {
+    int have_pre = stat(path, &pre) == 0;
+    if (have_pre && !S_ISREG(pre.st_mode)) {
         NmToolResult r = read_failed_result(path);
         free(path);
         nm_json_free(args);
@@ -1101,6 +1133,47 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
                                .read_state = NM_READ_STATE_PAST_EOF };
     }
 
+    /* The session's file ledger (nm_file_ledger.h): this read against
+     * what the conversation already read. A REPEAT means the SAME bytes
+     * are already above — the hash of what we just read is the proof —
+     * and that result is still in context, so returning them again
+     * would bill the same content twice. The identity (size + mtime)
+     * answers the other question: is this file still the one the
+     * session saw? The call sits BELOW every error return on purpose: a
+     * read that returned no content (an empty file, an offset past the
+     * last line, a binary, a failure) must not be remembered as one —
+     * the next identical request would then be answered with "it is
+     * already above" for content that was never there. The image branch
+     * above returns before this too: an image is the session's image
+     * store's business (its bytes are attached once), not the text
+     * ledger's. */
+    NmFileVerdict verdict = NM_FILE_VERDICT_NONE;
+    if (ctx && ctx->ledger && len > 0) {
+        NmFileRead fr = {
+            .path = path,
+            .offset = offset,
+            .limit = limit,
+            .numbered = numbered,
+            .hash = nm_xxh3_64(text, len),
+            .size = have_pre ? (long long)pre.st_size : 0,
+            .mtime_ns = have_pre ? stat_mtime_ns(&pre) : 0,
+        };
+        verdict = nm_file_ledger_note_read(ctx->ledger, &fr);
+    }
+    if (verdict == NM_FILE_VERDICT_REPEAT) {
+        free(text);
+        free(path);
+        nm_json_free(args);
+        NmToolResult r = nm_tool_format_result(
+            "read_file: unchanged — an identical read of this file (same "
+            "path, same offset/limit, same bytes) is already in this "
+            "conversation above, and it is still in context. The content is "
+            "not repeated here: use that result.\n",
+            0);
+        r.file_state = NM_FILE_VERDICT_REPEAT;
+        return r;
+    }
+
     /* Walk window lines spending the budget on whole rendered lines. */
     long keep_lines = 0;
     size_t consumed = 0;
@@ -1192,6 +1265,10 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
      * read fails now instead of reporting zero bytes. */
     if (len == 0)
         r.read_state = NM_READ_STATE_EMPTY;
+    /* The ledger's verdict about the file itself (NONE, or CHANGED when
+     * this path is not what the session last read — the fact behind the
+     * `file-changed` reminder). REPEAT returned above. */
+    r.file_state = verdict;
     free(full);
     free(body);
     free(text);
@@ -1205,7 +1282,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
 /* ---------------------------------------------------------------- */
 
 static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
-                                   void *userdata)
+                                   const NmToolCtx *ctx)
 {
     (void)tool;
     const char *jerr = NULL;
@@ -1214,7 +1291,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     if (!args)
         return nm_tool_result_error("arguments are not a JSON object");
 
-    char *path = resolve_path(args, userdata);
+    char *path = resolve_path(args, ctx);
     const char *old = arg_str(args, "old_string");
     const char *new = arg_str(args, "new_string");
     int replace_all = nm_json_get(args, "replace_all") && nm_json_bool(nm_json_get(args, "replace_all"));
@@ -1372,6 +1449,13 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     }
     free(out);
 
+    /* The model's own write (nm_file_ledger.h): what the session knew
+     * about this file's content is stale now, and the newest copy is
+     * the model's own. Without this, a read after the model's own edit
+     * would be reported as a change somebody else made. */
+    if (ctx && ctx->ledger)
+        nm_file_ledger_note_write(ctx->ledger, path);
+
     /* Status line: path, count, match lines; then a mini context
      * diff of the replaced span (port of quoth's context-diff — the
      * span is short by construction). The diff's exact size is
@@ -1442,7 +1526,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
 /* ---------------------------------------------------------------- */
 
 static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
-                                    void *userdata)
+                                    const NmToolCtx *ctx)
 {
     (void)tool;
     const char *jerr = NULL;
@@ -1451,7 +1535,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
     if (!args)
         return nm_tool_result_error("arguments are not a JSON object");
 
-    char *path = resolve_path(args, userdata);
+    char *path = resolve_path(args, ctx);
     if (!path) {
         nm_json_free(args);
         return nm_tool_result_error("missing or empty path");
@@ -1503,6 +1587,12 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         nm_json_free(args);
         return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
+
+    /* The model's own write (nm_file_ledger.h): the file is no longer
+     * what the session read, and the model is the one who changed it —
+     * the ledger must not later report that as somebody else's edit. */
+    if (ctx && ctx->ledger)
+        nm_file_ledger_note_write(ctx->ledger, path);
 
     /* The result is a SUMMARY, never the content (the model knows what
      * it wrote; echoing it burns the output budget for nothing). Line
@@ -1572,7 +1662,7 @@ static wchar_t *utf8_to_wide_path(const char *s)
 #endif
 
 static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
-                                  void *userdata)
+                                  const NmToolCtx *ctx)
 {
     (void)tool;
     const char *jerr = NULL;
@@ -1580,7 +1670,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         nm_json_parse(args_json, strlen(args_json), &jerr);
     if (!args)
         return nm_tool_result_error("arguments are not a JSON object");
-    char *path = resolve_path(args, userdata);
+    char *path = resolve_path(args, ctx);
     nm_json_free(args);
     if (!path)
         return nm_tool_result_error("missing or empty path");
@@ -1826,7 +1916,7 @@ static int search_dir_walk(const char *dir, const char *needle, char *body,
 }
 
 static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
-                                    void *userdata)
+                                    const NmToolCtx *ctx)
 {
     (void)tool;
     const char *jerr = NULL;
@@ -1834,7 +1924,7 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
         nm_json_parse(args_json, strlen(args_json), &jerr);
     if (!args)
         return nm_tool_result_error("arguments are not a JSON object");
-    char *path = resolve_path(args, userdata);
+    char *path = resolve_path(args, ctx);
     const char *needle_raw = arg_str(args, "needle");
     char *needle = needle_raw ? strdup(needle_raw) : NULL;
     nm_json_free(args); /* needle copied; path is malloc'd */

@@ -5,8 +5,8 @@
  * one-shot `run_command`.  Each job runs under a PTY with merged
  * stdout+stderr and a sanitized environment, keeps a bounded output
  * buffer, and lives in a process-global registry (like the web_search
- * knobs) so the tool `userdata` — a workdir path string, per the
- * AGENTS.md gotcha — never has to carry it.
+ * knobs) so the tool `NmToolCtx` — a workdir plus the session's file
+ * ledger, per the AGENTS.md gotcha — never has to carry it.
  *
  * The layer is platform-neutral above the OS seam (nm_process_posix.c /
  * nm_process_win.c): spawn, read/write, group-kill, reap.  What the

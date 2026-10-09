@@ -45,6 +45,7 @@
  * winsock2.h must come first (house rule). */
 #include "nm_clock.h"
 
+#include "nm_file_ledger.h"
 #include "nm_reminder.h"
 
 #include "provider_internal.h"
@@ -109,6 +110,18 @@ struct NmAgent
      * reminders are evaluated. */
     size_t trim_anchor;
     int round_dropped;
+    /* This session's file ledger (nm_file_ledger.h): what the
+     * conversation has already read, so a re-read of an unchanged file
+     * is a pointer instead of a duplicate copy, and a file that changed
+     * on disk is reported as such. Per SESSION by construction — it
+     * lives and dies with the agent, and a fresh chat (a provider
+     * switch, an agent rebuild) starts empty, which is what makes "the
+     * content is already in your context" true rather than remembered
+     * from a conversation the model never had. tool_ctx is the
+     * per-call context every tool receives: this ledger plus the
+     * tools' working directory (NULL = the process cwd). */
+    NmFileLedger *file_ledger;
+    NmToolCtx tool_ctx;
     /* Rounds the output limit cut short (`finish_reason: "length"`),
      * cumulative: the fact the output-cut rule latches on (a new cut is
      * a new edge). */
@@ -363,6 +376,12 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
          * section is simply absent. */
     }
     nm_conversation_id_new(a->conversation_id);
+    /* The session's file ledger (nm_file_ledger.h). A ledger allocation
+     * failure is not an agent failure: every read simply reads, which
+     * is exactly the behavior without one. */
+    a->file_ledger = nm_file_ledger_new();
+    a->tool_ctx.workdir = NULL; /* relative paths resolve against the cwd */
+    a->tool_ctx.ledger = a->file_ledger;
     return a;
 }
 
@@ -394,6 +413,7 @@ void nm_agent_free(NmAgent *a)
     nm_tool_calls_free(a->calls, a->n_calls);
     nm_context_free(a->context);
     nm_session_free(a->session);
+    nm_file_ledger_free(a->file_ledger);
     free(a->round_images);
     free(a);
 }
@@ -1114,6 +1134,19 @@ static int begin_round(NmAgent *a)
     if (append_user_reminders(a, NM_REMINDER_POINT_ROUND))
         view = nm_session_context(a->session, budget, &a->trim_anchor);
 
+    /* Tell the file ledger where the window now starts
+     * (nm_file_ledger.h): a read whose result fell out of the window is
+     * no longer in context, so it can neither be skipped ("the content
+     * is above" would be a lie) nor claimed. 0 = nothing was dropped,
+     * which is the whole transcript (windowing off, or everything
+     * fits). The anchor is the window's first message, so a record
+     * before it is gone. */
+    nm_file_ledger_set_window(a->file_ledger,
+                              budget > 0 &&
+                                      a->trim_anchor != NM_SESSION_NO_ANCHOR
+                                  ? a->trim_anchor
+                                  : 0);
+
     round_reset(a);
     /* A model whose catalog positively does not claim tools gets no
      * toolset — and no tool_choice: OpenRouter 404s the whole request
@@ -1491,6 +1524,8 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
         f.model_vision = model_vision_cached(a->provider, a->model);
         f.read_empty = res->read_state == NM_READ_STATE_EMPTY;
         f.read_past_eof = res->read_state == NM_READ_STATE_PAST_EOF;
+        f.file_repeat = res->file_state == NM_FILE_VERDICT_REPEAT;
+        f.file_changed = res->file_state == NM_FILE_VERDICT_CHANGED;
         NmReminderOut out;
         reminders_at(a, NM_REMINDER_POINT_TOOL_RESULT, &f, &out);
         if (out.tool.data && *out.tool.data) {
@@ -1591,6 +1626,13 @@ static int tool_step(NmAgent *a)
         const NmToolCall *tc = &a->calls[a->tool_exec_idx];
         const NmTool *t = nm_toolset_find(a->tools, tc->name);
 
+        /* The ledger's session position: the index this call's result
+         * will occupy, which is what a recorded read is stamped with
+         * (nm_file_ledger.h). Set before the tool runs, so a tool that
+         * records during its own execution names the right message. */
+        nm_file_ledger_set_position(a->file_ledger,
+                                    nm_session_len(a->session));
+
         /* Plan first (principle 1): START for THIS call, the moment it
          * is about to run — not the round's other calls, which have not
          * been reached yet. */
@@ -1617,7 +1659,7 @@ static int tool_step(NmAgent *a)
 
         /* Start an async exec when the tool offers one. */
         if (t && t->begin) {
-            NmToolExec *e = t->begin(t, tc->args_json, a->userdata);
+            NmToolExec *e = t->begin(t, tc->args_json, &a->tool_ctx);
             if (e) {
                 a->exec = e;
                 a->exec_tool = t;
@@ -1630,7 +1672,7 @@ static int tool_step(NmAgent *a)
         NmToolResult tres =
             nm_toolset_execute(a->tools, tc->name,
                                tc->args_json ? tc->args_json : "{}",
-                               a->userdata /* tools workdir */);
+                               &a->tool_ctx /* workdir + file ledger */);
         finish_tool_call(a, tc, &tres);
         next_tool(a);
         return 0;

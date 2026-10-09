@@ -73,7 +73,7 @@ const NmTool *nm_toolset_find(const NmToolset *ts, const char *name)
 }
 
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
-                                const char *args_json, void *userdata)
+                                const char *args_json, const NmToolCtx *ctx)
 {
     NmToolResult r = { 0 };
     (void)args_json;
@@ -89,7 +89,7 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                      name ? name : "(null)");
         return r;
     }
-    return t->execute(t, args_json, userdata);
+    return t->execute(t, args_json, ctx);
 }
 
 NmToolResult nm_tool_result_error(const char *message)

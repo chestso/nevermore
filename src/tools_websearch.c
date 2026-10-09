@@ -674,10 +674,10 @@ static void ws_end(NmToolExec *e)
 /* ---------------------------------------------------------------- */
 
 static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
-                            void *userdata)
+                            const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
 
     /* Disabled short-circuit: no HTTP request (quoth's "do not hammer
      * a dead server"). The store's `searxng_enabled` is off either
@@ -798,9 +798,9 @@ static int wait_ready(int fd, unsigned interest, int timeout_ms)
 }
 
 static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
-                               void *userdata)
+                               const NmToolCtx *ctx)
 {
-    NmToolExec *e = ws_begin(tool, args_json, userdata);
+    NmToolExec *e = ws_begin(tool, args_json, ctx);
     if (!e)
         return nm_tool_result_error("web_search: out of memory");
     for (;;) {

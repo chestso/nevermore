@@ -233,10 +233,10 @@ static const char *run_command_argv(const char *args_json, char **cmd_out)
 }
 
 static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
-                                     void *userdata)
+                                     const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
     char *cmd = NULL;
     const char *prog = run_command_argv(args_json, &cmd);
     if (!prog)
@@ -361,10 +361,10 @@ static NmToolExec *spawn_begin(const char *const *argv)
 }
 
 static NmToolExec *run_command_begin(const NmTool *tool,
-                                     const char *args_json, void *userdata)
+                                     const char *args_json, const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
     char *cmd = NULL;
     const char *prog = run_command_argv(args_json, &cmd);
     if (!prog)

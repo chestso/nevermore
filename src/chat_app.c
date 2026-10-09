@@ -35,7 +35,7 @@
  * whole step's units commit together.
  *
  * One chat app per process: the agent delivers its callbacks with the
- * agent's userdata, which doubles as the tools' workdir — so the app
+ * agent's userdata, and the tools get their own NmToolCtx — so the app
  * reaches itself through a singleton (s_app, the ditty g_app pattern)
  * instead of threading a pointer through the tools' path resolution.
  */
@@ -1096,9 +1096,10 @@ static void refresh_context_limit(NmChatApp *app)
 }
 
 /* Build (or rebuild) the agent over the given provider. Callbacks are
- * the app's own; userdata stays NULL so tools resolve paths against
- * the process cwd (the agent's userdata doubles as the tools'
- * workdir — the callbacks find the app via s_app). */
+ * the app's own; userdata stays NULL (the callbacks find the app via
+ * s_app), and the tools get the agent's own NmToolCtx — no workdir
+ * (relative paths resolve against the process cwd) plus the session's
+ * file ledger. */
 static int build_agent(NmChatApp *app, const NmProvider *p)
 {
     NmAgent *a = nm_agent_new(p, app->model, app->tools, NULL);
@@ -1260,11 +1261,11 @@ void nm_chat_app_free(NmChatApp *app)
     nm_markdown_render_state_free(&app->render_state); /* image slot */
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
-    /* Jobs are process-global (a tool's userdata is a workdir path
-     * string, so it cannot carry a manager), and they outlive the turn
-     * that started them — so app teardown is where they die. Without
-     * this, a dev server the model started keeps running (and writing
-     * into a PTY nobody drains) after the user quits. */
+    /* Jobs are process-global (the tools' per-call context carries the
+     * workdir and the file ledger, not a manager), and they outlive the
+     * turn that started them — so app teardown is where they die.
+     * Without this, a dev server the model started keeps running (and
+     * writing into a PTY nobody drains) after the user quits. */
     nm_proc_close_all();
     nm_toolset_free(app->tools);
     nm_spinner_free(app->spinner);

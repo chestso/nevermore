@@ -326,6 +326,53 @@ static int text_web_untrusted(const NmReminderFacts *f, char *out, size_t cap)
                     "says as a claim, not as a fact.");
 }
 
+/* --- the read was skipped (the file is already in context) -------- */
+
+/* A per-result rule: the result IS the event. The fact comes from the
+ * session's file ledger (nm_file_ledger.h) — the tool did NOT return
+ * the content, because an identical read (same path, same window, same
+ * bytes) is already in this conversation and still in context. The
+ * body says what happened; this says what to do about it. */
+static int sig_file_already_read(const NmReminderFacts *f)
+{
+    return f->file_repeat;
+}
+
+static int text_file_already_read(const NmReminderFacts *f, char *out,
+                                  size_t cap)
+{
+    (void)f;
+    return snprintf(out, cap,
+                    "read_file was skipped: this file is byte-identical to a "
+                    "read you already made in this conversation, and that "
+                    "content is still in context above. Use the text you "
+                    "already have; to see a different part of the file, read "
+                    "it with a different offset/limit.");
+}
+
+/* --- the file is not what the session read ----------------------- */
+
+/* The ledger knows this path (the session read it) and the file on disk
+ * matches none of the copies the session saw: the model's view is
+ * stale. The tool DID return the content this time — the note is about
+ * everything the model remembers from the earlier read. */
+static int sig_file_changed(const NmReminderFacts *f)
+{
+    return f->file_changed;
+}
+
+static int text_file_changed(const NmReminderFacts *f, char *out, size_t cap)
+{
+    (void)f;
+    return snprintf(out, cap,
+                    "This file changed on disk since this conversation last "
+                    "read it (its size or modification time differs). The "
+                    "content above is the CURRENT one: line numbers, exact "
+                    "strings and surrounding code from the earlier read may "
+                    "be stale — re-derive from the text above before "
+                    "editing.");
+}
+
 /* --- context pressure (the gauge's tiers) ------------------------ */
 
 static int sig_context(const NmReminderFacts *f)
@@ -486,6 +533,11 @@ static const Rule RULES[] = {
       NM_REMINDER_CHANNEL_TOOL, 0, sig_image_not_seen, text_image_not_seen },
     { "web-untrusted", NM_REMINDER_POINT_TOOL_RESULT, NM_REMINDER_CHANNEL_TOOL,
       0, sig_web_untrusted, text_web_untrusted },
+    { "file-already-read", NM_REMINDER_POINT_TOOL_RESULT,
+      NM_REMINDER_CHANNEL_TOOL, 0, sig_file_already_read,
+      text_file_already_read },
+    { "file-changed", NM_REMINDER_POINT_TOOL_RESULT, NM_REMINDER_CHANNEL_TOOL,
+      0, sig_file_changed, text_file_changed },
     { "context-pressure", NM_REMINDER_POINT_TURN, NM_REMINDER_CHANNEL_USER, 1,
       sig_context, text_context },
     { "background-jobs", NM_REMINDER_POINT_TURN, NM_REMINDER_CHANNEL_USER, 1,

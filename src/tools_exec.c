@@ -459,7 +459,7 @@ static void exec_end(NmToolExec *e)
 /* ---------------------------------------------------------------- */
 
 static NmToolExec *exec_command_begin(const NmTool *tool,
-                                      const char *args_json, void *userdata)
+                                      const char *args_json, const NmToolCtx *ctx)
 {
     (void)tool;
     NmJson *args = parse_args(args_json);
@@ -473,12 +473,11 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
         nm_json_free(args);
         return fail_exec(nm_tool_result_error("exec_command: missing cmd"));
     }
-    /* The workdir arg, else the agent's working directory (the tool
-     * callback context IS the workdir path — see AGENTS.md), else
+    /* The workdir arg, else the call context's working directory, else
      * inherit ours. */
     const char *cwd = nm_json_str(nm_json_get(args, "workdir"));
     if (!cwd || !*cwd)
-        cwd = (const char *)userdata;
+        cwd = ctx ? ctx->workdir : NULL;
     int provided = 0;
     long req = requested_yield_ms(args, NM_EXEC_YIELD_DEFAULT_MS, &provided);
     int lo = NM_EXEC_YIELD_MIN_MS;
@@ -569,10 +568,10 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
 /* ---------------------------------------------------------------- */
 
 static NmToolExec *write_stdin_begin(const NmTool *tool, const char *args_json,
-                                     void *userdata)
+                                     const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
     NmJson *args = parse_args(args_json);
     if (!args) {
         return fail_exec(nm_tool_result_error(
@@ -736,14 +735,15 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
  * a loop). The timeout keeps the yield deadline checkable even when the
  * source never becomes ready. */
 static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
-                                                   const char *, void *),
+                                                   const char *,
+                                                   const NmToolCtx *),
                               NmToolStatus (*step)(NmToolExec *,
                                                    NmToolResult *),
                               int (*source)(NmToolExec *, NmSource *),
                               const NmTool *tool, const char *args_json,
-                              void *userdata, const char *oom_msg)
+                              const NmToolCtx *ctx, const char *oom_msg)
 {
-    NmToolExec *e = begin(tool, args_json, userdata);
+    NmToolExec *e = begin(tool, args_json, ctx);
     if (!e)
         return nm_tool_result_error(oom_msg);
     for (;;) {
@@ -766,17 +766,17 @@ static NmToolResult exec_pump(NmToolExec *(*begin)(const NmTool *,
 }
 
 static NmToolResult exec_command_exec(const NmTool *tool,
-                                      const char *args_json, void *userdata)
+                                      const char *args_json, const NmToolCtx *ctx)
 {
     return exec_pump(exec_command_begin, exec_command_step, NULL, tool,
-                     args_json, userdata, "exec_command: out of memory");
+                     args_json, ctx, "exec_command: out of memory");
 }
 
 static NmToolResult write_stdin_exec(const NmTool *tool, const char *args_json,
-                                     void *userdata)
+                                     const NmToolCtx *ctx)
 {
     return exec_pump(write_stdin_begin, write_stdin_step,
-                     write_stdin_source, tool, args_json, userdata,
+                     write_stdin_source, tool, args_json, ctx,
                      "write_stdin: out of memory");
 }
 
@@ -785,10 +785,10 @@ static NmToolResult write_stdin_exec(const NmTool *tool, const char *args_json,
 /* ---------------------------------------------------------------- */
 
 static NmToolResult kill_job_exec(const NmTool *tool,
-                                  const char *args_json, void *userdata)
+                                  const char *args_json, const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
     NmJson *args = parse_args(args_json);
     if (!args) {
         return nm_tool_result_error(

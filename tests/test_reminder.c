@@ -217,8 +217,7 @@ static void test_rules_fire_on_their_facts(void)
     ASSERT_TRUE(strstr(out.tool.data, "SHORTER") != NULL);
     nm_reminder_out_free(&out);
 
-    /* The picture the model cannot see: BOTH facts must line up. */
-    facts_zero(&f);
+    /* The picture the model cannot see: BOTH facts must line up. */ facts_zero(&f);
     f.tool_name = "read_file";
     f.tool_image = 1;
     f.model_vision = 0;
@@ -264,6 +263,41 @@ static void test_rules_fire_on_their_facts(void)
     /* A local result says nothing: the boundary is about where the text
      * came from, not about tool output in general. */
     f.tool_untrusted = 0;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_TOOL_RESULT, &f, latch, &out),
+              (size_t)0);
+    nm_reminder_out_free(&out);
+
+    /* The file ledger's two findings. A skipped read says the content is
+     * already above (and how to see a different part of it); a changed
+     * file says the copy the model remembers is stale. Both are facts
+     * about ONE result, so neither latches and each fires per result. */
+    facts_zero(&f);
+    f.tool_name = "read_file";
+    f.file_repeat = 1;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_TOOL_RESULT, &f, latch, &out),
+              (size_t)1);
+    ASSERT_STR_EQ(out.fired[0].name, "file-already-read");
+    ASSERT_TRUE(strstr(out.tool.data, "byte-identical") != NULL);
+    ASSERT_TRUE(strstr(out.tool.data, "still in context") != NULL);
+    nm_reminder_out_free(&out);
+
+    facts_zero(&f);
+    f.tool_name = "read_file";
+    f.file_changed = 1;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_TOOL_RESULT, &f, latch, &out),
+              (size_t)1);
+    ASSERT_STR_EQ(out.fired[0].name, "file-changed");
+    ASSERT_TRUE(strstr(out.tool.data, "changed on disk") != NULL);
+    ASSERT_TRUE(strstr(out.tool.data, "CURRENT one") != NULL);
+    nm_reminder_out_free(&out);
+
+    /* An ordinary read (the ledger said nothing) is not a finding: the
+     * zero facts fire neither rule. */
+    facts_zero(&f);
+    f.tool_name = "read_file";
     nm_reminder_out_init(&out);
     ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_TOOL_RESULT, &f, latch, &out),
               (size_t)0);
@@ -531,6 +565,12 @@ static void facts_for_rule(size_t i, NmReminderFacts *f)
     } else if (strcmp(name, "web-untrusted") == 0) {
         f->tool_name = "web_search";
         f->tool_untrusted = 1;
+    } else if (strcmp(name, "file-already-read") == 0) {
+        f->tool_name = "read_file";
+        f->file_repeat = 1;
+    } else if (strcmp(name, "file-changed") == 0) {
+        f->tool_name = "read_file";
+        f->file_changed = 1;
     } else if (strcmp(name, "context-pressure") == 0) {
         f->ctx_used = 99000;
         f->ctx_limit = 100000;

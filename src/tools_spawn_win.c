@@ -169,10 +169,10 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 /* ---------------------------------------------------------------- */
 
 static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
-                                     void *userdata)
+                                     const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata;
+    (void)ctx;
     const char *jerr = NULL;
     NmJson *args =
         nm_json_parse(args_json, strlen(args_json), &jerr);
@@ -325,10 +325,10 @@ static NmToolStatus take(NmToolExec *e, NmToolResult *out)
 }
 
 static NmToolExec *run_command_begin(const NmTool *tool,
-                                     const char *args_json, void *userdata)
+                                     const char *args_json, const NmToolCtx *ctx)
 {
     (void)tool;
-    (void)userdata; /* workdir arg is reserved: the child inherits our cwd */
+    (void)ctx; /* workdir arg is reserved: the child inherits our cwd */
     NmJson *args = nm_json_parse(args_json, strlen(args_json), NULL);
     if (!args)
         return NULL; /* bad args: the synchronous execute reports them */

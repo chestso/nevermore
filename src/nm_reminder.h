@@ -187,6 +187,16 @@ typedef struct NmReminderFacts
      * offset is past its last line. */
     int read_empty;
     int read_past_eof;
+
+    /* The session's file ledger's verdict about the file this result
+     * read (nm_file_ledger.h): the read was skipped because the same
+     * bytes are already in this conversation and still in context
+     * (`file-already-read`), or the path is not what the session last
+     * read (`file-changed`). Both are per-result facts: the result IS
+     * the event. Two booleans, like the read findings — the reminder
+     * module never sees the ledger's own vocabulary. */
+    int file_repeat;
+    int file_changed;
 } NmReminderFacts;
 
 /* Where a reminder goes. The choice is per RULE, not per call site:

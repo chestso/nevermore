@@ -12,7 +12,8 @@
 
 #include <stddef.h>
 
-#include "transport.h" /* NmSource: what an async tool waits on */
+#include "nm_file_ledger.h" /* NmFileVerdict: the file ledger's answer */
+#include "transport.h"      /* NmSource: what an async tool waits on */
 
 #ifdef __cplusplus
 extern "C" {
@@ -20,6 +21,24 @@ extern "C" {
 
 typedef struct NmToolset NmToolset;
 typedef struct NmTool NmTool;
+
+/* The per-call context a tool receives: the working directory relative
+ * paths resolve against, and the SESSION's file ledger
+ * (nm_file_ledger.h) — the memory that turns a re-read of an unchanged
+ * file into a pointer instead of a duplicate copy.
+ *
+ * NULL means "no context": paths resolve against the process cwd and
+ * every read is a fresh read (what a direct caller and a test want).
+ * The agent builds one per call, so a tool never reaches into the agent
+ * — and the workdir is an explicit field, not the agent's opaque
+ * userdata pointer reinterpreted as a string (which is what it used to
+ * be: any UI that passed its own userdata silently became the tools'
+ * cwd). */
+typedef struct NmToolCtx
+{
+    const char *workdir;  /* borrowed; NULL = the process cwd */
+    NmFileLedger *ledger; /* this session's ledger, or NULL */
+} NmToolCtx;
 
 /* How a tool call ended. The step machine's progress and the finished
  * result's outcome are ONE enum — the shape NmChatStatus and
@@ -90,6 +109,16 @@ typedef struct NmToolResult
      * reminder framework reads it (`empty-file` / `offset-past-eof`);
      * NM_READ_STATE_NONE is the zero value. */
     int read_state;
+    /* What the session's file ledger (nm_file_ledger.h) made of the
+     * file this result read — an NmFileVerdict. REPEAT means the tool
+     * did NOT return the content: an identical read of the same file is
+     * already in this conversation and still in context, so the body
+     * says so instead of repeating the bytes (the `file-already-read`
+     * reminder). CHANGED means the path is not what the session last
+     * read: the model's view is stale (`file-changed`). The zero value
+     * is every other result — a tool that reads no file needs no
+     * code. */
+    int file_state;
 } NmToolResult;
 
 typedef enum
@@ -138,7 +167,7 @@ typedef struct NmTool
                                 * description, params_schema). */
     const char *params_schema; /* JSON Schema for "parameters", or NULL */
     NmToolResult (*execute)(const NmTool *tool, const char *args_json,
-                            void *userdata);
+                            const NmToolCtx *ctx);
     /* Async path (NULL for synchronous tools). begin returns a handle,
      * or NULL to fall back to execute (bad args / spawn failure).
      * source reports what the step is waiting on right now (object +
@@ -146,7 +175,7 @@ typedef struct NmTool
      * NM_TOOL_OK / NM_TOOL_ERR when finished (NM_TOOL_RUNNING while it
      * is still working); end frees the handle. */
     NmToolExec *(*begin)(const NmTool *tool, const char *args_json,
-                         void *userdata);
+                         const NmToolCtx *ctx);
     NmToolStatus (*step)(NmToolExec *e, NmToolResult *out);
     /* The live wait source while a step is draining: fills *out and
      * returns 1 when there is one, 0 when the tool has nothing to wait
@@ -177,9 +206,10 @@ const NmTool *nm_toolset_get(const NmToolset *ts, size_t i);
 const NmTool *nm_toolset_find(const NmToolset *ts, const char *name);
 
 /* Execute by wire name. Returns an NM_TOOL_ERR result with an error
- * message when the tool is unknown. */
+ * message when the tool is unknown. `ctx` is the per-call context
+ * (NmToolCtx) — NULL for "no workdir, no ledger". */
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
-                                const char *args_json, void *userdata);
+                                const char *args_json, const NmToolCtx *ctx);
 
 /* Serialize the full toolset as the provider "tools" JSON array.
  * Cached in the toolset (serialized once per registered set);

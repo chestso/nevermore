@@ -616,6 +616,150 @@ static void test_read_file_missing(void)
     nm_toolset_free(ts);
 }
 
+/* The session's file ledger (nm_file_ledger.h) through the tool: a read
+ * whose bytes this conversation already holds answers with a POINTER
+ * instead of a second copy, a file that is not what the session read
+ * says so, and the model's own write is never reported as somebody
+ * else's change. */
+static void test_read_file_ledger_skips_a_repeat(void)
+{
+    char *path = scratch_path("ledger.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("alpha\nbeta\n", f);
+    fclose(f);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmFileLedger *l = nm_file_ledger_new();
+    ASSERT_NOT_NULL(l);
+    NmToolCtx ctx = { NULL, l };
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+
+    /* The first read returns the content and is recorded. */
+    NmToolResult r = nm_toolset_execute(ts, "read_file", args, &ctx);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_TRUE(strstr(r.output, "alpha") != NULL);
+    ASSERT_EQ(r.file_state, NM_FILE_VERDICT_NONE);
+    nm_tool_result_free(&r);
+
+    /* The identical read again: the bytes are already in the
+     * conversation, so the body points at them. */
+    NmToolResult r2 = nm_toolset_execute(ts, "read_file", args, &ctx);
+    ASSERT_EQ(r2.status, NM_TOOL_OK);
+    ASSERT_EQ(r2.file_state, NM_FILE_VERDICT_REPEAT);
+    ASSERT_TRUE(strstr(r2.output, "alpha") == NULL);
+    ASSERT_TRUE(strstr(r2.output, "unchanged") != NULL);
+    ASSERT_TRUE(strstr(r2.output, "not repeated here") != NULL);
+    nm_tool_result_free(&r2);
+
+    /* A different window is a different read: the content comes back. */
+    NmJson *jw = nm_json_new_object();
+    nm_json_set(jw, "path", nm_json_new_string(path));
+    nm_json_set(jw, "limit", nm_json_new_number(1));
+    char *wargs = nm_json_dump(jw);
+    nm_json_free(jw);
+    NmToolResult r3 = nm_toolset_execute(ts, "read_file", wargs, &ctx);
+    ASSERT_EQ(r3.status, NM_TOOL_OK);
+    ASSERT_EQ(r3.file_state, NM_FILE_VERDICT_NONE);
+    ASSERT_TRUE(strstr(r3.output, "alpha") != NULL);
+    nm_tool_result_free(&r3);
+    free(wargs);
+
+    /* The file changes on disk: the read returns the current content
+     * and reports the session's view as stale. */
+    f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("alpha\nbeta\ngamma\n", f);
+    fclose(f);
+    NmToolResult r4 = nm_toolset_execute(ts, "read_file", args, &ctx);
+    ASSERT_EQ(r4.file_state, NM_FILE_VERDICT_CHANGED);
+    ASSERT_TRUE(strstr(r4.output, "gamma") != NULL);
+    nm_tool_result_free(&r4);
+
+    /* The model's own edit: the write is noted, so the read that
+     * follows is NOT a change note (and the new content is returned). */
+    NmJson *jedit = nm_json_new_object();
+    nm_json_set(jedit, "path", nm_json_new_string(path));
+    nm_json_set(jedit, "old_string", nm_json_new_string("gamma"));
+    nm_json_set(jedit, "new_string", nm_json_new_string("delta"));
+    char *eargs = nm_json_dump(jedit);
+    nm_json_free(jedit);
+    NmToolResult re = nm_toolset_execute(ts, "edit_file", eargs, &ctx);
+    ASSERT_EQ(re.status, NM_TOOL_OK);
+    nm_tool_result_free(&re);
+    free(eargs);
+    NmToolResult r5 = nm_toolset_execute(ts, "read_file", args, &ctx);
+    ASSERT_EQ(r5.file_state, NM_FILE_VERDICT_NONE);
+    ASSERT_TRUE(strstr(r5.output, "delta") != NULL);
+    nm_tool_result_free(&r5);
+
+    /* write_file tells the ledger too. */
+    NmJson *jwrite = nm_json_new_object();
+    nm_json_set(jwrite, "path", nm_json_new_string(path));
+    nm_json_set(jwrite, "content", nm_json_new_string("epsilon\n"));
+    char *wargs2 = nm_json_dump(jwrite);
+    nm_json_free(jwrite);
+    NmToolResult rw = nm_toolset_execute(ts, "write_file", wargs2, &ctx);
+    ASSERT_EQ(rw.status, NM_TOOL_OK);
+    nm_tool_result_free(&rw);
+    free(wargs2);
+    NmToolResult r6 = nm_toolset_execute(ts, "read_file", args, &ctx);
+    ASSERT_EQ(r6.file_state, NM_FILE_VERDICT_NONE);
+    ASSERT_TRUE(strstr(r6.output, "epsilon") != NULL);
+    nm_tool_result_free(&r6);
+
+    /* A read that returned NO content is not remembered, so repeating it
+     * cannot be answered with "the content is already above": an offset
+     * past the last line fails again, and an empty file still reports
+     * itself as empty. */
+    NmJson *jbad = nm_json_new_object();
+    nm_json_set(jbad, "path", nm_json_new_string(path));
+    nm_json_set(jbad, "offset", nm_json_new_number(999));
+    char *badargs = nm_json_dump(jbad);
+    nm_json_free(jbad);
+    for (int i = 0; i < 2; i++) {
+        NmToolResult rb = nm_toolset_execute(ts, "read_file", badargs, &ctx);
+        ASSERT_EQ(rb.status, NM_TOOL_ERR);
+        ASSERT_EQ(rb.file_state, NM_FILE_VERDICT_NONE);
+        ASSERT_TRUE(strstr(rb.output, "past the last line") != NULL);
+        nm_tool_result_free(&rb);
+    }
+    free(badargs);
+
+    char *empty = scratch_path("ledger-empty.txt");
+    FILE *ef = fopen(empty, "wb");
+    ASSERT_NOT_NULL(ef);
+    fclose(ef);
+    NmJson *jempty = nm_json_new_object();
+    nm_json_set(jempty, "path", nm_json_new_string(empty));
+    char *eargs2 = nm_json_dump(jempty);
+    nm_json_free(jempty);
+    for (int i = 0; i < 2; i++) {
+        NmToolResult re2 = nm_toolset_execute(ts, "read_file", eargs2, &ctx);
+        ASSERT_EQ(re2.status, NM_TOOL_OK);
+        ASSERT_EQ(re2.file_state, NM_FILE_VERDICT_NONE);
+        ASSERT_EQ(re2.read_state, NM_READ_STATE_EMPTY);
+        nm_tool_result_free(&re2);
+    }
+    free(eargs2);
+    free(empty);
+
+    /* Without a ledger (a direct caller, a test) every read is a fresh
+     * read: the zero verdict, the content, no skip. */
+    NmToolResult r7 = nm_toolset_execute(ts, "read_file", args, NULL);
+    ASSERT_EQ(r7.file_state, NM_FILE_VERDICT_NONE);
+    ASSERT_TRUE(strstr(r7.output, "epsilon") != NULL);
+    nm_tool_result_free(&r7);
+
+    free(args);
+    free(path);
+    nm_file_ledger_free(l);
+    nm_toolset_free(ts);
+}
+
 /* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
 static const unsigned char T_IMG_PNG[] = {
     0x89,
@@ -4396,6 +4540,7 @@ int main(void)
     RUN_TEST(test_read_file_line_numbers_and_window);
     RUN_TEST(test_truncated_fact_is_reported);
     RUN_TEST(test_read_file_missing);
+    RUN_TEST(test_read_file_ledger_skips_a_repeat);
     RUN_TEST(test_read_file_image_branch);
     RUN_TEST(test_read_file_image_branch_beats_window_args);
     RUN_TEST(test_read_file_image_too_large);
