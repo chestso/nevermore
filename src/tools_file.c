@@ -10,7 +10,11 @@
  * Write_file (create or overwrite the WHOLE file) and edit_file's
  * splice both go through write_atomic — a same-directory tmp file plus
  * a rename, so a crash mid-write can never truncate the previous
- * content.
+ * content. The rename replaces the inode, so the seam also carries the
+ * target's own metadata onto the replacement (its mode before the first
+ * byte, its owner, the Windows attributes) and resolves the path to the
+ * file it MEANS — see the seam's comment for what it preserves, what it
+ * deliberately drops and what it refuses.
  *
  * Every result rides the output budget (NM_TOOL_MAX_OUTPUT): the head
  * is kept and the tail dropped, with a marker. read_file's marker
@@ -102,10 +106,48 @@ static char *resolve_path(NmJson *args, void *userdata)
     return full;
 }
 
+/* Parent directory of a resolved path: "/a/b" -> "/a", "/b" -> "/",
+ * "C:/b" -> "C:/"; a bare name (no separator) has the CWD as its
+ * parent. Heap-owned, or NULL on OOM. */
+static char *parent_dir_of(const char *path)
+{
+    char *p = strdup(path);
+    if (!p)
+        return NULL;
+    char *sep = strrchr(p, '/');
+    char *bs = strrchr(p, '\\');
+    if (bs && (!sep || bs > sep))
+        sep = bs;
+    if (!sep) {
+        free(p);
+        return strdup(".");
+    }
+#ifdef _WIN32
+    if (sep == p + 2 && p[1] == ':') { /* "C:/b" -> "C:/" */
+        sep[1] = '\0';
+        return p;
+    }
+#endif
+    if (sep == p) { /* "/b" -> "/" */
+        sep[1] = '\0';
+        return p;
+    }
+    *sep = '\0';
+    return p;
+}
+
 /* Read a whole file into a heap buffer. NULL + errno text on error.
- * Byte-exact: no newline translation, no charset conversion. */
+ * Byte-exact: no newline translation, no charset conversion. A path that
+ * is not a REGULAR file fails here rather than in fopen: opening a fifo
+ * for reading BLOCKS until a writer arrives, which would hang the tool
+ * (the same finding as probe_file_size's, on the read side). */
 static char *read_file_bytes(const char *path, size_t *len_out)
 {
+    struct stat pre;
+    if (stat(path, &pre) == 0 && !S_ISREG(pre.st_mode)) {
+        errno = EINVAL; /* read_failed_result names the kind */
+        return NULL;
+    }
     FILE *f = fopen(path, "rb");
     if (!f)
         return NULL;
@@ -146,6 +188,27 @@ static char *read_file_bytes(const char *path, size_t *len_out)
     return buf;
 }
 
+/* What a non-regular path IS, for a refusal message ("not a file — it is
+ * a fifo: /tmp/pipe"). One spelling, shared by the read and the write
+ * side. S_ISSOCK is not defined on MinGW (Windows has no sockets as
+ * paths), hence the guard. */
+static const char *not_file_kind(mode_t mode)
+{
+    if (S_ISDIR(mode))
+        return "a directory";
+    if (S_ISFIFO(mode))
+        return "a fifo";
+    if (S_ISCHR(mode))
+        return "a character device";
+    if (S_ISBLK(mode))
+        return "a block device";
+#ifdef S_ISSOCK
+    if (S_ISSOCK(mode))
+        return "a socket";
+#endif
+    return "not a regular file";
+}
+
 /* The one "the read did not happen" result: the path, and WHY. A
  * directory is named as one, because it is the failure the errno names
  * worst (glibc's fseek fails with a bare EINVAL before anything notices
@@ -162,6 +225,11 @@ static NmToolResult read_failed_result(const char *path)
             snprintf(msg, need, "not a file — it is a directory: %s (use "
                                 "list_dir)",
                      path);
+        /* Any other non-regular path: named too, since read_file_bytes
+         * refuses it before fopen can block on it (a fifo). */
+        else if (stat(path, &st) == 0 && !S_ISREG(st.st_mode))
+            snprintf(msg, need, "not a file — it is %s: %s",
+                     not_file_kind(st.st_mode), path);
         else if (errno)
             snprintf(msg, need, "cannot read %s: %s", path, strerror(errno));
         else
@@ -220,11 +288,143 @@ static int utf8_valid(const unsigned char *b, size_t n)
  * process-global counter, because a pid alone repeats across calls in
  * one process, so sequential writes cannot collide; a crash can strand
  * one, named so it is recognizable and skippable. Removed on failure.
- * Returns 0, or -1 with errno preserved for the caller's message.
+ * Returns the outcome, with `*err` holding the reason on WRITE_FAILED
+ * and `*mode` the target's bits (for the refusal message).
+ *
+ * A rename REPLACES the inode, so everything the old file carried has
+ * to be carried onto the replacement or it is silently gone — and the
+ * mode is the one a user notices (an executable that stops being one, a
+ * 0600 file that comes back 0644). The seam therefore:
+ *
+ *   - resolves the path to the file it MEANS (a symlink chain, dangling
+ *     links included), because read_file follows links (fopen does) and
+ *     a rename onto the link itself would edit nothing while reporting
+ *     success;
+ *   - copies the target's permission bits onto the tmp BEFORE the first
+ *     byte is written — fchmod, not open()'s mode argument, which umask
+ *     masks (a 0664 file under umask 077 came back 0600), and before the
+ *     content so a private file's new bytes never sit in a
+ *     world-readable tmp;
+ *   - restores the owner when the process is allowed to (best effort:
+ *     another user's ownership needs privilege);
+ *   - carries the Windows attributes (HIDDEN / SYSTEM / ARCHIVE ...)
+ *     onto the tmp, since MoveFileEx takes the SOURCE's attributes.
+ *
+ * Deliberately NOT preserved, and why: setuid / setgid / sticky (the
+ * kernel clears setuid and setgid when a file's content changes, and a
+ * rename bypasses that — carrying them would keep a trust bit on bytes
+ * the model just wrote), hard links (the rename IS the atomicity;
+ * writing in place would keep them and lose the crash safety), POSIX
+ * xattrs/ACLs and a Windows DACL's explicit (non-inherited) ACEs (the
+ * tmp inherits the directory's defaults, which is what a new file in
+ * that directory gets).
+ *
+ * Refusals the seam owns, because a rename would do them silently: a
+ * read-only target (no write bit — the in-place write the seam replaced
+ * could not have written it either), a directory, and a special file (a
+ * fifo / socket / device, which a rename would replace with a regular
+ * file). Windows additionally refuses a reparse point it could not
+ * resolve — renaming over a link destroys it and edits nothing.
  *
  * Both callers are in this TU (write_file, edit_file's splice), so the
  * seam is static — an unused export would read as live API. */
+typedef enum
+{
+    WRITE_OK = 0,
+    WRITE_READONLY, /* the target exists and no write bit is set */
+    WRITE_NOT_FILE, /* a directory, fifo, socket or device */
+    WRITE_LINK,     /* Windows: a link whose target could not be resolved */
+    WRITE_FAILED,   /* *err holds the reason */
+} WriteOutcome;
+
 static unsigned long g_write_seq;
+
+#define NM_WRITE_LINK_MAX 8 /* symlink hops before ELOOP, as the kernel */
+
+#ifndef _WIN32
+/* Follow `path`'s symlink chain by hand, whether or not the final
+ * target exists. realpath() covers the common case but refuses a
+ * DANGLING chain — and a dangling link's target is exactly where a
+ * create must land: fopen follows the link and creates the target, so
+ * the write must not replace the link instead. A relative link target
+ * resolves against the directory the link was found in; a cycle is
+ * refused like the kernel's ELOOP (bounded, never a hang).
+ * Returns a malloc'd path, or NULL with errno set (ELOOP / ENOMEM). */
+static char *resolve_links(const char *path, int depth)
+{
+    struct stat st;
+    if (lstat(path, &st) != 0 || !S_ISLNK(st.st_mode))
+        return strdup(path); /* a plain file, or nothing there yet */
+    if (depth >= NM_WRITE_LINK_MAX) {
+        errno = ELOOP;
+        return NULL;
+    }
+    size_t cap = st.st_size > 0 ? (size_t)st.st_size + 1 : 256;
+    char *link = malloc(cap);
+    if (!link)
+        return NULL;
+    ssize_t n = readlink(path, link, cap - 1);
+    if (n < 0) { /* raced away: let the write name the real error */
+        free(link);
+        return strdup(path);
+    }
+    link[n] = '\0';
+    char *next;
+    if (link[0] == '/') {
+        next = strdup(link);
+    } else {
+        char *dir = parent_dir_of(path);
+        size_t need = (dir ? strlen(dir) : 1) + strlen(link) + 2;
+        next = malloc(need);
+        if (next)
+            snprintf(next, need, "%s/%s", dir ? dir : ".", link);
+        free(dir);
+    }
+    free(link);
+    if (!next)
+        return NULL;
+    char *out = resolve_links(next, depth + 1);
+    free(next);
+    return out;
+}
+#else
+/* Windows: resolve a reparse point (a symlink or a junction) to the
+ * file it names, so the rename replaces the TARGET and not the link —
+ * the same read/write agreement the POSIX half keeps. Best effort: a
+ * handle that will not open (Wine refuses host symlinks outright, and a
+ * dangling link has no target to open) returns the path as given, and
+ * the caller then REFUSES a reparse point rather than destroy it. The
+ * normalized form arrives as `\\?\C:\...`; the prefix is stripped,
+ * since the CRT cannot open a `\\?\` path (the buffer is MAX_PATH, so a
+ * longer real path falls back rather than truncate).
+ * Returns a malloc'd path, or NULL with errno set (ENOMEM). */
+static char *resolve_links(const char *path, int depth)
+{
+    (void)depth;
+    HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE |
+                               FILE_SHARE_DELETE,
+                           NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS,
+                           NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return strdup(path);
+    char buf[MAX_PATH];
+    DWORD n = GetFinalPathNameByHandleA(h, buf, (DWORD)sizeof(buf),
+                                        FILE_NAME_NORMALIZED | VOLUME_NAME_DOS);
+    CloseHandle(h);
+    if (n == 0 || n >= (DWORD)sizeof(buf))
+        return strdup(path);
+    if (strncmp(buf, "\\\\?\\UNC\\", 8) == 0) {
+        char *out = malloc(strlen(buf) + 2);
+        if (out)
+            snprintf(out, strlen(buf) + 2, "\\\\%s", buf + 8);
+        return out;
+    }
+    if (strncmp(buf, "\\\\?\\", 4) == 0)
+        return strdup(buf + 4);
+    return strdup(buf);
+}
+#endif
 
 #ifdef _WIN32
 /* MoveFileExA reports through GetLastError, never errno: map the cases
@@ -253,28 +453,112 @@ static void errno_from_last_error(void)
 }
 #endif
 
-static int write_atomic(const char *path, const void *buf, size_t len)
+static WriteOutcome write_atomic(const char *path, const void *buf, size_t len,
+                                 int *err, mode_t *mode)
 {
-    if (!path || !*path)
-        return -1;
-    size_t need = strlen(path) + 40;
-    char *tmp = malloc(need);
-    if (!tmp)
-        return -1;
+    *err = 0;
+    *mode = 0;
+    if (!path || !*path) {
+        *err = EINVAL;
+        return WRITE_FAILED;
+    }
+
+    /* The file the path MEANS: a symlink chain resolves to its target,
+     * so the rename replaces the file and not the link. */
+    char *target = resolve_links(path, 0);
+    if (!target) {
+        *err = errno ? errno : ENOMEM;
+        return WRITE_FAILED;
+    }
+
+    /* The target's own state, read BEFORE the tmp exists: its bits are
+     * what the replacement must carry, and a target that must not be
+     * replaced is refused here rather than by the rename. */
+    int exists = 0;
+    mode_t perm = 0666; /* a new file: the usual create mode (umask trims) */
 #ifdef _WIN32
-    snprintf(tmp, need, "%s.tmp-%ld-%lu", path, (long)_getpid(),
-             ++g_write_seq);
-    int fd = _open(tmp, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY,
-                   _S_IREAD | _S_IWRITE);
+    DWORD attrs = GetFileAttributesA(target);
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        if (attrs & FILE_ATTRIBUTE_DIRECTORY) {
+            *mode = S_IFDIR;
+            free(target);
+            return WRITE_NOT_FILE;
+        }
+        if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
+            /* resolve_links could not follow it (a dangling link, or one
+             * this host will not open): a rename would destroy the link
+             * and edit nothing. */
+            free(target);
+            return WRITE_LINK;
+        }
+        if (attrs & FILE_ATTRIBUTE_READONLY) {
+            *mode = 0444;
+            free(target);
+            return WRITE_READONLY;
+        }
+        exists = 1;
+        perm = _S_IREAD | _S_IWRITE;
+    }
 #else
-    snprintf(tmp, need, "%s.tmp-%ld-%lu", path, (long)getpid(),
+    struct stat st;
+    if (stat(target, &st) == 0) {
+        if (!S_ISREG(st.st_mode)) {
+            *mode = st.st_mode; /* the message names the kind */
+            free(target);
+            return WRITE_NOT_FILE;
+        }
+        if ((st.st_mode & 0222) == 0) {
+            *mode = st.st_mode & 07777;
+            free(target);
+            return WRITE_READONLY;
+        }
+        exists = 1;
+        perm = st.st_mode & 0777;
+    }
+#endif
+
+    size_t need = strlen(target) + 40;
+    char *tmp = malloc(need);
+    if (!tmp) {
+        *err = ENOMEM;
+        free(target);
+        return WRITE_FAILED;
+    }
+#ifdef _WIN32
+    snprintf(tmp, need, "%s.tmp-%ld-%lu", target, (long)_getpid(),
              ++g_write_seq);
-    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, 0666);
+    int fd = _open(tmp, _O_CREAT | _O_EXCL | _O_WRONLY | _O_BINARY, perm);
+#else
+    snprintf(tmp, need, "%s.tmp-%ld-%lu", target, (long)getpid(),
+             ++g_write_seq);
+    int fd = open(tmp, O_CREAT | O_EXCL | O_WRONLY, perm);
 #endif
     if (fd < 0) {
+        *err = errno;
         free(tmp);
-        return -1;
+        free(target);
+        return WRITE_FAILED;
     }
+#ifndef _WIN32
+    if (exists) {
+        /* Best effort: restoring another user's ownership needs
+         * privilege, and for our own file it is already right. */
+        (void)fchown(fd, st.st_uid, st.st_gid);
+        /* The target's bits EXACTLY (open's mode argument is masked by
+         * umask), and before the first byte — a private file's new
+         * content must never sit in a world-readable tmp. A failure
+         * refuses the write: landing the content with the wrong mode is
+         * the silent leak this seam exists to prevent. */
+        if (fchmod(fd, perm) != 0) {
+            *err = errno;
+            close(fd);
+            remove(tmp);
+            free(tmp);
+            free(target);
+            return WRITE_FAILED;
+        }
+    }
+#endif
     int ok = 1;
     const char *p = buf;
     size_t left = len;
@@ -310,44 +594,94 @@ static int write_atomic(const char *path, const void *buf, size_t len)
     if (!ok) {
         remove(tmp);
         free(tmp);
-        errno = e;
-        return -1;
+        free(target);
+        *err = e;
+        return WRITE_FAILED;
     }
 #ifdef _WIN32
-    if (!MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) {
+    if (exists) {
+        /* MoveFileEx takes the SOURCE's attributes, so the target's are
+         * carried onto the tmp first (the read-only bit never reaches
+         * here — that target was refused above). Best effort: an
+         * attribute that will not set is not a reason to lose the
+         * write. */
+        SetFileAttributesA(tmp, attrs & ~(FILE_ATTRIBUTE_DIRECTORY |
+                                          FILE_ATTRIBUTE_REPARSE_POINT));
+    }
+    if (!MoveFileExA(tmp, target, MOVEFILE_REPLACE_EXISTING)) {
         errno_from_last_error();
         e = errno;
         DeleteFileA(tmp);
         free(tmp);
-        errno = e;
-        return -1;
+        free(target);
+        *err = e;
+        return WRITE_FAILED;
     }
 #else
-    if (rename(tmp, path) != 0) {
+    if (rename(tmp, target) != 0) {
         e = errno;
         remove(tmp);
         free(tmp);
-        errno = e;
-        return -1;
+        free(target);
+        *err = e;
+        return WRITE_FAILED;
     }
 #endif
     free(tmp);
-    return 0;
+    free(target);
+    return WRITE_OK;
 }
 
-/* Pre-write size probe: byte count when `path` exists and is readable,
- * -1 otherwise. An existence probe, never a read into memory — the
- * created/overwrote report is the only thing it feeds. */
+/* The family's ONE write-refusal message, built from the seam's own
+ * finding — the two callers must not spell a refusal differently, and a
+ * bare errno cannot name the fix. `mode` is the target's bits (the
+ * read-only case reports them; on Windows the read-only attribute is
+ * reported as 0444, the POSIX spelling for it). Heap-owned, or NULL on
+ * OOM. */
+static char *write_refusal_message(const char *path, WriteOutcome out,
+                                   int err, mode_t mode)
+{
+    size_t need = strlen(path) + 224;
+    char *msg = malloc(need);
+    if (!msg)
+        return NULL;
+    switch (out) {
+    case WRITE_READONLY:
+        snprintf(msg, need,
+                 "cannot write %s: the file is read-only (mode %04o) — "
+                 "chmod +w it if the change is intended",
+                 path, (unsigned)mode);
+        break;
+    case WRITE_NOT_FILE:
+        snprintf(msg, need, "cannot write %s: it is %s, not a file", path,
+                 not_file_kind(mode));
+        break;
+    case WRITE_LINK:
+        snprintf(msg, need,
+                 "cannot write %s: it is a link whose target could not be "
+                 "resolved (write the target path instead)",
+                 path);
+        break;
+    default:
+        snprintf(msg, need, "cannot write %s: %s", path,
+                 err ? strerror(err) : "failed");
+        break;
+    }
+    return msg;
+}
+
+/* Pre-write size probe: byte count when `path` exists as a readable
+ * REGULAR file, -1 otherwise. An existence probe, never a read into
+ * memory — the created/overwrote report is the only thing it feeds. A
+ * stat, not an fopen: opening a fifo for reading BLOCKS until a writer
+ * arrives, which would hang the tool before the seam could refuse it
+ * (found by the fifo refusal's own test). */
 static long probe_file_size(const char *path)
 {
-    FILE *f = fopen(path, "rb");
-    if (!f)
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
         return -1;
-    long sz = -1;
-    if (fseek(f, 0, SEEK_END) == 0)
-        sz = ftell(f);
-    fclose(f);
-    return sz;
+    return (long)st.st_size;
 }
 
 /* ---------------------------------------------------------------- */
@@ -644,6 +978,19 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     if (!path) {
         nm_json_free(args);
         return nm_tool_result_error("missing or empty path");
+    }
+
+    /* A path that is not a REGULAR file is refused BEFORE the image
+     * probe opens it: opening a fifo blocks until a writer arrives, and
+     * a synchronous tool call has no timeout to rescue the turn (the
+     * same finding as read_file_bytes' and probe_file_size's guards).
+     * read_failed_result names the kind. */
+    struct stat pre;
+    if (stat(path, &pre) == 0 && !S_ISREG(pre.st_mode)) {
+        NmToolResult r = read_failed_result(path);
+        free(path);
+        nm_json_free(args);
+        return r;
     }
 
     /* Image branch (D2/D3): a supported image is the useful answer, so
@@ -1008,11 +1355,14 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
 
     /* Byte-exact write (LF stays LF; no translation) through the
      * family's atomic seam: a crash, disk-full or kill mid-write leaves
-     * the previous content intact instead of a truncated file. */
-    if (write_atomic(path, out, wi) != 0) {
-        char *msg = malloc(strlen(path) + 64);
-        if (msg)
-            snprintf(msg, strlen(path) + 64, "cannot write %s", path);
+     * the previous content intact instead of a truncated file. The seam
+     * carries the target's mode onto the replacement and refuses what a
+     * rename would silently destroy (a read-only file, a link). */
+    int werr = 0;
+    mode_t wmode = 0;
+    WriteOutcome wout = write_atomic(path, out, wi, &werr, &wmode);
+    if (wout != WRITE_OK) {
+        char *msg = write_refusal_message(path, wout, werr, wmode);
         free(out);
         free(hits);
         free(text);
@@ -1091,36 +1441,6 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
 /* write_file                                                        */
 /* ---------------------------------------------------------------- */
 
-/* Parent directory of a resolved path: "/a/b" -> "/a", "/b" -> "/",
- * "C:/b" -> "C:/"; a bare name (no separator) has the CWD as its
- * parent. Heap-owned, or NULL on OOM. */
-static char *parent_dir_of(const char *path)
-{
-    char *p = strdup(path);
-    if (!p)
-        return NULL;
-    char *sep = strrchr(p, '/');
-    char *bs = strrchr(p, '\\');
-    if (bs && (!sep || bs > sep))
-        sep = bs;
-    if (!sep) {
-        free(p);
-        return strdup(".");
-    }
-#ifdef _WIN32
-    if (sep == p + 2 && p[1] == ':') { /* "C:/b" -> "C:/" */
-        sep[1] = '\0';
-        return p;
-    }
-#endif
-    if (sep == p) { /* "/b" -> "/" */
-        sep[1] = '\0';
-        return p;
-    }
-    *sep = '\0';
-    return p;
-}
-
 static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
                                     void *userdata)
 {
@@ -1174,12 +1494,11 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
     /* created vs overwrote comes from the pre-write size (an existence
      * probe, never a read); -1 means the file was not there. */
     long old_size = probe_file_size(path);
-    if (write_atomic(path, content, clen) != 0) {
-        int e = errno;
-        size_t need = strlen(path) + 128;
-        char *msg = malloc(need);
-        if (msg)
-            snprintf(msg, need, "cannot write %s: %s", path, strerror(e));
+    int werr = 0;
+    mode_t wmode = 0;
+    WriteOutcome wout = write_atomic(path, content, clen, &werr, &wmode);
+    if (wout != WRITE_OK) {
+        char *msg = write_refusal_message(path, wout, werr, wmode);
         free(path);
         nm_json_free(args);
         return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };

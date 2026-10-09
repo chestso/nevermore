@@ -1762,6 +1762,417 @@ static void test_write_file_failed_write_keeps_original(void)
 }
 #endif /* !_WIN32 */
 
+/* The seam's OTHER half (2026-10-09): a rename replaces the inode, so
+ * the target's metadata has to be carried onto the replacement or it is
+ * silently gone. The bug this pins: a 0755 script edited to 0644, and a
+ * 0600 file made world-readable. */
+
+#ifndef _WIN32
+/* edit_file and write_file both, over the three modes that matter: the
+ * exec bit (the reported bug), a private file, and 0664 — the last under
+ * umask 077, which is what proves fchmod does the work (open's mode
+ * argument is masked, so it alone would give 0600). */
+static void test_write_seam_preserves_mode(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    static const struct
+    {
+        const char *name;
+        mode_t mode;
+    } cases[] = {
+        { "mode_exec.sh", 0755 },
+        { "mode_private.txt", 0600 },
+        { "mode_group.txt", 0664 },
+    };
+    mode_t um = umask(077); /* process-global: restored before returning */
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *path = scratch_path(cases[i].name);
+        FILE *f = fopen(path, "wb");
+        ASSERT_NOT_NULL(f);
+        fputs("old\n", f);
+        fclose(f);
+        ASSERT_EQ(chmod(path, cases[i].mode), 0);
+
+        NmJson *jargs = nm_json_new_object();
+        nm_json_set(jargs, "path", nm_json_new_string(path));
+        nm_json_set(jargs, "old_string", nm_json_new_string("old"));
+        nm_json_set(jargs, "new_string", nm_json_new_string("new"));
+        char *args = nm_json_dump(jargs);
+        nm_json_free(jargs);
+        NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+        free(args);
+        ASSERT_EQ(r.status, NM_TOOL_OK);
+        nm_tool_result_free(&r);
+
+        struct stat st;
+        ASSERT_EQ(stat(path, &st), 0);
+        ASSERT_EQ(st.st_mode & 07777, cases[i].mode);
+        /* the content really changed: a preserved mode on an untouched
+         * file would pass the line above for the wrong reason */
+        char buf[32];
+        ASSERT_EQ(slurp_file(path, buf, sizeof(buf)), 4);
+        ASSERT_STR_EQ(buf, "new\n");
+        free(path);
+    }
+    umask(um);
+
+    /* write_file's overwrite rides the same seam. */
+    char *path = scratch_path("mode_write.sh");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("#!/bin/sh\necho one\n", f);
+    fclose(f);
+    ASSERT_EQ(chmod(path, 0755), 0);
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("#!/bin/sh\necho two\n"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+    struct stat st;
+    ASSERT_EQ(stat(path, &st), 0);
+    ASSERT_EQ(st.st_mode & 07777, (mode_t)0755);
+    free(path);
+
+    /* A NEW file is the usual create mode: umask still applies to it
+     * (0666 & ~077 = 0600), so the seam is not "copy a mode" everywhere. */
+    char *fresh = scratch_path("mode_fresh.txt");
+    remove(fresh);
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(fresh));
+    nm_json_set(jargs, "content", nm_json_new_string("new\n"));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    mode_t um2 = umask(077);
+    r = nm_toolset_execute(ts, "write_file", args, NULL);
+    umask(um2);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(stat(fresh, &st), 0);
+    ASSERT_EQ(st.st_mode & 07777, (mode_t)0600);
+    free(fresh);
+
+    ASSERT_TRUE(!dir_has_stray_tmp(scratch_dir()));
+    nm_toolset_free(ts);
+}
+
+/* read_file follows a symlink (fopen does), so the write must too: a
+ * rename onto the link replaces the link and reports an edit that never
+ * touched the file. The tmp belongs beside the TARGET as well (both
+ * directories are checked for strays). */
+static void test_write_follows_symlink(void)
+{
+    char *dir_a = scratch_sub_dir("link_dir");
+    char *dir_b = scratch_sub_dir("link_target_dir");
+    char *target = scratch_in(dir_b, "target.txt");
+    char *link = scratch_in(dir_a, "link.txt");
+    FILE *f = fopen(target, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("value = old\n", f);
+    fclose(f);
+    remove(link);
+    ASSERT_EQ(symlink(target, link), 0);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(link));
+    nm_json_set(jargs, "old_string", nm_json_new_string("old"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("new"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+
+    struct stat lst;
+    ASSERT_EQ(lstat(link, &lst), 0);
+    ASSERT_TRUE(S_ISLNK(lst.st_mode)); /* the link is still a link */
+    char buf[64];
+    ASSERT_EQ(slurp_file(target, buf, sizeof(buf)), 12);
+    ASSERT_STR_EQ(buf, "value = new\n");
+    ASSERT_TRUE(!dir_has_stray_tmp(dir_a));
+    ASSERT_TRUE(!dir_has_stray_tmp(dir_b));
+
+    /* A DANGLING link: fopen creates the TARGET (the link's own
+     * directory is the base for a relative target), so the write must
+     * land there — realpath alone cannot, and renaming over the link
+     * would destroy it. */
+    char *missing = scratch_in(dir_a, "created.txt");
+    char *dangling = scratch_in(dir_a, "dangling.txt");
+    remove(missing);
+    remove(dangling);
+    ASSERT_EQ(symlink("created.txt", dangling), 0);
+    NmJson *j2 = nm_json_new_object();
+    nm_json_set(j2, "path", nm_json_new_string(dangling));
+    nm_json_set(j2, "content", nm_json_new_string("made\n"));
+    char *a2 = nm_json_dump(j2);
+    nm_json_free(j2);
+    r = nm_toolset_execute(ts, "write_file", a2, NULL);
+    free(a2);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(lstat(dangling, &lst), 0);
+    ASSERT_TRUE(S_ISLNK(lst.st_mode));
+    ASSERT_EQ(slurp_file(missing, buf, sizeof(buf)), 5);
+    ASSERT_STR_EQ(buf, "made\n");
+
+    /* A cycle is refused like the kernel's ELOOP — never renamed over. */
+    char *c1 = scratch_in(dir_a, "cycle1");
+    char *c2 = scratch_in(dir_a, "cycle2");
+    remove(c1);
+    remove(c2);
+    ASSERT_EQ(symlink("cycle2", c1), 0);
+    ASSERT_EQ(symlink("cycle1", c2), 0);
+    NmJson *j3 = nm_json_new_object();
+    nm_json_set(j3, "path", nm_json_new_string(c1));
+    nm_json_set(j3, "content", nm_json_new_string("nope\n"));
+    char *a3 = nm_json_dump(j3);
+    nm_json_free(j3);
+    r = nm_toolset_execute(ts, "write_file", a3, NULL);
+    free(a3);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "symbolic links") != NULL);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(lstat(c1, &lst), 0);
+    ASSERT_TRUE(S_ISLNK(lst.st_mode));
+
+    remove(c1);
+    remove(c2);
+    remove(dangling);
+    remove(missing);
+    remove(link);
+    free(missing);
+    free(dangling);
+    free(c1);
+    free(c2);
+    free(target);
+    free(link);
+    free(dir_a);
+    free(dir_b);
+    nm_toolset_free(ts);
+}
+#endif /* !_WIN32 */
+
+/* A target that must not be replaced is refused BY NAME, not by
+ * whatever the rename would say: the pre-seam in-place write could not
+ * have written a read-only file either, and a rename happily would. */
+static void test_write_refuses_readonly_target(void)
+{
+    char *path = scratch_path("readonly.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("locked\n", f);
+    fclose(f);
+#ifdef _WIN32
+    ASSERT_TRUE(SetFileAttributesA(path, FILE_ATTRIBUTE_READONLY) != 0);
+#else
+    ASSERT_EQ(chmod(path, 0444), 0);
+#endif
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "content", nm_json_new_string("CLOBBERED\n"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "read-only") != NULL);
+    ASSERT_TRUE(strstr(r.output, "0444") != NULL); /* the mode is named */
+    nm_tool_result_free(&r);
+
+    /* edit_file refuses the same target through the same seam. */
+    NmJson *jedit = nm_json_new_object();
+    nm_json_set(jedit, "path", nm_json_new_string(path));
+    nm_json_set(jedit, "old_string", nm_json_new_string("locked"));
+    nm_json_set(jedit, "new_string", nm_json_new_string("open"));
+    char *eargs = nm_json_dump(jedit);
+    nm_json_free(jedit);
+    r = nm_toolset_execute(ts, "edit_file", eargs, NULL);
+    free(eargs);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "read-only") != NULL);
+    nm_tool_result_free(&r);
+
+    char buf[64];
+    ASSERT_EQ(slurp_file(path, buf, sizeof(buf)), 7);
+    ASSERT_STR_EQ(buf, "locked\n");
+#ifdef _WIN32
+    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL); /* so cleanup can */
+#else
+    ASSERT_EQ(chmod(path, 0644), 0);
+#endif
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A rename would replace a special file (or a directory) with a regular
+ * file, silently destroying it — the seam refuses instead, naming what
+ * the path is. */
+static void test_write_refuses_non_file_target(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+
+    /* a directory target: refused by name (rename's own EISDIR /
+     * ERROR_ACCESS_DENIED is not a message a model can act on) */
+    char *dir = scratch_sub_dir("dir_target");
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(dir));
+    nm_json_set(jargs, "content", nm_json_new_string("x"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "a directory") != NULL);
+    ASSERT_TRUE(strstr(r.output, "not a file") != NULL);
+    nm_tool_result_free(&r);
+    struct stat st;
+    ASSERT_EQ(stat(dir, &st), 0);
+    ASSERT_TRUE(S_ISDIR(st.st_mode)); /* still a directory */
+    ASSERT_TRUE(!dir_has_stray_tmp(scratch_dir()));
+
+#ifndef _WIN32
+    /* a fifo: a rename would replace it with a regular file */
+    char *fifo = scratch_in(dir, "pipe");
+    remove(fifo);
+    ASSERT_EQ(mkfifo(fifo, 0644), 0);
+    jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(fifo));
+    nm_json_set(jargs, "content", nm_json_new_string("nope\n"));
+    args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    r = nm_toolset_execute(ts, "write_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "a fifo") != NULL);
+    nm_tool_result_free(&r);
+    ASSERT_EQ(lstat(fifo, &st), 0);
+    ASSERT_TRUE(S_ISFIFO(st.st_mode)); /* still a fifo */
+
+    /* And the READ side names it too: opening a fifo for reading BLOCKS
+     * until a writer arrives, so a read_file on one used to hang the
+     * tool (the write_file probe did as well — both stat now). */
+    NmJson *jread = nm_json_new_object();
+    nm_json_set(jread, "path", nm_json_new_string(fifo));
+    char *rargs = nm_json_dump(jread);
+    nm_json_free(jread);
+    r = nm_toolset_execute(ts, "read_file", rargs, NULL);
+    free(rargs);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "a fifo") != NULL);
+    nm_tool_result_free(&r);
+
+    remove(fifo);
+    free(fifo);
+#endif
+    free(dir);
+    nm_toolset_free(ts);
+}
+
+#ifdef _WIN32
+/* The Windows analogue of the mode: MoveFileEx takes the SOURCE's
+ * attributes, so the target's must be carried onto the tmp or a hidden
+ * file comes back visible. */
+static void test_write_preserves_attributes(void)
+{
+    char *path = scratch_path("hidden.txt");
+    FILE *f = fopen(path, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("old\n", f);
+    fclose(f);
+    ASSERT_TRUE(SetFileAttributesA(path, FILE_ATTRIBUTE_HIDDEN) != 0);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(path));
+    nm_json_set(jargs, "old_string", nm_json_new_string("old"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("new"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+
+    DWORD attrs = GetFileAttributesA(path);
+    ASSERT_TRUE(attrs != INVALID_FILE_ATTRIBUTES);
+    ASSERT_TRUE((attrs & FILE_ATTRIBUTE_HIDDEN) != 0);
+    char buf[32];
+    ASSERT_EQ(slurp_file(path, buf, sizeof(buf)), 4);
+    ASSERT_STR_EQ(buf, "new\n");
+    SetFileAttributesA(path, FILE_ATTRIBUTE_NORMAL);
+    free(path);
+    nm_toolset_free(ts);
+}
+
+/* A symlink: the rename must land on the TARGET, the same read/write
+ * agreement the POSIX half keeps. Wine can neither create nor open a
+ * host symlink, so this passes through there (the MSYS2 CI runs it for
+ * real, as an admin). */
+static void test_write_follows_symlink(void)
+{
+    char *dir_a = scratch_sub_dir("winlink_dir");
+    char *dir_b = scratch_sub_dir("winlink_target");
+    char *target = scratch_in(dir_b, "target.txt");
+    char *link = scratch_in(dir_a, "link.txt");
+    FILE *f = fopen(target, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("value = old\n", f);
+    fclose(f);
+    remove(link);
+    if (!CreateSymbolicLinkA(link, target, 0)) {
+        /* no privilege on this host (Wine, a locked-down runner): the
+         * behavior is untestable here, never a failure */
+        free(target);
+        free(link);
+        free(dir_a);
+        free(dir_b);
+        return;
+    }
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmJson *jargs = nm_json_new_object();
+    nm_json_set(jargs, "path", nm_json_new_string(link));
+    nm_json_set(jargs, "old_string", nm_json_new_string("old"));
+    nm_json_set(jargs, "new_string", nm_json_new_string("new"));
+    char *args = nm_json_dump(jargs);
+    nm_json_free(jargs);
+    NmToolResult r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    nm_tool_result_free(&r);
+
+    DWORD attrs = GetFileAttributesA(link);
+    ASSERT_TRUE(attrs != INVALID_FILE_ATTRIBUTES);
+    ASSERT_TRUE((attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0); /* still a link */
+    char buf[64];
+    ASSERT_EQ(slurp_file(target, buf, sizeof(buf)), 12);
+    ASSERT_STR_EQ(buf, "value = new\n");
+    ASSERT_TRUE(!dir_has_stray_tmp(dir_a));
+    ASSERT_TRUE(!dir_has_stray_tmp(dir_b));
+
+    remove(link);
+    free(target);
+    free(link);
+    free(dir_a);
+    free(dir_b);
+    nm_toolset_free(ts);
+}
+#endif /* _WIN32 */
+
 /* ---------------------------------------------------------------- */
 /* list_dir / search_dir                                             */
 /* ---------------------------------------------------------------- */
@@ -4013,6 +4424,15 @@ int main(void)
     RUN_TEST(test_write_file_missing_args);
 #ifndef _WIN32
     RUN_TEST(test_write_file_failed_write_keeps_original);
+#endif
+#ifndef _WIN32
+    RUN_TEST(test_write_seam_preserves_mode);
+#endif
+    RUN_TEST(test_write_refuses_readonly_target);
+    RUN_TEST(test_write_refuses_non_file_target);
+    RUN_TEST(test_write_follows_symlink);
+#ifdef _WIN32
+    RUN_TEST(test_write_preserves_attributes);
 #endif
     RUN_TEST(test_list_dir);
     RUN_TEST(test_search_dir_literal);
