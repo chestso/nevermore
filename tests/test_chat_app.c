@@ -1295,9 +1295,11 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    /* hyper's static catalog carries gpt-oss-120b's window (131072), so
+     * the denominator is real catalog metadata resolved at the point of
+     * use — no push. */
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
-    nm_agent_set_context_limit(nm_chat_app_agent(h->app), 131072);
 
     /* Round 1: usage, but no cache read ever reported => no ⚡ at all
      * (never a fabricated 0 %) and the session line says so. */
@@ -1357,7 +1359,9 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
 }
 
 /* The gauge's tier tracks how full the window is: Orange past ~85 % of a
- * KNOWN limit, Red past ~95 % (Comment at rest). */
+ * KNOWN limit, Red past ~95 % (Comment at rest). The window is the
+ * catalog's (openai's o3, 200000) — resolved at the point of use, so the
+ * tiers are exercised through the real path, not a pushed fixture. */
 static void test_context_gauge_warns_near_the_limit(void)
 {
     struct ServerScript sc;
@@ -1365,13 +1369,13 @@ static void test_context_gauge_warns_near_the_limit(void)
     sc.n_rounds = 2;
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":860,"
-        "\"completion_tokens\":1,\"total_tokens\":861}}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":170000,"
+        "\"completion_tokens\":1,\"total_tokens\":170001}}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":960,"
-        "\"completion_tokens\":1,\"total_tokens\":961}}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":190000,"
+        "\"completion_tokens\":1,\"total_tokens\":190001}}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -1380,17 +1384,15 @@ static void test_context_gauge_warns_near_the_limit(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("openai", "o3", base);
     ASSERT_NOT_NULL(h);
-    /* A known window to measure against (the UI's own push seam). */
-    nm_agent_set_context_limit(nm_chat_app_agent(h->app), 1000);
 
     harness_type(h, "one");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = span_bytes(nm_color_gutter_warn(), "ctx 860/1k ");
+    char *warn = span_bytes(nm_color_gutter_warn(), "ctx 170k/200k ");
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -1400,7 +1402,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = span_bytes(nm_color_gutter_warn_hot(), "ctx 960/1k ");
+    char *hot = span_bytes(nm_color_gutter_warn_hot(), "ctx 190k/200k ");
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);

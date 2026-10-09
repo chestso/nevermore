@@ -763,12 +763,12 @@ static void trim_path(const char *arg, char *path, size_t cap)
 /* ---------------------------------------------------------------- */
 
 /* The active model's vision flag, from the provider catalog (the one
- * authority): 1 accepts image parts, 0 is text-only, -1 unknown. Same
- * borrowed static/cached lookup as model_context_limit — never a wire
- * fetch from the UI thread. The agent resolves the same flag itself at
- * construction (the system prompt's capability clause), and it cannot
- * be the source here: /model changes the model without rebuilding the
- * agent, and this warning must follow the CURRENT model. */
+ * authority): 1 accepts image parts, 0 is text-only, -1 unknown. The
+ * CACHED read — never a wire fetch from the UI thread (the agent's own
+ * lookup in agent.c is the same shape). The agent resolves the same flag
+ * itself at construction (the system prompt's capability clause), and it
+ * cannot be the source here: /model changes the model without rebuilding
+ * the agent, and this warning must follow the CURRENT model. */
 static int model_vision(const NmChatApp *app, const NmProvider *p)
 {
     if (!p || !app->model)
@@ -1185,38 +1185,6 @@ static void warn_missing_key(NmChatApp *app, const NmProvider *p)
                  p->name);
 }
 
-/* The active model's context window, from the provider catalog (the
- * one authority). NULL base_url/api_key on purpose: a base_url would
- * make a wire-catalog provider (ollama, opencode) issue a BLOCKING
- * fetch from the UI thread — the catalog lookup must resolve against
- * whatever is cached/static. -1 = unknown (an ids-only live catalog,
- * or a model the static table does not carry). */
-static long model_context_limit(const NmChatApp *app, const NmProvider *p)
-{
-    if (!p || !app->model)
-        return -1;
-    size_t n = 0;
-    /* The CACHED read: a wire catalog must never be fetched from the
-     * UI thread here (the popup's async seam owns that). */
-    const NmModel *models = p->models_cached(p, &n);
-    if (!models)
-        return -1;
-    for (size_t i = 0; i < n; i++) {
-        if (models[i].id && strcmp(models[i].id, app->model) == 0)
-            return models[i].context_length;
-    }
-    return -1;
-}
-
-/* Resolve + push the active model's window (the agent has no catalog;
- * the UI owns the lookup). -1 = unknown, and the gauge degrades. */
-static void refresh_context_limit(NmChatApp *app)
-{
-    if (app->agent)
-        nm_agent_set_context_limit(app->agent,
-                                   model_context_limit(app, app->provider));
-}
-
 /* Build (or rebuild) the agent over the given provider. Callbacks are
  * the app's own; userdata stays NULL (the callbacks find the app via
  * s_app), and the tools get the agent's own NmToolCtx — no workdir
@@ -1234,11 +1202,12 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_reminder(a, nm_chat_app_on_reminder);
     nm_agent_on_warning(a, nm_chat_app_on_warning);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
-    /* The tool-round cap, the reasoning echo and the stream-inactivity
-     * timeout are NOT pushed: the agent resolves them from the config
-     * store at the point of use (nm_agent_max_rounds /
-     * nm_agent_reasoning_echo / nm_agent_timeout_ms). */
-    nm_agent_set_context_limit(a, model_context_limit(app, p));
+    /* The tool-round cap, the reasoning echo, the stream-inactivity
+     * timeout and the active model's context window are NOT pushed: the
+     * agent resolves them at the point of use (nm_agent_max_rounds /
+     * nm_agent_reasoning_echo / nm_agent_timeout_ms /
+     * nm_agent_context_limit, the last from the provider's cached
+     * catalog read). */
     if (app->agent)
         nm_agent_free(app->agent); /* session goes with it (fresh chat) */
     app->agent = a;
@@ -3185,7 +3154,6 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             nm_agent_set_model(app->agent, id);
             free(app->model);
             app->model = strdup(id);
-            refresh_context_limit(app);
             char line[256];
             snprintf(line, sizeof(line), "model: %s (exact)", app->model);
             persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);
@@ -3228,7 +3196,6 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
                 nm_agent_set_model(app->agent, q.text);
                 free(app->model);
                 app->model = strdup(q.text);
-                refresh_context_limit(app);
                 char line[256];
                 snprintf(line, sizeof(line), "model: %s", app->model);
                 persist_and_report(app, NM_CFG_KEY_MODEL, app->model, line);

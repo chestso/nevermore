@@ -75,15 +75,17 @@ int nm_agent_max_rounds(const NmAgent *a);
  *   nm_agent_context_cached_tokens  prefix-cache read; -1 unknown
  *   nm_agent_context_limit        active model's window; -1 unknown
  *
- * The limit is NOT provider usage: the agent has no catalog, so the UI
- * resolves the active model's context_length and pushes it with
- * nm_agent_set_context_limit (beside set_endpoint/set_timeout_ms). -1
- * means unknown (an ids-only live catalog), and the display degrades. */
+ * The limit is NOT provider usage: it is CATALOG metadata, resolved at
+ * the point of use from the provider's cached catalog read (never a
+ * fetch, so it is safe on the UI thread and never a freeze) — the same
+ * lookup that answers the vision and tool-use claims. A cache the
+ * /model popup's async fetch warms therefore moves the gauge with no
+ * push and no rebuild; -1 means unknown (an ids-only live catalog, or a
+ * model the static fallback does not carry), and the display degrades. */
 int nm_agent_context_has_usage(const NmAgent *a);
 long nm_agent_context_used_tokens(const NmAgent *a);
 long nm_agent_context_cached_tokens(const NmAgent *a);
 long nm_agent_context_limit(const NmAgent *a);
-void nm_agent_set_context_limit(NmAgent *a, long limit);
 
 /* Session accounting: the provider-agnostic ledger over COMPLETED
  * rounds (the facts in NmUsage — see the contract there). The agent

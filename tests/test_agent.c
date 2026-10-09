@@ -2480,7 +2480,7 @@ static void test_agent_error_message_is_informative(void)
 
 /* Context-usage gauge: a round carrying a usage object populates the
  * agent's accessors; a round without one leaves has_usage false. The
- * limit is UI-pushed and round-trips. */
+ * window is a catalog fact, resolved at the point of use — no push. */
 static void test_agent_context_usage_accessors(void)
 {
     reset_capture();
@@ -2507,13 +2507,15 @@ static void test_agent_context_usage_accessors(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    /* Before any round: no usage, unknown limit. */
+    /* Before any round: no usage, and no window for a model the catalog
+     * does not carry (never a guess). */
     ASSERT_FALSE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), -1);
     ASSERT_EQ(nm_agent_context_limit(agent), -1);
 
-    /* The UI pushes the model's window (the agent has no catalog). */
-    nm_agent_set_context_limit(agent, 128000);
+    /* The window is a CATALOG fact, resolved at the point of use: no
+     * push, and /model switches it on the live agent. */
+    nm_agent_set_model(agent, "gpt-5");
     ASSERT_EQ(nm_agent_context_limit(agent), 128000);
 
     int rc = nm_agent_turn(agent, "hi", NULL, 0);
@@ -3398,6 +3400,65 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
     nm_toolset_free(tools);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* The context window is a CATALOG fact, resolved at the point of use:
+ * when the cache warms — the /model popup's async fetch is what fills it
+ * — the gauge follows with NO push and NO agent rebuild. The bug this
+ * pins: the limit used to be a copy pushed at construction, so a model
+ * the static fallback did not carry (hyper's `deepseek-v4.1-flash`, the
+ * user's `ctx 47.1k/-`) stayed `-` for the whole session, however warm
+ * the cache got. */
+static const NmModel stub_cold_models[] = {
+    { "other-model", "Stub (static fallback)", 0, 0, 8192, 0 },
+    { 0 }
+};
+static const NmModel stub_live_models[] = {
+    { "stub-late", "Stub (live catalog)", 0, 0, 262144, 0 },
+    { 0 }
+};
+
+/* The provider's process-global cache: the seam the async fetch writes. */
+static const NmModel *g_stub_catalog;
+
+static const NmModel *stub_catalog_read(const NmProvider *p, size_t *n_out)
+{
+    (void)p;
+    size_t n = 0;
+    while (g_stub_catalog[n].id)
+        n++;
+    if (n_out)
+        *n_out = n;
+    return g_stub_catalog;
+}
+
+static void test_agent_context_limit_follows_a_warmed_catalog(void)
+{
+    struct NmProvider p = nm_test_provider;
+    p.models_cached = stub_catalog_read;
+
+    /* A cold cache: the fallback does not carry the model, so the window
+     * is unknown (never a guess). */
+    g_stub_catalog = stub_cold_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-late", tools, NULL);
+    ASSERT_EQ(nm_agent_context_limit(agent), -1);
+    ASSERT_EQ(nm_agent_context_tier(agent), 0);
+
+    /* The async fetch lands (a different table, the same provider): the
+     * accessor follows the cache on the spot. */
+    g_stub_catalog = stub_live_models;
+    ASSERT_EQ(nm_agent_context_limit(agent), 262144);
+
+    /* And it follows the MODEL, not a snapshot: a /model switch
+     * re-resolves with no rebuild. */
+    nm_agent_set_model(agent, "other-model");
+    ASSERT_EQ(nm_agent_context_limit(agent), -1);
+    nm_agent_set_model(agent, "stub-late");
+    ASSERT_EQ(nm_agent_context_limit(agent), 262144);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
 }
 
 /* ---------------------------------------------------------------- */
@@ -4369,16 +4430,17 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
     g_reminder_calls = 0;
     g_reminder_names[0] = '\0';
 
-    /* Three turns; every round reports the same 86000-token prompt, so
-     * the gauge sits at tier 1 (86 % of 100000) from turn 2 on. */
+    /* Three turns; every round reports the same 170000-token prompt, so
+     * the gauge sits at tier 1 (85 % of 200000 — the catalog window of
+     * openai's o3, resolved at the point of use) from turn 2 on. */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 3;
     for (int i = 0; i < 3; i++)
         sc.sse[i] =
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
-            "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":86000,"
-            "\"completion_tokens\":5,\"total_tokens\":86005}}\n\n"
+            "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":170000,"
+            "\"completion_tokens\":5,\"total_tokens\":170005}}\n\n"
             "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -4389,14 +4451,13 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     const NmProvider *p = nm_provider_by_name("openai");
     NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "o3", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
-    nm_agent_set_context_limit(agent, 100000);
 
     /* Turn 1: the gauge has no usage yet when the turn starts, so no
-     * reminder; the round reports 86000. */
+     * reminder; the round reports 170000. */
     ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
     ASSERT_EQ(g_reminder_calls, 0);
     ASSERT_EQ(nm_agent_context_tier(agent), 1);
@@ -4407,7 +4468,7 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
     ASSERT_STR_EQ(g_reminder_names, "context-pressure,");
     ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
-    ASSERT_TRUE(strstr(g_requests[1], "Context is at 86%") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "Context is at 85%") != NULL);
     /* It is a USER message of its own, after the user's own text. */
     const char *rem = strstr(g_requests[1], "<system-reminder>\\n");
     ASSERT_NOT_NULL(rem);
@@ -5127,6 +5188,7 @@ int main(void)
     RUN_TEST(test_agent_env_stage_is_skipped_outside_a_repo);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
     RUN_TEST(test_agent_never_takes_the_blocking_catalog_drive);
+    RUN_TEST(test_agent_context_limit_follows_a_warmed_catalog);
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);
     RUN_TEST(test_agent_cancel_drops_pending_image_fanout);

@@ -197,11 +197,14 @@ struct NmAgent
     /* Provider-reported token usage: the LAST usage object seen this
      * round (sentinels -1 when a field was not reported). has_usage is
      * the gate — a real prompt_tokens (>= 0) has arrived at least once.
-     * context_limit is the active model's window, pushed by the UI (the
-     * agent has no catalog); -1 = unknown. */
+     * The context window is NOT a field: like the model's vision and
+     * tool-use claims it is a CATALOG fact, resolved at the point of use
+     * (nm_agent_context_limit) from the cached read — a pushed copy went
+     * stale the moment the /model popup's async fetch warmed the cache
+     * (a wire-catalog model outside the static fallback showed `-` for
+     * the whole session). */
     NmUsage last_usage;
     int has_usage;
-    long context_limit;
 
     /* 1 while THIS round has carried a real usage report: cleared at
      * round_reset, set by round_on_usage. finish_round accumulates the
@@ -244,49 +247,48 @@ static void set_error(NmAgent *a, const char *msg)
     set_state(a, NM_AGENT_ERROR);
 }
 
-/* The active model's vision flag, from the provider catalog (the one
- * authority): 1 accepts image content parts, 0 is text-only, -1
- * unknown. Resolved here, at construction, because the assembled
- * system prompt has to declare the capability (context.c's
- * vision_clause) — a coding-agent identity with file tools otherwise
- * makes an attached image read as a file to go read. The UI resolves
- * the same flag for its text-only warning; it cannot be the source
- * here because a /model switch changes the model without rebuilding
- * the agent, while this value is per-chat on purpose (that is what
- * keeps the clause inside the cached prefix). */
-static int model_vision_lookup(const NmModel *models, size_t n,
-                               const char *model)
-{
-    if (!models || !model)
-        return -1;
-    for (size_t i = 0; i < n; i++) {
-        if (models[i].id && strcmp(models[i].id, model) == 0)
-            return models[i].vision;
-    }
-    return -1;
-}
-
-/* The lookup, resolved with the CACHED catalog read — never the
- * blocking drive. Every call site here runs on the UI thread
- * (nm_agent_new is reached from a /provider key handler and from
- * startup; begin_round from the first step of a turn), where a live
- * fetch is a freeze: that is the repo-wide rule (AGENTS.md — "on the
- * UI thread the catalog is read with models_cached, never fetching").
- * A cold cache therefore answers the static fallback, and a model
- * that is not in it stays unknown (-1) — exactly the degradation an
- * unknown model always had: the prompt claims no capability it cannot
- * confirm and the toolset is kept. The /model popup's async fetch is
- * what warms the cache. The drive fills `n` BEFORE the lookup reads
- * it — in one expression the read could be sequenced before the call
- * (argument evaluation order is unspecified), which silently looked
+/* The active model's row in the provider catalog — the ONE lookup behind
+ * the vision claim, the tool-use claim and the context window. Resolved
+ * with the CACHED catalog read, never the blocking drive: every call site
+ * runs on the UI thread (nm_agent_new from a /provider switch or from
+ * startup, begin_round from a turn's first step, nm_agent_context_limit
+ * from every frame that composes the gauge), where a live fetch is a
+ * freeze — the repo-wide rule (AGENTS.md: "on the UI thread the catalog
+ * is read with models_cached, never fetching"). A cold cache therefore
+ * answers the static fallback, and a model that is not in it stays
+ * unknown (-1): exactly the degradation an unknown model always had, and
+ * what the /model popup's async fetch is for. Because every reader
+ * resolves HERE, the answer follows the cache with no event and no push:
+ * the window used to be a copy pushed at construction, so a fetch that
+ * landed later could not move it. The drive fills `n` BEFORE the lookup
+ * reads it — in one expression the read could be sequenced before the
+ * call (argument evaluation order is unspecified), which silently looked
  * up zero entries. */
-static int model_vision(const NmProvider *p, const char *model)
+static const NmModel *model_entry(const NmProvider *p, const char *model)
 {
-    if (!p || !p->models_cached)
-        return -1;
+    if (!p || !p->models_cached || !model || !*model)
+        return NULL;
     size_t n = 0;
     const NmModel *models = p->models_cached(p, &n);
-    return model_vision_lookup(models, n, model);
+    for (size_t i = 0; i < n; i++) {
+        if (models[i].id && strcmp(models[i].id, model) == 0)
+            return &models[i];
+    }
+    return NULL;
+}
+
+/* The active model's vision flag: 1 accepts image content parts, 0 is
+ * text-only, -1 unknown. Resolved here, at construction, because the
+ * assembled system prompt has to declare the capability (context.c's
+ * vision_clause) — a coding-agent identity with file tools otherwise
+ * makes an attached image read as a file to go read. The clause sits
+ * inside the cached prefix on purpose, so this one is a per-chat read;
+ * the UI resolves the same flag for its text-only warning (chat_app.c),
+ * which must follow the CURRENT model. */
+static int model_vision(const NmProvider *p, const char *model)
+{
+    const NmModel *m = model_entry(p, model);
+    return m ? m->vision : -1;
 }
 
 /* The active model's tool-use claim, from the provider catalog (the
@@ -297,7 +299,8 @@ static int model_vision(const NmProvider *p, const char *model)
  * not silently lose its tools. Resolved at the point of use
  * (begin_round), not at construction, because /model switches the
  * model on a live agent without rebuilding it — the same reason the
- * round cap and the echo mode are store lookups, not pushed copies.
+ * round cap, the echo mode and the context window are lookups, not
+ * pushed copies.
  * The CACHED read, for the same reason model_vision takes it: this
  * runs inside the first step of a turn, on the UI thread, where the
  * blocking drive would re-pay a dead peer's fetch deadline EVERY
@@ -306,17 +309,8 @@ static int model_vision(const NmProvider *p, const char *model)
  * (0), which keeps the toolset. */
 static int model_tools(const NmProvider *p, const char *model)
 {
-    if (!p || !p->models_cached || !model)
-        return 0;
-    size_t n = 0;
-    const NmModel *models = p->models_cached(p, &n);
-    if (!models)
-        return 0;
-    for (size_t i = 0; i < n; i++) {
-        if (models[i].id && strcmp(models[i].id, model) == 0)
-            return models[i].tools;
-    }
-    return 0;
+    const NmModel *m = model_entry(p, model);
+    return m ? m->tools : 0;
 }
 
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
@@ -330,13 +324,11 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->tools = tools;
     a->userdata = userdata;
     a->state = NM_AGENT_IDLE;
-    /* Usage gauge starts unknown: sentinels until the provider reports
-     * (and the limit until the UI pushes it). */
+    /* Usage gauge starts unknown: sentinels until the provider reports. */
     a->last_usage.prompt_tokens = -1;
     a->last_usage.completion_tokens = -1;
     a->last_usage.total_tokens = -1;
     a->last_usage.cached_tokens = -1;
-    a->context_limit = -1;
     /* Context assembly is construction-time I/O (one walk + a couple
      * of bounded reads). Failure degrades to the base prompt, never
      * to a failed agent. The model's vision flag is part of the
@@ -614,9 +606,15 @@ long nm_agent_context_cached_tokens(const NmAgent *a)
     return a ? a->last_usage.cached_tokens : -1;
 }
 
+/* The active model's window, from the provider catalog (the one
+ * authority), resolved at the point of use — the same cached lookup as
+ * the vision and tool-use claims, so the answer follows a cache the
+ * /model popup's async fetch warmed. -1 = unknown (an ids-only live
+ * catalog, or a model the static fallback does not carry). */
 long nm_agent_context_limit(const NmAgent *a)
 {
-    return a ? a->context_limit : -1;
+    const NmModel *m = a ? model_entry(a->provider, a->model) : NULL;
+    return m ? m->context_length : -1;
 }
 
 /* ---- session accounting (provider-agnostic; see NmUsage) ---- */
@@ -655,12 +653,6 @@ long nm_agent_session_cache_base_tokens(const NmAgent *a)
     if (!a || !a->sess_read_seen)
         return -1;
     return a->sess_cache_base;
-}
-
-void nm_agent_set_context_limit(NmAgent *a, long limit)
-{
-    if (a)
-        a->context_limit = limit;
 }
 
 /* The stream-inactivity budget is the config store's `timeout` key,
