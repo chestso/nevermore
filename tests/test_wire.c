@@ -121,7 +121,14 @@ static int server_bind(int *port)
         return -1;
     }
     *port = ntohs(got.sin_port);
-    if (listen(fd, 1) < 0) {
+    /* Backlog 8, not 1: a test may have TWO connections pending at once
+     * (nm_source_wait_any's set case dials a second one while the first
+     * is unaccepted), and a 1-deep queue is a platform truth, not a
+     * constant — Linux rounds the backlog up, macOS/BSD SILENTLY DROP
+     * the extra SYN (the connect hangs to the OS timeout) and Windows
+     * refuses it outright.  test_agent/test_chat_app's helpers already
+     * carry the same number. */
+    if (listen(fd, 8) < 0) {
         close(fd);
         return -1;
     }

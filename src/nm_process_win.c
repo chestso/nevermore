@@ -279,9 +279,15 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
     SIZE_T attr_size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &attr_size);
     LPPROC_THREAD_ATTRIBUTE_LIST attrs = malloc(attr_size ? attr_size : 1);
+    /* The handle list's backing store must stay alive until
+     * CreateProcessW returns: the attribute holds a POINTER to it (the
+     * API does not copy the array), so a block-scoped array is read
+     * after it has gone out of scope — whatever the compiler left in
+     * the slot — and CreateProcessW then fails with
+     * ERROR_INVALID_PARAMETER (87) for a garbage handle. */
+    HANDLE inherit[2] = { in_r, out_w };
     if (attrs && attr_size &&
         InitializeProcThreadAttributeList(attrs, 1, 0, &attr_size)) {
-        HANDLE inherit[2] = { in_r, out_w };
         if (UpdateProcThreadAttribute(attrs, 0,
                                       PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
                                       inherit, sizeof(inherit), NULL, NULL)) {
