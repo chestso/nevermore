@@ -530,7 +530,7 @@ const NmTool nm_tool_run_command = {
                    "stdin). A command that produces no output for a while is "
                    "stopped and its partial output returned; use "
                    "exec_command for anything long-lived or interactive",
-    .emoji = "🖥️",
+    .emoji = "🚀",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
     .begin = run_command_begin,

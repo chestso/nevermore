@@ -2139,7 +2139,7 @@ static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
      * the table sizes it ONE cell while the terminal presents the
      * emoji two, so its VS16 is LOAD-BEARING (without it the
      * right-aligned column is a cell off on every image_gen row,
-     * exactly like the tool badges' U+1F5A5/U+270F). 🔧️ carries the
+     * exactly like the tool badges' U+270F/U+25B6). 🔧️ carries the
      * same selector as 🖼️ — belt and braces for a terminal whose text
      * default wins (the table is already right either way). */
     if (m->vision)
