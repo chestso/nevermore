@@ -215,19 +215,6 @@ extern "C" {
  * applies to `run_command` or nevermore's own stages. Env spelling:
  * NEVERMORE_LOGIN_SHELL. */
 #define NM_CFG_KEY_LOGIN_SHELL "login_shell"
-/* Rolling context window: whether the agent trims the stored
- * conversation to a token budget before each request. `on`/`off` (a
- * bool, default OFF). OFF — the default — sends the whole transcript
- * and lets the provider report "too large", instead of silently
- * capping. A window that slides every turn also defeats the
- * provider's prefix cache (cached input bills far cheaper), so
- * trimming is opt-in. Env spelling: NEVERMORE_ROLLING_WINDOW. */
-#define NM_CFG_KEY_ROLLING_WINDOW "rolling_window"
-/* The token budget for the rolling window, read only when
- * `rolling_window` is on. A positive decimal, default
- * NM_AGENT_DEFAULT_CONTEXT_BUDGET; the 4-chars-per-token estimate
- * (quoth convention). Env spelling: NEVERMORE_CONTEXT_BUDGET. */
-#define NM_CFG_KEY_CONTEXT_BUDGET "context_budget"
 
 typedef enum
 {
@@ -267,8 +254,8 @@ void nm_config_free(NmConfig *c);
 const char *nm_config_get(const NmConfig *c, const char *key);
 NmCfgSource nm_config_source(const NmConfig *c, const char *key);
 
-/* Truthiness for a bool key (`family_skip`, `searxng_enabled`,
- * `rolling_window`): 1/true/on/yes, case-insensitive. Unset or
+/* Truthiness for a bool key (`family_skip`, `searxng_enabled`):
+ * 1/true/on/yes, case-insensitive. Unset or
  * unparseable yields `fallback` (set_env already dropped garbage). NOT
  * the reader for `reasoning_echo`, whose value space is the three modes —
  * use nm_config_reasoning_echo_mode. */
@@ -423,7 +410,7 @@ int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
 /* Is `value` a bool spelling (1/true/on/yes, 0/false/off/no,
  * case-insensitive)? The shape the bool keys (family_skip,
- * searxng_enabled, rolling_window) share, read back by
+ * searxng_enabled) share, read back by
  * nm_config_get_bool. */
 int nm_config_valid_bool(const char *value);
 /* Is `value` a duration spelling — a positive decimal (ms, up to

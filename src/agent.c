@@ -100,16 +100,6 @@ struct NmAgent
      * needs no latch at all. */
     unsigned turn;
     int reminder_latch[NM_REMINDER_MAX_RULES];
-    /* The rolling window's remembered cut point (session.h): the
-     * stable-prefix drive reads and updates it, so the ON path's prefix
-     * does not slide per round. NM_SESSION_NO_ANCHOR until a window
-     * computes one (and again after a no-trim call, which forgets it).
-     * round_dropped is the ledger the post-trim note reads: how many
-     * messages the window left out of THIS round's request (0 = the
-     * whole transcript), set at begin_round before the round's
-     * reminders are evaluated. */
-    size_t trim_anchor;
-    int round_dropped;
     /* This session's file ledger (nm_file_ledger.h): what the
      * conversation has already read, so a re-read of an unchanged file
      * is a pointer instead of a duplicate copy, and a file that changed
@@ -362,9 +352,6 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
      * the first round wait for it — nm_agent_start/step below. A
      * non-git cwd starts nothing and the prompt is already final. */
     a->env_job = -1;
-    /* No window cut point yet: the first ON-path call computes one
-     * (session.h's NM_SESSION_NO_ANCHOR). */
-    a->trim_anchor = NM_SESSION_NO_ANCHOR;
     if (nm_context_env_git_pending(a->context)) {
         char err[128];
         int id = -1;
@@ -518,9 +505,6 @@ static void reminder_facts(NmAgent *a, NmReminderFacts *f)
     f->ctx_tier = nm_agent_context_tier(a);
     f->round = a->round;
     f->round_cap = nm_agent_max_rounds(a);
-    /* The window's ledger for this round's request (set by begin_round
-     * just before this is gathered) and the cumulative cut count. */
-    f->ctx_dropped = a->round_dropped;
     f->output_cuts = a->output_cuts;
     /* The process registry: the jobs the MODEL started. nevermore's own
      * machinery (the context <env> git stage) is hidden and is not the
@@ -562,10 +546,8 @@ static void reminders_at(NmAgent *a, NmReminderPoint point, NmReminderFacts *f,
  * untouched and the provider's cache survives; the text says it is the
  * harness talking (see the system-prompt clause).
  *
- * Returns 1 when a message was appended (the caller must then rebuild
- * the round's context view: the view is a snapshot, so a message
- * appended after it is computed would otherwise never reach the wire),
- * 0 when there was nothing to say. */
+ * Returns 1 when a message was appended, 0 when there was nothing to
+ * say. */
 static int append_user_reminders(NmAgent *a, NmReminderPoint point)
 {
     if (!a->session)
@@ -613,22 +595,6 @@ int nm_agent_max_rounds(const NmAgent *a)
     return c ? nm_config_resolve_int(c, NM_CFG_KEY_ROUNDS,
                                      NM_AGENT_DEFAULT_MAX_ROUNDS)
              : NM_AGENT_DEFAULT_MAX_ROUNDS;
-}
-
-int nm_agent_rolling_window(const NmAgent *a)
-{
-    (void)a;
-    NmConfig *c = nm_config_store();
-    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_ROLLING_WINDOW, 0) : 0;
-}
-
-long nm_agent_context_budget(const NmAgent *a)
-{
-    (void)a;
-    NmConfig *c = nm_config_store();
-    return c ? nm_config_resolve_int(c, NM_CFG_KEY_CONTEXT_BUDGET,
-                                     NM_AGENT_DEFAULT_CONTEXT_BUDGET)
-             : NM_AGENT_DEFAULT_CONTEXT_BUDGET;
 }
 
 /* ---- context-usage gauge (provider-reported) ---- */
@@ -1015,9 +981,9 @@ static char *calls_to_json(const NmToolCall *calls, size_t n)
 
 /* Ensure the session exists, seeded with the assembled system prompt
  * (base text + the <project_context> block from AGENTS.md discovery;
- * see context.h). The session keeps message 0 across turns — and
- * nm_session_context() always keeps it even under a tiny budget, so
- * the context files cannot be trimmed away. */
+ * see context.h). The session keeps message 0 across turns, and the
+ * whole transcript rides every request — the context files can never be
+ * dropped. */
 static int ensure_session(NmAgent *a)
 {
     if (a->session)
@@ -1106,7 +1072,7 @@ static void chat_failure(NmAgent *a, const NmChatResult *r, char *out,
     }
 }
 
-/* Open the next round's stream from the session's context view.
+/* Open the next round's stream from the session's transcript.
  * Returns 0 on success. */
 static int begin_round(NmAgent *a)
 {
@@ -1123,35 +1089,9 @@ static int begin_round(NmAgent *a)
 
     /* This round's reminders, before its request is built (the cap
      * check above already passed, so the last-round nudge can never be
-     * appended for a round that will not happen).
-     *
-     * The window is computed FIRST, because one of those reminders
-     * reads its ledger: the post-trim note is about the very request
-     * this round builds, and it has to ride that request — a note
-     * describing a window it is not in would be exactly the divergence
-     * the transparency principle forbids. The view is a SNAPSHOT, so a
-     * reminder appended below only reaches the wire once the view is
-     * rebuilt, which is what the second call does. */
-    long budget = nm_agent_rolling_window(a) ? nm_agent_context_budget(a) : 0;
-    size_t anchor = a->trim_anchor;
-    NmContextView view = nm_session_context(a->session, budget, &anchor);
-    a->trim_anchor = anchor;
-    a->round_dropped = (int)view.dropped;
-    if (append_user_reminders(a, NM_REMINDER_POINT_ROUND))
-        view = nm_session_context(a->session, budget, &a->trim_anchor);
-
-    /* Tell the file ledger where the window now starts
-     * (nm_file_ledger.h): a read whose result fell out of the window is
-     * no longer in context, so it can neither be skipped ("the content
-     * is above" would be a lie) nor claimed. 0 = nothing was dropped,
-     * which is the whole transcript (windowing off, or everything
-     * fits). The anchor is the window's first message, so a record
-     * before it is gone. */
-    nm_file_ledger_set_window(a->file_ledger,
-                              budget > 0 &&
-                                      a->trim_anchor != NM_SESSION_NO_ANCHOR
-                                  ? a->trim_anchor
-                                  : 0);
+     * appended for a round that will not happen). They land in the
+     * session, so the request built below carries them. */
+    append_user_reminders(a, NM_REMINDER_POINT_ROUND);
 
     round_reset(a);
     /* A model whose catalog positively does not claim tools gets no
@@ -1164,13 +1104,12 @@ static int begin_round(NmAgent *a)
             ? nm_toolset_to_json(a->tools)
             : NULL;
 
-    /* Build the request from the session's context view. Rolling
-     * window OFF (the default) means no trim: the whole transcript is
-     * sent and the provider reports "too large", never a silent cap
-     * (and a per-turn slide would defeat the provider's prefix
-     * cache). ON means the store's budget, through the remembered cut
-     * point so the prefix holds between jumps (session.h). */
-    NmMessage *msgs = malloc((view.n + 1) * sizeof(*msgs));
+    /* Build the request from the WHOLE transcript: nevermore never
+     * caps it (no token-budget guessing), so the provider reports
+     * "too large" and the request prefix stays byte-stable — which is
+     * what keeps the provider's cached prefix paying off. */
+    size_t n_msgs = nm_session_len(a->session);
+    NmMessage *msgs = malloc((n_msgs + 1) * sizeof(*msgs));
     if (!msgs) {
         set_error(a, "out of memory");
         return -1;
@@ -1181,8 +1120,8 @@ static int begin_round(NmAgent *a)
      * copy of the payload — that is what the raw node and this array
      * exist for. */
     size_t total_parts = 0;
-    for (size_t i = 0; i < view.n; i++) {
-        const NmSessionMessage *sm = view.messages[i];
+    for (size_t i = 0; i < n_msgs; i++) {
+        const NmSessionMessage *sm = nm_session_get(a->session, i);
         for (size_t k = 0; k < sm->n_images; k++) {
             if (nm_session_image(a->session, sm->images[k]))
                 total_parts++;
@@ -1204,8 +1143,8 @@ static int begin_round(NmAgent *a)
      * any actually did is what freezes the mode below. */
     NmReasoningEcho echo = nm_agent_reasoning_echo(a);
     int echoed = 0;
-    for (size_t i = 0; i < view.n; i++) {
-        const NmSessionMessage *sm = view.messages[i];
+    for (size_t i = 0; i < n_msgs; i++) {
+        const NmSessionMessage *sm = nm_session_get(a->session, i);
         msgs[i].role = (sm->role == NM_ROLE_USER)        ? "user"
                        : (sm->role == NM_ROLE_ASSISTANT) ? "assistant"
                        : (sm->role == NM_ROLE_TOOL)      ? "tool"
@@ -1268,7 +1207,7 @@ static int begin_round(NmAgent *a)
     NmChatRequest req = {
         a->model,
         msgs,
-        view.n,
+        n_msgs,
         NULL, /* system prompt rides in the session transcript */
         tools_json,
         -1,
@@ -1638,13 +1577,6 @@ static int tool_step(NmAgent *a)
     if (a->tool_exec_idx < a->n_calls) {
         const NmToolCall *tc = &a->calls[a->tool_exec_idx];
         const NmTool *t = nm_toolset_find(a->tools, tc->name);
-
-        /* The ledger's session position: the index this call's result
-         * will occupy, which is what a recorded read is stamped with
-         * (nm_file_ledger.h). Set before the tool runs, so a tool that
-         * records during its own execution names the right message. */
-        nm_file_ledger_set_position(a->file_ledger,
-                                    nm_session_len(a->session));
 
         /* Plan first (principle 1): START for THIS call, the moment it
          * is about to run — not the round's other calls, which have not

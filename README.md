@@ -134,8 +134,7 @@ Settings resolve once, lowest to highest:
    `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
-   `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`,
-   `NEVERMORE_ROLLING_WINDOW`, `NEVERMORE_CONTEXT_BUDGET`
+   `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -166,8 +165,6 @@ searxng_timeout  = 10000
 run_command_timeout = 300000
 login_shell      = off
 reminders        = on
-rolling_window   = off
-context_budget   = 100000
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -184,25 +181,12 @@ provider, nevermore says so and waits for `/model` — ask mode exits
 before any traffic — rather than guessing an id from another
 provider's catalog.
 
-`rolling_window` (default `off`) is whether the agent trims the stored
-conversation to `context_budget` tokens (a 4-chars-per-token estimate)
-before each request. Off — the default — sends the whole transcript and
-lets the provider report "too large", which also keeps the request
-prefix stable so providers can serve it from their prompt cache
-(cached input bills far cheaper). Turn it on only if you want
-nevermore to silently cap the context instead.
-
-When it is on, the window is **stable-prefix**: it remembers where it
-cut, keeps that cut point as long as the newest messages still fit (so
-the prefix only grows and the provider's cache keeps working), and moves
-it only when the tail outgrows the budget — dropping **whole turns** at
-once (never half a turn, never a tool result without the call that
-produced it), down to about three quarters of the budget so the next
-jump is many rounds away rather than the next round. A single turn
-bigger than the budget is kept whole: the estimate is rough, and
-`/context` (the gauge) is what shows the real pressure. When a jump does
-drop messages, the model is told once that what it read earlier may be
-gone — re-read before asserting — unless `reminders = off`.
+The whole transcript rides every request: nevermore never trims it to a
+guessed token budget (a sliding window would silently cap the
+conversation and change the request prefix the provider's prompt cache
+keys on). A context that is too large is therefore the provider's error
+to report, verbatim; `/context` shows the provider-reported usage that
+tells you how close you are.
 
 `searxng` is the local [SearXNG](https://searxng.org) endpoint behind
 the `web_search` tool (default `http://127.0.0.1:8888`); the model
@@ -294,8 +278,7 @@ when a condition is met — a tool result that was truncated, a partial
 past its last line, an image attached for a model that cannot see it,
 web results that came from outside the machine, the context gauge
 crossing 85 %/95 %, background jobs still running from earlier turns,
-an answer the output limit cut short, the window having dropped earlier
-messages, the last tool round of a turn.
+an answer the output limit cut short, the last tool round of a turn.
 They are **never silent**: the human sees every one (the user-channel
 ones as a purple `reminder (rule): …` line, the tool-channel ones
 inside the panel's own body, in the same purple role), because the

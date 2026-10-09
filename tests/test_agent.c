@@ -2395,9 +2395,9 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
 /* One-shot oversize responder: accept once, capture the request,
  * answer 400 with a context-length error body (the provider's "too
- * large"), close. This is the default path with the rolling window
- * off — nevermore sends everything and the provider reports the
- * overflow, rather than silently capping. */
+ * large"), close. The whole transcript rides the request, so the
+ * provider reports the overflow rather than nevermore silently
+ * capping. */
 static void *context_400_server_thread(void *arg)
 {
     struct ServerScript *sc = arg;
@@ -2478,9 +2478,6 @@ static void test_agent_error_message_is_informative(void)
     close(sc.fd);
 }
 
-/* The rolling window is OFF by default and the agent sends the whole
- * transcript; the provider reports an oversize context verbatim rather
- * than nevermore silently capping it. */
 /* Context-usage gauge: a round carrying a usage object populates the
  * agent's accessors; a round without one leaves has_usage false. The
  * limit is UI-pushed and round-trips. */
@@ -2679,38 +2676,9 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     close(sc.fd);
 }
 
-static void test_agent_rolling_window_default_off(void)
-{
-    reset_capture();
-
-    const NmProvider *p = nm_provider_by_name("openai");
-    ASSERT_NOT_NULL(p);
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    ASSERT_NOT_NULL(agent);
-
-    /* Default: OFF, built-in budget. */
-    ASSERT_FALSE(nm_agent_rolling_window(agent));
-    ASSERT_EQ(nm_agent_context_budget(agent), NM_AGENT_DEFAULT_CONTEXT_BUDGET);
-
-    /* The store drives both, resolved at the point of use. */
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROLLING_WINDOW, "on");
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET, "4000");
-    ASSERT_TRUE(nm_agent_rolling_window(agent));
-    ASSERT_EQ(nm_agent_context_budget(agent), 4000);
-
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROLLING_WINDOW);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET);
-    ASSERT_FALSE(nm_agent_rolling_window(agent));
-    ASSERT_EQ(nm_agent_context_budget(agent), NM_AGENT_DEFAULT_CONTEXT_BUDGET);
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-}
-
 /* A context overflow is the provider's HTTP error (400), surfaced
- * verbatim: the request carries the user's message (nothing was
- * dropped to fit) and the agent reports the provider's own words. */
+ * verbatim: the request carries the whole transcript (nevermore never
+ * trims) and the agent reports the provider's own words. */
 static void test_agent_context_overflow_reports_provider_error(void)
 {
     reset_capture();
@@ -4634,92 +4602,6 @@ static void test_agent_output_cut_reminder(void)
     close(sc.fd);
 }
 
-/* The post-trim note: when the rolling window's cut point actually
- * JUMPED (the tail outgrew the budget), the model is told that what it
- * read earlier is no longer in context — re-read before asserting. The
- * window itself is the wire proof: the dropped turn is not in the
- * request that carries the note. */
-static void test_agent_post_trim_reminder(void)
-{
-    reset_capture();
-    g_reminder_calls = 0;
-    g_reminder_names[0] = '\0';
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROLLING_WINDOW, "on");
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET, "500");
-
-    /* ~6 KB of file: one tool result's worth, well over the budget, and
-     * small enough that the test server captures the whole request. */
-    FILE *f = fopen(BIG_FIXTURE, "wb");
-    ASSERT_NOT_NULL(f);
-    for (int i = 0; i < 120; i++)
-        fprintf(f, "line %04d: the quick brown fox jumps over the lazy dog\n",
-                i);
-    fclose(f);
-
-    /* Round 1 (turn 1): read it. Round 2 (turn 1): answer. Then two more
-     * one-round turns: the window can only cut between them. */
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 4;
-    sc.sse[0] =
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
-        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
-        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" BIG_FIXTURE
-        "\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n"
-        "data: [DONE]\n\n";
-    sc.sse[1] = "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"},"
-                "\"finish_reason\":\"stop\"}]}\n\n"
-                "data: [DONE]\n\n";
-    sc.sse[2] = sc.sse[1];
-    sc.sse[3] = sc.sse[1];
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    nm_agent_set_endpoint(agent, base, NULL);
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_reminder(agent, cap_reminder);
-
-    /* Turn 1: the read is the newest turn, and a window never cuts inside
-     * a turn — so nothing was dropped and there is nothing to report. */
-    ASSERT_EQ(nm_agent_turn(agent, "read the big file", NULL, 0), 0);
-    ASSERT_EQ(g_n_requests, 2);
-    ASSERT_EQ(g_reminder_calls, 0);
-    ASSERT_TRUE(strstr(g_requests[1], "quick brown fox") != NULL);
-
-    /* Turn 2: the cut point jumps past the read turn to hold the new
-     * (small) turn, so the model is told — and the note rides the very
-     * request that no longer carries the file. */
-    ASSERT_EQ(nm_agent_turn(agent, "and now?", NULL, 0), 0);
-    ASSERT_EQ(g_reminder_calls, 1);
-    ASSERT_STR_EQ(g_reminder_names, "post-trim,");
-    ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
-    ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
-    ASSERT_TRUE(strstr(g_requests[2], "earlier messages") != NULL);
-    ASSERT_TRUE(strstr(g_requests[2], "re-read") != NULL);
-    ASSERT_NULL(strstr(g_requests[2], "quick brown fox"));
-
-    /* Turn 3: the cut point HOLDS (the tail still fits), so the note is
-     * not repeated — it is simply carried along. */
-    ASSERT_EQ(nm_agent_turn(agent, "still here?", NULL, 0), 0);
-    ASSERT_EQ(g_reminder_calls, 1);
-    ASSERT_EQ(count_framed_reminders(g_requests[3]), 1);
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-    remove(BIG_FIXTURE);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROLLING_WINDOW);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_CONTEXT_BUDGET);
-}
-
 /* The boundary for EXTERNAL content: a tool whose output came from
  * outside the machine (the web_search shape) declares it, and the note
  * rides THAT result — the model is told where the untrusted text is,
@@ -5277,11 +5159,9 @@ int main(void)
     RUN_TEST(test_agent_reminders_gate_off);
     RUN_TEST(test_agent_round_budget_reminder);
     RUN_TEST(test_agent_output_cut_reminder);
-    RUN_TEST(test_agent_post_trim_reminder);
     RUN_TEST(test_agent_context_usage_accessors);
     RUN_TEST(test_agent_context_usage_survives_null_usage_round);
     RUN_TEST(test_agent_session_accounting_accumulates_and_pairs);
-    RUN_TEST(test_agent_rolling_window_default_off);
     RUN_TEST(test_agent_context_overflow_reports_provider_error);
     RUN_TEST(test_agent_set_model_changes_wire_model);
     RUN_TEST(test_agent_max_rounds_caps_tool_rounds);

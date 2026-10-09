@@ -1,9 +1,8 @@
-/* session.c - conversation transcript + context-window management
+/* session.c - conversation transcript (see the header).
  *
- * Phase 3: real implementation. One growable message array per
- * session (geometric growth, memory-reuse principle); the context
- * view is a reused pointer array filled per call, borrowed by the
- * caller until the next mutation.
+ * One growable message array per session (geometric growth,
+ * memory-reuse principle); the whole transcript is what the agent
+ * sends — nevermore never trims it.
  */
 
 #include <stdio.h>
@@ -18,8 +17,6 @@ struct NmSession
     NmSessionMessage *msgs;
     size_t n;
     size_t cap;
-    const NmSessionMessage **view; /* reused context-view array */
-    size_t view_cap;
     /* The image store (VISION-PLAN §3): attached files, read once and
      * frozen as data URLs. Grown geometrically — an attach is an event,
      * not churn. Messages carry INDICES into this array. */
@@ -27,15 +24,6 @@ struct NmSession
     size_t n_images;
     size_t image_cap;
 };
-
-/* Rough token estimate for one attached image. Real image tokenization
- * is provider-side and pixel-based (the probed ballpark for a
- * full-resolution tile set is ~1.2k tokens), so it cannot be derived
- * from the byte count — the base64 length would overcount by orders of
- * magnitude. A flat per-image allowance keeps the estimate in the right
- * neighbourhood; the authoritative number is always the provider's
- * prompt_tokens (the context gauge reads that, never this). */
-#define NM_SESSION_IMAGE_TOKEN_ESTIMATE 1200
 
 static char *dup_or_null(const char *s)
 {
@@ -120,7 +108,6 @@ void nm_session_free(NmSession *s)
     }
     free(s->images);
     free(s->msgs);
-    free(s->view);
     free(s);
 }
 
@@ -556,137 +543,6 @@ const NmSessionMessage *nm_session_get(const NmSession *s, size_t i)
 }
 
 size_t nm_session_len(const NmSession *s) { return s ? s->n : 0; }
-
-/* Rough token estimate: 4 chars per token (the quoth convention), plus
- * a flat allowance per attached image (its token cost is pixel-based
- * and provider-side — see NM_SESSION_IMAGE_TOKEN_ESTIMATE). */
-static long est_tokens(const NmSessionMessage *m)
-{
-    size_t chars = 0;
-    if (m->content)
-        chars += strlen(m->content);
-    if (m->tool_calls_json)
-        chars += strlen(m->tool_calls_json);
-    return (long)((chars + 3) / 4) + 4 + /* +4: per-message framing */
-           (long)m->n_images * NM_SESSION_IMAGE_TOKEN_ESTIMATE;
-}
-
-/* The window's own cost: every message from `cut` to the newest. The
- * system prompt is NOT in here — it is always kept, so the caller adds
- * it once (nm_session_context's sys_cost). */
-static long tail_cost(const NmSession *s, size_t cut)
-{
-    long t = 0;
-    for (size_t i = cut; i < s->n; i++)
-        t += est_tokens(&s->msgs[i]);
-    return t;
-}
-
-/* Where a jump lands, as a percentage of the budget: the cut advances
- * until the tail fits this much of it. Headroom is the whole point of a
- * jump — without it the tail would sit right at the limit and every
- * round's growth would force another jump, throwing the provider's
- * cached prefix away as often as a sliding window does (the churn a
- * stable prefix exists to avoid). */
-#define NM_SESSION_WINDOW_TARGET_PCT 75
-
-/* The next TURN start after `cut`: the next user message. A turn is a
- * user message through everything up to the next one, so a cut at a turn
- * start can never keep an answer whose question is gone, and it never
- * separates a tool result from the assistant message that called it
- * (both live inside the turn that asked for them). Returns 0 when there
- * is none — the caller's "keep the newest turn whole". */
-static size_t next_turn_start(const NmSession *s, size_t cut)
-{
-    for (size_t i = cut + 1; i < s->n; i++)
-        if (s->msgs[i].role == NM_ROLE_USER)
-            return i;
-    return 0;
-}
-
-/* Fill the session's reused view array with [the system prompt, when
- * present] + messages[cut .. n-1]. `start` is 1 when message 0 is the
- * system prompt. Returns the view (messages == NULL on OOM). */
-static NmContextView fill_view(const NmSession *s, size_t start, size_t cut)
-{
-    NmContextView v = { NULL, 0, 0 };
-    size_t n_view = (s->n - cut) + (start == 1 ? 1 : 0);
-    if (s->view_cap < n_view) {
-        /* s is logically const here; the view array is scratch. */
-        NmSession *mut = (NmSession *)s;
-        size_t ncap = s->view_cap ? s->view_cap : 16;
-        while (ncap < n_view)
-            ncap *= 2;
-        const NmSessionMessage **nv =
-            realloc(s->view, ncap * sizeof(*s->view));
-        if (!nv)
-            return v;
-        mut->view = nv;
-        mut->view_cap = ncap;
-    }
-    size_t vi = 0;
-    if (start == 1)
-        s->view[vi++] = &s->msgs[0];
-    for (size_t k = cut; k < s->n; k++)
-        s->view[vi++] = &s->msgs[k];
-    v.messages = s->view;
-    v.n = vi;
-    v.dropped = cut - start;
-    return v;
-}
-
-NmContextView nm_session_context(const NmSession *s, long budget_tokens,
-                                 size_t *anchor)
-{
-    NmContextView v = { NULL, 0, 0 };
-    if (!s || s->n == 0) {
-        if (anchor)
-            *anchor = NM_SESSION_NO_ANCHOR;
-        return v;
-    }
-
-    /* The system prompt (message 0, when present) always leads and is
-     * always in, so it is never part of the cut. */
-    size_t start = (s->msgs[0].role == NM_ROLE_SYSTEM) ? 1 : 0;
-
-    if (budget_tokens <= 0) {
-        /* No trim: the whole transcript, system prompt included, and no
-         * remembered cut point (turning the window off forgets it, so
-         * turning it back on computes a fresh one instead of resuming a
-         * stale index). This is the default the agent uses (rolling
-         * window off) — nevermore sends everything and lets the provider
-         * report "too large", instead of silently capping. */
-        if (anchor)
-            *anchor = NM_SESSION_NO_ANCHOR;
-        return fill_view(s, start, start);
-    }
-
-    /* The remembered cut point. A value that names no real message (a
-     * fresh caller, a stale index — including one past the end) starts
-     * the search from the top: it must never leave an empty window. */
-    size_t cut = (anchor && *anchor != NM_SESSION_NO_ANCHOR &&
-                  *anchor >= start && *anchor < s->n)
-                     ? *anchor
-                     : start;
-    long sys_cost = (start == 1) ? est_tokens(&s->msgs[0]) : 0;
-
-    /* While the tail from the cut point fits, the cut point HOLDS: the
-     * prefix is unchanged and the tail simply grows (append-only, which
-     * is what the provider's prefix cache likes). Only a tail that no
-     * longer fits moves it. */
-    if (sys_cost + tail_cost(s, cut) > budget_tokens) {
-        long target = budget_tokens * NM_SESSION_WINDOW_TARGET_PCT / 100;
-        while (sys_cost + tail_cost(s, cut) > target) {
-            size_t next = next_turn_start(s, cut);
-            if (next == 0)
-                break; /* the newest turn alone: keep it whole */
-            cut = next;
-        }
-    }
-    if (anchor)
-        *anchor = cut;
-    return fill_view(s, start, cut);
-}
 
 /* ---------------------------------------------------------------- */
 /* Persistence (markdown transcript with a metadata header)          */

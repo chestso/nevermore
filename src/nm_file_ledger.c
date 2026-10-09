@@ -19,7 +19,6 @@ typedef struct NmFileEntry
     unsigned long long hash; /* the bytes that read returned */
     long long size;          /* the file's size when it was read */
     long long mtime_ns;      /* its modification time then */
-    size_t msg_index;        /* the session message holding that result */
     int ours;                /* the model wrote the path afterwards: this
                               * record no longer describes the file */
     unsigned long long seq;  /* recency, for eviction */
@@ -28,8 +27,6 @@ typedef struct NmFileEntry
 struct NmFileLedger
 {
     NmFileEntry e[NM_FILE_LEDGER_MAX_ENTRIES];
-    size_t window;          /* first session index still in context */
-    size_t position;        /* index the next message will occupy */
     unsigned long long seq; /* insertion/refresh counter */
 };
 
@@ -45,18 +42,6 @@ void nm_file_ledger_free(NmFileLedger *l)
     for (size_t i = 0; i < NM_FILE_LEDGER_MAX_ENTRIES; i++)
         free(l->e[i].path);
     free(l);
-}
-
-void nm_file_ledger_set_position(NmFileLedger *l, size_t session_index)
-{
-    if (l)
-        l->position = session_index;
-}
-
-void nm_file_ledger_set_window(NmFileLedger *l, size_t first_in_context)
-{
-    if (l)
-        l->window = first_in_context;
 }
 
 size_t nm_file_ledger_count(const NmFileLedger *l)
@@ -120,7 +105,6 @@ static void record(NmFileLedger *l, const NmFileRead *r)
     e->hash = r->hash;
     e->size = r->size;
     e->mtime_ns = r->mtime_ns;
-    e->msg_index = l->position;
     e->ours = 0;
     e->seq = ++l->seq;
 }
@@ -143,18 +127,18 @@ NmFileVerdict nm_file_ledger_note_read(NmFileLedger *l, const NmFileRead *r)
         known = 1;
         if (e->size == r->size && e->mtime_ns == r->mtime_ns)
             same_file = 1;
-        /* The skip needs ALL of it: the same window, the same bytes
-         * (the hash is the proof), and a result still in context. */
+        /* The skip needs ALL of it: the same window and the same bytes
+         * (the hash is the proof). */
         if (v != NM_FILE_VERDICT_REPEAT && e->offset == r->offset &&
             e->limit == r->limit && e->numbered == r->numbered &&
-            e->hash == r->hash && e->msg_index >= l->window)
+            e->hash == r->hash)
             v = NM_FILE_VERDICT_REPEAT;
     }
     if (v == NM_FILE_VERDICT_NONE && known && !same_file)
         v = NM_FILE_VERDICT_CHANGED;
 
-    /* A repeat keeps the earlier record: its position is the anchor of
-     * the claim ("the content is above"), and it is still true. */
+    /* A repeat keeps the earlier record: the content is above, and it
+     * is still true. */
     if (v != NM_FILE_VERDICT_REPEAT)
         record(l, r);
     return v;

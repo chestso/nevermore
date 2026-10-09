@@ -73,15 +73,9 @@ static void test_identical_read_is_a_repeat(void)
     NmFileLedger *l = nm_file_ledger_new();
     NmFileRead r = read_of("/tmp/a.c", 1, 0, 0, 0x1111, 100, 1000);
 
-    /* The position stamps the record with where its result landed; the
-     * window starts at 0 (nothing dropped), so it is in context. */
-    nm_file_ledger_set_position(l, 5);
     ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_NONE);
-
-    nm_file_ledger_set_position(l, 9);
     ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_REPEAT);
-    /* A repeat keeps the EARLIER record (its position is the anchor of
-     * the claim), so the count does not grow. */
+    /* A repeat keeps the EARLIER record, so the count does not grow. */
     ASSERT_EQ(nm_file_ledger_count(l), (size_t)1);
 
     /* The hash is the proof, and it outranks the identity: the same
@@ -95,35 +89,6 @@ static void test_identical_read_is_a_repeat(void)
                    NM_FILE_VERDICT_NONE);
     ASSERT_VERDICT(nm_file_ledger_note_read(l, &same_identity_new_bytes),
                    NM_FILE_VERDICT_REPEAT);
-
-    nm_file_ledger_free(l);
-}
-
-static void test_window_decides_whether_the_content_is_there(void)
-{
-    NmFileLedger *l = nm_file_ledger_new();
-    NmFileRead r = read_of("/tmp/a.c", 1, 0, 0, 0x1111, 100, 1000);
-
-    nm_file_ledger_set_position(l, 4);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_NONE);
-    nm_file_ledger_set_position(l, 8);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_REPEAT);
-
-    /* The window moved past the record's message (4): its content is
-     * gone from the model's context, so the read returns it again (and
-     * NOT as a change — the file is exactly what was read). That read
-     * re-stamps the record at its own position (8). */
-    nm_file_ledger_set_window(l, 6);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_NONE);
-    nm_file_ledger_set_position(l, 12);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_REPEAT);
-
-    /* A window that starts exactly at the record's message still holds
-     * it; one message past it does not. */
-    nm_file_ledger_set_window(l, 8);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_REPEAT);
-    nm_file_ledger_set_window(l, 9);
-    ASSERT_VERDICT(nm_file_ledger_note_read(l, &r), NM_FILE_VERDICT_NONE);
 
     nm_file_ledger_free(l);
 }
@@ -246,7 +211,6 @@ int main(void)
     printf("test_file_ledger:\n");
     RUN_TEST(test_first_read_says_nothing);
     RUN_TEST(test_identical_read_is_a_repeat);
-    RUN_TEST(test_window_decides_whether_the_content_is_there);
     RUN_TEST(test_a_different_window_is_not_a_repeat);
     RUN_TEST(test_changed_file_is_reported);
     RUN_TEST(test_our_own_write_invalidates_the_record);

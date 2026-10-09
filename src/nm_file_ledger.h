@@ -28,11 +28,9 @@
  *     miss a change (a weaker nudge); it can never turn a read into a
  *     wrong skip, which only the hash can do.
  *
- * A record is only good while its RESULT is still in the model's
- * context: the window may have dropped it (session.h's stable-prefix
- * window), and then the content is gone and the read must return it
- * again. The agent owns that fact (it computes the window each round)
- * and pushes it here; the ledger never guesses.
+ * The whole transcript rides every request (nevermore never trims), so
+ * a record stays good for as long as the session lives: what was read
+ * is still in the conversation.
  */
 
 #ifndef NM_FILE_LEDGER_H
@@ -57,9 +55,9 @@ typedef enum
     NM_FILE_VERDICT_NONE = 0, /* nothing to say (the zero value: a tool
                                * with no ledger, or a first read) */
     NM_FILE_VERDICT_REPEAT = 1,
-    /* Byte-identical to a read of the same path with the same window
-     * whose result is STILL IN CONTEXT: the bytes are already in the
-     * conversation, so repeating them bills them twice. */
+    /* Byte-identical to a read of the same path with the same window:
+     * the bytes are already in the conversation, so repeating them
+     * bills them twice. */
     NM_FILE_VERDICT_CHANGED = 2
     /* The session read this path before, and the file on disk matches
      * NONE of the copies it saw: the model's view is stale. */
@@ -85,23 +83,10 @@ typedef struct NmFileLedger NmFileLedger;
 NmFileLedger *nm_file_ledger_new(void);
 void nm_file_ledger_free(NmFileLedger *l);
 
-/* The session position: the index the NEXT message will occupy. The
- * agent sets it before dispatching a tool call, so a recorded read
- * names the message its result lands in — which is what the
- * in-context test below reads. */
-void nm_file_ledger_set_position(NmFileLedger *l, size_t session_index);
-
-/* The window's start: the first session index still in context
- * (0 = nothing was dropped — windowing off, or everything fits). A
- * record older than this is out of context, so it can neither be
- * skipped nor claimed. */
-void nm_file_ledger_set_window(NmFileLedger *l, size_t first_in_context);
-
 /* Record a read and answer what it was relative to what this session
  * already knows (see NmFileVerdict). A REPEAT leaves the earlier
- * record in place — its position is the claim's anchor, and it is still
- * true; every other verdict records the read as the newest knowledge of
- * that (path, window). */
+ * record in place — it is still true; every other verdict records the
+ * read as the newest knowledge of that (path, window). */
 NmFileVerdict nm_file_ledger_note_read(NmFileLedger *l, const NmFileRead *r);
 
 /* The model WROTE this path: what the session knew about its content is

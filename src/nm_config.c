@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 18
+#define NM_CFG_NKEYS 16
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -146,9 +146,6 @@ static const struct
     { NM_CFG_KEY_POLL_TIMEOUT, "NEVERMORE_POLL_TIMEOUT_MS",
       NM_STR(NM_POLL_TIMEOUT_MS_DEFAULT) },
     { NM_CFG_KEY_LOGIN_SHELL, "NEVERMORE_LOGIN_SHELL", "off" },
-    { NM_CFG_KEY_ROLLING_WINDOW, "NEVERMORE_ROLLING_WINDOW", "off" },
-    { NM_CFG_KEY_CONTEXT_BUDGET, "NEVERMORE_CONTEXT_BUDGET",
-      NM_STR(NM_AGENT_DEFAULT_CONTEXT_BUDGET) },
 };
 
 static void init_keys(NmConfig *c)
@@ -320,7 +317,7 @@ int nm_config_valid_rounds(const char *value)
 }
 
 /* A bool spelling: 1/true/on/yes, 0/false/off/no (case-insensitive) —
- * the shape family_skip / searxng_enabled / rolling_window share. */
+ * the shape family_skip / searxng_enabled share. */
 int nm_config_valid_bool(const char *value)
 {
     if (!value || !*value)
@@ -571,7 +568,6 @@ static int normalize_value(const char *key, const char *raw, char *out,
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_ROUNDS) == 0 ||
                strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_CONTEXT_BUDGET) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_TIMEOUT) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
@@ -593,8 +589,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
     } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
-               strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0 ||
-               strcmp(key, NM_CFG_KEY_ROLLING_WINDOW) == 0) {
+               strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {
         if (!nm_config_valid_bool(raw))
             return 0;
         snprintf(out, cap, "%s", normalize_bool(raw));
@@ -866,8 +861,7 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
                 continue;
             }
             /* The key list is read off the one table, so it can never
-             * drift out of the hint (it did: reasoning, rolling_window
-             * and context_budget were missing). */
+             * drift out of the hint (it did: reasoning was missing). */
             fprintf(stderr, "nevermore: %s: unknown key '%s' (keys: ",
                     which, key);
             for (int i = 0; i < NM_CFG_NKEYS; i++)

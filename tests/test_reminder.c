@@ -314,7 +314,7 @@ static void test_rules_fire_on_their_facts(void)
               (size_t)1);
     ASSERT_STR_EQ(out.fired[0].name, "context-pressure");
     ASSERT_TRUE(strstr(out.user.data, "87%") != NULL);
-    ASSERT_TRUE(strstr(out.user.data, "rolling window is off") != NULL);
+    ASSERT_TRUE(strstr(out.user.data, "never trims the transcript") != NULL);
     nm_reminder_out_free(&out);
 
     /* Background jobs: the ids ride the text (the model needs them to
@@ -464,42 +464,6 @@ static void test_state_rules_are_edge_triggered(void)
               (size_t)1);
     nm_reminder_out_free(&out);
 
-    /* Post-trim: the cut point holds between jumps, so the dropped count
-     * is unchanged and the note stays silent; a jump (more messages out)
-     * fires again, and a window that stops trimming (dropped back to 0,
-     * e.g. windowing turned off) re-arms the rule. */
-    facts_zero(&f);
-    f.ctx_dropped = 4;
-    nm_reminder_out_init(&out);
-    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
-              (size_t)1);
-    ASSERT_TRUE(strstr(out.user.data, "4 earlier messages") != NULL);
-    nm_reminder_out_free(&out);
-
-    nm_reminder_out_init(&out);
-    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
-              (size_t)0);
-    nm_reminder_out_free(&out);
-
-    f.ctx_dropped = 9; /* the window jumped again */
-    nm_reminder_out_init(&out);
-    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
-              (size_t)1);
-    ASSERT_TRUE(strstr(out.user.data, "9 earlier messages") != NULL);
-    nm_reminder_out_free(&out);
-
-    f.ctx_dropped = 0; /* the window went away: no fire, and it re-arms */
-    nm_reminder_out_init(&out);
-    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
-              (size_t)0);
-    nm_reminder_out_free(&out);
-
-    f.ctx_dropped = 2;
-    nm_reminder_out_init(&out);
-    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
-              (size_t)1);
-    nm_reminder_out_free(&out);
-
     /* Per-result rules do not latch: two truncated results are two
      * events, and each result deserves its own note. Same for the rest
      * of the family — a second web result is a second injection
@@ -585,8 +549,6 @@ static void facts_for_rule(size_t i, NmReminderFacts *f)
         f->turn = 1;
     } else if (strcmp(name, "output-cut") == 0) {
         f->output_cuts = 1;
-    } else if (strcmp(name, "post-trim") == 0) {
-        f->ctx_dropped = 7;
     }
 }
 

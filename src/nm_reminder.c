@@ -438,9 +438,9 @@ static int text_context(const NmReminderFacts *f, char *out, size_t cap)
                         pct, f->ctx_used, f->ctx_limit);
     return snprintf(out, cap,
                     "Context is at %d%% of the active model's window (%ld of "
-                    "%ld tokens). The rolling window is off, so a round that "
-                    "exceeds the window fails at the provider: prefer "
-                    "finishing the current task over starting new "
+                    "%ld tokens). nevermore never trims the transcript, so a "
+                    "round that exceeds the window fails at the provider: "
+                    "prefer finishing the current task over starting new "
                     "exploration.",
                     pct, f->ctx_used, f->ctx_limit);
 }
@@ -536,30 +536,6 @@ static int text_output_cut(const NmReminderFacts *f, char *out, size_t cap)
                     "resume directly from where it stopped.");
 }
 
-/* --- the window dropped messages --------------------------------- */
-
-/* The dropped count is the signature, which is what makes this the
- * honest twin of the window's own policy: a cut point that HOLDS
- * reports the same number and stays silent, and only a real jump (the
- * tail outgrew the budget and the cut advanced) fires. The note is
- * appended after that jump, so it is the newest message and inside the
- * window it describes — it survives until the next jump replaces it. */
-static int sig_post_trim(const NmReminderFacts *f)
-{
-    return f->ctx_dropped > 0 ? f->ctx_dropped : 0;
-}
-
-static int text_post_trim(const NmReminderFacts *f, char *out, size_t cap)
-{
-    return snprintf(out, cap,
-                    "The context window dropped %d earlier messages from this "
-                    "conversation — they are NOT in your context any more. "
-                    "Anything you read or ran before that point (file "
-                    "contents, command output) may be gone: re-read it before "
-                    "asserting anything about it.",
-                    f->ctx_dropped);
-}
-
 static const Rule RULES[] = {
     { "tool-output-truncated", NM_REMINDER_POINT_TOOL_RESULT,
       NM_REMINDER_CHANNEL_TOOL, 0, sig_tool_truncated, text_tool_truncated },
@@ -586,8 +562,6 @@ static const Rule RULES[] = {
       sig_round, text_round },
     { "output-cut", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
       sig_output_cut, text_output_cut },
-    { "post-trim", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
-      sig_post_trim, text_post_trim },
 };
 
 #define N_RULES (sizeof(RULES) / sizeof(RULES[0]))

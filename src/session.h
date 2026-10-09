@@ -1,7 +1,6 @@
-/* session.h - conversation and context-window state
+/* session.h - conversation transcript state
  *
- * The session is the persistent chat transcript plus context-window
- * management (the job quoth-context.el does in Elisp). Messages are
+ * The session is the persistent chat transcript. Messages are
  * stored as plain-text role/content pairs with optional tool-call
  * annotations and optional image references, so the wire format stays a
  * provider concern. Images are captured ONCE at attach into the
@@ -9,9 +8,10 @@
  *
  * Memory model: one growable message array per session, grown
  * geometrically; message strings are heap-owned copies made once at
- * append. nm_session_context returns a borrowed view (pointer into a
- * per-session view array, also reused across calls) — valid until
- * the next session mutation or free.
+ * append. nm_session_get returns a borrowed pointer into that array —
+ * valid until the next session mutation or free. The WHOLE transcript
+ * rides every request (nevermore never trims it: no token-budget
+ * guessing), which is what keeps the request prefix byte-stable.
  */
 
 #ifndef NM_SESSION_H
@@ -205,86 +205,14 @@ const NmSessionMessage *nm_session_append_assistant_images(
     NmSession *s, const char *reasoning, const char *content,
     const char *tool_calls_json, const size_t *image_ids, size_t n_images);
 
+/* The transcript, as the agent sends it: message 0 is the system
+ * prompt when the session has one, and EVERY stored message rides the
+ * next request. nevermore never trims the transcript (a guessed token
+ * budget would silently cap the conversation and break the request
+ * prefix the provider's cache keys on), so a too-large context is the
+ * provider's error to report, verbatim. */
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
-
-/* Context-window management. Returns a view of the messages the agent
- * should send.
- *
- *   budget_tokens <= 0  NO TRIM: the whole transcript (system prompt +
- *                       every message), and any remembered cut point is
- *                       forgotten (there is no window). This is the
- *                       default — the agent sends everything and lets
- *                       the provider report "too large", rather than
- *                       silently capping. A window that slid every turn
- *                       would also defeat the provider's prefix cache
- *                       (cached input bills far cheaper), so trimming is
- *                       opt-in.
- *   budget_tokens  > 0  a WINDOW: the newest tail that fits. The ON path
- *                       is STABLE-PREFIX (docs/CONTEXT-PLAN.md P3) — a
- *                       cut point that slides one message per round
- *                       changes the request's prefix every round and
- *                       throws the provider's cached prefix away, which
- *                       is the cost a window exists to avoid paying. So
- *                       the caller hands in `anchor`, its remembered cut
- *                       point:
- *
- *                         anchor == NULL        no memory: the cut is
- *                                              computed for this call
- *                                              alone (the tail that
- *                                              fits, from scratch).
- *                         *anchor == NO_ANCHOR   likewise, and the cut
- *                                              it computes is stored.
- *                         *anchor == k           the window begins at
- *                                              message k. While the tail
- *                                              from k fits the budget the
- *                                              view starts EXACTLY there
- *                                              (an unchanged prefix; the
- *                                              tail only grows), and only
- *                                              when it no longer fits does
- *                                              the anchor ADVANCE — by
- *                                              whole turns (a user
- *                                              message through everything
- *                                              up to the next one, so a
- *                                              kept answer never loses its
- *                                              question, and a tool result
- *                                              never loses its call) until
- *                                              the tail fits with headroom
- *                                              (NM_SESSION_WINDOW_TARGET_PCT
- *                                              of the budget, so the next
- *                                              jump is many rounds away,
- *                                              not the next one). The new
- *                                              cut point is written back.
- *                                              A k that names no real
- *                                              message (a stale index, or
- *                                              one at the very end, which
- *                                              would leave an empty
- *                                              window) is IGNORED: the cut
- *                                              is computed from scratch.
- *
- * The system prompt (message 0) always leads and is always kept, even
- * when it alone exceeds the budget; a single turn that exceeds the
- * budget is kept whole too (a window never cuts inside a turn). The view
- * is valid until the next session mutation. */
-typedef struct NmContextView
-{
-    const NmSessionMessage *const *messages;
-    size_t n;
-    /* The trim's ledger: how many stored messages the window left out
-     * (0 = the whole transcript — windowing off, or everything fits).
-     * The reminder layer's `post-trim` note reads it: a CHANGE here is
-     * the jump the model has to be told about, and a cut point that
-     * holds reports the same number (which is what keeps that note
-     * edge-triggered instead of per-round noise). */
-    size_t dropped;
-} NmContextView;
-
-/* "No cut point remembered": a value that cannot be a real one (the
- * system prompt, when present, occupies index 0 and is never cut). */
-#define NM_SESSION_NO_ANCHOR ((size_t)-1)
-
-NmContextView nm_session_context(const NmSession *s, long budget_tokens,
-                                 size_t *anchor);
 
 /* Persistence: load/save as markdown transcript with metadata header.
  * Attached images are NOT written (a data URL is megabytes and the save
