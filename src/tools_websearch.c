@@ -21,10 +21,21 @@
  * request — a dead server must not be hammered on every tool round,
  * and /config shows (and resets) the self-disabling. A success leaves
  * it on; a changed endpoint (the store's `searxng` value differs from
- * the one last probed) clears the latch for a fresh probe. The tool
+ * the one last probed) clears the latch for a fresh probe. An HTTP
+ * STATUS response never latches: the instance answered, so it IS
+ * reachable, and a 400/403/429 is about the one request that earned
+ * it (the status latch was how a malformed request line — see below —
+ * turned into a session-long "SearXNG is unreachable"). The tool
  * keeps NO endpoint/health copy: the URL and the enabled bool are
  * resolved from the config store at the point of use (no store = the
  * built-in default URL, enabled).
+ *
+ * A request line is not a fixed-size thing: the query is
+ * percent-encoded (3 bytes per byte of UTF-8, so a Thai or Japanese
+ * query is ~3x its character count) and rides the URL, and the
+ * transport formats the request line at its exact length — it used to
+ * cut it at 511 bytes, which is exactly the HTTP 400 this tool used
+ * to see on a long non-ASCII query.
  *
  * Memory: one connection + one growing body buffer per call, reused
  * across steps; the parsed JSON is freed at the end. No per-token
@@ -39,7 +50,6 @@
 #include <sys/time.h>
 #endif
 
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,20 +171,6 @@ static void buf_add(Buf *b, const char *s, size_t n)
 static void buf_puts(Buf *b, const char *s) { buf_add(b, s, strlen(s)); }
 
 static void buf_addc(Buf *b, char c) { buf_add(b, &c, 1); }
-
-/* One formatted field (a score, a count): routed through vsnprintf,
- * never a forwarded variadic (which is UB). */
-static void buf_addf(Buf *b, const char *fmt, ...)
-{
-    char tmp[512];
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
-    va_end(ap);
-    if (n > 0)
-        buf_add(b, tmp,
-                (size_t)n < sizeof(tmp) ? (size_t)n : sizeof(tmp) - 1);
-}
 
 /* Percent-encode with the RFC 3986 unreserved set untouched (and a
  * space as %20, not a '+': SearXNG takes the query verbatim). */
@@ -350,8 +346,14 @@ static void format_block(Buf *b, const NmJson *r)
     else
         snprintf(sc, sizeof(sc), "unknown");
 
-    buf_addf(b, "Result [engine: %s, score: %s]:\n", eng.p ? eng.p : "unknown",
-             sc);
+    /* Plain concatenation, not a fixed-scratch format: the engine list
+     * comes from the instance and has no length the tool can know (the
+     * same shape the transport's request line had). */
+    buf_puts(b, "Result [engine: ");
+    buf_puts(b, eng.p ? eng.p : "unknown");
+    buf_puts(b, ", score: ");
+    buf_puts(b, sc);
+    buf_puts(b, "]:\n");
     buf_puts(b, "# ");
     buf_puts(b, title ? title : "");
     buf_puts(b, "\n");
@@ -538,13 +540,23 @@ static void ws_finalize(NmToolExec *e)
     const NmResponse *resp = nm_response(e->conn);
     int status = resp ? resp->status : 0;
     if (status < 200 || status >= 300) {
-        char msg[128];
-        snprintf(msg, sizeof(msg),
-                 "web_search: SearXNG returned HTTP %d (is format=json "
-                 "enabled in search.formats?)",
-                 status);
+        char msg[192];
+        /* An HTTP status is an ANSWER: the instance is up and talking,
+         * so nothing here may latch the reachability cache. A 400 is a
+         * request the instance refused and a 429 is a rate limit —
+         * both are about THIS query, and the next one may well
+         * succeed. 403 is SearXNG's own "this output format is not
+         * enabled" (webapp.py aborts 403 when `json` is missing from
+         * search.formats) — the one status whose fix is a config line,
+         * so it is the one status that names it. */
+        if (status == 403)
+            snprintf(msg, sizeof(msg),
+                     "web_search: SearXNG refused the JSON output format "
+                     "(HTTP 403 — add `json` to search.formats)");
+        else
+            snprintf(msg, sizeof(msg),
+                     "web_search: SearXNG returned HTTP %d", status);
         ws_fail(e, msg);
-        ws_mark_unreachable();
         return;
     }
     if (e->len == 0) {

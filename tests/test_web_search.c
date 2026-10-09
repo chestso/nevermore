@@ -414,9 +414,13 @@ static void test_web_search_extra_params(void)
     close(s.fd);
 }
 
-/* Non-2xx (e.g. format=json disabled) is an error result naming the
- * status, and it poisons the reachability cache for the session. */
-static void test_web_search_http_error_then_cached(void)
+/* An HTTP status is an ANSWER, not unreachability: the instance is up
+ * and talking, so the reachability cache must NOT be poisoned — the
+ * next call dials again. (A 400/403 used to latch `searxng_enabled=off`
+ * for the session, so ONE refused request turned every later
+ * web_search into "SearXNG is unreachable (cached for this session)" —
+ * the shape a long query hit, see the long-query test below.) */
+static void test_web_search_http_error_does_not_latch(void)
 {
     Srv s;
     memset(&s, 0, sizeof(s));
@@ -435,18 +439,74 @@ static void test_web_search_http_error_then_cached(void)
 
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r.output, "HTTP 403"));
-    /* Nothing was fetched into context, so no untrusted-content fact. */
+    /* 403 is the one status whose fix is a config line: the message
+     * names it. Nothing was fetched into context, so no untrusted fact. */
+    ASSERT_NOT_NULL(strstr(r.output, "search.formats"));
     ASSERT_EQ(r.untrusted, 0);
     nm_tool_result_free(&r);
 
-    /* Second call: cached unreachable, no HTTP request. The server is
-     * gone, so a request would fail differently ("unreachable"), which
-     * is exactly what the cache short-circuit avoids. */
+    /* The instance answered, so it is reachable: the health latch is
+     * still off (`searxng_enabled` resolves to its default, on). */
+    ASSERT_TRUE(nm_config_resolve_bool(g_cfg, NM_CFG_KEY_SEARXNG_ENABLED, 1));
+
+    /* Second call: it DIALS again (the listener is gone now, so the
+     * answer is the connection failure — a poisoned cache would have
+     * said "cached" without dialling). */
+    close(s.fd);
     NmToolResult r2 = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                          NULL);
     ASSERT_EQ(r2.status, NM_TOOL_ERR);
-    ASSERT_NOT_NULL(strstr(r2.output, "cached"));
+    ASSERT_NOT_NULL(strstr(r2.output, "unreachable"));
+    ASSERT_TRUE(strstr(r2.output, "cached") == NULL);
     nm_tool_result_free(&r2);
+    nm_toolset_free(ts);
+}
+
+/* A long query is not a fixed-size thing. The query rides the URL
+ * percent-encoded (3 bytes per byte of UTF-8, so ~170 Thai characters
+ * is already past 511 bytes), and the transport used to format the
+ * request line into a 512-byte stack scratch and silently cut it
+ * there — the line lost its ` HTTP/1.1` and the Host header glued
+ * onto it, which is the HTTP 400 a long Thai query used to get. */
+static void test_web_search_long_query_lands_intact(void)
+{
+    Srv s;
+    memset(&s, 0, sizeof(s));
+    ws_reset_health();
+    s.fd = server_bind(&s.port);
+    set_response(&s, 200, "OK", "{\"results\":[]}");
+    char base[64];
+    ws_set_url(base_for(s.port, base, sizeof(base)));
+
+    pthread_t th = srv_launch(&s);
+
+    /* 500 ASCII bytes + a space + a 3-character Thai word (9 bytes) =
+     * 521 encoded bytes, i.e. past the 511-byte cut the old scratch
+     * made. */
+    char query[520];
+    memset(query, 'a', 500);
+    query[500] = ' ';
+    memcpy(query + 501, "ตู้", 10); /* 9 bytes + NUL */
+
+    char args[600];
+    snprintf(args, sizeof(args), "{\"query\":\"%s\"}", query);
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    NmToolResult r = nm_toolset_execute(ts, "web_search", args, NULL);
+    pthread_join(th, NULL);
+
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    /* The server got a well-formed request line carrying the WHOLE
+     * query: the line ends in ` HTTP/1.1` and the Host header starts
+     * the next line. */
+    ASSERT_NOT_NULL(strstr(s.req, " HTTP/1.1\r\n"));
+    ASSERT_NOT_NULL(strstr(s.req, "\r\nHost: "));
+    char expected[600];
+    memset(expected, 'a', 500);
+    /* ตู้ encodes as E0 B8 95 / E0 B8 B9 / E0 B9 89 */
+    strcpy(expected + 500, "%20%E0%B8%95%E0%B8%B9%E0%B9%89&format=json");
+    ASSERT_NOT_NULL(strstr(s.req, expected));
+    nm_tool_result_free(&r);
     nm_toolset_free(ts);
     close(s.fd);
 }
@@ -633,7 +693,8 @@ int main(void)
     RUN_TEST(test_web_search_no_results_is_not_untrusted);
     RUN_TEST(test_web_search_dedup_and_cap);
     RUN_TEST(test_web_search_extra_params);
-    RUN_TEST(test_web_search_http_error_then_cached);
+    RUN_TEST(test_web_search_http_error_does_not_latch);
+    RUN_TEST(test_web_search_long_query_lands_intact);
     RUN_TEST(test_web_search_malformed_json);
     RUN_TEST(test_web_search_refused_then_cached);
     RUN_TEST(test_web_search_timeout);

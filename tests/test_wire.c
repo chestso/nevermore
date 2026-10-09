@@ -718,6 +718,104 @@ static void test_async_send_partial_resume(void)
 }
 
 /* ---------------------------------------------------------------- */
+/* Request serialization: exact lengths                              */
+/* ---------------------------------------------------------------- */
+
+/* A server that KEEPS the request head it received (up to the blank
+ * line), so a test can assert on the bytes that actually went on the
+ * wire — the shape a serializer length bug needs. */
+struct CaptureCase
+{
+    int fd;
+    int port;
+    const char *response;
+    size_t len;
+    char req[8192];
+    size_t req_len;
+};
+
+static void *capture_server(void *arg)
+{
+    struct CaptureCase *cc = arg;
+    int cfd = accept(cc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    for (;;) {
+        char buf[1024];
+        long n = recv(cfd, buf, sizeof(buf), 0);
+        if (n <= 0)
+            break;
+        if (cc->req_len + (size_t)n >= sizeof(cc->req))
+            break; /* capture full: answer anyway */
+        memcpy(cc->req + cc->req_len, buf, (size_t)n);
+        cc->req_len += (size_t)n;
+        cc->req[cc->req_len] = '\0';
+        if (strstr(cc->req, "\r\n\r\n"))
+            break;
+    }
+    send(cfd, cc->response, cc->len, 0);
+    close(cfd);
+    return NULL;
+}
+
+/* Every field of a request is written at its EXACT length. The
+ * serializer used to format into a 512-byte stack scratch and
+ * SILENTLY drop the tail: a request line past 511 bytes lost its
+ * ` HTTP/1.1` and the next header glued onto it (a server can only
+ * answer 400 — the reported web_search failure on a long
+ * percent-encoded UTF-8 query), and a header past the cap lost its
+ * own tail (a long bearer token). */
+static void test_wire_long_request_line_and_header(void)
+{
+    struct CaptureCase cc;
+    memset(&cc, 0, sizeof(cc));
+    cc.response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                  "Content-Length: 2\r\n\r\nok";
+    cc.len = strlen(cc.response);
+    cc.fd = server_bind(&cc.port);
+    ASSERT_TRUE(cc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, capture_server, &cc);
+
+    /* A percent-encoded UTF-8 query — 3 bytes per byte of input, so
+     * this path is ~200 characters of Thai and well past 511 bytes. */
+    char path[1024];
+    snprintf(path, sizeof(path), "/search?q=");
+    size_t p = strlen(path);
+    const char *chunk = "%E0%B8%AA";
+    while (p + strlen(chunk) + 16 < sizeof(path))
+        p += (size_t)snprintf(path + p, sizeof(path) - p, "%s", chunk);
+    snprintf(path + p, sizeof(path) - p, "&format=json");
+    ASSERT_TRUE(strlen(path) > 512);
+
+    /* A header value past the old cap: the same scratch formatted it. */
+    char hval[900];
+    memset(hval, 'x', sizeof(hval) - 1);
+    hval[sizeof(hval) - 1] = '\0';
+    NmRequestHeader h = { "X-Long", hval, 0 };
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("127.0.0.1", cc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", path, &h, 1, NULL, 0), NM_TRANSPORT_OK);
+    ASSERT_EQ(nm_response(c)->status, 200);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(cc.fd);
+
+    /* The request line is whole — the path, its own ` HTTP/1.1`, and
+     * the Host header starting the NEXT line. */
+    char expect[1200];
+    snprintf(expect, sizeof(expect), "GET %s HTTP/1.1\r\n", path);
+    ASSERT_NOT_NULL(strstr(cc.req, expect));
+    ASSERT_NOT_NULL(strstr(cc.req, "\r\nHost: "));
+    /* And the long header landed whole, on its own line. */
+    ASSERT_NOT_NULL(strstr(cc.req, hval));
+    ASSERT_NOT_NULL(strstr(cc.req, "\r\nContent-Length: 0\r\n"));
+}
+
+/* ---------------------------------------------------------------- */
 /* The bounded connect walk                                          */
 /* ---------------------------------------------------------------- */
 
@@ -1437,6 +1535,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_async_connect_interest_and_phases);
     RUN_TEST(test_async_connect_refused_step_errors);
     RUN_TEST(test_async_send_partial_resume);
+    RUN_TEST(test_wire_long_request_line_and_header);
     RUN_TEST(test_blocking_connect_walks_to_reachable_address);
     RUN_TEST(test_async_connect_walks_to_reachable_address);
     RUN_TEST(test_connect_budget_bounds_a_black_hole);

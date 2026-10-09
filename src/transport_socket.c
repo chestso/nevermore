@@ -903,18 +903,25 @@ void nm_socket_wait_writable(int fd)
  * request lives in the connection itself — one allocation per
  * connection, grown geometrically, reused across request rounds.
  * The per-request malloc/free of the old ReqBuf died with this. */
+static int rb_reserve(NmConnection *conn, size_t extra)
+{
+    if (conn->req_len + extra <= conn->req_cap)
+        return 0;
+    size_t nc = conn->req_cap ? conn->req_cap : 1024;
+    while (nc < conn->req_len + extra)
+        nc *= 2;
+    char *ns = realloc(conn->req_buf, nc);
+    if (!ns)
+        return -1;
+    conn->req_buf = ns;
+    conn->req_cap = nc;
+    return 0;
+}
+
 static int rb_put(NmConnection *conn, const char *s, size_t n)
 {
-    if (conn->req_len + n > conn->req_cap) {
-        size_t nc = conn->req_cap ? conn->req_cap : 1024;
-        while (nc < conn->req_len + n)
-            nc *= 2;
-        char *ns = realloc(conn->req_buf, nc);
-        if (!ns)
-            return -1;
-        conn->req_buf = ns;
-        conn->req_cap = nc;
-    }
+    if (rb_reserve(conn, n) != 0)
+        return -1;
     memcpy(conn->req_buf + conn->req_len, s, n);
     conn->req_len += n;
     return 0;
@@ -925,18 +932,33 @@ static int rb_puts(NmConnection *conn, const char *s)
     return rb_put(conn, s, strlen(s));
 }
 
+/* One field, at its exact length: the buffer is growable, so there is
+ * no length to guess. It used to format into a 512-byte stack scratch
+ * and SILENTLY drop the tail — a request line past 511 bytes (a
+ * percent-encoded UTF-8 query is 3 bytes per character, so ~165 of
+ * them) went on the wire without its ` HTTP/1.1` and with the next
+ * header glued onto it, and the peer can only answer 400. The same
+ * cut hit any header past the cap (a long bearer token). Measure,
+ * reserve, then format into place. */
 static int rb_printf(NmConnection *conn, const char *fmt, ...)
 {
-    char tmp[512];
-    va_list ap;
+    va_list ap, ap2;
     va_start(ap, fmt);
-    int n = vsnprintf(tmp, sizeof(tmp), fmt, ap);
+    va_copy(ap2, ap);
+    int n = vsnprintf(NULL, 0, fmt, ap);
     va_end(ap);
-    if (n < 0)
+    if (n < 0) {
+        va_end(ap2);
         return -1;
-    if ((size_t)n >= sizeof(tmp))
-        n = sizeof(tmp) - 1;
-    return rb_put(conn, tmp, (size_t)n);
+    }
+    if (rb_reserve(conn, (size_t)n + 1) != 0) {
+        va_end(ap2);
+        return -1;
+    }
+    vsnprintf(conn->req_buf + conn->req_len, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    conn->req_len += (size_t)n;
+    return 0;
 }
 
 /* Dechunk states (chunk_remaining holds the current chunk's bytes). */
