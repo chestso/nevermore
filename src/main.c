@@ -62,7 +62,6 @@ static void usage(FILE *out)
             "                        opencode:zen | test:replay\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -i, --image PATH      attach an image to the prompt (repeatable)\n"
-            "  -P, --plain           plain-text output, no TUI (for ask/pipe use)\n"
             "  -h, --help            this help\n"
             "  -v, --version         version\n"
             "\n"
