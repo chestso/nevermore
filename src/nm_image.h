@@ -93,7 +93,7 @@ void nm_image_slot_free(NmImageSlot *s);
  * 1 = the transcript will render it, 0 = it would degrade to the
  * marker (no graphics support, a container neither a native transport
  * nor a transcode can carry, or a profile that has not reached its
- * verdict yet). This is the "if supported" gate chat_app's /img reads
+ * verdict yet). This is the "if supported" gate chat_app's /image reads
  * when it decides whether to display an attached image right there at
  * the point of attach; the same table nm_image_measure picks the
  * transport from, so the answer cannot drift from what the commit pass

@@ -116,7 +116,7 @@ static void ask_save_image(const char *url)
     /* The extension is the BYTES' answer, not the mime's claim, and the
      * name has to be chosen before the write — so the container and the
      * dims come from one scratch decode here, and the shared writer
-     * decodes its own copy (a one-shot cost; /save has the facts
+     * decodes its own copy (a one-shot cost; /image save has the facts
      * already and pays nothing). */
     unsigned char *bytes = malloc(b64_len / 4 * 3 + 1);
     if (!bytes)
@@ -385,7 +385,7 @@ int main(int argc, char *argv[])
     const char *prompt = NULL;
     int want_models = 0;
     /* -i: images attached to the ask-mode prompt, in order (repeatable).
-     * Ask mode only — the TUI attaches with /img, where the pending set
+     * Ask mode only — the TUI attaches with /image, where the pending set
      * is visible in the transcript. */
     const char *image_paths[16];
     size_t n_image_paths = 0;
@@ -433,13 +433,13 @@ int main(int argc, char *argv[])
         }
     }
 
-    /* -i is an ask-mode flag: the TUI attaches with /img, where the
+    /* -i is an ask-mode flag: the TUI attaches with /image, where the
      * pending set is visible in the transcript. Silently ignoring the
      * paths (which is what a fall-through to interactive would do) is
      * the one outcome a user cannot debug. */
     if (n_image_paths > 0 && !prompt) {
         fprintf(stderr, "nevermore: --image needs a prompt "
-                        "(interactive mode attaches with /img)\n");
+                        "(interactive mode attaches with /image)\n");
         return 1;
     }
 

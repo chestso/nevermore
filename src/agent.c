@@ -1000,7 +1000,7 @@ long nm_agent_attach_image(NmAgent *a, const char *path, char *reason,
             snprintf(reason, reason_cap, "no agent");
         return -1;
     }
-    /* Attaching is the first thing a chat can do (the TUI's /img runs
+    /* Attaching is the first thing a chat can do (the TUI's /image runs
      * before any submit), so the session — which owns the image store —
      * is built on demand here exactly as it is on the first turn. */
     if (ensure_session(a) != 0) {

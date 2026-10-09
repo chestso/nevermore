@@ -137,7 +137,7 @@ int nm_image_data_url_split(const char *url, size_t len, NmImageFormat *fmt,
 #define NM_IMAGE_DESC_MAX 64
 
 /* "PNG 64x32, 24 B" — the ONE spelling of an image's facts for the
- * lines that name one: read_file's summary and its refusals, /img's
+ * lines that name one: read_file's summary and its refusals, /image's
  * attach and list lines, ask mode's `-i` line. `name` comes from
  * either vocabulary — the wire's (nm_image_format_name) for an image
  * that IS attached, the recognition one (nm_image_kind_name) for one
@@ -149,7 +149,7 @@ void nm_image_describe(const char *name, int w, int h, size_t bytes,
 /* The canonical file extension for a wire format — "png"/"jpg"/"gif",
  * and "img" for a container the wire does not name. The ONE spelling
  * of the name a saved image lands under: ask mode's `-i` drop and the
- * chat's /save both stand on it. */
+ * chat's /image save both stand on it. */
 const char *nm_image_format_ext(int format);
 
 /* Write a base64 data URL's payload to `path`, byte-exact — the bytes

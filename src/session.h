@@ -173,8 +173,8 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
  *
  * A received image has no name of its own, so the store gives it the
  * noun ("image") and the ID returned here — the CHAT-scoped index —
- * is the handle: the UI prints it as the block's caption and /save
- * takes it. */
+ * is the handle: the UI prints it as the block's caption and /image
+ * save takes it. */
 long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
                                  char *reason, size_t reason_cap);
 

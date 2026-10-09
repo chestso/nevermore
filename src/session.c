@@ -422,7 +422,7 @@ long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
      * not come from a file): the store calls it what it is, and the
      * handle a person uses is the CHAT-scoped index this call returns,
      * which the UI prints as the block's caption (`image #<id>`) and
-     * /save takes. */
+     * /image save takes. */
     memcpy(img->alt, "image", sizeof("image"));
     return (long)(s->n_images - 1);
 }

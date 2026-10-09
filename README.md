@@ -299,15 +299,20 @@ key.
 
 ## Images (vision models)
 
-A turn may carry images. In the chat, `/img <path>` attaches one to
-the NEXT message (repeat for several), `/img` lists what is pending,
-and `/img -<n>` drops one; in ask mode, `-i <path>` (repeatable) does
+A turn may carry images. In the chat, `/image <path>` attaches one to
+the NEXT message (repeat for several), `/image` lists what is pending,
+and `/image -<n>` drops one; in ask mode, `-i <path>` (repeatable) does
 the same for the one-shot prompt:
 
 ```
-/img ~/shot.png
+/image ~/shot.png
 what is wrong in this screenshot?     # the pending image rides this turn
 ```
+
+One command covers both directions: bare `/image` lists what is
+pending, `/image <path>` attaches, `/image -<n>` drops one,
+`/image list` names every image the conversation already holds, and
+`/image save [n] [path]` writes one out to a file (see below).
 
 The file is read **once, at attach**: the bytes are frozen into the
 session as a canonical `data:` URL, so later rounds never re-read it.
@@ -325,8 +330,8 @@ carries it does not re-echo it. On a terminal without graphics support
 and the message's echo renders the image's marker — alt, format, dims,
 size and the reason — never the payload.
 
-`/img` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or is
-over 8 MiB — the bytes ride **every** request, so the cap bounds the
+`/image` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or
+is over 8 MiB — the bytes ride **every** request, so the cap bounds the
 body, and a local refusal keeps the message yours instead of a provider
 error. That is the only cap: an image the attach accepted renders,
 however large, because the transcript does not second-guess a payload
@@ -342,8 +347,8 @@ text at all is named too (a PDF, a ZIP, an ELF binary, or plainly
 
 Sending an image to a text-only model is not an error — the provider
 strips it and the model answers blind — so the catalog's vision flag is
-a **warning**, never a refusal: `/img` notes it, and `/model` notes it
-when the conversation already carries images.
+a **warning**, never a refusal: `/image` notes it, and `/model` notes
+it when the conversation already carries images.
 
 ## Generated images (image models)
 
@@ -360,17 +365,17 @@ there is no transcript, so the image is saved to a file —
 `nevermore-image-N.png` in the cwd, noted on stderr — and stdout stays
 clean.
 
-Keeping one is `/save`:
+Keeping one is `/image save`:
 
 ```
-/save            # the newest image -> nevermore-image-<n>.<ext> here
-/save 3          # the image the caption called #3
-/save 3 ~/a.png  # ...where you say
-/save list       # every image in the conversation, with its number
+/image save            # the newest image -> nevermore-image-<n>.<ext> here
+/image save 3          # the image the caption called #3
+/image save 3 ~/a.png  # ...where you say
+/image list            # every image in the conversation, with its number
 ```
 
 The numbers are the chat's image order (attachments and generated
-images share it), and `/save` writes the conversation's own bytes —
+images share it), and `/image save` writes the conversation's own bytes —
 exactly what the wire replays, never a re-encode. This exists because
 the model cannot do it: an image-output model's catalog row usually
 lists no tool support, so the request carries no toolset at all, and
@@ -415,8 +420,8 @@ path is taken verbatim (spaces included); bare, the deterministic
 refused, never an empty file.
 
 Images are **not** in the markdown: a data URL is megabytes, and the
-save is an inspection surface, not a backup format. `/save <n>` writes
-one image's own bytes. Loading a saved transcript back is a post-1.0
+save is an inspection surface, not a backup format. `/image save <n>`
+writes one image's own bytes. Loading a saved transcript back is a post-1.0
 item (the writer is the only half that exists).
 
 ## Long-running commands
