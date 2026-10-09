@@ -225,6 +225,12 @@ fail=0
 # more than the shown number of errors could be killed mid-write and
 # report fewer problems than it has (the same trap win-wine-check.sh
 # hit, where a warning-flooded TU "failed" with its error unprinted).
+#
+# The -I list mirrors configure's nevermore_CPPFLAGS: the build dirs,
+# src, third_party/stb (the vendored stb headers — nm_image_codec.c is
+# the one TU that includes them, and without the -I it "FAIL"s for a
+# header that is right there), and boba's install prefix. A new include
+# dir in configure.ac belongs here too.
 logdir=/tmp
 for f in src/*.c; do
 	base=$(basename "$f" .c)
@@ -242,14 +248,16 @@ for f in src/*.c; do
 		zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
 			-include "$cache/nm-zig-shim.h" \
 			-c -o "$logdir/nmm_$base.o" "$f" \
-			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
+			-I"$builddir" -I"$builddir/src" -Isrc -I. -Ithird_party/stb \
+			-I"$HOME/.local/include" \
 			-isysroot "$cache" -F "$cache" >"$log" 2>&1 || true
 		out=$(grep -E "error:" "$log" | head -2)
 		;;
 	*)
 		zig cc -target aarch64-macos \
 			-c -o "$logdir/nmm_$base.o" "$f" \
-			-I"$builddir" -I"$builddir/src" -Isrc -I. -I"$HOME/.local/include" \
+			-I"$builddir" -I"$builddir/src" -Isrc -I. -Ithird_party/stb \
+			-I"$HOME/.local/include" \
 			>"$log" 2>&1 || true
 		out=$(grep -E "error:" "$log" | head -2)
 		;;
