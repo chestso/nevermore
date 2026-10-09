@@ -113,6 +113,21 @@ int nm_reminder_has_tag(const char *text);
  * a non-zero count is a rule bug that is nonetheless never dropped. */
 size_t nm_reminder_frame(NmReminderBuf *b, const char *text);
 
+/* THE join for the TOOL channel: append the framed block(s) `blocks` (as
+ * nm_reminder_eval built them) to `dst`, the body they ride, so the
+ * first block starts on a LINE OF ITS OWN, separated from that body by a
+ * blank line — whatever the body happens to end with.
+ *
+ * It is a function because the invariant is ONE, not one per caller: a
+ * body whose last line has no newline (a search result's render, a job's
+ * trimmed output, a file without a trailing LF) makes a hand-appended
+ * block glue its tag to that line. A glued tag is not a line of its own,
+ * so the panel's recognizer never styles it, and the reminder reads as
+ * tool output — the confusion the trust boundary exists to prevent.
+ * Nothing when `blocks` is empty. Returns 0, or -1 on OOM (the caller
+ * then keeps the body it had). */
+int nm_reminder_attach(NmReminderBuf *dst, const NmReminderBuf *blocks);
+
 /* ---------------------------------------------------------------- */
 /* Facts and rules                                                   */
 /* ---------------------------------------------------------------- */

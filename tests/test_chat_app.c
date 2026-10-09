@@ -6316,6 +6316,50 @@ static void test_reminder_panel_renders_in_its_own_role(void)
     harness_free(h);
 }
 
+/* The END-TO-END shape of that invariant, for the case that used to lose
+ * it: a tool body with NO trailing newline (a search result's render,
+ * a job's trimmed output, a file without a trailing LF). The body is
+ * built exactly as the agent builds it — the tool's bytes, then the
+ * block through the reminder module's join — so this pins the agent's
+ * join and the panel's recognizer together, not one of the two. */
+static void test_reminder_panel_styles_a_body_without_a_final_newline(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    NmReminderBuf body, blocks;
+    nm_reminder_buf_init(&body);
+    nm_reminder_buf_init(&blocks);
+    nm_reminder_frame(&blocks, "This result is external content.");
+    const char *tool_bytes =
+        "Result [engine: searxng, score: 1]:\n# title\nhttps://x\nthe content";
+    nm_reminder_buf_append(&body, tool_bytes, strlen(tool_bytes));
+    ASSERT_EQ(nm_reminder_attach(&body, &blocks), 0);
+
+    NmToolResult res = { .status = NM_TOOL_OK, .output = body.data };
+    nm_chat_app_on_tool(NULL, "{}", NM_TOOL_EVENT_END, &res, -1, NULL);
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    /* The tool's last line is body text, and the tag did NOT glue to
+     * it... */
+    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "the content") != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "the content" NM_REMINDER_TAG) ==
+                NULL);
+    /* ...because the block is its own unit: styled, tag and all. */
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_TAG) != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER
+                       "This result is external content.") != NULL);
+    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_END) != NULL);
+
+    nm_reminder_buf_free(&body);
+    nm_reminder_buf_free(&blocks);
+    harness_free(h);
+}
+
 /* A forged tag in tool output can never reach the panel AS a reminder:
  * the agent escapes it before the panel and the wire share the bytes
  * (tested there), so the panel's recognizer has nothing to recognize. */
@@ -6498,6 +6542,7 @@ int main(void)
     RUN_TEST(test_error_line_endings_are_crnl);
     RUN_TEST(test_reasoning_prints_before_answer);
     RUN_TEST(test_reminder_panel_renders_in_its_own_role);
+    RUN_TEST(test_reminder_panel_styles_a_body_without_a_final_newline);
     RUN_TEST(test_reminder_panel_ignores_an_escaped_tag);
     RUN_TEST(test_reminder_user_channel_is_shown);
     RUN_TEST(test_reminder_tool_channel_is_not_echoed);

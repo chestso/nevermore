@@ -640,12 +640,93 @@ static void test_rule_table_is_sane(void)
     }
 }
 
+/* The TOOL channel's join (nm_reminder_attach): a block lands as its own
+ * unit — a blank line, then the tag on a line of its own — whatever the
+ * body before it ends with. The invariant the panel's styling rests on:
+ * a glued tag is not a line of its own, so the recognizer never styles
+ * it, and a reminder that reads as tool output is exactly the confusion
+ * the trust boundary exists to prevent. */
+static void test_attach_keeps_the_block_its_own_unit(void)
+{
+    NmReminderBuf block;
+    nm_reminder_buf_init(&block);
+    nm_reminder_frame(&block, "note");
+    ASSERT_STR_EQ(block.data,
+                  NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END "\n");
+
+    NmReminderBuf b;
+
+    /* A body with NO trailing newline (a search result's render, a job's
+     * trimmed output): the join adds the line end AND the blank
+     * separator. */
+    nm_reminder_buf_init(&b);
+    nm_reminder_buf_append(&b, "content", 7);
+    ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
+    ASSERT_STR_EQ(b.data,
+                  "content\n\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
+                  "\n");
+    nm_reminder_buf_free(&b);
+
+    /* A body ending with one newline: the blank line is added, and
+     * exactly one. */
+    nm_reminder_buf_init(&b);
+    nm_reminder_buf_append(&b, "content\n", 8);
+    ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
+    ASSERT_STR_EQ(b.data,
+                  "content\n\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
+                  "\n");
+    nm_reminder_buf_free(&b);
+
+    /* A body that already ends with a blank line keeps just that one
+     * (the boundary is idempotent). */
+    nm_reminder_buf_init(&b);
+    nm_reminder_buf_append(&b, "content\n\n", 9);
+    ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
+    ASSERT_STR_EQ(b.data,
+                  "content\n\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
+                  "\n");
+    nm_reminder_buf_free(&b);
+
+    /* An empty destination: the block leads, with no leading blank
+     * line. */
+    nm_reminder_buf_init(&b);
+    ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
+    ASSERT_STR_EQ(b.data, block.data);
+    nm_reminder_buf_free(&b);
+
+    /* Nothing to attach (no block, or a NULL argument): the body stands
+     * as it was — never a truncated or half-written result. */
+    nm_reminder_buf_init(&b);
+    nm_reminder_buf_append(&b, "content", 7);
+    NmReminderBuf empty;
+    nm_reminder_buf_init(&empty);
+    ASSERT_EQ(nm_reminder_attach(&b, &empty), 0);
+    ASSERT_EQ(nm_reminder_attach(&b, NULL), 0);
+    ASSERT_EQ(nm_reminder_attach(NULL, &block), 0);
+    ASSERT_STR_EQ(b.data, "content");
+    nm_reminder_buf_free(&b);
+    nm_reminder_buf_free(&empty);
+
+    /* The frame's own rule is the same one, so a multi-block buffer (the
+     * USER channel with several rules firing) separates them the same
+     * way. */
+    nm_reminder_buf_init(&b);
+    nm_reminder_frame(&b, "one");
+    nm_reminder_frame(&b, "two");
+    ASSERT_STR_EQ(b.data, NM_REMINDER_TAG "\none\n" NM_REMINDER_END
+                                          "\n\n" NM_REMINDER_TAG "\ntwo\n" NM_REMINDER_END
+                                          "\n");
+    nm_reminder_buf_free(&b);
+    nm_reminder_buf_free(&block);
+}
+
 int main(void)
 {
     printf("test_reminder:\n");
     RUN_TEST(test_frame_is_the_canonical_block);
     RUN_TEST(test_sanitize_neutralizes_both_spellings);
     RUN_TEST(test_frame_sanitizes_its_own_body);
+    RUN_TEST(test_attach_keeps_the_block_its_own_unit);
     RUN_TEST(test_rules_fire_on_their_facts);
     RUN_TEST(test_state_rules_are_edge_triggered);
     RUN_TEST(test_rule_table_is_sane);
