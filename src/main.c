@@ -511,6 +511,24 @@ int main(int argc, char *argv[])
         }
         const char *api_key = nm_provider_api_key(provider);
 
+        /* The one-shot CLI is where the BLOCKING catalog drive belongs
+         * (the same reason `nevermore models` blocks): there is no event
+         * loop to protect here. The agent's own catalog reads are the
+         * CACHED ones on purpose (BUG 1 — the same agent runs on the
+         * TUI's UI thread, where a live fetch froze the interface), so
+         * warming the cache is what keeps this path's behavior: the
+         * prompt's capability clause and the toolset decision see the
+         * live catalog, which a wire-catalog provider (ollama) needs for
+         * a model the static fallback does not carry. `models()` answers
+         * the static fallback when the fetch fails or the live gate is
+         * off, so a warm-up never fails the run. */
+        {
+            size_t warm_n = 0;
+            const NmModel *warm =
+                provider->models(provider, base_url, api_key, &warm_n);
+            nm_provider_free_models(provider, warm);
+        }
+
         NmToolset *tools = nm_toolset_new_defaults();
         if (!tools) {
             fprintf(stderr, "nevermore: out of memory\n");

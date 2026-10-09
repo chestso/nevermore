@@ -4135,6 +4135,71 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
     close(lfd);
 }
 
+/* A one-shot canned catalog: answers the next connection with ONE id
+ * the shipped static table does not carry. The reply goes out as soon
+ * as the connection lands (the client queues its request and sends it
+ * from a step), and the listener is bounded so a test that never
+ * drives the fetch cannot wedge this thread. */
+static void *wire_only_catalog_server_thread(void *arg)
+{
+    int lfd = *(int *)arg;
+    fd_set r;
+    struct timeval tv = { 2, 0 };
+    FD_ZERO(&r);
+    FD_SET(lfd, &r);
+    if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
+        return NULL;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    static const char body[] = "{\"data\":[{\"id\":\"wire-only-model\"}]}";
+    char head[160];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %zu\r\n\r\n",
+                      strlen(body));
+    send(cfd, head, (size_t)hl, 0);
+    send(cfd, body, strlen(body), 0);
+    close(cfd);
+    return NULL;
+}
+
+/* /model <exact id> is a key handler too — the same UI thread the
+ * /provider switch froze on (BUG 1, in the /model dress). The id is
+ * validated against the CACHED catalog, never the blocking drive: an
+ * id only a wire catalog carries is not refused, it opens the picker
+ * with the text as the query and the fetch lands async. So the command
+ * returns BEFORE any round trip and the active model is untouched —
+ * while the blocking drive would have found the id (the canned server
+ * answers with it) and set it inline. */
+static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
+{
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, wire_only_catalog_server_thread, &lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model wire-only-model");
+    harness_enter(h);
+
+    /* Returned with the fetch still in flight: no inline set, and the
+     * note says the picker is on its way. */
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "test-model");
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "loading the openai model catalog") != NULL);
+
+    harness_free(h);
+    close(lfd);
+    pthread_join(th, NULL);
+}
+
 /* /config lists the provider-scoped keys that are set, after the plain
  * ones — the per-provider model memory. */
 static void test_config_lists_scoped_model_keys(void)
@@ -6526,6 +6591,7 @@ int main(void)
     RUN_TEST(test_send_without_model_is_refused);
     RUN_TEST(test_missing_key_preflight_warns);
     RUN_TEST(test_model_popup_does_not_block_on_a_wire_catalog);
+    RUN_TEST(test_model_exact_id_never_fetches_on_the_ui_thread);
     RUN_TEST(test_config_lists_scoped_model_keys);
     RUN_TEST(test_config_absent_is_no_persistence);
     RUN_TEST(test_connect_knobs_via_config_command);

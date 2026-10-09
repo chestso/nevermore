@@ -276,25 +276,21 @@ static int model_vision_lookup(const NmModel *models, size_t n,
     return -1;
 }
 
-/* One lookup, two drives (the catalog seam's own shape). The drive
- * fills `n` BEFORE the lookup reads it — in one expression the read
- * could be sequenced before the call (argument evaluation order is
- * unspecified), which silently looked up zero entries. */
+/* The lookup, resolved with the CACHED catalog read — never the
+ * blocking drive. Every call site here runs on the UI thread
+ * (nm_agent_new is reached from a /provider key handler and from
+ * startup; begin_round from the first step of a turn), where a live
+ * fetch is a freeze: that is the repo-wide rule (AGENTS.md — "on the
+ * UI thread the catalog is read with models_cached, never fetching").
+ * A cold cache therefore answers the static fallback, and a model
+ * that is not in it stays unknown (-1) — exactly the degradation an
+ * unknown model always had: the prompt claims no capability it cannot
+ * confirm and the toolset is kept. The /model popup's async fetch is
+ * what warms the cache. The drive fills `n` BEFORE the lookup reads
+ * it — in one expression the read could be sequenced before the call
+ * (argument evaluation order is unspecified), which silently looked
+ * up zero entries. */
 static int model_vision(const NmProvider *p, const char *model)
-{
-    if (!p || !p->models)
-        return -1;
-    size_t n = 0;
-    const NmModel *models = p->models(p, NULL, NULL, &n);
-    return model_vision_lookup(models, n, model);
-}
-
-/* The same flag for a firing point, resolved WITHOUT fetching: the
- * tool-result path runs inside a step on the UI thread, where the
- * construction-time drive above (which pumps a live fetch when one is
- * warranted) would block the event loop. -1 = unknown, which no rule
- * acts on. */
-static int model_vision_cached(const NmProvider *p, const char *model)
 {
     if (!p || !p->models_cached)
         return -1;
@@ -311,13 +307,19 @@ static int model_vision_cached(const NmProvider *p, const char *model)
  * not silently lose its tools. Resolved at the point of use
  * (begin_round), not at construction, because /model switches the
  * model on a live agent without rebuilding it — the same reason the
- * round cap and the echo mode are store lookups, not pushed copies. */
+ * round cap and the echo mode are store lookups, not pushed copies.
+ * The CACHED read, for the same reason model_vision takes it: this
+ * runs inside the first step of a turn, on the UI thread, where the
+ * blocking drive would re-pay a dead peer's fetch deadline EVERY
+ * round (an empty catalog is never negatively cached) — and emit a
+ * spurious connect notice with it. An uncached catalog says nothing
+ * (0), which keeps the toolset. */
 static int model_tools(const NmProvider *p, const char *model)
 {
-    if (!p || !p->models || !model)
+    if (!p || !p->models_cached || !model)
         return 0;
     size_t n = 0;
-    const NmModel *models = p->models(p, NULL, NULL, &n);
+    const NmModel *models = p->models_cached(p, &n);
     if (!models)
         return 0;
     for (size_t i = 0; i < n; i++) {
@@ -348,7 +350,11 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     /* Context assembly is construction-time I/O (one walk + a couple
      * of bounded reads). Failure degrades to the base prompt, never
      * to a failed agent. The model's vision flag is part of the
-     * prompt (the capability clause), so it is resolved here. */
+     * prompt (the capability clause), so it is resolved here — from
+     * the CACHED catalog read: this runs on the UI thread (a
+     * /provider switch, startup), where a live fetch is the freeze
+     * BUG 1 measured. A cold cache claims nothing (context.c adds no
+     * clause for -1); the /model popup's async fetch warms it. */
     a->context = nm_context_new(NULL, model_vision(provider, model));
     /* The <env> git section is the one part that must not run on this
      * thread: `git status` on a monorepo can hang for seconds. Start it
@@ -1512,8 +1518,8 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
      * the result's own (nm_reminder.h): what the tool withheld, whether
      * the text came from outside the machine, whether an image rode
      * along, and — for read_file — what the path turned out to be. The
-     * vision flag is resolved from the catalog the UI reads, never
-     * fetched (this runs inside a step on the UI thread). */
+     * vision flag comes from the catalog the UI reads, never fetched:
+     * every lookup in this file is the cached read (model_vision). */
     {
         NmReminderFacts f;
         reminder_facts(a, &f);
@@ -1521,7 +1527,7 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
         f.tool_truncated = res->truncated;
         f.tool_untrusted = res->untrusted;
         f.tool_image = image_id >= 0;
-        f.model_vision = model_vision_cached(a->provider, a->model);
+        f.model_vision = model_vision(a->provider, a->model);
         f.read_empty = res->read_state == NM_READ_STATE_EMPTY;
         f.read_past_eof = res->read_state == NM_READ_STATE_PAST_EOF;
         f.file_repeat = res->file_state == NM_FILE_VERDICT_REPEAT;

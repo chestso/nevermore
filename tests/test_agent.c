@@ -3315,6 +3315,123 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
     close(sc.fd);
 }
 
+/* The agent NEVER takes the blocking catalog drive (BUG 1, 2026-10-09).
+ * Both catalog firing points in agent.c run on the UI thread — the
+ * system prompt's vision clause at nm_agent_new (a /provider switch, a
+ * key handler; startup) and the toolset decision in begin_round (the
+ * first step of a turn) — and the blocking drive pumps a live fetch
+ * there. Measured before the fix: `/provider ollama:cloud` froze the
+ * TUI for ~13 s (gdb: nm_catalog_run ← nm_ollama_models ← nm_agent_new
+ * ← build_agent ← run_command ← chat_app_update), and a dead local
+ * daemon re-paid the per-request deadline EVERY round (an empty catalog
+ * is never negatively cached), with a spurious connect notice each
+ * time.
+ *
+ * The pin is the count: the stub's blocking drive is a DIFFERENT answer
+ * from its cached read (text-only vs can-see), so the count says
+ * "never called" and the prompt's clause says WHICH read the agent
+ * believed. */
+static int g_blocking_models_calls;
+
+static const NmModel stub_blocking_models[] = {
+    { "stub-vision", "Stub (blocking)", 0, 0, 0, -1 },
+    { 0 }
+};
+static const NmModel stub_cached_models[] = {
+    { "stub-vision", "Stub (cached)", 1, 0, 128000, 0 },
+    { 0 }
+};
+
+static const NmModel *stub_blocking_models_drive(const NmProvider *p,
+                                                 const char *base_url,
+                                                 const char *api_key,
+                                                 size_t *n_out)
+{
+    (void)p;
+    (void)base_url;
+    (void)api_key;
+    g_blocking_models_calls++;
+    size_t n = 0;
+    while (stub_blocking_models[n].id)
+        n++;
+    if (n_out)
+        *n_out = n;
+    return stub_blocking_models;
+}
+
+static const NmModel *stub_cached_models_read(const NmProvider *p,
+                                              size_t *n_out)
+{
+    (void)p;
+    size_t n = 0;
+    while (stub_cached_models[n].id)
+        n++;
+    if (n_out)
+        *n_out = n;
+    return stub_cached_models;
+}
+
+static void test_agent_never_takes_the_blocking_catalog_drive(void)
+{
+    reset_capture();
+    write_fixture();
+    g_blocking_models_calls = 0;
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    /* Round 1: a read_file call, so the turn opens a SECOND round
+     * (begin_round runs again, and its toolset decision with it). */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_read\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    /* The test provider's loopback wire surface with the catalog seam
+     * replaced: the blocking drive counts (and claims text-only / no
+     * tools), the cached read claims vision and says nothing about
+     * tools. */
+    struct NmProvider p = nm_test_provider;
+    p.models = stub_blocking_models_drive;
+    p.models_cached = stub_cached_models_read;
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-vision", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+
+    /* Construction and both rounds read the CACHED catalog only. */
+    ASSERT_EQ(g_blocking_models_calls, 0);
+
+    /* And the cached answer is the one that landed: the prompt declares
+     * the capability (the blocking table's text-only answer would have
+     * added no clause). */
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+    /* tools == 0 in the cached table ("the catalog says nothing") keeps
+     * the toolset — an unknown model must not silently lose its tools. */
+    ASSERT_TRUE(strstr(g_requests[0], "\"tools\"") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* ---------------------------------------------------------------- */
 /* Tool images (TOOL-IMAGE-PLAN): read_file captures an image, the     */
 /* agent fans it out as a synthetic user message one round later      */
@@ -5127,6 +5244,7 @@ int main(void)
     RUN_TEST(test_agent_env_git_stage_lands_in_the_system_prompt);
     RUN_TEST(test_agent_env_stage_is_skipped_outside_a_repo);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
+    RUN_TEST(test_agent_never_takes_the_blocking_catalog_drive);
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);
     RUN_TEST(test_agent_cancel_drops_pending_image_fanout);

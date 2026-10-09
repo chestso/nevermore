@@ -2983,12 +2983,19 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         }
         /* A plain text argument that names an exact catalog id still
          * sets it (refuse an unknown id instead of a silent 404 on the
-         * next turn); anything with a typed token opens the picker. */
+         * next turn); anything with a typed token opens the picker.
+         * The CACHED read: this is a key handler on the UI thread, and
+         * the blocking drive would freeze it for a wire catalog's whole
+         * fetch (the /provider freeze, in the /model dress). An id the
+         * cache cannot confirm is not refused — it opens the picker
+         * with the text as the query, and the picker's async fetch is
+         * what turns it into a row to select. */
         if (model_query_is_plain(&q)) {
             size_t n = 0;
-            const NmModel *models = app->provider->models(
-                app->provider, app->base_url, endpoint_key(app, app->provider),
-                &n);
+            const NmModel *models = app->provider->models_cached
+                                        ? app->provider->models_cached(
+                                              app->provider, &n)
+                                        : NULL;
             int found = 0;
             for (size_t i = 0; i < n; i++) {
                 if (strcmp(models[i].id, q.text) == 0) {
