@@ -66,26 +66,31 @@ static int buf_puts(NmReminderBuf *b, const char *s)
     return nm_reminder_buf_append(b, s, s ? strlen(s) : 0);
 }
 
-/* The block boundary: make `b` end with a BLANK line (nothing when it is
- * empty), so a block appended next starts on a line of its own, visually
- * separated from whatever precedes it. Idempotent — a buffer that
- * already ends with one blank line gets nothing. Returns 0, or -1 on
- * OOM.
- *
- * ONE rule, two users: nm_reminder_frame (a second block after an
- * earlier one in the same buffer) and nm_reminder_attach (a block after
- * a tool result's body). It is what makes the block its own unit
- * wherever it lands, and the reason it is a function rather than a
- * `puts("\n")` at each site: a caller that appends the block by hand
- * glues its tag to the text before it whenever that text has no trailing
- * newline — and a glued tag is not a line of its own, so the panel's
- * recognizer never styles it (the reminder then reads as tool output,
- * the very confusion the trust boundary exists to prevent). */
+/* End `b` at a line start (nothing when it is empty or already does), so
+ * whatever is appended next begins on a line of its own. This is the
+ * TIGHT boundary: no blank line is inserted — the block sits directly
+ * under the text it follows, exactly as the panel already renders tool
+ * output (and as a body that ends with a newline always did). Idempotent.
+ * Returns 0, or -1 on OOM. */
+static int buf_end_line(NmReminderBuf *b)
+{
+    if (!b || b->len == 0)
+        return 0;
+    if (b->data[b->len - 1] != '\n')
+        return buf_puts(b, "\n");
+    return 0;
+}
+
+/* End `b` at a blank line (nothing when it is empty), so a block appended
+ * next starts on a line of its own, visually separated from what precedes
+ * it. This is the PARAGRAPH boundary, for two blocks in one buffer (the
+ * USER channel when several rules fire at once): they must not fuse into
+ * one wall of text. Idempotent. Returns 0, or -1 on OOM. */
 static int buf_blank_line(NmReminderBuf *b)
 {
     if (!b || b->len == 0)
         return 0;
-    if (b->data[b->len - 1] != '\n' && buf_puts(b, "\n") != 0)
+    if (buf_end_line(b) != 0)
         return -1;
     if (!(b->len >= 2 && b->data[b->len - 2] == '\n') &&
         buf_puts(b, "\n") != 0)
@@ -218,7 +223,7 @@ int nm_reminder_attach(NmReminderBuf *dst, const NmReminderBuf *blocks)
 {
     if (!dst || !blocks || !blocks->data || blocks->len == 0)
         return 0; /* nothing to attach: the body stands as it is */
-    if (buf_blank_line(dst) != 0)
+    if (buf_end_line(dst) != 0)
         return -1;
     return nm_reminder_buf_append(dst, blocks->data, blocks->len);
 }

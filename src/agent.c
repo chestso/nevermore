@@ -1533,15 +1533,14 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
             nm_reminder_buf_init(&b);
             const char *body = res->output ? res->output : "";
             nm_reminder_buf_append(&b, body, strlen(body));
-            /* The join is the reminder module's (nm_reminder_attach): a
-             * blank line, then the block with its tag on a line of its
-             * own — whatever the body happens to end with. Appending the
-             * block by hand is what used to glue the tag to a body whose
-             * last line has no newline (a search result's render, a
-             * job's trimmed output, a file without a trailing LF): the
-             * panel's recognizer needs the tag on a line of its own, so
-             * a glued reminder lost the harness styling and read as tool
-             * output. */
+            /* The join is the reminder module's (nm_reminder_attach): the
+             * block starts on a line of its own, whatever the body
+             * happens to end with. Appending the block by hand is what
+             * used to glue the tag to a body whose last line has no
+             * newline (a search result's render, a job's trimmed output,
+             * a file without a trailing LF): the panel's recognizer
+             * needs the tag on a line of its own, so a glued reminder
+             * lost the harness styling and read as tool output. */
             if (nm_reminder_attach(&b, &out.tool) == 0 && b.data) {
                 free(res->output);
                 res->output = b.data; /* transferred */

@@ -640,12 +640,12 @@ static void test_rule_table_is_sane(void)
     }
 }
 
-/* The TOOL channel's join (nm_reminder_attach): a block lands as its own
- * unit — a blank line, then the tag on a line of its own — whatever the
- * body before it ends with. The invariant the panel's styling rests on:
- * a glued tag is not a line of its own, so the recognizer never styles
- * it, and a reminder that reads as tool output is exactly the confusion
- * the trust boundary exists to prevent. */
+/* The TOOL channel's join (nm_reminder_attach): a block lands on a line
+ * of its own — ONE line break after the body, no blank line inserted —
+ * whatever the body before it ends with. The invariant the panel's
+ * styling rests on: a glued tag is not a line of its own, so the
+ * recognizer never styles it, and a reminder that reads as tool output is
+ * exactly the confusion the trust boundary exists to prevent. */
 static void test_attach_keeps_the_block_its_own_unit(void)
 {
     NmReminderBuf block;
@@ -657,28 +657,28 @@ static void test_attach_keeps_the_block_its_own_unit(void)
     NmReminderBuf b;
 
     /* A body with NO trailing newline (a search result's render, a job's
-     * trimmed output): the join adds the line end AND the blank
-     * separator. */
+     * trimmed output): the join adds the line break, and only that. */
     nm_reminder_buf_init(&b);
     nm_reminder_buf_append(&b, "content", 7);
     ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
     ASSERT_STR_EQ(b.data,
-                  "content\n\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
+                  "content\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
                   "\n");
     nm_reminder_buf_free(&b);
 
-    /* A body ending with one newline: the blank line is added, and
-     * exactly one. */
+    /* A body that already ends at a line start: the block follows on the
+     * next line — exactly the look read_file's panel always had, so this
+     * is the unchanged case. */
     nm_reminder_buf_init(&b);
     nm_reminder_buf_append(&b, "content\n", 8);
     ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
     ASSERT_STR_EQ(b.data,
-                  "content\n\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
+                  "content\n" NM_REMINDER_TAG "\nnote\n" NM_REMINDER_END
                   "\n");
     nm_reminder_buf_free(&b);
 
-    /* A body that already ends with a blank line keeps just that one
-     * (the boundary is idempotent). */
+    /* A body that ends with a blank line keeps it: the boundary adds
+     * nothing, it never strips. */
     nm_reminder_buf_init(&b);
     nm_reminder_buf_append(&b, "content\n\n", 9);
     ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
@@ -687,8 +687,8 @@ static void test_attach_keeps_the_block_its_own_unit(void)
                   "\n");
     nm_reminder_buf_free(&b);
 
-    /* An empty destination: the block leads, with no leading blank
-     * line. */
+    /* An empty destination: the block leads, with no leading line
+     * break. */
     nm_reminder_buf_init(&b);
     ASSERT_EQ(nm_reminder_attach(&b, &block), 0);
     ASSERT_STR_EQ(b.data, block.data);
@@ -707,9 +707,9 @@ static void test_attach_keeps_the_block_its_own_unit(void)
     nm_reminder_buf_free(&b);
     nm_reminder_buf_free(&empty);
 
-    /* The frame's own rule is the same one, so a multi-block buffer (the
-     * USER channel with several rules firing) separates them the same
-     * way. */
+    /* The frame's rule is the PARAGRAPH one: two blocks in one buffer
+     * (the USER channel with several rules firing) keep a blank line
+     * between them, so they never fuse. */
     nm_reminder_buf_init(&b);
     nm_reminder_frame(&b, "one");
     nm_reminder_frame(&b, "two");

@@ -104,9 +104,11 @@ int nm_reminder_has_tag(const char *text);
  *   text
  *   </system-reminder>
  *
- * The blank separator is what makes the block its own unit wherever it
- * lands (a markdown paragraph boundary in a transcript, a visual break
- * in a tool panel). `text` is sanitized on the way in, so no
+ * The blank separator keeps two blocks in ONE buffer apart (the USER
+ * channel when several rules fire at once), so they never fuse into one
+ * wall of text. How a block lands relative to a TOOL RESULT's body is
+ * the other half of the same invariant, and it has its own join:
+ * nm_reminder_attach below. `text` is sanitized on the way in, so no
  * interpolated fact — a command line, a file name, a web snippet — can
  * open or close the framing. Returns the neutralized count, which a
  * rule's own text must always report as 0 (a rule never quotes a tag);
@@ -115,8 +117,10 @@ size_t nm_reminder_frame(NmReminderBuf *b, const char *text);
 
 /* THE join for the TOOL channel: append the framed block(s) `blocks` (as
  * nm_reminder_eval built them) to `dst`, the body they ride, so the
- * first block starts on a LINE OF ITS OWN, separated from that body by a
- * blank line — whatever the body happens to end with.
+ * first block starts on a LINE OF ITS OWN — a single line break after
+ * the body, whatever the body happens to end with (no blank line is
+ * inserted: the block sits directly under the tool's last line, which is
+ * how the panel already renders a body that ends with a newline).
  *
  * It is a function because the invariant is ONE, not one per caller: a
  * body whose last line has no newline (a search result's render, a job's
