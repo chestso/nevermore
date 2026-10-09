@@ -27,6 +27,7 @@ README.md for the tmux capture recipe.
 import argparse
 import base64
 import json
+import os
 import socket
 import struct
 import sys
@@ -83,6 +84,133 @@ def make_png(w=64, h=32):
 
 IMAGEGEN_URL = "data:image/png;base64," + base64.b64encode(make_png()).decode()
 
+# ---- the tool-loop scenario -------------------------------------------
+# A scripted TOOL-using turn, so the tool-channel paths can be smoked
+# with no model in the loop: the file ledger's pointer body
+# (`file-already-read`), a file changed behind the model's back
+# (`file-changed`), the model's own write (silent), and the untrusted
+# boundary (`web-untrusted`, a real search against the local SearXNG).
+# The step is chosen by counting the `tool` messages in the request, so
+# it is deterministic and needs no server-side state between requests —
+# except the fixture file, which the server owns and rewrites itself.
+SMOKE_DIR = "/tmp/nevermore-smoke"
+SMOKE_FILE = SMOKE_DIR + "/sample.txt"
+SMOKE_V1 = "alpha\nbravo\ncharlie\n"
+SMOKE_V2 = "alpha\nBRAVO changed by someone else\ncharlie\n"
+SMOKE_EDIT_OLD = "BRAVO changed by someone else"
+SMOKE_EDIT_NEW = "bravo edited by the model"
+SMOKE_QUERY = "nevermore coding agent"
+
+
+def write_fixture(text):
+    os.makedirs(SMOKE_DIR, exist_ok=True)
+    with open(SMOKE_FILE, "w") as f:
+        f.write(text)
+
+
+def tool_call_deltas(name, args, cid):
+    """The streamed tool_calls shape: id + name in the first delta, the
+    argument JSON split across two more — the accumulation path a real
+    provider exercises (a fragment is not valid JSON on its own)."""
+    blob = json.dumps(args)
+    half = len(blob) // 2
+    return [
+        {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": cid,
+                    "type": "function",
+                    "function": {"name": name, "arguments": blob[:half]},
+                }
+            ]
+        },
+        {
+            "tool_calls": [
+                {"index": 0, "id": cid, "function": {"arguments": blob[half:]}}
+            ]
+        },
+    ]
+
+
+# (tool, arguments, note). The note is streamed as the first content
+# delta, so the transcript says which step the answer belongs to.
+def tool_loop_steps():
+    return [
+        (
+            "read_file",
+            {"path": SMOKE_FILE},
+            "read_file: the content lands (no note expected)",
+        ),
+        (
+            "read_file",
+            {"path": SMOKE_FILE},
+            "read_file again: expect the POINTER body + file-already-read",
+        ),
+        (
+            "read_file",
+            {"path": SMOKE_FILE},
+            "read_file after an EXTERNAL change: expect file-changed",
+        ),
+        (
+            "edit_file",
+            {
+                "path": SMOKE_FILE,
+                "old_string": SMOKE_EDIT_OLD,
+                "new_string": SMOKE_EDIT_NEW,
+            },
+            "edit_file: the model's own write",
+        ),
+        (
+            "read_file",
+            {"path": SMOKE_FILE},
+            "read_file after the model's OWN write: expect NO note",
+        ),
+        (
+            "web_search",
+            {"query": SMOKE_QUERY, "max_results": 3},
+            "web_search: expect the web-untrusted block in the result",
+        ),
+    ]
+
+
+def tool_loop_deltas(raw):
+    """The tool-loop answer for one request: (deltas, finish_reason)."""
+    try:
+        doc = json.loads(raw)
+    except ValueError as e:
+        return (
+            [{"content": f"[fake-ollama] request body is not JSON: {e}\n\n"}],
+            "stop",
+        )
+    done = sum(1 for m in (doc.get("messages") or []) if m.get("role") == "tool")
+    steps = tool_loop_steps()
+    if done >= len(steps):
+        return (
+            [
+                {
+                    "content": "Tool loop complete: two reads, a change from "
+                    "outside, the model's own edit, a re-read, and a "
+                    "search. Check the blocks above.\n\n"
+                }
+            ],
+            "stop",
+        )
+    name, args, note = steps[done]
+    if done == 0:
+        # A fresh conversation starts from the pristine fixture: the
+        # server outlives a chat (and edits it), so a second run would
+        # otherwise open on the previous run's content.
+        write_fixture(SMOKE_V1)
+    if done == 2:
+        # The change "somebody else made" lands BEFORE this request is
+        # answered, so the read the model is about to run sees it.
+        write_fixture(SMOKE_V2)
+    deltas = [{"content": f"[fake-ollama] tool-loop step {done + 1}: {note}\n\n"}]
+    deltas += tool_call_deltas(name, args, f"call_{done + 1}")
+    return (deltas, "tool_calls")
+
+
 # Phase-sequential: reasoning deltas first (content absent), then
 # content. The markdown pieces are split across deltas so the classifier
 # sees lines/rows arrive incrementally, as a real stream would.
@@ -118,6 +246,9 @@ SCENARIOS = {
         {"content": "```c\nstatic int load(void)\n{\n    return 0;\n}\n```\n\n"},
         {"content": "That is all.\n\n"},
     ],
+    # Built per request from the tool messages already in the
+    # conversation (tool_loop_deltas), not a fixed list.
+    "tool-loop": [],
     "prose": [
         {"content": "One line.\n"},
         {"content": "Two line.\n\n"},
@@ -230,6 +361,9 @@ class Handler(BaseHTTPRequestHandler):
         # A scenario with a wire contract checks the request before it
         # answers, and says so in the stream's first delta.
         deltas = self.deltas
+        finish = "stop"
+        if self.scenario == "tool-loop":
+            deltas, finish = tool_loop_deltas(body)
         check = SCENARIO_CHECKS.get(self.scenario)
         if check:
             problems, summary = check(body)
@@ -253,7 +387,7 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 return
         try:
-            self.wfile.write(sse({"choices": [{"delta": {}, "finish_reason": "stop"}]}))
+            self.wfile.write(sse({"choices": [{"delta": {}, "finish_reason": finish}]}))
             self.wfile.write(b"data: [DONE]\n\n")
             self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
@@ -289,6 +423,11 @@ def main():
     Handler.deltas = SCENARIOS[args.scenario]
     Handler.scenario = args.scenario
 
+    if args.scenario == "tool-loop":
+        # The server owns the fixture and resets it, so a rerun starts
+        # from the same content (the previous run edited it).
+        write_fixture(SMOKE_V1)
+
     bound = []
     if args.both:
         launchers = [("127.0.0.1", ThreadingHTTPServer), ("::1", V6Server)]
@@ -309,7 +448,8 @@ def main():
     where = ", ".join(h for h, _ in launchers)
     print(
         f"fake-ollama: {where} port {args.port}, "
-        f"scenario={args.scenario}, pace={args.pace}s",
+        f"scenario={args.scenario}, pace={args.pace}s"
+        + (f", fixture={SMOKE_FILE}" if args.scenario == "tool-loop" else ""),
         flush=True,
     )
     try:
