@@ -169,6 +169,16 @@ wire half: the tool message in the recorded request carries the raw
 `<system-reminder>` (never the escaped spelling) exactly once, and the
 same bytes the panel shows.
 
+**Driving a TUI: never use portty's `sendln`.** Its trailing byte pair
+is `\r\n` (`portty_script.c`), which is right for a shell and wrong for
+a raw-mode full-screen app: the CR submits and the LF lands in the NEXT
+input as a real newline, so the message that follows begins with an
+empty line (the wire then carries `"\nwhat is in this image?"` and the
+echo shows the `❯` gutter on its own line with the text indented below
+— the textinput's multiline rendering, faithful to the content). Use
+`send "text"` followed by a lone `\r` (`send printf 'text\r'`), or
+tmux `send-keys "text" Enter`, which keeps the two apart.
+
 ## Files
 
 | File             | Purpose                         |
