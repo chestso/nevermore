@@ -74,6 +74,25 @@ void nm_chat_app_set_runtime(NmChatApp *app, TuiRuntime *rt);
 void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
                               const char *api_key);
 
+/* Warm the ACTIVE provider's model catalog in the BACKGROUND: one async
+ * fetch over the provider's catalog seam, no popup and no line. The
+ * gauge's denominator, the gauge tier, the `context-pressure` reminder
+ * and the first round's capability claims all resolve at their point of
+ * use from the provider's CACHED catalog (agent.c's model_entry), so
+ * something has to fill that cache — and the /model picker cannot be
+ * the only thing that does: the model id is persisted (the config
+ * shadow), so a session that never opens the picker reads the catalog
+ * cold, and a wire-catalog model outside the provider's static fallback
+ * shows `ctx 11k/-` for the whole chat.
+ *
+ * Called by main.c once the endpoint is resolved (never from the
+ * constructor: the endpoint is not known yet, and a unit test's app must
+ * not fetch), and by a /provider switch for the new provider. A no-op
+ * when a fetch is already in flight or the provider has nothing to
+ * fetch (already cached, or no live seam) — so it is safe to call
+ * unconditionally. */
+void nm_chat_app_warm_catalog(NmChatApp *app);
+
 /* Tool-call round cap, reasoning echo mode and stream-inactivity
  * timeout are NOT app state: they are config values (the store's
  * `rounds`, `reasoning_echo` and `timeout` keys) that the agent

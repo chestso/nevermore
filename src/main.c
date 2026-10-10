@@ -327,6 +327,15 @@ static int run_interactive(const char *provider_name, const char *model,
     }
     nm_chat_app_set_runtime(app, rt);
 
+    /* Warm the active provider's model catalog in the background, now
+     * that the endpoint is resolved: the gauge's denominator, the tier,
+     * the `context-pressure` reminder and the first round's capability
+     * claims all read the provider's CACHED catalog, and the /model
+     * picker is not always visited (the model id is persisted). The
+     * fetch is the picker's own async seam, so nothing blocks here and
+     * a failure just leaves the cold-cache degradation. */
+    nm_chat_app_warm_catalog(app);
+
     nm_history_load(nm_chat_app_textinput(app));
 
     /* The banner stays a printf (D11): it is emitted before the first

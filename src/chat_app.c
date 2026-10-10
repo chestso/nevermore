@@ -63,6 +63,7 @@
 #include "source.h"
 #include "nm_process.h"
 #include "spinner.h"
+#include "provider_internal.h" /* nm_live_catalog_enabled (the warm's gate) */
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
@@ -254,14 +255,20 @@ struct NmChatApp
      * command once, and never again). */
     int image_hint_shown;
 
-    /* The model-catalog fetch in flight (the /model popup's
-     * non-blocking path). A catalog SOURCE (src/source.h) owns the
-     * fetch: its begin/step/fd drive the provider's async seam, and
-     * the popup opens when it lands. The parsed query (ModelQuery) is
-     * remembered so the popup opens with the filter the user asked
-     * for. */
+    /* The model-catalog fetch in flight. A catalog SOURCE
+     * (src/source.h) owns the fetch: its begin/step/fd drive the
+     * provider's async seam. TWO things want one, and they are the
+     * same fetch: the /model popup (which opens when it lands, with
+     * the remembered ModelQuery filter) and the BACKGROUND WARM
+     * (nm_chat_app_warm_catalog — it exists to fill the provider's
+     * cache, so it lands silently and shows nothing). catalog_popup
+     * says which of the two is owed at the terminal step; a warm the
+     * user interrupted with /model is upgraded in place, because a
+     * second fetch cannot stack (models_begin refuses) and would
+     * answer from the still-cold cache. */
     NmListSource *catalog_src;
     ModelQuery catalog_query;
+    int catalog_popup;
 };
 
 /* The singleton (see file header). */
@@ -2246,6 +2253,39 @@ static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
         meta_append(buf, cap, &off, "🔧️");
 }
 
+/* The three outcomes of starting a catalog fetch (catalog_fetch_begin). */
+typedef enum
+{
+    NM_CAT_FAIL = 0, /* no provider seam, or the begin failed */
+    NM_CAT_FETCHING, /* in flight; *out is the source, the caller's */
+    NM_CAT_READY     /* nothing to fetch; *out holds the cached answer */
+} NmCatFetch;
+
+/* Begin a catalog fetch for the ACTIVE provider over its async seam
+ * (src/source.h's catalog source). ONE begin for both drivers — the
+ * popup and the background warm — because they are one fetch: the
+ * provider's models_begin refuses to stack, so a second one would
+ * answer from the still-cold cache. A provider with no live seam (or
+ * one gated off, or already cached) answers READY at once, which is
+ * how the sync providers keep working through the same call. */
+static NmCatFetch catalog_fetch_begin(NmChatApp *app, NmListSource **out)
+{
+    *out = NULL;
+    if (!app->provider)
+        return NM_CAT_FAIL;
+    NmListSource *s = nm_source_catalog_create(app->provider, app->base_url,
+                                               endpoint_key(app, app->provider));
+    if (!s)
+        return NM_CAT_FAIL;
+    if (nm_source_fetch_begin(s, NULL) != 0) {
+        nm_source_free(s);
+        return NM_CAT_FAIL;
+    }
+    *out = s;
+    return nm_source_step(s) == NM_FETCH_PENDING ? NM_CAT_FETCHING
+                                                 : NM_CAT_READY;
+}
+
 /* Open the models popup over the catalog SOURCE (src/source.h), which
  * drives the provider's async catalog seam — a wire catalog is fetched
  * without ever blocking the event loop: the popup opens when it lands
@@ -2256,43 +2296,86 @@ static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
  * stacking. */
 static void open_models_popup(NmChatApp *app, const ModelQuery *q)
 {
-    if (!app->provider) {
-        sys_line(app, "no models in the catalog");
-        return;
-    }
     if (app->catalog_src) {
-        sys_line(app, "still loading the %s model catalog…",
-                 app->provider->name);
+        const char *name = app->provider ? app->provider->name : "model";
+        if (app->catalog_popup) {
+            /* One popup fetch at a time: a second /model says so rather
+             * than stacking (or restacking) a fetch. */
+            sys_line(app, "still loading the %s model catalog…", name);
+            return;
+        }
+        /* A background warm is in flight: adopt it — its landing opens
+         * the picker with THIS query instead of nothing. */
+        app->catalog_popup = 1;
+        app->catalog_query = *q;
+        sys_line(app, "loading the %s model catalog…", name);
         return;
     }
-    NmListSource *s = nm_source_catalog_create(app->provider, app->base_url,
-                                               endpoint_key(app, app->provider));
-    if (!s) {
-        sys_line(app, "no models in the catalog");
-        return;
-    }
-    if (nm_source_fetch_begin(s, NULL) != 0) {
-        nm_source_free(s);
-        sys_line(app, "no models in the catalog");
-        return;
-    }
-    if (nm_source_step(s) == NM_FETCH_PENDING) {
+    NmListSource *s = NULL;
+    switch (catalog_fetch_begin(app, &s)) {
+    case NM_CAT_FETCHING:
         /* A wire catalog: the fetch is in flight. The popup opens when
          * it lands (nm_chat_app_external_ready / tick -> catalog_step),
          * so the UI thread is never blocked on the round trip. */
         app->catalog_src = s;
+        app->catalog_popup = 1;
         app->catalog_query = *q;
         sys_line(app, "loading the %s model catalog…", app->provider->name);
         return;
+    case NM_CAT_READY:
+        show_models_popup(app, s, q);
+        nm_source_free(s);
+        return;
+    default:
+        sys_line(app, "no models in the catalog");
+        return;
     }
-    show_models_popup(app, s, q);
-    nm_source_free(s);
+}
+
+/* Warm the ACTIVE provider's catalog in the BACKGROUND: one fetch, no
+ * popup, no line. The picker was the only warm site, so a session that
+ * never opened it — the common case, since the model id is persisted
+ * in the config shadow — read the catalog COLD all session: a
+ * wire-catalog model outside the provider's static fallback showed
+ * `ctx 11k/-` in the status row for the whole chat (and the tier, the
+ * `context-pressure` reminder and the first round's tool-use claim
+ * resolved cold with it). Every one of those readers resolves at the
+ * point of use from `models_cached` (agent.c's model_entry), so the
+ * fix is a warm, not a push.
+ *
+ * The prompt's vision clause is NOT part of this: it is a fact about
+ * the model assembled ONCE at construction, inside the provider's
+ * cached prefix (the recorded decision — no async pre-flight on the
+ * agent), so a warm that lands later moves the gauge and the claims
+ * that are read at their point of use, never the prefix.
+ *
+ * Gated on the live-catalog knob (nm_live_catalog_enabled): a warm is
+ * live-catalog traffic the user did NOT ask for, which is exactly what
+ * `NM_NO_LIVE_CATALOG` suppresses — the picker's fetch is bidden, this
+ * one is not. That keeps `make check` and the wire-replay tool (both
+ * of which set the knob, the latter because its server holds only chat
+ * completions) free of surprise /models GETs. */
+void nm_chat_app_warm_catalog(NmChatApp *app)
+{
+    if (!app || app->catalog_src)
+        return; /* a fetch is already in flight (a warm, or the picker) */
+    if (!nm_live_catalog_enabled())
+        return;
+    NmListSource *s = NULL;
+    if (catalog_fetch_begin(app, &s) != NM_CAT_FETCHING)
+        return; /* nothing to fetch: cached, or no live seam */
+    app->catalog_src = s;
+    app->catalog_popup = 0;
+    memset(&app->catalog_query, 0, sizeof(app->catalog_query));
 }
 
 /* Drive the in-flight catalog fetch (the event loop's fd-ready, and the
  * tick's deadline). On a terminal status the popup opens with the
  * remembered query — the source already holds the live catalog, or the
- * static fallback when the fetch failed. */
+ * static fallback when the fetch failed. A background warm ends here
+ * too, silently either way: the user asked for nothing, and a failure
+ * leaves exactly the cold-cache degradation it was trying to improve
+ * (the picker is still the place that reports a fetch failure). */
 static void catalog_step(NmChatApp *app)
 {
     if (!app || !app->catalog_src)
@@ -2301,12 +2384,22 @@ static void catalog_step(NmChatApp *app)
     if (st == NM_FETCH_PENDING)
         return;
     NmListSource *s = app->catalog_src;
+    int popup = app->catalog_popup;
     app->catalog_src = NULL;
-    if (st != NM_FETCH_OK)
-        sys_line(app, "note: could not load the live %s catalog — showing "
-                      "the built-in list",
-                 app->provider ? app->provider->name : "model");
-    show_models_popup(app, s, &app->catalog_query);
+    app->catalog_popup = 0;
+    if (popup) {
+        if (st != NM_FETCH_OK)
+            sys_line(app, "note: could not load the live %s catalog — showing "
+                          "the built-in list",
+                     app->provider ? app->provider->name : "model");
+        show_models_popup(app, s, &app->catalog_query);
+    } else if (app->rt) {
+        /* A warm's landing changes what the gauge (and the tier colour)
+         * draws, and it is the ONLY event: nothing else wakes the loop
+         * for it, so the frame would keep the pre-warm `ctx -/-` until
+         * the next keystroke. */
+        tui_runtime_wakeup(app->rt);
+    }
     nm_source_free(s);
 }
 
@@ -2475,9 +2568,11 @@ static int switch_provider(NmChatApp *app, const char *name)
     pending_clear(app);
     app->image_hint_shown = 0; /* the hint is chat-scoped, like the ids */
     /* A catalog fetch for the OLD provider is dropped with the session
-     * (the popup would otherwise open on a catalog nobody asked for). */
+     * (a popup would otherwise open on a catalog nobody asked for, and
+     * a warm would fill the wrong provider's cache). */
     nm_source_free(app->catalog_src);
     app->catalog_src = NULL;
+    app->catalog_popup = 0;
     send_msg(app, tui_msg_transcript_clear());
     hold_discard(app, NM_STREAM_ID_CONTENT);
     hold_discard(app, NM_STREAM_ID_REASONING);
@@ -2501,6 +2596,10 @@ static int switch_provider(NmChatApp *app, const char *name)
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
     warn_missing_key(app, p);
+    /* The new provider's catalog is a different cache: warm it in the
+     * background, exactly as startup does — otherwise the gauge (and
+     * the claims) read the new provider cold until a picker visit. */
+    nm_chat_app_warm_catalog(app);
     if (!app->model)
         no_model_notice(app);
     if (dropped)

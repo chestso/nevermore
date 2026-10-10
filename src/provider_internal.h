@@ -83,7 +83,11 @@ void nm_conversation_id_new(char out[NM_CONVERSATION_ID_LEN]);
  * loopback connect stalled Windows CI past the 10s watchdog).
  * Providers apply the gate ONLY when the caller passed no explicit
  * base_url: scripted-server tests (explicit base) keep exercising
- * the live fetch path. */
+ * the live fetch path. The app's background catalog warm
+ * (nm_chat_app_warm_catalog) applies it unconditionally — that fetch
+ * is live-catalog traffic nobody asked for, so the knob suppresses it
+ * even with an explicit base (the wire-replay tool sets the knob
+ * because its server holds only chat completions). */
 int nm_live_catalog_enabled(void);
 
 #endif // NM_PROVIDER_INTERNAL_H

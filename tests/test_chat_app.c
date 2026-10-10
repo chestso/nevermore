@@ -4202,8 +4202,116 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
     pthread_join(th, NULL);
 }
 
-/* /config lists the provider-scoped keys that are set, after the plain
- * ones — the per-provider model memory. */
+/* A canned hyper catalog: ONE id the shipped static table does not carry,
+ * with the wire's context_window (hyper's parse reads that key). */
+static void *warm_catalog_server_thread(void *arg)
+{
+    int lfd = *(int *)arg;
+    fd_set r;
+    struct timeval tv = { 2, 0 };
+    FD_ZERO(&r);
+    FD_SET(lfd, &r);
+    if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
+        return NULL;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    static const char body[] =
+        "{\"object\":\"list\",\"data\":["
+        "{\"id\":\"wire-only-model\",\"display_name\":\"Wire Only\","
+        "\"context_window\":1048576,\"capabilities\":{\"vision\":false}}]}";
+    char head[160];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %zu\r\n\r\n",
+                      strlen(body));
+    send(cfd, head, (size_t)hl, 0);
+    send(cfd, body, strlen(body), 0);
+    close(cfd);
+    return NULL;
+}
+
+/* The TUI WARMS the active provider's catalog in the BACKGROUND
+ * (main.c -> nm_chat_app_warm_catalog): the gauge's denominator is
+ * catalog metadata resolved at the point of use from `models_cached`
+ * (agent.c's model_entry), so it needs a warm — and the /model picker
+ * cannot be the only warm site, because the model id is PERSISTED (the
+ * config shadow), so a session that never opens the picker reads the
+ * catalog cold. That was the reported bug's remaining half: after the
+ * point-of-use fix, `ctx 11k/-` against `hyper · deepseek-v4.1-flash`
+ * still lasted the whole session — hyper's static fallback is one row,
+ * and nothing else had warmed the cache.
+ *
+ * The warm is silent and shows nothing (it is the gauge's, not the
+ * user's): it fills the provider cache and the frame moves with it, no
+ * push and no rebuild. The prompt's vision clause is deliberately NOT
+ * covered here — it is assembled once at construction, inside the
+ * provider's cached prefix.
+ *
+ * REGISTERED LAST (see main): provider catalogs are process-global, so
+ * the live commit this test makes is visible to every test after it —
+ * it would replace the static fallback those tests pin. */
+static void test_startup_warm_fills_the_gauge_without_a_popup(void)
+{
+    /* The warm is gated on the live-catalog knob (it is live-catalog
+     * traffic the user did not ask for), so lift the suite's pin for
+     * this one test — the production default. LAST test, so nothing
+     * after it can read the unpinned state, and the pin's own tripwire
+     * (test_offline_catalog_is_pinned) already ran first. */
+    test_unsetenv("NM_NO_LIVE_CATALOG");
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, warm_catalog_server_thread, &lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("hyper", "wire-only-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* Cold: the static fallback does not carry the id, so the limit is
+     * honestly unknown. */
+    char *cold = span_bytes(nm_color_gutter(), "ctx -/- ");
+    ASSERT_NOT_NULL(cold);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), cold) != NULL);
+    free(cold);
+
+    /* main.c's call, verbatim (the harness sets the endpoint after the
+     * runtime, so the warm is explicit here as it is there). */
+    nm_chat_app_warm_catalog(h->app);
+
+    /* In flight and still silent: no popup, no line. */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "Wire Only") == NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "catalog") == NULL);
+
+    /* It lands and fills the cache: the gauge resolves the new row on
+     * the spot. */
+    ASSERT_EQ(harness_pump_catalog(h, 50), 0);
+    char *warm = span_bytes(nm_color_gutter(), "ctx -/1M ");
+    ASSERT_NOT_NULL(warm);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), warm) != NULL);
+    free(warm);
+
+    /* Still nothing said, and still no popup: the fetch is the gauge's. */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "Wire Only") == NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "catalog") == NULL);
+
+    /* A second warm is a no-op (the catalog is cached; nothing refetches
+     * — the canned server accepts exactly one connection). */
+    nm_chat_app_warm_catalog(h->app);
+    ASSERT_EQ(harness_pump_catalog(h, 50), 0);
+
+    harness_free(h);
+    close(lfd);
+    pthread_join(th, NULL);
+    /* Restore the suite's pin (harmless — this is the last test — but
+     * the process should leave the world as it found it). */
+    test_pin_offline_catalog();
+}
+
 static void test_config_lists_scoped_model_keys(void)
 {
     pin_cfg_paths("scopedlist");
@@ -6827,5 +6935,9 @@ int main(void)
     RUN_TEST(test_ps_command_column_elides_safely);
     RUN_TEST(test_exec_command_spinner_tier);
 #endif
+    /* LAST on purpose: this one commits a live hyper catalog, and the
+     * provider catalogs are process-global — every test after it would
+     * read the canned catalog instead of the static fallback it pins. */
+    RUN_TEST(test_startup_warm_fills_the_gauge_without_a_popup);
     TEST_SUMMARY();
 }
