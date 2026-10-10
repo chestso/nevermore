@@ -24,6 +24,8 @@
 #include <ws2tcpip.h>
 #else
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -4312,6 +4314,137 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
     test_pin_offline_catalog();
 }
 
+/* ---------------------------------------------------------------- */
+/* The fetch's deadline bounds the RESPONSE, not the connect         */
+/* ---------------------------------------------------------------- */
+
+/* A non-blocking socket (the fillers below must never block: a
+ * blocking connect past a full accept queue parks for the kernel's
+ * SYN timeout, which is minutes). */
+static void sock_nonblock(int fd)
+{
+#ifdef _WIN32
+    u_long one = 1;
+    ioctlsocket(fd, FIONBIO, &one);
+#else
+    int fl = fcntl(fd, F_GETFL, 0);
+    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+#endif
+}
+
+/* A listener whose accept queue is FULL: the fillers connect and are
+ * never accepted, so the kernel drops the NEXT connect's SYN — the
+ * peer is reachable (the listener exists) yet the connect never
+ * completes. That is a black-holed address in miniature, and it is the
+ * one way to hold a fetch in its CONNECT phase. *fillers must stay
+ * open for the fetch's whole life; close them with *n out. */
+static int server_bind_full(int *port, int *fillers, int max_fill,
+                            int *n_fill)
+{
+    int lfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0 ||
+        listen(lfd, 0) < 0) {
+        close(lfd);
+        return -1;
+    }
+    socklen_t l = sizeof(a);
+    if (getsockname(lfd, (struct sockaddr *)&a, &l) < 0) {
+        close(lfd);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    int n = 0;
+    for (; n < max_fill; n++) {
+        int c = socket(AF_INET, SOCK_STREAM, 0);
+        if (c < 0)
+            break;
+        sock_nonblock(c);
+        struct sockaddr_in b = a;
+        if (connect(c, (struct sockaddr *)&b, sizeof(b)) != 0 &&
+            errno != EINPROGRESS) {
+            close(c);
+            break;
+        }
+        fillers[n] = c;
+    }
+    /* Let whatever can land, land (the SYN queue counts too). */
+    usleep(50 * 1000);
+    *n_fill = n;
+    return lfd;
+}
+
+/* The catalog fetch's per-request deadline (openai_client.c) is the
+ * RESPONSE bound — "a peer that answers the connection and then never
+ * sends the response" — and it is armed the moment the request goes on
+ * the wire. It used to be armed at nm_fetch_begin, which silently
+ * overrode the transport's own budgets for the connect walk
+ * (`connect_timeout`, per address) and the TLS handshake
+ * (`handshake_timeout`): a 2 s constant over a 10 s handshake budget.
+ * A cold connect — an address budget burned on a black-holed address,
+ * a slow TLS handshake — then failed the fetch BEFORE the peer had
+ * been asked anything, and the background warm has no retry, so the
+ * gauge's denominator read `-` for the whole session (the reported
+ * `ctx 11k/-`).
+ *
+ * Here the fetch is still CONNECTING when the fake clock crosses the
+ * deadline: the connect is the walk's to bound (its budget is raised
+ * so the walk itself does not abandon the address), so the fetch must
+ * still be in flight — no failure note, no popup. */
+static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
+{
+    int port = 0;
+    int fillers[8];
+    int n_fill = 0;
+    int lfd = server_bind_full(&port, fillers, 8, &n_fill);
+    ASSERT_TRUE(lfd >= 0);
+
+    pin_cfg_paths("catdeadline");
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    /* hyper: the ONLY provider whose live cache is still clean here
+     * (the picker tests pin it offline, and the warm test that commits
+     * a live one runs LAST) — an already-cached catalog would answer
+     * READY and never start the fetch this test is about. */
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    /* The walk's own budget must outlast the fetch deadline, or the
+     * walk abandons the address and the test measures the walk. */
+    store_set(NM_CFG_KEY_CONNECT_TIMEOUT, "30000");
+
+    /* /model starts the fetch. The connect is armed but its SYN is
+     * dropped, so nothing is on the wire yet. */
+    harness_type(h, "/model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "loading the hyper") != NULL);
+
+    /* The clock crosses the fetch's response deadline (2 s) while the
+     * fetch is still CONNECTING. */
+    nm_test_clock_advance_ms(2100);
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+
+    /* Still in flight: the deadline did not fire (no note, no popup —
+     * the note and the built-in list are what a FAILED fetch opens). */
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "could not load the live hyper catalog") == NULL);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT OSS 120b") == NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
+    for (int i = 0; i < n_fill; i++)
+        close(fillers[i]);
+    close(lfd);
+}
+
+/* /config lists the provider-scoped keys that are set, after the plain
+ * ones — the per-provider model memory. */
 static void test_config_lists_scoped_model_keys(void)
 {
     pin_cfg_paths("scopedlist");
@@ -6935,6 +7068,7 @@ int main(void)
     RUN_TEST(test_ps_command_column_elides_safely);
     RUN_TEST(test_exec_command_spinner_tier);
 #endif
+    RUN_TEST(test_catalog_fetch_deadline_does_not_bound_the_connect);
     /* LAST on purpose: this one commits a live hyper catalog, and the
      * provider catalogs are process-global — every test after it would
      * read the canned catalog instead of the static fallback it pins. */

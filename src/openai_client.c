@@ -1304,10 +1304,21 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
 /* The blocking pump's readiness slice: short enough that a silent peer
  * is re-checked against the request's deadline promptly. */
 #define NM_FETCH_SLICE_MS 50
-/* Per-REQUEST bound (the old recv timeout's role): a peer that accepts
- * and never answers fails this request instead of stalling its caller.
- * Per request, not per fetch — ollama's catalog is one GET plus one
- * POST per model, and each of those is entitled to its own budget. */
+/* Per-REQUEST RESPONSE bound (the old recv timeout's role): a peer that
+ * answers the connection and then never sends the response fails this
+ * request instead of stalling its caller. Per request, not per fetch —
+ * ollama's catalog is one GET plus one POST per model, and each of those
+ * is entitled to its own budget.
+ *
+ * It bounds the RESPONSE, not the connection: the clock starts when the
+ * request goes on the wire (nm_fetch_step). The connect walk and the TLS
+ * handshake that precede it have their own budgets (the per-address
+ * `connect_timeout`, the `handshake_timeout`), and arming this 2 s
+ * constant at nm_fetch_begin silently OVERRODE them: a cold connect that
+ * spent an address budget on a black-holed address, or a slow handshake,
+ * failed the fetch before the peer had been asked anything. The
+ * background catalog warm has no retry, so that failure was permanent —
+ * the gauge's denominator read `-` for the whole session. */
 #define NM_FETCH_TIMEOUT_MS 2000
 
 struct NmFetchStream
@@ -1357,8 +1368,10 @@ NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
         return NULL;
     }
     f->conn = conn;
-    f->deadline =
-        nm_monotonic_seconds() + (double)NM_FETCH_TIMEOUT_MS / 1000.0;
+    /* The response deadline is armed by the first step that puts the
+     * request on the wire (nm_fetch_step): the connect + handshake that
+     * precede it are the transport's own budgets to bound. */
+    f->deadline = 0;
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
@@ -1403,17 +1416,23 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
         return NM_CATALOG_ERR;
     if (f->terminal)
         return f->ok ? NM_CATALOG_OK : NM_CATALOG_ERR;
-    if (f->deadline > 0 && nm_monotonic_seconds() >= f->deadline) {
-        fetch_fail(f);
-        return NM_CATALOG_ERR;
-    }
 
     /* Connect + send phases first (idempotent, PENDING while in
-     * flight), then the resumable head/body read. */
+     * flight), then the resumable head/body read. These phases are the
+     * transport's to bound (the per-address connect budget, the
+     * handshake budget); the fetch's own deadline is the RESPONSE bound
+     * and is armed here, the moment the request is on the wire. */
     NmTransportStatus ts = nm_connection_step(f->conn);
     if (ts == NM_TRANSPORT_PENDING)
         return NM_CATALOG_PENDING;
     if (ts != NM_TRANSPORT_OK) {
+        fetch_fail(f);
+        return NM_CATALOG_ERR;
+    }
+    if (f->deadline == 0)
+        f->deadline =
+            nm_monotonic_seconds() + (double)NM_FETCH_TIMEOUT_MS / 1000.0;
+    if (nm_monotonic_seconds() >= f->deadline) {
         fetch_fail(f);
         return NM_CATALOG_ERR;
     }
