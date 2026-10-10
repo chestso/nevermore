@@ -6505,15 +6505,15 @@ static void test_model_picker_shows_capability_metadata(void)
     harness_free(h);
 }
 
-/* "/model @img" opens the picker filtered to image generators. The
+/* "/model @image" opens the picker filtered to image generators. The
  * active vision model does NOT carry the capability, so it is not
  * prepended — the answer is only the models that claim it. */
-static void test_model_picker_capability_query_img(void)
+static void test_model_picker_capability_query_image(void)
 {
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @img");
+    harness_type(h, "/model @image");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
@@ -6703,7 +6703,7 @@ static void test_model_picker_grammar_ctx_range(void)
 
 /* Grammar v2: tokens combine — a capability, a tag and a ctx bound
  * AND together, and free text rides along. `tag:vision ctx:>128k`
- * leaves the one model that claims both; adding `@img` (which that
+ * leaves the one model that claims both; adding `@image` (which that
  * model does not claim) empties the view with the generic note. */
 static void test_model_picker_grammar_combines(void)
 {
@@ -6717,7 +6717,7 @@ static void test_model_picker_grammar_combines(void)
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") == NULL);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
-    harness_type(h, "/model tag:vision @img");
+    harness_type(h, "/model tag:vision @image");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "no models match the filter") != NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
@@ -6836,13 +6836,13 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     AppHarness *h = harness_new("openrouter", "filler-000", base);
     ASSERT_NOT_NULL(h);
 
-    /* /model @img: the deep generator is the ONLY match — past the
+    /* /model @image: the deep generator is the ONLY match — past the
      * cap it was invisible and the answer was "none in the catalog".
      * The active filler carries no image_gen, so nothing prepends.
      * The catalog is a WIRE catalog here (an explicit base): /model
      * starts the fetch and returns, so pump the event loop until the
      * popup lands. */
-    harness_type(h, "/model @img");
+    harness_type(h, "/model @image");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
@@ -7232,7 +7232,7 @@ int main(void)
     RUN_TEST(test_session_inspects_and_saves);
     RUN_TEST(test_session_without_a_transcript);
     RUN_TEST(test_model_picker_shows_capability_metadata);
-    RUN_TEST(test_model_picker_capability_query_img);
+    RUN_TEST(test_model_picker_capability_query_image);
     RUN_TEST(test_model_picker_capability_query_tools);
     RUN_TEST(test_model_picker_capability_query_tools_empty);
     RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);

@@ -107,7 +107,7 @@ typedef enum
 } PopupKind;
 
 /* Capability query bits for the model picker (`/model @vision`,
- * `/model @img`, `/model @tools`): a catalog-side filter, distinct from
+ * `/model @image`, `/model @tools`): a catalog-side filter, distinct from
  * the popup's text filter over ids. */
 #define NM_CAP_VISION 1u
 #define NM_CAP_IMAGE  2u
@@ -118,7 +118,7 @@ typedef enum
  * ("/model gpt tag:vision ctx:>128k"):
  *
  *   <text>      id substring (the popup's own text filter)
- *   @cap        a capability CLAIM: @vision / @img / @tools
+ *   @cap        a capability CLAIM: @vision / @image / @tools
  *   tag:NAME    the entry carries the tag (NmEntry.tags)
  *   ctx:<op>N   context window: >N >=N <N <=N =N (k/M suffix ok)
  *
@@ -1850,7 +1850,7 @@ static void print_help(NmChatApp *app)
                   "  /help              this list\n"
                   "  /model [id|query]  show, set, or pick a model (! id = exact;\n"
                   "                     remembered per provider)\n"
-                  "  /model @vision     pick among vision models (@img = image-gen,\n"
+                  "  /model @vision     pick among vision models (@image = image-gen,\n"
                   "                     @tools = tool use; combine with text,\n"
                   "                     tag:NAME and ctx:>128k, e.g.\n"
                   "                     /model gpt tag:vision ctx:>128k)\n"
@@ -2035,14 +2035,13 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
     return 1;
 }
 
-/* Parse the text after a picker `@` (the capability token). Known
- * spellings map to a bit; 0 when unknown. */
+/* Parse the text after a picker `@` (the capability token). A known
+ * token maps to a bit; 0 when unknown. */
 static unsigned capability_token(const char *tok)
 {
     if (strcmp(tok, "vision") == 0)
         return NM_CAP_VISION;
-    if (strcmp(tok, "img") == 0 || strcmp(tok, "image") == 0 ||
-        strcmp(tok, "imagegen") == 0 || strcmp(tok, "image_gen") == 0)
+    if (strcmp(tok, "image") == 0)
         return NM_CAP_IMAGE;
     if (strcmp(tok, "tools") == 0)
         return NM_CAP_TOOLS;
@@ -2187,7 +2186,7 @@ static int model_query_parse(const char *arg, ModelQuery *q, char *err,
             if (!bit) {
                 snprintf(err, errcap,
                          "model: unknown capability '%s' — one of @vision, "
-                         "@img, @tools",
+                         "@image, @tools",
                          cap);
                 return -1;
             }

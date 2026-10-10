@@ -654,11 +654,11 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   `vision` are picker UX: the model picker renders a right-aligned
   metadata column (boba's list-popup meta column —
   `tui_list_popup_set_items_meta`) carrying `ctx 👀 🖼 🔧` (context
-  window, vision, imagegen, tools), and `/model @vision` / `/model @img`
+  window, vision, imagegen, tools), and `/model @vision` / `/model @image`
   / `/model @tools` filter the catalog by the same claim. The `/model`
   argument is a small QUERY GRAMMAR (`ModelQuery`, chat_app.c's
   `model_query_parse` — the one scanner): free text (id substring) plus
-  typed tokens `@vision` / `@img` / `@tools`, `tag:NAME` (matches
+  typed tokens `@vision` / `@image` / `@tools`, `tag:NAME` (matches
   `NmEntry.tags`) and `ctx:<op>N` (`>N` `>=N` `<N` `<=N` `=N`, a bare N
   = at least, k/M suffix 1000-based like the column) — they AND
   together, and a malformed token is a named refusal, never a silent id
