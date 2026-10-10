@@ -4140,10 +4140,8 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
 }
 
 /* A one-shot canned catalog: answers the next connection with ONE id
- * the shipped static table does not carry. The reply goes out as soon
- * as the connection lands (the client queues its request and sends it
- * from a step), and the listener is bounded so a test that never
- * drives the fetch cannot wedge this thread. */
+ * the shipped static table does not carry. The listener is bounded so a
+ * test that never drives the fetch cannot wedge this thread. */
 static void *wire_only_catalog_server_thread(void *arg)
 {
     int lfd = *(int *)arg;
@@ -4156,6 +4154,22 @@ static void *wire_only_catalog_server_thread(void *arg)
     int cfd = accept(lfd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    /* Drain the GET: headers only, to the blank line (the canned-server
+     * shape this file uses). A server that closes with its request still
+     * unread sends an RST, and an RST can discard the reply the client
+     * has not read yet — the macOS/BSD behaviour that failed the warm
+     * fixture below in CI. */
+    char req[2048];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        req[got] = '\0';
+        if (strstr(req, "\r\n\r\n"))
+            break;
+    }
     static const char body[] = "{\"data\":[{\"id\":\"wire-only-model\"}]}";
     char head[160];
     int hl = snprintf(head, sizeof(head),
@@ -4163,6 +4177,15 @@ static void *wire_only_catalog_server_thread(void *arg)
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(body));
+    /* Hold the reply briefly: the test's point is the ASYNC gap (the
+     * command must return with the fetch still in flight), and loopback
+     * is fast enough that the reply can already be sitting in the
+     * client's socket when its first step looks — under ASan (a slower,
+     * instrumented client; this thread is not instrumented) that is the
+     * COMMON case, which made the "loading the …" assertion flake in CI.
+     * The hold makes the pending state deterministic instead of a race
+     * (the same hold the big-catalog fixture below documents). */
+    usleep(200 * 1000);
     send(cfd, head, (size_t)hl, 0);
     send(cfd, body, strlen(body), 0);
     close(cfd);
@@ -4205,7 +4228,10 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
 }
 
 /* A canned hyper catalog: ONE id the shipped static table does not carry,
- * with the wire's context_window (hyper's parse reads that key). */
+ * with the wire's context_window (hyper's parse reads that key). The
+ * request is drained before the reply: the client must READ this body,
+ * and a close over an unread request is an RST — which on macOS/BSD can
+ * discard the reply (the gauge then stayed cold and CI went red there). */
 static void *warm_catalog_server_thread(void *arg)
 {
     int lfd = *(int *)arg;
@@ -4218,6 +4244,17 @@ static void *warm_catalog_server_thread(void *arg)
     int cfd = accept(lfd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    char req[2048];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        req[got] = '\0';
+        if (strstr(req, "\r\n\r\n"))
+            break;
+    }
     static const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"wire-only-model\",\"display_name\":\"Wire Only\","
