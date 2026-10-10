@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 16
+#define NM_CFG_NKEYS 17
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -146,6 +146,7 @@ static const struct
     { NM_CFG_KEY_POLL_TIMEOUT, "NEVERMORE_POLL_TIMEOUT_MS",
       NM_STR(NM_POLL_TIMEOUT_MS_DEFAULT) },
     { NM_CFG_KEY_LOGIN_SHELL, "NEVERMORE_LOGIN_SHELL", "off" },
+    { NM_CFG_KEY_KBD, "NEVERMORE_KBD", "auto" },
 };
 
 static void init_keys(NmConfig *c)
@@ -555,6 +556,63 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c)
                                        : NM_REASONING_ECHO_OFF;
 }
 
+/* ---------------------------------------------------------------- */
+/* The `kbd` value space                                             */
+/* ---------------------------------------------------------------- */
+
+/* Three modes, with the bool spellings and the two terminal names a
+ * user might reach for (`kitty` for the protocol, `legacy` for the
+ * encodings it replaces). */
+static const char *const KBD_AUTO[] = { "auto", "default", NULL };
+static const char *const KBD_ON[] = { "on", "true", "yes", "1", "kitty",
+                                      NULL };
+static const char *const KBD_OFF[] = { "off", "no", "false", "0", "legacy",
+                                       NULL };
+
+int nm_config_kbd_canon(const char *value, char *out, size_t cap)
+{
+    if (!value || !*value)
+        return 0;
+    const char *canon = token_in(value, KBD_AUTO)  ? "auto"
+                        : token_in(value, KBD_ON)  ? "on"
+                        : token_in(value, KBD_OFF) ? "off"
+                                                   : NULL;
+    if (!canon)
+        return 0;
+    snprintf(out, cap, "%s", canon);
+    return 1;
+}
+
+int nm_config_valid_kbd(const char *value)
+{
+    char tmp[16];
+    return nm_config_kbd_canon(value, tmp, sizeof(tmp));
+}
+
+const char *nm_config_kbd_name(NmKbdMode mode)
+{
+    switch (mode) {
+    case NM_KBD_ON:
+        return "on";
+    case NM_KBD_OFF:
+        return "off";
+    case NM_KBD_AUTO:
+        break;
+    }
+    return "auto";
+}
+
+NmKbdMode nm_config_kbd_mode(const NmConfig *c)
+{
+    const char *v = c ? nm_config_resolve(c, NM_CFG_KEY_KBD, NULL) : NULL;
+    char canon[16];
+    if (!v || !nm_config_kbd_canon(v, canon, sizeof(canon)))
+        return NM_KBD_AUTO;
+    return strcmp(canon, "on") == 0    ? NM_KBD_ON
+           : strcmp(canon, "off") == 0 ? NM_KBD_OFF
+                                       : NM_KBD_AUTO;
+}
+
 /* Validate + normalize ONE key's raw value into `out` (capped at
  * NM_CONFIG_VAL): 1 = accepted, 0 = rejected. The single place the
  * file layer, the environment layer and the shadow write-back all
@@ -575,6 +633,9 @@ static int normalize_value(const char *key, const char *raw, char *out,
         /* The one key whose value space is not a bool: off/tools/all
          * (with the old bool spellings folded in). */
         return nm_config_reasoning_echo_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_KBD) == 0) {
+        /* auto / on / off (bool spellings and kitty/legacy folded in). */
+        return nm_config_kbd_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0) {

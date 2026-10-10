@@ -514,6 +514,21 @@ save [path]` writes session.c's markdown). Const on purpose: the
   nevermore's markdown grammar (`nm_markdown.c` /
   `nm_markdown_render.c`). See "The chat transcript protocol" below —
   the one design that is NOT obvious from the code.
+- **The keyboard tier** (`src/chat_app.c`'s `kbd_declaration`) — the
+  terminal's kitty keyboard protocol is DECLARED per frame from the
+  `kbd` key resolved at the point of use: `auto` (default) declares it
+  only once the startup probe's answer proves the terminal speaks it,
+  `on` declares it without waiting, `off` never does. The tier is the
+  protocol's flag 1 only — an unambiguous Esc and unambiguous
+  Ctrl+keys. **Shift+Enter is deliberately NOT enabled**: it needs the
+  "report all keys as escape codes" flag, and that flag without the
+  associated text turns every capital into its unshifted key code plus
+  Shift, so declaring it would corrupt typed prose (boba does not
+  decode the associated text yet). `Ctrl+J` remains the newline key, and
+  `/config` prints the value _and_ the terminal's answer, because the
+  store alone cannot say whether the protocol is in use. The flags are
+  popped at stop — the runtime reconciles them in both render modes, so
+  a shell never inherits them.
 - **The status row** (`src/chat_app.c`'s `compose_status`) — boba's
   `TuiStatusLine` component, DECLARED by the app and laid out by boba.
   It used to be a field of the text input (`TuiSpan` +

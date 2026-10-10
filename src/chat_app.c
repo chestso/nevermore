@@ -899,6 +899,33 @@ static void post_image_block(NmChatApp *app, const NmImage *img)
     post_image_line(app, img->alt, img->data_url, img->data_url_len);
 }
 
+/* The keyboard protocol tier, resolved at the point of use (the view is
+ * built every frame, so a probe answer that lands after the first flush
+ * moves the declaration and the runtime reconciles it: pop + push).
+ *
+ * Tier 1 only — the protocol's flag 1, which makes Esc, alt+key and
+ * ctrl+key unambiguous. Shift+Enter would need flags 8|16, and flag 8
+ * without 16 turns every capital into its unshifted key code plus
+ * SHIFT (the associated text that fixes that is not decoded yet), so
+ * declaring it would corrupt typed prose; Ctrl+J stays the newline key.
+ *
+ * `auto` waits for the terminal's own answer: before the probe resolves
+ * there is no answer, and nothing is declared — which changes nothing,
+ * since a terminal sends the legacy encodings until we push. */
+static TuiKeyboardEnhancements kbd_declaration(const NmChatApp *app)
+{
+    NmKbdMode mode = app->cfg ? nm_config_kbd_mode(app->cfg) : NM_KBD_AUTO;
+    if (mode == NM_KBD_OFF)
+        return TUI_KBD_NONE;
+    if (mode == NM_KBD_ON)
+        return TUI_KBD_KITTY;
+    if (!app->rt)
+        return TUI_KBD_NONE;
+    const TuiTerminalProfile *p = tui_runtime_terminal_profile(app->rt);
+    return (p && p->resolved && p->kbd_protocol) ? TUI_KBD_KITTY
+                                                 : TUI_KBD_NONE;
+}
+
 /* Does the terminal render this image? The "if supported" gate: the
  * runtime's profile (resolved by the startup probe) through
  * nm_image.c's tier table, so the answer is exactly what the commit
@@ -2721,6 +2748,17 @@ static void print_config(NmChatApp *app)
         if (strcmp(k, NM_CFG_KEY_SKIP_FAMILIES) == 0 &&
             !nm_connection_family_skip() && v && strcmp(v, "none") != 0)
             layer = "inert: family_skip off";
+        /* The keyboard protocol tier is the TERMINAL's answer, not the
+         * store's value: `auto` means "if the terminal answers", so say
+         * what it answered. */
+        if (strcmp(k, NM_CFG_KEY_KBD) == 0 && v && strcmp(v, "auto") == 0 &&
+            app->rt) {
+            const TuiTerminalProfile *p =
+                tui_runtime_terminal_profile(app->rt);
+            layer = (p && p->resolved && p->kbd_protocol)
+                        ? "terminal: kitty protocol"
+                        : "terminal: legacy encodings";
+        }
         sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-", layer);
     }
     /* The provider-scoped keys actually set (`model.<provider>`), after
@@ -3989,6 +4027,10 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     TuiView v = tui_view_default(out);
     v.render_mode = TUI_RENDER_INLINE;
     v.bracketed_paste = 1;
+    /* The keyboard protocol tier (see kbd_declaration): flag 1 when the
+     * terminal grants it, nothing otherwise. Declared per frame, so a
+     * probe answer that lands after startup moves it. */
+    v.kbd_enhancements = kbd_declaration(app);
     /* Declared so the terminal profile probe runs at startup: the
      * IMAGE tier's transport choice (kitty/iTerm2 marker) needs the
      * verdict, and the commit gate holds image batches for it. A

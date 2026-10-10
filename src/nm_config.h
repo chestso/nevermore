@@ -215,6 +215,18 @@ extern "C" {
  * applies to `run_command` or nevermore's own stages. Env spelling:
  * NEVERMORE_LOGIN_SHELL. */
 #define NM_CFG_KEY_LOGIN_SHELL "login_shell"
+/* Whether the terminal's kitty keyboard protocol may be requested:
+ * `auto` (the default — request it once the probe's answer proves the
+ * terminal speaks the protocol), `on` (request it regardless: for a
+ * terminal that supports it but answers late or not at all), `off`
+ * (never — keep the legacy encodings, for a terminal whose
+ * implementation misbehaves). The declared tier is the protocol's flag
+ * 1 only: an unambiguous Esc and unambiguous ctrl+keys. Shift+Enter
+ * needs flags 8|16, and flag 8 without 16 turns every capital into its
+ * unshifted key code plus SHIFT — the associated text that fixes that
+ * is not decoded yet (boba's TODO.md, "Keyboard protocol"), so
+ * declaring it would corrupt typed prose. Env spelling: NEVERMORE_KBD. */
+#define NM_CFG_KEY_KBD "kbd"
 
 typedef enum
 {
@@ -234,6 +246,15 @@ typedef enum
     NM_REASONING_ECHO_TOOLS,   /* only on messages carrying tool_calls */
     NM_REASONING_ECHO_ALL      /* every assistant message with a trace */
 } NmReasoningEcho;
+
+/* The `kbd` key's value space: when the terminal's keyboard protocol may
+ * be requested (the key comment above says what each mode is for). */
+typedef enum
+{
+    NM_KBD_AUTO = 0, /* request it when the terminal proves support */
+    NM_KBD_ON,       /* request it regardless of the probe */
+    NM_KBD_OFF       /* never request it */
+} NmKbdMode;
 
 typedef struct NmConfig NmConfig;
 
@@ -439,6 +460,22 @@ const char *nm_config_reasoning_echo_name(NmReasoningEcho mode);
  * config. This is what the agent reads at the point of use (before its
  * own freeze latches — see agent.h). */
 NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
+
+/* Is `value` a `kbd` mode: `auto` / `on` / `off` (case-insensitive, with
+ * the bool spellings and `kitty` / `legacy` accepted as synonyms)? */
+int nm_config_valid_kbd(const char *value);
+
+/* Normalize a `kbd` value (validated first) into its canonical
+ * spelling. Returns 1 on success, 0 when `value` is not valid. */
+int nm_config_kbd_canon(const char *value, char *out, size_t cap);
+
+/* A mode's canonical spelling, for messages and /config. */
+const char *nm_config_kbd_name(NmKbdMode mode);
+
+/* The `kbd` key resolved and parsed: the winning layer's value as a
+ * mode. NM_KBD_AUTO when the key is unset, and for a NULL config. This
+ * is what the view reads at the point of use. */
+NmKbdMode nm_config_kbd_mode(const NmConfig *c);
 
 /* Is `value` a family set: `none`, or one or both families joined by
  * '+' (`IPv4`, `IPv6`, `IPv4+IPv6`)? The tokens are the nm_family_name

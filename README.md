@@ -171,6 +171,7 @@ searxng_timeout  = 10000
 run_command_timeout = 300000
 login_shell      = off
 reminders        = on
+kbd              = auto
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -276,6 +277,20 @@ when jobs cannot find your toolchain (a TUI started from a launcher has
 a minimal PATH). A call's own `login: false` always wins, and the key
 never reaches `run_command` or nevermore's own stages — those run under
 the platform shell, deterministically, whatever this is set to.
+
+`kbd` (`$NEVERMORE_KBD`, default `auto`) is whether the terminal's
+kitty keyboard protocol may be requested. `auto` asks for it once the
+startup probe proves the terminal speaks it, `on` requests it without
+waiting for an answer (a terminal that supports it but answers late),
+and `off` keeps the legacy encodings — the escape hatch for a terminal
+whose implementation misbehaves. It buys an unambiguous Esc and
+unambiguous Ctrl+keys; the protocol's Shift+Enter is **not** enabled,
+because it needs the flag that reports all keys as escape codes, and
+that flag without the associated text turns every capital into its
+unshifted key code plus Shift. `Ctrl+J` inserts a newline either way.
+`/config` shows the value _and_ what the terminal answered
+(`terminal: kitty protocol` / `terminal: legacy encodings`), since the
+store alone cannot say whether the protocol is in use.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation

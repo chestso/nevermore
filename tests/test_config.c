@@ -390,6 +390,74 @@ static void test_reasoning_mode_vocabulary(void)
     ASSERT_EQ(nm_config_reasoning_echo_mode(NULL), NM_REASONING_ECHO_OFF);
 }
 
+/* The `kbd` mode: three values, one vocabulary — `auto` (the default),
+ * `on` (request the protocol regardless of the probe) and `off` (keep
+ * the legacy encodings). The bool spellings and the two terminal names
+ * a user reaches for (`kitty` / `legacy`) fold in, every layer
+ * normalizes to the canonical spelling, and the resolver agrees. */
+static void test_kbd_mode_vocabulary(void)
+{
+    char out[16];
+    /* auto — the default: the terminal's answer decides */
+    ASSERT_TRUE(nm_config_kbd_canon("auto", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "auto");
+    ASSERT_TRUE(nm_config_kbd_canon("DEFAULT", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "auto");
+    /* on — request it regardless (the probe cannot be trusted) */
+    ASSERT_TRUE(nm_config_kbd_canon("on", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "on");
+    ASSERT_TRUE(nm_config_kbd_canon("YES", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "on");
+    ASSERT_TRUE(nm_config_kbd_canon("kitty", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "on");
+    /* off — the escape hatch for a terminal whose implementation
+     * misbehaves */
+    ASSERT_TRUE(nm_config_kbd_canon("off", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    ASSERT_TRUE(nm_config_kbd_canon("NO", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    ASSERT_TRUE(nm_config_kbd_canon("legacy", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "off");
+    /* nothing else */
+    ASSERT_FALSE(nm_config_kbd_canon("sometimes", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_kbd_canon("", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_valid_kbd("auto ")); /* no trimming */
+
+    ASSERT_STR_EQ(nm_config_kbd_name(NM_KBD_AUTO), "auto");
+    ASSERT_STR_EQ(nm_config_kbd_name(NM_KBD_ON), "on");
+    ASSERT_STR_EQ(nm_config_kbd_name(NM_KBD_OFF), "off");
+
+    /* A file value normalizes on the way in... */
+    pin_paths("kbd-modes");
+    write_file_at(g_user, "kbd = Kitty\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_KBD), "on");
+    ASSERT_EQ(nm_config_kbd_mode(c), NM_KBD_ON);
+
+    /* ...the env outranks it... */
+    test_setenv("NEVERMORE_KBD", "legacy");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_KBD), "off");
+    ASSERT_EQ(nm_config_kbd_mode(c), NM_KBD_OFF);
+
+    /* ...garbage is dropped (the layer below stands), and the shadow
+     * write-back refuses it too. */
+    test_setenv("NEVERMORE_KBD", "perhaps");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_KBD), NM_CFG_USER);
+    ASSERT_EQ(nm_config_kbd_mode(c), NM_KBD_ON);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_KBD, "perhaps"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_KBD, "auto"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "kbd = auto\n");
+    ASSERT_EQ(nm_config_kbd_mode(c), NM_KBD_AUTO);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_KBD");
+
+    /* No config at all: auto, never a stale value. */
+    ASSERT_EQ(nm_config_kbd_mode(NULL), NM_KBD_AUTO);
+}
+
 /* ---------------------------------------------------------------- */
 /* Shadow write-back                                                 */
 /* ---------------------------------------------------------------- */
@@ -580,7 +648,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_POLL_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_LOGIN_SHELL);
-    ASSERT_NULL(nm_config_key_at(16));
+    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
+    ASSERT_NULL(nm_config_key_at(17));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -1141,6 +1210,7 @@ int main(void)
     RUN_TEST(test_env_garbage_is_ignored);
     RUN_TEST(test_boolean_normalization);
     RUN_TEST(test_reasoning_mode_vocabulary);
+    RUN_TEST(test_kbd_mode_vocabulary);
     RUN_TEST(test_shadow_write_and_reload);
     RUN_TEST(test_shadow_write_leaves_user_file_alone);
     RUN_TEST(test_shadow_reset_key_and_all);

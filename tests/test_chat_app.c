@@ -1195,8 +1195,102 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     harness_free(h);
 }
 
-/* A bracketed paste lands in the input as TEXT: every line ending a
- * terminal sends for the same copied text (CR, CRLF, LF) is one
+/* The keyboard protocol tier is the terminal's answer, resolved at the
+ * point of use: `auto` declares the protocol's flag 1 only once the
+ * probe says the terminal speaks it, and the declaration is what makes
+ * the runtime push it. Before the answer there is nothing to declare —
+ * which changes nothing, since a terminal sends the legacy encodings
+ * until we push. */
+static void test_kbd_tier_follows_the_terminal(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    /* Started like the real loop (tui_runtime_run), so the stop path
+     * that pops the flags is live. */
+    tui_runtime_start(h->rt);
+
+    /* The probe has not resolved: no push. (The tmpfile terminal never
+     * answers; the real loop's deadline is what resolves it.) */
+    tui_runtime_flush(h->rt);
+    const char *frame = harness_read(h);
+    ASSERT_TRUE(strstr(frame, "\033[?u") != NULL);  /* asked */
+    ASSERT_TRUE(strstr(frame, "\033[>1u") == NULL); /* nothing declared */
+
+    /* The terminal answers: it speaks the protocol. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    tui_runtime_flush(h->rt);
+    frame = harness_read(h);
+    ASSERT_TRUE(strstr(frame, "\033[>1u") != NULL);
+
+    /* And the flags are popped at stop, so the shell does not inherit
+     * them. */
+    tui_runtime_stop(h->rt);
+    frame = harness_read(h);
+    ASSERT_TRUE(strstr(frame, "\033[<u") != NULL);
+
+    harness_free(h);
+}
+
+/* `kbd = off` is the escape hatch and it wins over the terminal's
+ * answer: a terminal whose implementation misbehaves gets the legacy
+ * encodings, never the push. `kbd = on` is the other override — declare
+ * it without waiting for a probe that a late-answering terminal never
+ * gives. */
+static void test_kbd_mode_overrides_the_probe(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_KBD, "off"), 0);
+
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>1u") == NULL);
+
+    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_KBD, "on"), 0);
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>1u") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* /config reports the terminal's ANSWER for `auto`: the store value
+ * alone would not say whether the protocol is actually in use, which is
+ * the one thing the row is for. */
+static void test_config_reports_the_kbd_tier(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "kbd") != NULL);
+    ASSERT_TRUE(strstr(out, "terminal: legacy encodings") != NULL);
+    size_t seen = strlen(out);
+
+    /* The terminal answers: the same row now reports the protocol. */
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    harness_type(h, "/config");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "terminal: kitty protocol") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* A bracketed paste lands in the input as TEXT: every line ending a * terminal sends for the same copied text (CR, CRLF, LF) is one
  * newline, and no part of the payload submits. A terminal without
  * bracketed paste delivers the same bytes as Enter presses — which is
  * exactly the submit this must not be. */
@@ -7010,6 +7104,9 @@ int main(void)
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
+    RUN_TEST(test_kbd_tier_follows_the_terminal);
+    RUN_TEST(test_kbd_mode_overrides_the_probe);
+    RUN_TEST(test_config_reports_the_kbd_tier);
     RUN_TEST(test_paste_lands_as_text_with_newlines);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
