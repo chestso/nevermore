@@ -3645,33 +3645,6 @@ static TuiCmd *chat_interrupt(NmChatApp *app)
     return tui_cmd_quit();
 }
 
-/* Bracketed paste: insert codepoints, \n as a newline. */
-static void paste_insert(NmChatApp *app, const TuiPasteMsg *paste)
-{
-    if (!app || !paste || !paste->text)
-        return;
-    const char *p = paste->text;
-    const char *end = p + paste->len;
-    while (p < end) {
-        if (*p == '\n') {
-            tui_textinput_update(app->input, tui_msg_key(TUI_KEY_ENTER, 0,
-                                                         TUI_MOD_SHIFT));
-            p++;
-            continue;
-        }
-        if ((unsigned char)*p < 0x20) { /* CR and control bytes: drop */
-            p++;
-            continue;
-        }
-        int len = tui_utf8_char_len(p);
-        if (p + len > end)
-            break;
-        uint32_t cp = tui_utf8_decode(p, len);
-        tui_textinput_update(app->input, tui_msg_char(cp, 0));
-        p += len;
-    }
-}
-
 static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
 {
     if (tui_list_popup_is_visible(app->popup)) {
@@ -3764,7 +3737,12 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         return tui_update_result_none();
 
     case TUI_MSG_PASTE:
-        paste_insert(app, &msg.data.paste);
+        /* Bracketed paste is the input's to insert: a pasted newline is
+         * a newline (one edit, one undo entry), never a synthesized
+         * Shift+Enter — and never a submit. The payload is borrowed for
+         * the call, which is all the component needs: it copies what it
+         * inserts. */
+        tui_textinput_update(app->input, msg);
         break;
 
     case TUI_MSG_INTERRUPT:

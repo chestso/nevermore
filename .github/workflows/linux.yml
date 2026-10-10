@@ -35,7 +35,11 @@ jobs:
         with:
           repository: chestso/boba
           # Pinned: bump alongside the nevermore commit that consumes a
-          # new boba API (currently the status line component —
+          # new boba API or behavior (currently the textinput's own
+          # bracketed-paste insert — the app hands the input
+          # TUI_MSG_PASTE and no longer synthesizes a key per codepoint,
+          # so a pasted newline is one edit with one undo entry — plus
+          # the status line component —
           # components/statusline.h's TuiStatusLine + TuiSegment, which
           # the app DECLARES and boba lays out, replacing the text
           # input's status line: TuiSpan and
@@ -55,7 +59,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: d63759ebd3f9b208a3c781682275008823e99282
+          ref: 6c4354c821d8e6c9e6b2dd6ce43d056ca5a8d879
           path: boba
           fetch-depth: 0
 

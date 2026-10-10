@@ -1195,6 +1195,30 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     harness_free(h);
 }
 
+/* A bracketed paste lands in the input as TEXT: every line ending a
+ * terminal sends for the same copied text (CR, CRLF, LF) is one
+ * newline, and no part of the payload submits. A terminal without
+ * bracketed paste delivers the same bytes as Enter presses — which is
+ * exactly the submit this must not be. */
+static void test_paste_lands_as_text_with_newlines(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "before ");
+    const char *payload = "one\rtwo\r\nthree\nfour";
+    TuiMsg paste = tui_msg_paste(strdup(payload), strlen(payload));
+    tui_runtime_send(h->rt, paste);
+    tui_msg_free(&paste);
+
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "before one\ntwo\nthree\nfour");
+    /* Nothing submitted: the whole block is still the prompt. */
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    harness_free(h);
+}
+
 /* A usage-carrying round fills the gauge from the provider's numbers —
  * used from the wire, limit from the catalog, cached from the
  * prompt_tokens_details breakdown — and colors it by how full the
@@ -6986,6 +7010,7 @@ int main(void)
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
+    RUN_TEST(test_paste_lands_as_text_with_newlines);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
