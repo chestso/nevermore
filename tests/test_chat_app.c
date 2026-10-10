@@ -2268,6 +2268,91 @@ static void test_cancel_midstream_returns_to_idle(void)
     close(sc.fd);
 }
 
+/* One real turn driven to completion against a canned one-round server,
+ * so a test can assert a PROMPT behavior in the state the user's next
+ * prompt is actually in: a finished turn rests in NM_AGENT_DONE (only a
+ * cancel walks back to IDLE). NULL = setup failed. The caller owns the
+ * harness and joins/closes the server (one round: the thread ends by
+ * itself). */
+static AppHarness *turn_to_done(struct ServerScript *sc, pthread_t *th)
+{
+    memset(sc, 0, sizeof(*sc));
+    sc->n_rounds = 1;
+    sc->sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"in one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc->fd = server_bind(&sc->port);
+    if (sc->fd < 0)
+        return NULL;
+    pthread_create(th, NULL, chat_server_thread, sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    if (!h)
+        return NULL;
+    harness_type(h, "hi there");
+    harness_enter(h);
+    if (harness_drive(h, 500) != 0)
+        return NULL;
+    return h;
+}
+
+/* Ctrl+D quits at the prompt — and KEEPS quitting after a turn has run.
+ * The EOF branch tested the state for NM_AGENT_IDLE, which a finished
+ * turn is not: Ctrl+D quit exactly once, on the very first prompt,
+ * before any turn had ever moved the agent off its initial state. */
+static void test_ctrl_d_quits_after_a_turn(void)
+{
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = turn_to_done(&sc, &th);
+    ASSERT_NOT_NULL(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    /* The next prompt: empty input, finished turn. */
+    tui_runtime_send(h->rt, tui_msg_eof());
+    ASSERT_TRUE(tui_runtime_should_quit(h->rt));
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+
+    /* And on a prompt that has never sent anything (the one case the
+     * IDLE test did cover). */
+    AppHarness *fresh = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
+    ASSERT_NOT_NULL(fresh);
+    tui_runtime_send(fresh->rt, tui_msg_eof());
+    ASSERT_TRUE(tui_runtime_should_quit(fresh->rt));
+    harness_free(fresh);
+}
+
+/* At a NON-empty prompt Ctrl+D deletes the character under the cursor,
+ * never quits — after a turn just as before one. Same stale predicate,
+ * same branch: it did nothing at all once the turn had run, so the key
+ * was silently dead (never reached the textinput either). */
+static void test_ctrl_d_deletes_at_a_nonempty_prompt_after_a_turn(void)
+{
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = turn_to_done(&sc, &th);
+    ASSERT_NOT_NULL(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    harness_type(h, "ab");
+    /* Ctrl+D deletes UNDER the cursor, and typing leaves it at the end:
+     * Home puts it on 'a' so the edit is observable. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_HOME, 0, 0));
+    tui_runtime_send(h->rt, tui_msg_eof());
+
+    ASSERT_FALSE(tui_runtime_should_quit(h->rt));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "b");
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* P0 deadline seam in the TUI: a silent server never makes the stream
  * fd readable, so only the runtime's tick can fire the stream-
  * inactivity deadline. The tick interval is bounded by
@@ -7278,6 +7363,8 @@ int main(void)
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);
     RUN_TEST(test_cancel_midstream_returns_to_idle);
+    RUN_TEST(test_ctrl_d_quits_after_a_turn);
+    RUN_TEST(test_ctrl_d_deletes_at_a_nonempty_prompt_after_a_turn);
     RUN_TEST(test_tick_fires_stream_inactivity_timeout);
     RUN_TEST(test_connect_error_prints_and_returns_to_idle);
     RUN_TEST(test_connect_walk_notice_is_printed);

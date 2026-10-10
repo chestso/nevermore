@@ -3806,18 +3806,28 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         break;
 
     case TUI_MSG_EOF:
+    {
+        /* "Idle" is NOT NM_AGENT_IDLE and never has been at the prompt:
+         * a completed turn rests in NM_AGENT_DONE (a failed one in
+         * NM_AGENT_ERROR), and only nm_agent_cancel walks back to IDLE.
+         * So the test is the same busy predicate handle_key,
+         * chat_interrupt and nm_chat_app_tick_ms use — testing the enum
+         * for IDLE made Ctrl+D quit exactly once: on the very first
+         * prompt, before any turn had ever run. */
+        NmAgentState st = nm_agent_state(app->agent);
+        int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
         if (tui_list_popup_is_visible(app->popup)) {
             tui_list_popup_hide(app->popup);
             app->popup_kind = POPUP_NONE;
-        } else if (nm_agent_state(app->agent) == NM_AGENT_IDLE &&
-                   tui_textinput_len(app->input) == 0) {
+        } else if (!busy && tui_textinput_len(app->input) == 0) {
             cmd = tui_cmd_quit();
-        } else if (nm_agent_state(app->agent) == NM_AGENT_IDLE) {
+        } else if (!busy) {
             /* Non-empty: Ctrl+D deletes the char under the cursor. */
             tui_textinput_update(
                 app->input, tui_msg_key(TUI_KEY_NONE, 'd', TUI_MOD_CTRL));
         }
         break;
+    }
 
     case TUI_MSG_KEY_PRESS:
         handle_key(app, &msg.data.key, &cmd);
