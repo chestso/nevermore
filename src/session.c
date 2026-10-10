@@ -567,7 +567,11 @@ int nm_session_save(const NmSession *s, const char *path)
 {
     if (!s || !path)
         return -1;
-    FILE *f = fopen(path, "w");
+    /* BINARY on purpose: the transcript is an artifact (diffed, shared,
+     * re-read by a test), so it is LF on every platform — text mode would
+     * translate every newline to CRLF on Windows and make the same save
+     * two different files. */
+    FILE *f = fopen(path, "wb");
     if (!f)
         return -1;
     fprintf(f, "<!-- nevermore session: %zu messages -->\n", s->n);
