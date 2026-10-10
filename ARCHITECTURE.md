@@ -518,17 +518,18 @@ save [path]` writes session.c's markdown). Const on purpose: the
   terminal's kitty keyboard protocol is DECLARED per frame from the
   `kbd` key resolved at the point of use: `auto` (default) declares it
   only once the startup probe's answer proves the terminal speaks it,
-  `on` declares it without waiting, `off` never does. The tier is the
-  protocol's flag 1 only — an unambiguous Esc and unambiguous
-  Ctrl+keys. **Shift+Enter is deliberately NOT enabled**: it needs the
-  "report all keys as escape codes" flag, and that flag without the
-  associated text turns every capital into its unshifted key code plus
-  Shift, so declaring it would corrupt typed prose (boba does not
-  decode the associated text yet). `Ctrl+J` remains the newline key, and
-  `/config` prints the value _and_ the terminal's answer, because the
-  store alone cannot say whether the protocol is in use. The flags are
-  popped at stop — the runtime reconciles them in both render modes, so
-  a shell never inherits them.
+  `on` declares it without waiting, `off` never does. The declared tier
+  is the protocol's full flag set (1|8|16): an unambiguous Esc and
+  Ctrl+keys, **Shift+Enter as the newline key** (`CSI 13;2u` — flag 8 is
+  what makes a shifted Enter tellable from Enter, which no legacy
+  encoding can express), and the text each key produced, so a capital or
+  an IME result arrives as itself (flag 16). A terminal that grants only
+  part of it degrades to what it grants: without flag 8 `Ctrl+J` remains
+  the newline key, and without flag 16 a shifted ASCII letter is
+  recovered as its capital. `/config` prints the value _and_ the
+  terminal's answer, because the store alone cannot say whether the
+  protocol is in use. The flags are popped at stop — the runtime
+  reconciles them in both render modes, so a shell never inherits them.
 - **The status row** (`src/chat_app.c`'s `compose_status`) — boba's
   `TuiStatusLine` component, DECLARED by the app and laid out by boba.
   It used to be a field of the text input (`TuiSpan` +

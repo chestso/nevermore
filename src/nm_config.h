@@ -220,12 +220,13 @@ extern "C" {
  * terminal speaks the protocol), `on` (request it regardless: for a
  * terminal that supports it but answers late or not at all), `off`
  * (never — keep the legacy encodings, for a terminal whose
- * implementation misbehaves). The declared tier is the protocol's flag
- * 1 only: an unambiguous Esc and unambiguous ctrl+keys. Shift+Enter
- * needs flags 8|16, and flag 8 without 16 turns every capital into its
- * unshifted key code plus SHIFT — the associated text that fixes that
- * is not decoded yet (boba's TODO.md, "Keyboard protocol"), so
- * declaring it would corrupt typed prose. Env spelling: NEVERMORE_KBD. */
+ * implementation misbehaves). The declared tier is the protocol's full
+ * flag set (1|8|16): unambiguous Esc and Ctrl+keys, Shift+Enter as the
+ * newline key, and the text each key produced (so a capital or an IME
+ * result arrives as itself). A terminal that grants only part of it
+ * degrades to what it grants — without the report-all flag Shift+Enter
+ * is not expressible and Ctrl+J inserts the newline. Env spelling:
+ * NEVERMORE_KBD. */
 #define NM_CFG_KEY_KBD "kbd"
 
 typedef enum

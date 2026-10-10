@@ -903,11 +903,15 @@ static void post_image_block(NmChatApp *app, const NmImage *img)
  * built every frame, so a probe answer that lands after the first flush
  * moves the declaration and the runtime reconciles it: pop + push).
  *
- * Tier 1 only — the protocol's flag 1, which makes Esc, alt+key and
- * ctrl+key unambiguous. Shift+Enter would need flags 8|16, and flag 8
- * without 16 turns every capital into its unshifted key code plus
- * SHIFT (the associated text that fixes that is not decoded yet), so
- * declaring it would corrupt typed prose; Ctrl+J stays the newline key.
+ * The FULL tier — the protocol's flags 1|8|16. Flag 1 makes Esc,
+ * alt+key and ctrl+key unambiguous; flag 8 is what makes Shift+Enter
+ * (CSI 13;2u) tellable from Enter, so the newline gets a key of its
+ * own; flag 16 is what keeps a capital arriving as a capital, since
+ * flag 8 alone sends a text key as its UNSHIFTED code (shift+a is
+ * CSI 97;2u) — boba decodes the associated text (CSI 97;2;65u), and a
+ * terminal that reports keys without it still gets its shifted ASCII
+ * letters recovered. Ctrl+J remains the newline key for a terminal
+ * that does not speak the protocol at all.
  *
  * `auto` waits for the terminal's own answer: before the probe resolves
  * there is no answer, and nothing is declared — which changes nothing,
@@ -917,13 +921,15 @@ static TuiKeyboardEnhancements kbd_declaration(const NmChatApp *app)
     NmKbdMode mode = app->cfg ? nm_config_kbd_mode(app->cfg) : NM_KBD_AUTO;
     if (mode == NM_KBD_OFF)
         return TUI_KBD_NONE;
+    const TuiKeyboardEnhancements full = TUI_KBD_KITTY |
+                                         TUI_KBD_KITTY_ALL_KEYS |
+                                         TUI_KBD_KITTY_TEXT;
     if (mode == NM_KBD_ON)
-        return TUI_KBD_KITTY;
+        return full;
     if (!app->rt)
         return TUI_KBD_NONE;
     const TuiTerminalProfile *p = tui_runtime_terminal_profile(app->rt);
-    return (p && p->resolved && p->kbd_protocol) ? TUI_KBD_KITTY
-                                                 : TUI_KBD_NONE;
+    return (p && p->resolved && p->kbd_protocol) ? full : TUI_KBD_NONE;
 }
 
 /* Does the terminal render this image? The "if supported" gate: the

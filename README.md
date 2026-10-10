@@ -284,10 +284,13 @@ startup probe proves the terminal speaks it, `on` requests it without
 waiting for an answer (a terminal that supports it but answers late),
 and `off` keeps the legacy encodings — the escape hatch for a terminal
 whose implementation misbehaves. It buys an unambiguous Esc and
-unambiguous Ctrl+keys; the protocol's Shift+Enter is **not** enabled,
-because it needs the flag that reports all keys as escape codes, and
-that flag without the associated text turns every capital into its
-unshifted key code plus Shift. `Ctrl+J` inserts a newline either way.
+unambiguous Ctrl+keys, **Shift+Enter as a newline** (the terminal
+reports it as `CSI 13;2u`, which no legacy encoding can express), and
+the text a key produced, so capitals and IME input arrive as
+themselves. A terminal that speaks only part of the protocol degrades
+to what it grants: without the report-all flag Shift+Enter stays
+unavailable and `Ctrl+J` inserts the newline, and without the
+associated text a shifted letter is recovered as its capital.
 `/config` shows the value _and_ what the terminal answered
 (`terminal: kitty protocol` / `terminal: legacy encodings`), since the
 store alone cannot say whether the protocol is in use.

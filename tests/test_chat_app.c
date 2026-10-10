@@ -1213,16 +1213,17 @@ static void test_kbd_tier_follows_the_terminal(void)
      * answers; the real loop's deadline is what resolves it.) */
     tui_runtime_flush(h->rt);
     const char *frame = harness_read(h);
-    ASSERT_TRUE(strstr(frame, "\033[?u") != NULL);  /* asked */
-    ASSERT_TRUE(strstr(frame, "\033[>1u") == NULL); /* nothing declared */
+    ASSERT_TRUE(strstr(frame, "\033[?u") != NULL);   /* asked */
+    ASSERT_TRUE(strstr(frame, "\033[>25u") == NULL); /* nothing declared */
 
-    /* The terminal answers: it speaks the protocol. */
+    /* The terminal answers: it speaks the protocol, so the full tier is
+     * declared (1 | 8 | 16 = 25). */
     h->rt->probe_state = 3;
     h->rt->profile.resolved = 1;
     h->rt->profile.kbd_protocol = 1;
     tui_runtime_flush(h->rt);
     frame = harness_read(h);
-    ASSERT_TRUE(strstr(frame, "\033[>1u") != NULL);
+    ASSERT_TRUE(strstr(frame, "\033[>25u") != NULL);
 
     /* And the flags are popped at stop, so the shell does not inherit
      * them. */
@@ -1250,13 +1251,49 @@ static void test_kbd_mode_overrides_the_probe(void)
     h->rt->profile.resolved = 1;
     h->rt->profile.kbd_protocol = 1;
     tui_runtime_flush(h->rt);
-    ASSERT_TRUE(strstr(harness_read(h), "\033[>1u") == NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>25u") == NULL);
 
     ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_KBD, "on"), 0);
     tui_runtime_flush(h->rt);
-    ASSERT_TRUE(strstr(harness_read(h), "\033[>1u") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>25u") != NULL);
 
     nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* Shift+Enter is the newline key once the full tier is declared — the
+ * terminal sends it as CSI 13;2u, which the parser turns into ENTER +
+ * SHIFT — and a capital that arrives with its reported text (CSI
+ * 97;2;65u) lands as the capital. */
+static void test_kbd_full_tier_gives_shift_enter(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    tui_runtime_flush(h->rt); /* declares the tier */
+    /* The tier this test is about: flags 1|8|16 pushed (8 is what makes
+     * Shift+Enter tellable from Enter). */
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>25u") != NULL);
+
+    harness_type(h, "one");
+    /* Shift+Enter: a newline, not a submit. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, TUI_MOD_SHIFT));
+    harness_type(h, "two");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "one\ntwo");
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    /* A text key that carries its text (the terminal's associated
+     * text) inserts what the key produced. */
+    TuiMsg cap = tui_msg_key(TUI_KEY_NONE, 'A', TUI_MOD_SHIFT);
+    cap.data.key.text[0] = 'A';
+    cap.data.key.text_len = 1;
+    tui_runtime_send(h->rt, cap);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "one\ntwoA");
+
     harness_free(h);
 }
 
@@ -7105,6 +7142,7 @@ int main(void)
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
     RUN_TEST(test_kbd_tier_follows_the_terminal);
+    RUN_TEST(test_kbd_full_tier_gives_shift_enter);
     RUN_TEST(test_kbd_mode_overrides_the_probe);
     RUN_TEST(test_config_reports_the_kbd_tier);
     RUN_TEST(test_paste_lands_as_text_with_newlines);

@@ -38,9 +38,12 @@ jobs:
           # new boba API or behavior (currently the keyboard protocol:
           # TuiKeyboardEnhancements carries the flag set, the inline
           # render mode reconciles it, Ctrl+C/Ctrl+D keep their
-          # INTERRUPT/EOF verdicts under the protocol, and the probe
+          # INTERRUPT/EOF verdicts under the protocol, the probe
           # answers CSI ? u with TuiTerminalProfile::kbd_protocol — the
-          # `kbd` key's `auto` tier is that answer — plus the
+          # `kbd` key's `auto` tier is that answer — and the parser
+          # decodes the associated text into TuiKeyMsg::text, without
+          # which the declared report-all flag would turn every capital
+          # into its unshifted key code; plus the
           # textinput's own bracketed-paste insert — the app hands the
           # input TUI_MSG_PASTE and no longer synthesizes a key per
           # codepoint, so a pasted newline is one edit with one undo
@@ -64,7 +67,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 72ffb8a51e0e93d5f452fc538fcc5eb13f95fbe5
+          ref: a468cd26fed9ae44a9fd86f2296b9aaf0b94200e
           path: boba
           fetch-depth: 0
 
