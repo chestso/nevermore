@@ -4165,10 +4165,16 @@ static void test_agent_keepalive_comments_reset_the_deadline(void)
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
-    /* Comment cadence is 60 ms: a 300 ms inactivity budget survives it
+    /* Comment cadence is 60 ms: a 600 ms inactivity budget survives it
      * only because the keep-alive comments count as traffic (the store's
-     * `timeout` key). */
-    nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "300");
+     * `timeout` key). The budget is deliberately SHORT of the 900 ms of
+     * comment-only traffic (a delta-clocked deadline must still die, or
+     * the test proves nothing) and a 10x margin over the cadence — at
+     * 300 ms the margin was 5x, and a starved server thread on a loaded
+     * macOS runner slipped past it, failing the turn (and leaking the
+     * short budget into the tests after it, which hold their rounds
+     * open). */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "600");
 
     ASSERT_EQ(nm_agent_turn(agent, "draw something slow", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
