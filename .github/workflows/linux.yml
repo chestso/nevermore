@@ -48,7 +48,11 @@ jobs:
           # flag reports, plus the lock, media, keypad and F13+ keys)
           # instead of handing its Private-Use-Area codepoint to the
           # input as a rune, which is what typed an invisible
-          # character every time the user pressed Shift; plus the
+          # character every time the user pressed Shift — and decodes
+          # the modifier field as the BIT FIELD it is (the lock bits
+          # masked off, since the report-all flag puts them on every
+          # key: with Num Lock on, a table of exact values read
+          # Shift+Enter as a bare Enter); plus the
           # textinput's own bracketed-paste insert — the app hands the
           # input TUI_MSG_PASTE and no longer synthesizes a key per
           # codepoint, so a pasted newline is one edit with one undo
@@ -72,7 +76,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 382952558b7cd8cd32c906d0cf3744e10f3589a5
+          ref: c7611fdfa4fb72f92145a91a74fa0ca1e0a865cc
           path: boba
           fetch-depth: 0
 

@@ -530,6 +530,11 @@ save [path]` writes session.c's markdown). Const on purpose: the
   are reported as key events too (a Shift press is `CSI 57441;2u`): they
   are FUNCTIONAL keys — the protocol's Private Use Area — and not text,
   so the parser drops them and reaching for a capital types nothing.
+  The modifier field is a BIT FIELD, and once this flag is on the
+  terminal reports the LOCK state in it on every key, so the parser
+  masks the locks off: with Num Lock on, Shift+Enter is `CSI 13;130u`,
+  and a decoder that knew only the values 2..8 read it as a bare Enter
+  (a submit, not a newline) and Ctrl+Shift+key as a plain letter.
   `/config` prints the value _and_ the
   terminal's answer, because the store alone cannot say whether the
   protocol is in use. The flags are popped at stop — the runtime

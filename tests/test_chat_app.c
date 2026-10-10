@@ -1316,6 +1316,42 @@ static void test_kbd_full_tier_gives_shift_enter(void)
     harness_free(h);
 }
 
+/* A lock modifier is not a modifier — it is keyboard STATE, and the
+ * report-all flag makes the terminal put it on EVERY key event. The
+ * user's own box has Num Lock on, so their kitty sends `CSI 97;133u`
+ * for Ctrl+A and `CSI 13;130u` for Shift+Enter (128 = num_lock): a
+ * decoder that knows only the values 2..8 reads those as NO modifiers,
+ * which is "Ctrl+Shift does nothing" and "Shift+Enter submits". The
+ * modifiers must survive the lock bits. */
+static void test_kbd_wire_lock_modifiers_keep_the_modifiers(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    tui_runtime_flush(h->rt); /* declares the tier */
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>25u") != NULL);
+
+    harness_type(h, "xy");
+    /* Shift+Enter with Num Lock on: a newline at the cursor, not a
+     * submit. */
+    harness_wire(h, "\033[13;130u");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "xy\n");
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+
+    /* Ctrl+A with Num Lock on: cursor to the start of the line, NOT a
+     * typed 'a' — so the next character lands before "ab". */
+    harness_type(h, "ab");
+    harness_wire(h, "\033[97;133u");
+    harness_type(h, "z");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "xy\nzab");
+
+    harness_free(h);
+}
+
 /* The declared tier's own traffic, fed as the WIRE BYTES the terminal
  * sends. Flag 8 reports the modifier keys THEMSELVES (a Shift press is
  * CSI 57441;2u) — a functional key, not text — and flag 16 reports a
@@ -7195,6 +7231,7 @@ int main(void)
     RUN_TEST(test_kbd_tier_follows_the_terminal);
     RUN_TEST(test_kbd_full_tier_gives_shift_enter);
     RUN_TEST(test_kbd_wire_shift_press_types_nothing);
+    RUN_TEST(test_kbd_wire_lock_modifiers_keep_the_modifiers);
     RUN_TEST(test_kbd_mode_overrides_the_probe);
     RUN_TEST(test_config_reports_the_kbd_tier);
     RUN_TEST(test_paste_lands_as_text_with_newlines);

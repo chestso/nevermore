@@ -292,7 +292,10 @@ to what it grants: without the report-all flag Shift+Enter stays
 unavailable and `Ctrl+J` inserts the newline, and without the
 associated text a shifted letter is recovered as its capital. The
 report-all flag also reports the modifier keys themselves; they are
-functional keys, not text, so pressing Shift types nothing.
+functional keys, not text, so pressing Shift types nothing. It also
+makes the terminal report the lock keys' state on every key event,
+which nevermore masks off — Num Lock on must not turn Shift+Enter into
+a plain Enter.
 `/config` shows the value _and_ what the terminal answered
 (`terminal: kitty protocol` / `terminal: legacy encodings`), since the
 store alone cannot say whether the protocol is in use.
