@@ -2362,8 +2362,16 @@ void nm_chat_app_warm_catalog(NmChatApp *app)
     if (!nm_live_catalog_enabled())
         return;
     NmListSource *s = NULL;
-    if (catalog_fetch_begin(app, &s) != NM_CAT_FETCHING)
-        return; /* nothing to fetch: cached, or no live seam */
+    if (catalog_fetch_begin(app, &s) != NM_CAT_FETCHING) {
+        /* Nothing is in flight: READY (already cached, or a provider
+         * with no live seam) and FAIL both leave the source the begin
+         * handed back to the CALLER (open_models_popup's READY arm
+         * frees it the same way). Dropping it here leaked one
+         * NmListSource per warm — a sync provider, or a catalog a
+         * picker visit already cached (found by the ASan gate). */
+        nm_source_free(s);
+        return;
+    }
     app->catalog_src = s;
     app->catalog_popup = 0;
     memset(&app->catalog_query, 0, sizeof(app->catalog_query));
