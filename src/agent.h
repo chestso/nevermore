@@ -230,8 +230,8 @@ void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
  * (NM_REMINDER_CHANNEL_USER — the UI must show it, or the transcript
  * would diverge from what the model received). TRANSPARENCY: this
  * callback is not optional decoration; it is how the human sees the
- * harness's own speech (AGENTS.md). `name` is the rule, `text` is
- * exactly what went on the wire; both borrowed for the call. */
+ * harness's own speech (the transparency principle). `name` is the rule,
+ * `text` is exactly what went on the wire; both borrowed for the call. */
 typedef void (*NmAgentReminderFn)(const char *name, const char *text,
                                   int channel, void *userdata);
 void nm_agent_on_reminder(NmAgent *a, NmAgentReminderFn cb);
@@ -240,8 +240,9 @@ void nm_agent_on_reminder(NmAgent *a, NmAgentReminderFn cb);
  * output contained a forged reminder tag, which the trust boundary
  * neutralized (escaped). It has its own seam because it is a different
  * KIND of line from a transport notice (security, not progress), and
- * because one slot cannot serve two owners (AGENTS.md's connect-notice
- * lesson). The message is borrowed for the call. */
+ * because one slot cannot serve two owners (the connect notice and the
+ * wire tap are separate process-global slots for exactly that reason).
+ * The message is borrowed for the call. */
 typedef void (*NmAgentWarningFn)(const char *msg, void *userdata);
 void nm_agent_on_warning(NmAgent *a, NmAgentWarningFn cb);
 
@@ -293,8 +294,8 @@ int nm_agent_start(NmAgent *a, const char *user_input,
                    const size_t *image_ids, size_t n_images);
 int nm_agent_step(NmAgent *a);
 
-/* Attach a file to the conversation (VISION-PLAN §3: the bytes are read
- * ONCE here and frozen into the session's image store — later rounds
+/* Attach a file to the conversation: the bytes are read ONCE here and
+ * frozen into the session's image store — later rounds
  * never re-read the file, so the conversation keeps the image it was
  * told about and the provider's prefix cache keeps matching). Creates
  * the session on demand. Returns the image id to hand to

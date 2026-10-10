@@ -14,7 +14,7 @@
  *     clipped to the tail rows_cap). Both call sites share one
  *     implementation, so the final and the live table cannot drift.
  *
- * Styling rules (docs/TRANSCRIPT-STYLING-PLAN.md D3-D6):
+ * Styling rules:
  *   - The reasoning stream (blk->stream == NM_STREAM_ID_REASONING)
  *     renders dim: every row is wrapped in the dim attr, and a span's
  *     reset restores the row's BASE attr (heading color, quote tint)

@@ -4,7 +4,7 @@
  * (`cmd.exe /d /c` unless the caller names another — see NmProcShell)
  * with merged stdout+stderr on one anonymous pipe and
  * a second pipe for stdin (never the terminal — the POSIX /dev/null
- * decision; see AGENTS.md), assigned to a Job Object so a group kill is
+ * decision), assigned to a Job Object so a group kill is
  * `TerminateJobObject` (the analogue of the POSIX process-group
  * SIGKILL, which is where the "job" vocabulary comes from).
  *
@@ -432,7 +432,7 @@ long nm_proc_os_write(NmProcOs *os, const char *buf, size_t n)
      * pipe).  The stdin pipe is created with a large buffer, and a
      * write_stdin input is model-authored text, so this stays a bounded
      * deferral rather than a stall (the same class as Windows'
-     * synchronous run_command — see AGENTS.md). */
+     * synchronous run_command). */
     DWORD wrote = 0;
     if (!WriteFile(os->in_write, buf, (DWORD)n, &wrote, NULL))
         return -1; /* broken pipe: the child's stdin is gone */

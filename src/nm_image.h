@@ -4,7 +4,7 @@
  * gate; this module owns every decision around them: parsing the
  * image markdown line's source, obtaining the bytes (data URIs and
  * local paths - the two sources whose bytes are already ours; remote
- * URLs degrade by design, see TRANSCRIPT-IMAGE-PLAN), sniffing
+ * URLs degrade by design), sniffing
  * dimensions from the container headers, choosing the transport from
  * the terminal profile, sizing the display in cells, and - when the
  * terminal cannot take the source container - TRANSCODING it to one it
@@ -13,8 +13,8 @@
  * No pixel decode happens for a container the terminal already takes
  * (kitty takes PNG via f=100; iTerm2 decodes its own PNG/JPEG/GIF);
  * only the kitty-vs-JPEG lane decodes, and the derived PNG is
- * display-local (the wire bytes are never touched — see
- * docs/IMAGE-TRANSCODE-PLAN.md D7).
+ * display-local, freed with the render (the wire bytes are never
+ * touched).
  *
  * The state is a ONE-SLOT cache reached through
  * TuiTranscriptConfig.user_data (NmMarkdownRenderState.img): boba

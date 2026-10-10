@@ -119,7 +119,7 @@ struct NmConnection
     size_t scratch_len; /* head bytes accumulated (before parse) */
     size_t pending_len; /* body bytes buffered in scratch (after) */
 
-    /* Wire-tap correlation ids (docs/WIRE-DEBUG.md §3): conn_id is
+    /* Wire-tap correlation ids: conn_id is
      * monotonic per process, never reused (assigned at allocation);
      * xchg counts requests queued on this connection, 1-based,
      * bumped at nm_request_queue time (1 today — one exchange per

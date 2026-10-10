@@ -34,7 +34,7 @@ typedef struct NmRequestHeader
 {
     const char *name;
     const char *value;
-    /* Wire-recording redaction marker (docs/WIRE-DEBUG.md §4): 1 =
+    /* Wire-recording redaction marker: 1 =
      * the value is a secret — any wire recording redacts it
      * (<redacted>); 0 logs as-is. Set where the secret is built,
      * never searched for afterwards: the constructor knows, the
@@ -425,7 +425,7 @@ typedef struct NmTlsBackend
 const NmTlsBackend *nm_tls_backend(void);
 
 /* ---------------------------------------------------------------- */
-/* Wire tap (docs/WIRE-DEBUG.md): the recording seam                 */
+/* Wire tap: the recording seam                                      */
 /* ---------------------------------------------------------------- */
 
 struct NmConnection; /* tap signatures borrow it opaquely */

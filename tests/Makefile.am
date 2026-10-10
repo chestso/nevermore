@@ -169,7 +169,7 @@ test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 
-# Wire debug recorder (docs/WIRE-DEBUG.md): banner + NDJSON event
+# Wire debug recorder: banner + NDJSON event
 # lines + redaction via the header secret marker, plus a tap round
 # trip against a canned loopback server. Direct recorder calls, no
 # real network.

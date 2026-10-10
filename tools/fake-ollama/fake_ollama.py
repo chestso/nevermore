@@ -269,7 +269,7 @@ def chunk(delta):
 
 
 # Server-side request checks, one per scenario that has a wire contract
-# to verify (VISION-PLAN section 2's parts array is the first). A check
+# to verify (the parts array is the first). A check
 # takes the raw request body and returns (problems, summary): an empty
 # problems list means the request was shaped the way the scenario
 # expects. The verdict rides back as the first content delta, so a

@@ -83,7 +83,7 @@ static void conn_set_err_detail(NmConnection *conn, const char *fmt, ...)
 }
 
 /* ----------------------------------------------------------------
- * Wire-tap stage tags + error emission (docs/WIRE-DEBUG.md §3)
+ * Wire-tap stage tags + error emission
  * ---------------------------------------------------------------- */
 
 /* Which seam a failure hit, decided by connection state: a completed

@@ -1,4 +1,4 @@
-/* wire_recorder.h - wire debug recorder (docs/WIRE-DEBUG.md)
+/* wire_recorder.h - wire debug recorder
  *
  * NEVERMORE_DEBUG_WIRE=1 turns nevermore into its own packet capture:
  * every HTTP request/response and each SSE event is appended to one
@@ -46,7 +46,7 @@ void nm_wire_recorder_shutdown(void);
 double nm_wire_recorder_now(void);
 
 /* The configured key names for the banner ("keys configured:" line).
- * names-only: values are NEVER logged (WIRE-DEBUG §4). */
+ * names-only: values are NEVER logged. */
 void nm_wire_recorder_set_env_keys(const char *const *names, size_t n);
 
 #ifdef __cplusplus

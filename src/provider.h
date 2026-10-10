@@ -114,7 +114,7 @@ typedef struct NmMessage
      * call it answers via tool_call_id. NULL otherwise. */
     const char *tool_calls_json; /* NM_ROLE_ASSISTANT: JSON array or NULL */
     const char *tool_call_id;    /* "tool" role: answered call id or NULL */
-    /* Image content parts (VISION-PLAN §2): a USER message that carries
+    /* Image content parts: a USER message that carries
      * images serializes its `content` as a parts ARRAY — the text part
      * first, then one image part per entry, in order. Each entry is
      * pre-serialized JSON of the shape
@@ -123,8 +123,8 @@ typedef struct NmMessage
      * the client embeds the bytes VERBATIM (nm_json_new_raw) and stays a
      * dumb serializer. BORROWED: the owner must outlive the request.
      *
-     * An ASSISTANT message with images (the receive direction,
-     * IMAGEGEN-PLAN — a generated image the round produced) serializes
+     * An ASSISTANT message with images (the receive direction — a
+     * generated image the round produced) serializes
      * differently, and the asymmetry is the providers' own (probed, not
      * chosen: docs/OPENROUTER-API.md §5.1): `content` stays a plain
      * string ("" when the round streamed no text) and the parts ride a

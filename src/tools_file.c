@@ -914,7 +914,7 @@ static NmToolResult not_text_result(const char *path, const char *text,
     return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
 }
 
-/* read_file's image branch (docs/TOOL-IMAGE-PLAN.md D2/D3): a two-step
+/* read_file's image branch: a two-step
  * probe so the text hot path never pays for a full read. Returns 1 when
  * it handled the call (`out` filled), 0 when the file is not an image
  * the WIRE takes (fall through to the text path UNCHANGED). */

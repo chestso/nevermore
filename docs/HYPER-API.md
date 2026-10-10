@@ -2,7 +2,8 @@
 
 This document specifies the **HTTP API of the Charm Hyper gateway** — the
 provider that Crush (and other clients) call to proxy LLM requests. It is not
-the Crush CLI protocol (see `CRUSH-SPEC.md`); it describes Hyper's server-side
+the Crush CLI protocol (see Crush's own `CRUSH-SPEC.md`); it describes
+Hyper's server-side
 endpoints as consumed by the OpenAI-compatible provider in Crush. The gateway's
 OpenAI-compatible chat-completions API lives under `/v1`; tokens (`sk-hyper-`
 prefixed) come from the Hyper Dashboard.

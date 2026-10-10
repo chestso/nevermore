@@ -9,7 +9,7 @@
  * comment (`in_block_comment`): every other token a fence line can
  * open (a string, a line comment) ends at the line's end by
  * construction. That is what makes per-line optimistic rendering
- * correct rather than merely cheap (TRANSCRIPT-BLOCKS.md).
+ * correct rather than merely cheap.
  */
 
 #include "nm_highlight.h"

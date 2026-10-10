@@ -432,7 +432,7 @@ static void test_null_dir_uses_process_cwd(void)
     nm_context_set_global_dir(NULL); /* restore the default chain */
 }
 
-/* The image-capability clause (VISION-PLAN): a model the catalog says
+/* The image-capability clause: a model the catalog says
  * can see gets it, right after the identity — the identity alone is a
  * coding agent with file tools, which reads "tell me about this image"
  * as "read this file". */

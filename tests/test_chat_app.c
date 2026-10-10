@@ -5342,7 +5342,7 @@ static void test_exec_command_spinner_tier(void)
 #endif /* !_WIN32 */
 
 /* ---------------------------------------------------------------- */
-/* Images (VISION-PLAN §7): /image, the pending set, the echo        */
+/* Images: /image, the pending set, the echo                         */
 /* ---------------------------------------------------------------- */
 
 /* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
@@ -5687,7 +5687,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
     close(sc.fd);
 }
 
-/* read_file on an image (TOOL-IMAGE-PLAN D9): the tool panel names it,
+/* read_file on an image: the tool panel names it,
  * and the image renders under that panel through the ONE pipeline —
  * the same markdown block /image posts, the same profile ladder. */
 static void test_tool_read_file_image_renders_under_the_panel(void)
@@ -5930,7 +5930,7 @@ static void test_tool_read_file_image_text_only_model_warns(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Imagegen (IMAGEGEN-PLAN §7): a model-generated image renders        */
+/* Imagegen: a model-generated image renders                           */
 /* through the one IMAGE-block pipeline                                */
 /* ---------------------------------------------------------------- */
 

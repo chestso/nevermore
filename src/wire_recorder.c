@@ -1,4 +1,4 @@
-/* wire_recorder.c - the wire debug recorder (docs/WIRE-DEBUG.md)
+/* wire_recorder.c - the wire debug recorder
  *
  * The NmWireTap implementation: NDJSON event lines appended to one
  * file, banner first, secrets redacted at serialization time. The
@@ -14,7 +14,7 @@
  *
  * JSON lines are built with nm_json_set + nm_json_dump — never raw
  * snprintf — because bodies and SSE data carry quotes and backslashes
- * (the backslash-escape rule from AGENTS.md; snprintf'd escapes reach
+ * (the JSON-escaping rule; snprintf'd escapes reach
  * the parser unescaped and reject the whole line).
  */
 
@@ -116,7 +116,7 @@ double nm_wire_recorder_now(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Redaction (log-write time only; WIRE-DEBUG §4)                    */
+/* Redaction (log-write time only)                                   */
 /* ---------------------------------------------------------------- */
 
 #define NM_WIRE_REDACTED "<redacted>"
@@ -434,7 +434,7 @@ static int mkdir_p(char *path)
 }
 
 /* Default directory per platform, matching history.c's state-dir
- * discovery (WIRE-DEBUG §2). dirname: $XDG_STATE_HOME/nevermore/wire
+ * discovery. dirname: $XDG_STATE_HOME/nevermore/wire
  * or %LOCALAPPDATA%\nevermore\wire. */
 static int wire_default_dir(char *out, size_t cap)
 {

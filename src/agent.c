@@ -50,10 +50,9 @@
 
 #include "provider_internal.h"
 
-/* One image a round's tool phase collected (docs/TOOL-IMAGE-PLAN.md D6):
- * the session id to fan out, and the producing tool's name for the
- * synthetic message's text. The agent owns the aggregation; the store
- * owns the bytes. */
+/* One image a round's tool phase collected: the session id to fan out,
+ * and the producing tool's name for the synthetic message's text. The
+ * agent owns the aggregation; the store owns the bytes. */
 typedef struct NmToolImage
 {
     size_t id;  /* session image id */
@@ -184,7 +183,7 @@ struct NmAgent
     size_t n_tool_images;
     size_t tool_images_cap;
 
-    /* Images the MODEL generated this round (IMAGEGEN-PLAN §3):
+    /* Images the MODEL generated this round:
      * NM_STREAM_IMAGE events, attached VERBATIM into the session store
      * as they arrive (the received data URL is the canonical part);
      * the ids ride the round's assistant message at finish_round, so
@@ -253,8 +252,8 @@ static void set_error(NmAgent *a, const char *msg)
  * runs on the UI thread (nm_agent_new from a /provider switch or from
  * startup, begin_round from a turn's first step, nm_agent_context_limit
  * from every frame that composes the gauge), where a live fetch is a
- * freeze — the repo-wide rule (AGENTS.md: "on the UI thread the catalog
- * is read with models_cached, never fetching"). A cold cache therefore
+ * freeze — the rule is that on the UI thread the catalog is read with
+ * models_cached, never fetching. A cold cache therefore
  * answers the static fallback, and a model that is not in it stays
  * unknown (-1): exactly the degradation an unknown model always had, and
  * what the /model popup's async fetch is for. Because every reader
@@ -831,8 +830,8 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
      * activity that produced it (a live answer is never cut). */
     a->last_activity = nm_monotonic_seconds();
 
-    /* A generated image: the WHOLE data URL in one event (IMAGEGEN-PLAN
-     * §3). The received bytes are attached VERBATIM into the session
+    /* A generated image: the WHOLE data URL in one event. The received
+     * bytes are attached VERBATIM into the session
      * store (they are the canonical part — a re-encode would break the
      * replay prefix) and ride the round's assistant message at
      * finish_round. A bare http(s) URL is not fetched by design (the
@@ -1332,7 +1331,7 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     if (a->n_calls == 0) {
         if (a->n_round_images > 0)
             /* The round generated images: content (possibly ""), trace
-             * and image ids are ONE append (IMAGEGEN-PLAN §3). */
+             * and image ids are ONE append. */
             nm_session_append_assistant_images(
                 a->session, a->reasoning, a->text, NULL, a->round_images,
                 a->n_round_images);

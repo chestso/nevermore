@@ -6,7 +6,7 @@
  * the primary buffer — no alt screen, no mouse; the terminal
  * scrollback is the output history.
  *
- * Transcript protocol (boba's streaming IR; see docs/TRANSCRIPT-BLOCKS.md):
+ * Transcript protocol (boba's streaming IR):
  *
  *   The component owns a TuiTranscript with two named streams —
  *   "content" (assistant answer) and "reasoning" (CoT) — plus boba's
@@ -228,7 +228,7 @@ struct NmChatApp
      * whose view would otherwise re-install the line. */
     int submitting;
 
-    /* Pending image attachments (VISION-PLAN §7): ids into the agent's
+    /* Pending image attachments: ids into the agent's
      * session image store, consumed by the next submit. Turn-scoped,
      * NOT model-scoped: /model keeps them. A /provider switch rebuilds
      * the agent — and the session, images included — so it drops them
@@ -282,7 +282,7 @@ static void chat_app_free(TuiModel *model);
 
 /* Image helpers defined in the images section below; on_tool (which
  * precedes them) needs the one render pipeline for a tool-captured
- * image (TOOL-IMAGE-PLAN D9). */
+ * image. */
 static int terminal_renders(const NmChatApp *app, const NmImage *img);
 static void post_image_block(NmChatApp *app, const NmImage *img);
 static void post_image_line(NmChatApp *app, const char *alt,
@@ -766,7 +766,7 @@ static void trim_path(const char *arg, char *path, size_t cap)
 }
 
 /* ---------------------------------------------------------------- */
-/* Images (VISION-PLAN §7): /image, the pending set, the echo        */
+/* Images: /image, the pending set, the echo                         */
 /* ---------------------------------------------------------------- */
 
 /* The active model's vision flag, from the provider catalog (the one

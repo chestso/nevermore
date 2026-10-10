@@ -6,7 +6,7 @@
  * input's status line while the agent streams. No alt-screen —
  * nevermore behaves like a chat in your shell, not like an editor.
  *
- * Transcript protocol (boba's streaming IR; docs/TRANSCRIPT-BLOCKS.md):
+ * Transcript protocol (boba's streaming IR):
  *
  *   The component owns a TuiTranscript with two nevermore streams
  *   ("content" = the assistant answer, "reasoning" = CoT) plus boba's

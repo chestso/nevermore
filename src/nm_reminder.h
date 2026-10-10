@@ -17,7 +17,7 @@
  *      has exactly one answer, and an attempt to forge one is
  *      detectable (the count is what the user's warning reports).
  *
- * TRANSPARENCY (AGENTS.md): a reminder is never silent. The agent hands
+ * TRANSPARENCY: a reminder is never silent. The agent hands
  * every fired reminder to the UI (nm_agent_on_reminder) and the
  * reminder's bytes are the same bytes the model receives — the
  * transcript shows what the model saw, at the point it was injected.

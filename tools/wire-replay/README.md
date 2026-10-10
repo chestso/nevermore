@@ -1,8 +1,8 @@
 # wire-replay — replay nevermore wire dumps
 
 A dependency-free Python HTTP server that reads a nevermore wire-debug
-dump (`NEVERMORE_DEBUG_WIRE=1`; format in `docs/WIRE-DEBUG.md`) and
-replays the recorded responses against live requests. It exists to make
+dump (`NEVERMORE_DEBUG_WIRE=1`) and replays the recorded responses
+against live requests. It exists to make
 nevermore debugging scenarios reproducible: capture once, replay as
 many times as you want, deterministically.
 

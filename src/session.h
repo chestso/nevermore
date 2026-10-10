@@ -33,7 +33,7 @@ typedef enum
     NM_ROLE_TOOL
 } NmRole;
 
-/* A captured image (VISION-PLAN §3: capture, not reference). The bytes
+/* A captured image (capture, not reference). The bytes
  * are read from the file exactly ONCE, at attach, and frozen here as the
  * canonical `data:` URL — later rounds never re-read the file. Two
  * reasons, both hard: the file can change mid-conversation (a re-read
@@ -126,7 +126,7 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
                                                       const char *tool_name,
                                                       const char *output);
 
-/* --- images (VISION-PLAN) ----------------------------------------- */
+/* --- images ---                                                     */
 
 /* Attach a file to the conversation: read it ONCE (bounded by
  * NM_IMAGE_MAX_WIRE_BYTES — the bytes ride every request, so the wire
@@ -156,7 +156,7 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
                                    size_t len, const char *alt, char *reason,
                                    size_t reason_cap);
 
-/* Attach a RECEIVED image (IMAGEGEN-PLAN §3): the whole image arrived
+/* Attach a RECEIVED image: the whole image arrived
  * as one `delta.images` event whose payload IS this data URL. The URL
  * is frozen VERBATIM — the received bytes are the canonical part, never
  * parse-and-rebuilt (a re-encode would change the bytes and break the
@@ -194,9 +194,9 @@ const NmSessionMessage *nm_session_append_user_images(NmSession *s,
                                                       const size_t *image_ids,
                                                       size_t n_images);
 
-/* Append the ASSISTANT message for a round that produced images
- * (IMAGEGEN-PLAN §3/§4): the round's content (NULL/"" stays a plain
- * empty string on the wire), reasoning trace, optional tool_calls
+/* Append the ASSISTANT message for a round that produced images: the
+ * round's content (NULL/"" stays a plain empty string on the wire),
+ * reasoning trace, optional tool_calls
  * array, and the image ids — one message, so the round's output is
  * one prefix-stable unit. The wire shape for these is the probed
  * message-level "images" array (docs/OPENROUTER-API.md §5.1). Returns

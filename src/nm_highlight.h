@@ -4,12 +4,11 @@
  * fence (```c / ```bash / ```json). Pure C: no I/O, no regex, no
  * allocation — runs are reported straight to a callback.
  *
- * Resumable, and optimistic per line (TRANSCRIPT-BLOCKS.md, Emission
- * granularity): boba renders a labeled fence one committed line at a
- * time and committed bytes can never be re-painted, so the highlighter
- * carries only the state a later line can still need (an open C-family
- * block comment) and renders every line with the state it has at
- * emission. The opening line's committed styling never changes.
+ * Resumable, and optimistic per line: boba renders a labeled fence one
+ * committed line at a time, and committed bytes can never be re-painted,
+ * so the highlighter carries only the state a later line can still need
+ * (an open C-family block comment) and renders every line with the state
+ * it has at emission. The opening line's committed styling never changes.
  *
  * State is per stream (a fence on content must not share a block
  * comment with one on reasoning), so the renderer holds one

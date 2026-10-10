@@ -58,7 +58,7 @@ const NmTlsBackend *nm_tls_backend(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Wire tap (docs/WIRE-DEBUG.md): the recording seam                 */
+/* Wire tap: the recording seam                                      */
 /* ---------------------------------------------------------------- */
 
 /* Process-global, installed once at startup (nm_tls_backend
@@ -167,8 +167,8 @@ void nm_wire_tap_connect_retry(const struct NmConnection *conn,
 /* Per-address connect budget in ms (see nm_connection_connect_timeout_
  * ms). The VALUE lives in the config store's `connect_timeout` key —
  * the transport keeps no copy, it resolves the store at the point of
- * use (AGENTS.md: the transport reads no config FILES; it reads the
- * one shared value store main.c installs). With no store (a unit test
+ * use (the transport reads no config FILES; it reads the one shared
+ * value store main.c installs). With no store (a unit test
  * with no config) the built-in default applies. */
 int nm_connection_connect_timeout_ms(void)
 {
@@ -367,7 +367,7 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
     NmConnection *conn = nm_socket_connect(host, port, info);
     if (!conn) {
         /* Pre-connection failure: no conn exists to correlate to, so
-         * the error line carries no xchg (WIRE-DEBUG §3). The socket
+         * the error line carries no xchg. The socket
          * layer stamped the process-global reason; surface it on the
          * tap too (info may be NULL on the catalog-fetch paths). */
         nm_wire_tap_error(NULL, "connect",
@@ -559,7 +559,7 @@ NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
         conn->xchg++;
     /* The request event fires at queue time — exactly what the app
      * constructed, before wire serialization (the reproducible
-     * truth, WIRE-DEBUG §3). */
+     * truth). */
     nm_wire_tap_request(conn, method, path, headers, n_headers, body,
                         body_len);
     return nm_socket_request_queue(conn, method, path, headers, n_headers,

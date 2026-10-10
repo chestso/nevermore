@@ -107,7 +107,7 @@ static void usage(FILE *out)
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
  * renders as a compact status line (the -P pipeline shape). */
 
-/* Images received in ask mode (IMAGEGEN-PLAN §3): no transcript exists,
+/* Images received in ask mode: no transcript exists,
  * so the image lands as a FILE — nevermore-image-N.<ext> in the cwd
  * (deterministic; the extension is the sniffed container's) — and the
  * note goes to stderr, keeping stdout clean for piping (a megabyte
@@ -372,7 +372,7 @@ static int run_interactive(const char *provider_name, const char *model,
     return rc == 0 ? 0 : 1;
 }
 
-/* Wire debug recorder (docs/WIRE-DEBUG.md): both entry paths record
+/* Wire debug recorder: both entry paths record
  * — it is the same transport underneath, so wiring happens once at
  * startup, before any provider traffic. Keys configured are banner
  * names-only (values never logged). Returns the provider name for

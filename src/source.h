@@ -1,7 +1,7 @@
 /* source.h - listing plane: uniform pickable entries behind sources
  *
- * The picker design (TODO.md): "provider" at scale means a catalog
- * entry, not a hand-written vtable. The routing plane (struct
+ * The picker design: "provider" at scale means a catalog entry, not a
+ * hand-written vtable. The routing plane (struct
  * NmProvider) stays as-is — 4 compiled-in transports routed by
  * name. The listing plane is this file: everything pickable
  * (providers, models, later tools/servers/sessions) comes from a

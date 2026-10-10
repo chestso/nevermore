@@ -17,7 +17,7 @@ struct NmSession
     NmSessionMessage *msgs;
     size_t n;
     size_t cap;
-    /* The image store (VISION-PLAN §3): attached files, read once and
+    /* The image store: attached files, read once and
      * frozen as data URLs. Grown geometrically — an attach is an event,
      * not churn. Messages carry INDICES into this array. */
     NmImage *images;
@@ -172,7 +172,7 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
 }
 
 /* ---------------------------------------------------------------- */
-/* Images (VISION-PLAN §3: capture, not reference)                   */
+/* Images (capture, not reference)                                   */
 /* ---------------------------------------------------------------- */
 
 static void attach_reason(char *reason, size_t cap, const char *msg)
@@ -440,7 +440,7 @@ size_t nm_session_image_count(const NmSession *s)
 /* The deterministic text part for an image-only send: the alt names
  * when they fit, else a count. Never empty, never absent — some
  * upstreams dislike a textless user message, and the shape has to be
- * frozen for the prefix cache anyway (VISION-PLAN §5). */
+ * frozen for the prefix cache anyway. */
 static void fallback_text(const NmSession *s, const size_t *ids, size_t n,
                           char *out, size_t cap)
 {

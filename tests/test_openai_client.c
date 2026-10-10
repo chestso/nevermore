@@ -590,7 +590,7 @@ static void test_chat_stream_end_to_end(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Images on the wire (VISION-PLAN §2, §4, §5)                       */
+/* Images on the wire                                                */
 /* ---------------------------------------------------------------- */
 
 /* The exact content part the session freezes at attach. */
@@ -652,10 +652,11 @@ static void test_chat_image_parts_shape(void)
     ASSERT_TRUE(strstr(body, "\"detail\"") == NULL);
 }
 
-/* VISION-PLAN §11's one assertion, and the reason the whole design is
- * shaped the way it is: round 1's serialized messages must be a
- * BYTE-EQUAL prefix of round 2's body. That single check pins the
- * invariants the provider's prompt cache needs — one canonical data
+/* The one assertion that pins the prefix invariant, and the reason the
+ * whole design is shaped the way it is: round 1's serialized messages
+ * must be a BYTE-EQUAL prefix of round 2's body. That single check
+ * pins the invariants the provider's prompt cache needs — one
+ * canonical data
  * URL, verbatim embedding, frozen field order, and a shape that never
  * flips — and it is what an image turn's cached prefix rests on. */
 static void test_chat_image_prefix_is_byte_stable(void)
@@ -797,7 +798,7 @@ static void test_chat_image_large_body_growth(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Generated images on the wire (IMAGEGEN-PLAN §3/§4/§5)             */
+/* Generated images on the wire                                      */
 /* ---------------------------------------------------------------- */
 
 /* The receive direction: one `delta.images` event fires ONE
@@ -942,7 +943,7 @@ static void test_chat_image_single_huge_event(void)
     free(url);
 }
 
-/* The compose side of an editing round (IMAGEGEN-PLAN §4): an
+/* The compose side of an editing round: an
  * ASSISTANT message's images ride a message-level "images" array and
  * content stays a plain string — the probed replay shape, not
  * content-parts (that asymmetry is the providers' own). */
@@ -975,9 +976,9 @@ static void test_chat_assistant_images_message_level(void)
     ASSERT_TRUE(strstr(body, "\"content\":\"draw a square\"") != NULL);
 }
 
-/* The editing round-trip's prefix invariant (IMAGEGEN-PLAN §5, the
- * shared assertion): a later round replays the assistant images array
- * BYTE-IDENTICAL — round 1's serialized messages are a byte-equal
+/* The editing round-trip's prefix invariant (the shared assertion): a
+ * later round replays the assistant images array BYTE-IDENTICAL —
+ * round 1's serialized messages are a byte-equal
  * prefix of round 2's. */
 static void test_chat_assistant_image_prefix_is_byte_stable(void)
 {

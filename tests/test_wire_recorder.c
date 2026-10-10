@@ -1,4 +1,4 @@
-/* test_wire_recorder.c - the wire debug recorder (docs/WIRE-DEBUG.md)
+/* test_wire_recorder.c - the wire debug recorder
  *
  * Direct recorder calls + the transport tap round trip against the
  * canned loopback servers. Never a real API (house rule). The redaction

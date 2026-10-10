@@ -11,7 +11,7 @@
  * reasoning must not share fence state). The classifier state is
  * app-owned; nm_markdown_classifier() hands boba a view of it.
  *
- * Dialect decisions (binding, see docs/TRANSCRIPT-BLOCKS.md):
+ * Dialect decisions (binding):
  *   - inline spans (code, emphasis) are LINE-SCOPED: the classifier
  *     keeps no pending state for them, so a span opened on one line
  *     and closed on a later line never retroactively restyles a

@@ -300,8 +300,8 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
 
 /* One call's state. It holds the job **id**, never an NmProc * — the
  * job is a live child the teardown path can free under us, so every
- * step re-resolves it (the "job-pair" invariant AGENTS.md documents for
- * the exec tools). */
+ * step re-resolves it (the job-pair invariant: an exec handle holds the
+ * job id, never an `NmProc *`). */
 struct NmToolExec
 {
     int job_id; /* -1 once the job was reported and closed */

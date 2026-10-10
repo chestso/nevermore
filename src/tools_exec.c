@@ -51,13 +51,12 @@
 
 #include "nm_clock.h"
 
-/* Codex's yield windows — PER CALL SITE, not one flat range (see
- * docs/PROCESS-PLAN.md §2). The initial exec_command window is
- * 250-30000 ms (a Windows floor of 10 s, Codex's
- * WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS); a NON-EMPTY write_stdin
- * write caps at the same 30 s; and an EMPTY write_stdin poll waits 5 s
- * up to the configurable background ceiling (`poll_timeout`, default
- * NM_POLL_TIMEOUT_MS_DEFAULT — Codex calls it
+/* Codex's yield windows — PER CALL SITE, not one flat range. The
+ * initial exec_command window is 250-30000 ms (a Windows floor of 10 s,
+ * Codex's WINDOWS_INITIAL_EXEC_YIELD_TIME_FLOOR_MS); a NON-EMPTY
+ * write_stdin write caps at the same 30 s; and an EMPTY write_stdin poll
+ * waits 5 s up to the configurable background ceiling (`poll_timeout`,
+ * default NM_POLL_TIMEOUT_MS_DEFAULT — Codex calls it
  * `background_terminal_max_timeout`). The 30 s ceiling that bounces a
  * long build every half-minute belongs to the initial exec, never to a
  * poll: polling is how the model waits patiently. */
@@ -221,7 +220,7 @@ static int arg_bool(NmJson *args, const char *key, int *value)
 /* The `login`/`shell` pair, resolved and validated, or NULL when
  * accepted (with *out filled). The refusals are what the model reads
  * instead of a silence: an argument the spawn ignores is worse than an
- * omitted one (docs/PROCESS-PLAN.md §6). */
+ * omitted one. */
 static const char *resolve_shell(NmJson *args, NmProcShell *out, char *msg,
                                  size_t msgsz)
 {
@@ -488,8 +487,8 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
 
     /* Which shell runs it, and whether it sources the user's profile.
      * Resolved and validated BEFORE the spawn: a refused request must
-     * not leave a child behind (docs/PROCESS-PLAN.md §6's rule — an
-     * argument the spawn ignores is worse than an omitted one). */
+     * not leave a child behind (an argument the spawn ignores is worse
+     * than an omitted one). */
     NmProcShell sh = { NULL, 0 };
     char why[192];
     if (resolve_shell(args, &sh, why, sizeof(why))) {

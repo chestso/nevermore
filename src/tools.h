@@ -83,7 +83,7 @@ typedef struct NmToolResult
      * textual tool). One slot, not a list — read_file reads one file,
      * and a round with several image-producing calls is aggregated by
      * the agent, which owns the fan-out into the conversation (the
-     * tool messages cannot carry images; see docs/TOOL-IMAGE-PLAN.md).
+     * tool messages cannot carry images — the agent fans them out).
      * Heap-owned; nm_tool_result_free releases it. */
     unsigned char *image;
     size_t image_len;

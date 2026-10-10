@@ -120,7 +120,7 @@
  * line the UI prints for the user channel. Its own role on purpose: a
  * reminder must never read as tool output (Foreground), as the model's
  * words, or as an error — it is the harness talking, and the human must
- * be able to tell (transparency, AGENTS.md). */
+ * be able to tell (the transparency principle). */
 #define NM_SGR_REMINDER "\033[38;2;189;147;249m"
 
 #define NM_SGR_RESET "\033[0m"

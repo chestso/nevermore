@@ -6,8 +6,8 @@
 > probed". Nevermore consumes both tiers through the shared
 > OpenAI-compatible client (`src/openai_client.c`), exactly like
 > OpenRouter (docs/OPENROUTER-API.md). This file supersedes the
-> pre-work guesses in TODO.md's "OpenCode Zen truth" section —
-> several of those were wrong (see §8).
+> pre-work guesses about this provider — several of those were wrong
+> (see §8).
 >
 > The 2026-09-22 extension probed a failure nevermore hit live: the
 > routing headers that name the upstream behind a Go request, and the
@@ -148,8 +148,8 @@ format,index}]`. The non-streaming body also carries a
     **per-model** distinction, not per-tier: `glm-5.3` (same Go
     tier, same probe) uses `delta.reasoning_content`. Do not
     assume "Go ⇒ reasoning_content".
-    Nevermore reads `delta.content` (and now the reasoning channel;
-    see `docs/OPENCODE-PROVIDER-PLAN.md` §7) from here; a client that
+    Nevermore reads `delta.content` (and now the reasoning channel)
+    from here; a client that
     does not surface reasoning must not treat an empty `content:""`
     delta that carries reasoning as the end of stream.
 - Tool calls: byte-identical to OpenAI. Leaked argument: one
@@ -472,7 +472,7 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   `deepseek` is ever the _only_ upstream, the echo stops being a
   coin-flip workaround and becomes mandatory.
 
-## 8. Corrections to the pre-work notes (TODO.md "OpenCode Zen truth")
+## 8. Corrections to the pre-work notes
 
 - **`/zen/v1/models` is public (tokenless)**, not key-gated —
   same as OpenRouter's catalog.

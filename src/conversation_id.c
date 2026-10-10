@@ -10,11 +10,10 @@
  *
  * The id is a provider-scoped routing hint (x-opencode-session), not
  * a secret: it has no authentication role. It only has to be stable
- * per conversation and non-colliding across concurrent clients
- * (docs/OPENCODE-PROVIDER-DESIGN.md §3), which is why the no-new-
- * library fallback below is safe for every platform.
+ * per conversation and non-colliding across concurrent clients, which
+ * is why the no-new-library fallback below is safe for every platform.
  *
- * Entropy, decided (design §1a: no new link libraries):
+ * Entropy, decided (no new link libraries):
  *   - POSIX: /dev/urandom — an OS file, not a dependency. Read once;
  *     failure falls through to the mix rather than failing.
  *   - Windows: a 128-bit splitmix64 mix of clock + pid + counter +

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """replay_server.py - HTTP replay of nevermore wire-dump responses.
 
-Turns a nevermore wire dump (docs/WIRE-DEBUG.md; parsed by
-wire_dump.py) into pending response ACTIONS, queued per request
-signature: method + request target (path [+query]) + exact body.
+Turns a nevermore wire dump (parsed by wire_dump.py) into pending
+response ACTIONS, queued per request signature: method + request
+target (path [+query]) + exact body.
 
 On each incoming HTTP request the server pops the oldest pending
 action whose signature matches and replays what the recording shows
@@ -122,7 +122,7 @@ class Scenario:
         self._dump_paths: List[str] = []
         # Loose (sequential) mode: serve any pending action without a
         # body match. For rendering repros, where the session content
-        # (tool output, AGENTS.md) cannot be reproduced byte-exactly —
+        # (tool output, a file read) cannot be reproduced byte-exactly —
         # the request SHAPE and the response stream are what matter.
         self.loose = False
 
@@ -786,10 +786,10 @@ def _list_dumps(dumps: Sequence[Dump]) -> None:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         prog="wire-replay",
-        description="Serve recorded responses from nevermore wire dumps "
-        "(docs/WIRE-DEBUG.md). Requests are matched by method + "
-        "request target + exact body; each match consumes one queued "
-        "action; no match answers HTTP 503.",
+        description="Serve recorded responses from nevermore wire dumps. "
+        "Requests are matched by method + request target + exact body; "
+        "each match consumes one queued action; no match answers "
+        "HTTP 503.",
     )
     parser.add_argument(
         "dumps",

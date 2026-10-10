@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """wire_dump.py - parse nevermore wire-debug NDJSON dumps.
 
-A dump (docs/WIRE-DEBUG.md) is: a plain-text banner (lines starting
+A dump is: a plain-text banner (lines starting
 with '#'), then one JSON object per line. One exchange is keyed by
 (conn, xchg) and its line sequence is exactly:
 

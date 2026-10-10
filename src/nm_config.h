@@ -66,7 +66,7 @@ extern "C" {
  * `-m` and $NEVERMORE_MODEL stay GLOBAL: an explicit flag is not
  * memory. With every layer empty there is no model — ask mode exits
  * before any traffic, the TUI refuses the send until /model sets one.
- * See nm_config_model_for, docs/CONFIG-PLAN.md §14. */
+ * See nm_config_model_for. */
 #define NM_CFG_KEY_MODEL  "model"
 #define NM_CFG_KEY_ROUNDS "rounds"
 

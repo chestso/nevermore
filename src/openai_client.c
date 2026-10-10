@@ -159,7 +159,7 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         nm_json_set(m, "role", nm_json_new_string(req->messages[i].role));
         if (req->messages[i].n_images > 0 &&
             strcmp(req->messages[i].role, "assistant") == 0) {
-            /* The RECEIVE direction (IMAGEGEN-PLAN §4): an assistant
+            /* The RECEIVE direction: an assistant
              * message's images ride a MESSAGE-LEVEL "images" array and
              * `content` stays a plain string ("" when the round
              * streamed no text) — the response's own shape, probed on
@@ -487,7 +487,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
                 st->on_delta(NM_STREAM_CONTENT, content, NULL, 0,
                              st->userdata);
 
-            /* Generated images (IMAGEGEN-PLAN §3): an image-output
+            /* Generated images: an image-output
              * model delivers the WHOLE image as one `delta.images`
              * event — an array of content parts, the payload inline
              * in image_url.url (a single SSE line to ~1.2 MiB; the
@@ -615,9 +615,8 @@ static void stream_finish(NmChatStream *st)
 
 /* Teardown: release the connection + SSE parser. The handle stays
  * alive (error/result fields) until chat_end frees it. Idempotent.
- * Fatal-exit paths tap the failure first (WIRE-DEBUG §3: every
- * client failure is an error line; the HTTP status rides along when
- * the wire answered). */
+ * Fatal-exit paths tap the failure first (every client failure is an
+ * error line; the HTTP status rides along when the wire answered). */
 static void stream_teardown(NmChatStream *h)
 {
     if (!h)
@@ -919,7 +918,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
      * openai_client.h). The auth header is built here and marked
      * secret HERE — the recorder redacts marked values at log-write
      * time; onboarding a provider via NmOpenaiEndpoint carries
-     * redaction with it (WIRE-DEBUG §4). Extras sit between auth
+     * redaction with it. Extras sit between auth
      * and UA, in array order; UA stays the tail. */
     NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
     size_t nh = 0;
@@ -1376,8 +1375,7 @@ NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
      * §5), provider extras, + User-Agent. The auth header is marked
-     * secret at its construction site (the redaction seam;
-     * WIRE-DEBUG §4). */
+     * secret at its construction site (the redaction seam). */
     NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
     size_t nh = 0;
     if (body) {
@@ -1480,7 +1478,7 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     }
 
     /* response capture point: a complete non-streaming body (the
-     * one-shot fetch paths; WIRE-DEBUG §3 "response"). */
+     * one-shot fetch paths). */
     nm_wire_tap_response(f->conn, f->body, f->len);
 
     const char *jerr = NULL;

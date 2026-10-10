@@ -3057,7 +3057,7 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Images (VISION-PLAN): attach -> parts on the wire, byte-stable     */
+/* Images: attach -> parts on the wire, byte-stable                   */
 /* ---------------------------------------------------------------- */
 
 /* Occurrences of a literal in a captured request (the "exactly once"
@@ -3202,7 +3202,7 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
     ASSERT_TRUE(strstr(tool, "\"content\":\"") != NULL);
     ASSERT_TRUE(strstr(tool, "\"content\":[") == NULL);
 
-    /* THE assertion (VISION-PLAN §5/§11): round 1's serialized messages
+    /* THE assertion: round 1's serialized messages
      * are a byte-equal prefix of round 2's. The image turn's cached
      * prefix rests on exactly this — one canonical data URL, verbatim
      * embedding, frozen order, and no shape flip. */
@@ -3462,7 +3462,7 @@ static void test_agent_context_limit_follows_a_warmed_catalog(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Tool images (TOOL-IMAGE-PLAN): read_file captures an image, the     */
+/* Tool images: read_file captures an image, the                       */
 /* agent fans it out as a synthetic user message one round later      */
 /* ---------------------------------------------------------------- */
 
@@ -3778,7 +3778,7 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Imagegen (IMAGEGEN-PLAN): the model's OWN images arrive as one      */
+/* Imagegen: the model's OWN images arrive as one                      */
 /* delta.images event, attach verbatim, and replay message-level       */
 /* ---------------------------------------------------------------- */
 
@@ -3869,7 +3869,7 @@ static void test_agent_imagegen_round_replays_message_level(void)
     ASSERT_TRUE(strstr(g_requests[1], "\\\"image_url\\\"") == NULL);
     ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
 
-    /* THE assertion (IMAGEGEN-PLAN §5): round 1's serialized messages
+    /* THE assertion: round 1's serialized messages
      * are a byte-equal prefix of round 2's. */
     const char *m1 = strstr(g_requests[0], "\"messages\":[");
     const char *m2 = strstr(g_requests[1], "\"messages\":[");

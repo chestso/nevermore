@@ -16,7 +16,7 @@
  * a JPEG the provider returns (Gemini does) has no ride to the terminal
  * without a re-encode. The display tier asks this module for that, and
  * the wire bytes are never touched (the derived PNG is display-local,
- * freed with the render — see docs/IMAGE-TRANSCODE-PLAN.md D7).
+ * freed with the render).
  *
  * Pure C, no boba, linkable without boba (the same rule as the byte
  * half), so test_image and the session tests stay boba-free.

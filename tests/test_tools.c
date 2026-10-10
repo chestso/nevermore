@@ -849,9 +849,9 @@ static NmToolResult read_file_at(const char *path)
     return r;
 }
 
-/* read_file on a supported image captures the bytes (docs/TOOL-IMAGE-
- * PLAN.md): the result carries the file's bytes byte-equal and a
- * one-line summary (name · format · dims · size), so the agent can fan
+/* read_file on a supported image captures the bytes: the result
+ * carries the file's bytes byte-equal and a one-line summary (name ·
+ * format · dims · size), so the agent can fan
  * the image out and the model reads what happened. */
 static void test_read_file_image_branch(void)
 {
@@ -3798,7 +3798,7 @@ static void test_exec_command_schema_names_shell_and_login(void)
 
 /* A requested login with the gate off is a NAMED refusal, and no child
  * is spawned: an argument the spawn would ignore is worse than an
- * omitted one (docs/PROCESS-PLAN.md §6). */
+ * omitted one. */
 static void test_exec_command_login_refused_when_gated_off(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();

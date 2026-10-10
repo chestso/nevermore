@@ -43,7 +43,7 @@ extern "C" {
  *    never sent empty (empty and absent are equivalent on the wire
  *    for the header this seam was built for);
  *  - `secret` is the wire-recorder redaction marker, marked where
- *    the value is built (docs/WIRE-DEBUG.md §4). The session id is
+ *    the value is built. The session id is
  *    explicitly not a secret; the flag exists for the next
  *    key-in-a-header provider so it cannot forget.
  *  - n_extra_headers above the cap is a programming error and is
@@ -119,8 +119,8 @@ int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
 /* Blocking one-shot JSON fetch — GONE (2026-10-07): the catalog seam
  * below is the only one-shot fetch. `nm_fetch_json` and
  * `nm_openai_models` had no production caller left once every provider
- * moved onto the seam, and a blocking drive nothing calls is dead code
- * (AGENTS.md). The blocking drive of the seam is `nm_catalog_run`. */
+ * moved onto the seam, and a blocking drive nothing calls is dead
+ * code. The blocking drive of the seam is `nm_catalog_run`. */
 
 /* ---------------------------------------------------------------- */
 /* Async one-shot JSON fetch (the catalog seam's engine)             */

@@ -116,7 +116,7 @@ static void test_session_save(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Images (VISION-PLAN: capture not reference, append-only)          */
+/* Images (capture not reference, append-only)                       */
 /* ---------------------------------------------------------------- */
 
 /* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
@@ -295,8 +295,8 @@ static void test_session_attach_refusals(void)
     nm_session_free(s);
 }
 
-/* The bytes attach (docs/TOOL-IMAGE-PLAN.md D1): a tool that read the
- * file itself hands the buffer in; the store copies it into the frozen
+/* The bytes attach: a tool that read the file itself hands the buffer
+ * in; the store copies it into the frozen
  * data URL, so the file is read ONCE and capture-not-reference holds
  * even if the caller mutates or frees its buffer. The reason vocabulary
  * is the path variant's, verbatim. */
@@ -437,7 +437,7 @@ static void test_session_append_user_images(void)
     remove(gif);
 }
 
-/* A RECEIVED image (IMAGEGEN-PLAN §3): the data URL is frozen VERBATIM
+/* A RECEIVED image: the data URL is frozen VERBATIM
  * (never re-encoded), the marker facts come from one scratch decode,
  * and there is no wire cap (a received image is the provider's output,
  * bounded by it). */
@@ -514,7 +514,7 @@ static void test_session_attach_image_url(void)
     nm_session_free(s);
 }
 
-/* The assistant image message (IMAGEGEN-PLAN §3/§4): content, trace
+/* The assistant image message: content, trace
  * and image ids ride ONE message; an image-only round's content is ""
  * (the probed replay shape), and the ids are copied at append. */
 static void test_session_append_assistant_images(void)
