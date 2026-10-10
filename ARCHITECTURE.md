@@ -1,16 +1,13 @@
 # ARCHITECTURE.md — nevermore
 
-**Tracked, unlike `AGENTS.md` and `TODO.md`** (house convention: AI
-assistant artifacts never ship; a fundamental architecture design
-does). This is the durable design of the system: what each module is,
-why it is shaped that way, and the principles every design decision is
-judged against. `AGENTS.md` is the working manual (commands, tests,
-platform traps); `TODO.md` holds the open work and the current state.
-Read this file before touching a module — a change that contradicts it
-needs the principle re-litigated at the root, not worked around. Wire
-truth is the tracked `docs/*-API.md`; the `docs/*-PLAN.md` files named
-below are **git-excluded local design notes** (they do not exist in
-another checkout).
+This is the durable design of the system: what each module is, why it
+is shaped that way, and the principles every design decision is judged
+against. Read it before touching a module — a change that contradicts
+it needs the principle re-litigated at the root, not worked around.
+
+Wire truth lives in the tracked `docs/*-API.md` specs. A rule stated
+here is stated as the rule it is, never as a pointer to a note that
+does not ship.
 
 nevermore: an interactive coding agent in pure C — quoth's spoken-word
 sibling ("quoth the raven: nevermore"). Seven providers (Charm Hyper,
@@ -233,7 +230,7 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `NM_CONNECT_ATTEMPT_MS`, 750 ms) runs out, ~0.75 s instead of the
   OS's ~130 s. Two seams hang off it, and they are deliberately separate
   process-global slots: the wire tap's `on_connect_retry`
-  (recorder, `docs/WIRE-DEBUG.md`) and the UI's connect notice
+  (the recorder) and the UI's connect notice
   (`nm_transport_set_connect_notice`, which the agent installs
   around each round and turns into a system-stream line via
   `nm_agent_on_notice` → `nm_chat_app_on_notice`) — a single slot
@@ -388,12 +385,11 @@ save [path]` writes session.c's markdown). Const on purpose: the
   late splice. A non-git cwd starts nothing; a failed/hung/garbled
   stage degrades to the gitless prompt (the repo flag still says yes).
   **`AGENTS.md` is the ONE filename — deliberately, with no fallback
-  list** (`.cursorrules`, `CLAUDE.md`, `GEMINI.md`, `crush.md`,
-  `.github/copilot-instructions.md`): the discovery is a root→cwd walk
-  for `AGENTS.md` + the global `~/.config/AGENTS.md`, and a repo that
-  wants its instructions read renames the file (a user call,
-  a user call — nevermore is not a compatibility layer for other
-  tools' conventions). The reminder clause (`nm_reminder.h`: how to read
+  list of other tools' convention files**: the discovery is a root→cwd
+  walk for `AGENTS.md` plus the global `~/.config/AGENTS.md`, and a
+  repo that wants its instructions read renames the file (a user call:
+  nevermore is not a compatibility layer for other tools' conventions).
+  The reminder clause (`nm_reminder.h`: how to read
   a `<system-reminder>` tag, what an escaped one means) is
   UNCONDITIONAL and sits right after the identity — the escape runs
   whether or not nudges do — and every context file body is sanitized
@@ -478,7 +474,6 @@ save [path]` writes session.c's markdown). Const on purpose: the
   the user-channel ones itself, the tool-channel ones are already in
   the panel body, styled by `NM_SGR_REMINDER`), and
   `nm_agent_on_warning` when untrusted output tried to forge a tag.
-  Design + the ecosystem research: `docs/REMINDER-PLAN.md`.
 - **The file ledger** (`src/nm_file_ledger.{h,c}`, ONE PER SESSION) —
   what this conversation has already read, and whether the file is
   still what it read. The tool observes (it is the thing that opened
@@ -573,8 +568,9 @@ save [path]` writes session.c's markdown). Const on purpose: the
   bomb (stb's own guards only reach ~2 GB). A decode/encode failure or
   an over-screen source degrades to the marker with the existing
   `undecodable source` rung — no new reason, so `nm_image_supported`
-  (the tier's front door) cannot lie. The ATTACH half lives in the session: `NmImage`
-  holds the canonical `data:` URL and the pre-serialized wire part,
+  (the tier's front door) cannot lie. The ATTACH half lives in the
+  session: `NmImage` holds the canonical `data:` URL and the
+  pre-serialized wire part,
   both frozen when `nm_session_attach_image` reads the file **once**
   (capture, not reference — a re-read would silently swap the image and
   break the provider's prefix cache, which keys on the serialized
@@ -589,7 +585,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   payload that is already in the conversation only makes the transcript
   lie. UI: `/image` (which displays the image at the attach when the
   terminal renders it — `nm_image_supported` is the tier table's front
-  door) + `-i`. Design: `docs/VISION-PLAN.md`.
+  door) + `-i`.
   **ONE command, both directions**: `/img` and `/save`
   were folded into `/image` — bare = the pending set, `<path>` =
   attach, `-<n>` = drop, `list` = every image the CONVERSATION holds,
@@ -699,8 +695,7 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   The registry is global for the same reason the web_search knobs are:
   a tool's `NmToolCtx` carries a workdir and the session's file ledger,
   never a manager. The tools over it live in `tools_exec.c` (see the
-  job-pair
-  gotcha below); the design is `docs/PROCESS-PLAN.md`. The user's
+  job-pair gotcha below). The user's
   window on jobs is `/ps` (id, state, command, bytes waiting) and
   `/kill <id>` (group-kill) — background output is the MODEL's to
   poll, never auto-streamed, so those two commands are the only place
@@ -732,7 +727,7 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   `login` argument is the override, and absent means the key — the
   same "absent = the config default" shape Codex's `get_command` uses.
   A request that cannot be honoured is a NAMED refusal, never a
-  silence (the PROCESS-PLAN §6 rule): `login: true` with the gate off,
+  silence (the named-refusal rule): `login: true` with the gate off,
   or on a shell with no login mode, refuses in-band before any spawn —
   while the gate's own default stays inert for such a shell (nothing
   was asked for, so nothing is ignored). The one thing a login shell
@@ -786,7 +781,7 @@ stream messages; boba is the only caller of
   single points (end of `chat_app_update`, end of
   `nm_chat_app_step`) — **never flush inside a stream helper**, or a
   transcript_write lands inside the agent's per-SSE-batch callback.
-  Submit is the one deliberate exception (D10): submit → flush →
+  Submit is the one deliberate exception: submit → flush →
   `finish_inline`.
 - **The markdown grammar is nevermore's**: `nm_markdown.c` classifies
   each completed line (fence / table / heading / list / quote);
@@ -823,8 +818,8 @@ stream messages; boba is the only caller of
   profile (transport choice, cell size), so boba DEFERS the unit
   (with everything freezing behind it, in freeze order) until the
   probe's verdict — emission is freeze-time, the profile is
-  commit-time, deferral is what keeps emission order through the gap
-  (`TRANSCRIPT-IMAGE-PLAN.md` D15). boba encodes (kitty `f=100` APC
+  commit-time, deferral is what keeps emission order through the gap.
+  boba encodes (kitty `f=100` APC
   / iTerm2 1337, explicit cells, `C=1` so the terminal never moves
   the cursor); nevermore decides (`src/nm_image.c`: tier table,
   display math, the one-slot cache). Degradation is a one-line
@@ -840,7 +835,7 @@ stream messages; boba is the only caller of
   ladder — one image pipeline, and the data URL (never the file path)
   is what shows. The markdown classifier path (a standalone
   `![alt](src)` line) remains for MODEL-authored image lines only.
-- The banner stays a plain `printf` before the first flush (D11) —
+- The banner stays a plain `printf` before the first flush —
   outside the seam's jurisdiction.
 
 ## Platform contract: the async connect

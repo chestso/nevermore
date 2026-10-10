@@ -6,7 +6,7 @@ nevermore chats with AI models (Charm Hyper, Ollama local daemon and
 Ollama Cloud, OpenAI, OpenRouter, OpenCode Go and Zen) from a
 terminal, with an agent loop that can read, edit, and search files,
 run commands, and search the web through a local SearXNG instance. It
-is a first-class citizen of the [portty](../portty)
+is a first-class citizen of the [portty](https://github.com/chestso/portty)
 terminal: kitty keyboard protocol, OSC 52 clipboard, Lottie spinner
 via OSC 5555, sixel image attach — graceful degradation elsewhere.
 
