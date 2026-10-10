@@ -526,7 +526,11 @@ save [path]` writes session.c's markdown). Const on purpose: the
   an IME result arrives as itself (flag 16). A terminal that grants only
   part of it degrades to what it grants: without flag 8 `Ctrl+J` remains
   the newline key, and without flag 16 a shifted ASCII letter is
-  recovered as its capital. `/config` prints the value _and_ the
+  recovered as its capital. Flag 8's own price is that the modifier keys
+  are reported as key events too (a Shift press is `CSI 57441;2u`): they
+  are FUNCTIONAL keys — the protocol's Private Use Area — and not text,
+  so the parser drops them and reaching for a capital types nothing.
+  `/config` prints the value _and_ the
   terminal's answer, because the store alone cannot say whether the
   protocol is in use. The flags are popped at stop — the runtime
   reconciles them in both render modes, so a shell never inherits them.

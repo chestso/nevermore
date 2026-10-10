@@ -38,6 +38,7 @@
 #include <time.h>
 
 #include <boba/dynamic_buffer.h>
+#include <boba/input_parser.h>
 #include <boba/msg.h>
 #include <boba/runtime.h>
 #include <boba/stream.h>
@@ -397,6 +398,24 @@ static void harness_type(AppHarness *h, const char *s)
         tui_runtime_send(h->rt, tui_msg_char(*p, 0));
         tui_runtime_flush(h->rt);
     }
+}
+
+/* Feed raw terminal bytes through the input parser and into the runtime,
+ * the way the event loop's read does — the wire is the parser's input,
+ * so a test about an ENCODING (a kitty CSI u key) starts here. */
+static void harness_wire(AppHarness *h, const char *bytes)
+{
+    TuiInputParser *p = tui_input_parser_create();
+    if (!p)
+        return;
+    TuiMsg msgs[8];
+    int n = tui_input_parser_parse(p, (const unsigned char *)bytes,
+                                   strlen(bytes), msgs, 8);
+    for (int i = 0; i < n; i++) {
+        tui_runtime_send(h->rt, msgs[i]);
+        tui_runtime_flush(h->rt);
+    }
+    tui_input_parser_free(p);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1293,6 +1312,38 @@ static void test_kbd_full_tier_gives_shift_enter(void)
     tui_runtime_send(h->rt, cap);
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
                   "one\ntwoA");
+
+    harness_free(h);
+}
+
+/* The declared tier's own traffic, fed as the WIRE BYTES the terminal
+ * sends. Flag 8 reports the modifier keys THEMSELVES (a Shift press is
+ * CSI 57441;2u) — a functional key, not text — and flag 16 reports a
+ * text key's text beside its unshifted code. Both halves matter: the
+ * Shift press must reach the input as NOTHING — before this the PUA
+ * codepoint went in as text, so every capital arrived preceded by an
+ * invisible character — and the capital must arrive exactly once. */
+static void test_kbd_wire_shift_press_types_nothing(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    h->rt->profile.kbd_protocol = 1;
+    tui_runtime_flush(h->rt); /* declares the tier */
+    ASSERT_TRUE(strstr(harness_read(h), "\033[>25u") != NULL);
+
+    harness_wire(h, "\033[57441;2u");   /* left shift down */
+    harness_wire(h, "\033[72;2;72u");   /* H: key code 72, text "H" */
+    harness_wire(h, "\033[57441;2:3u"); /* left shift up (a release) */
+    harness_wire(h, "\033[105;1;105u"); /* i */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "Hi");
+
+    /* And a grapheme arrives whole: 'e' + COMBINING ACUTE is ONE key
+     * event carrying both codepoints in its text field. */
+    harness_wire(h, "\033[101;1;101:769u");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "Hie\xcc\x81");
 
     harness_free(h);
 }
@@ -7143,6 +7194,7 @@ int main(void)
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
     RUN_TEST(test_kbd_tier_follows_the_terminal);
     RUN_TEST(test_kbd_full_tier_gives_shift_enter);
+    RUN_TEST(test_kbd_wire_shift_press_types_nothing);
     RUN_TEST(test_kbd_mode_overrides_the_probe);
     RUN_TEST(test_config_reports_the_kbd_tier);
     RUN_TEST(test_paste_lands_as_text_with_newlines);

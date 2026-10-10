@@ -290,7 +290,9 @@ the text a key produced, so capitals and IME input arrive as
 themselves. A terminal that speaks only part of the protocol degrades
 to what it grants: without the report-all flag Shift+Enter stays
 unavailable and `Ctrl+J` inserts the newline, and without the
-associated text a shifted letter is recovered as its capital.
+associated text a shifted letter is recovered as its capital. The
+report-all flag also reports the modifier keys themselves; they are
+functional keys, not text, so pressing Shift types nothing.
 `/config` shows the value _and_ what the terminal answered
 (`terminal: kitty protocol` / `terminal: legacy encodings`), since the
 store alone cannot say whether the protocol is in use.

@@ -910,8 +910,12 @@ static void post_image_block(NmChatApp *app, const NmImage *img)
  * flag 8 alone sends a text key as its UNSHIFTED code (shift+a is
  * CSI 97;2u) — boba decodes the associated text (CSI 97;2;65u), and a
  * terminal that reports keys without it still gets its shifted ASCII
- * letters recovered. Ctrl+J remains the newline key for a terminal
- * that does not speak the protocol at all.
+ * letters recovered. The price of flag 8 is that the modifier keys are
+ * reported as key events of their own (a Shift press is CSI 57441;2u):
+ * they are FUNCTIONAL keys, not text, and the parser drops them, so
+ * reaching for a capital never types an invisible character. Ctrl+J
+ * remains the newline key for a terminal that does not speak the
+ * protocol at all.
  *
  * `auto` waits for the terminal's own answer: before the probe resolves
  * there is no answer, and nothing is declared — which changes nothing,
@@ -3597,6 +3601,20 @@ static void popup_compose_command(NmChatApp *app, const char *noun)
     app->popup_kind = POPUP_NONE;
 }
 
+/* The key event as the input wants it: the parser's text field travels
+ * with the key, so a grapheme (a dead key plus its base, an IME result)
+ * arrives whole rather than as its first codepoint. A key that produced
+ * no text carries none, and the input falls back to the rune. */
+static TuiMsg input_key_msg(const TuiKeyMsg *key)
+{
+    TuiMsg m = tui_msg_key(key->key, key->rune, key->mods);
+    if (key->text_len > 0) {
+        memcpy(m.data.key.text, key->text, (size_t)key->text_len);
+        m.data.key.text_len = key->text_len;
+    }
+    return m;
+}
+
 static void popup_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
 {
     int key_code = key->key;
@@ -3660,9 +3678,7 @@ static void popup_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
     /* Any other key dismisses and falls through to the input. */
     tui_list_popup_hide(app->popup);
     app->popup_kind = POPUP_NONE;
-    TuiUpdateResult r = tui_textinput_update(app->input, tui_msg_key(
-                                                             key->key,
-                                                             key->rune, mods));
+    TuiUpdateResult r = tui_textinput_update(app->input, input_key_msg(key));
     if (r.cmd)
         *cmd_out = r.cmd;
 }
@@ -3709,10 +3725,7 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         return;
     }
 
-    TuiUpdateResult r = tui_textinput_update(app->input, tui_msg_key(
-                                                             key->key,
-                                                             key->rune,
-                                                             key->mods));
+    TuiUpdateResult r = tui_textinput_update(app->input, input_key_msg(key));
     if (r.cmd) {
         if (r.cmd->type == TUI_CMD_TAB_COMPLETE) {
             char *prefix = r.cmd->payload.tab_complete.prefix;
