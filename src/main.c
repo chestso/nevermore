@@ -353,16 +353,12 @@ static int run_interactive(const char *provider_name, const char *model,
      * flush, i.e. before any frame or transcript byte, so it is outside
      * the transcript seam's jurisdiction. Routing it through the system
      * stream would need a runtime handle before the transcript attaches
-     * and would make it a repaintable unit for no benefit. The
-     * `provider · model` pair is the SAME spelling the status row
-     * carries (nm_chat_app_identity), so the banner cannot drift from
-     * the row. */
-    char identity[256];
-    nm_chat_app_identity(app, identity, sizeof(identity));
-    printf("nevermore %s — %s\n"
+     * and would make it a repaintable unit for no benefit. The version
+     * is the whole banner: `provider · model` lives in the status row
+     * (nm_chat_app_identity) and is not repeated here. */
+    printf("nevermore %s\n"
            "Type a prompt; %s/help%s for commands, %s/quit%s to leave.\n\n",
-           NEVERMORE_VERSION, identity, "\033[1m", "\033[1m", "\033[1m",
-           "\033[0m");
+           NEVERMORE_VERSION, "\033[1m", "\033[1m", "\033[1m", "\033[0m");
 
     int rc = tui_runtime_run(rt);
 

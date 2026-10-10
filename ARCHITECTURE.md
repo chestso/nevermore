@@ -546,8 +546,9 @@ save [path]` writes session.c's markdown). Const on purpose: the
   the declaration set, so the app's old `status_text`/`status_last`
   buffers and `strcmp` are gone. The identity is `<provider> · <label>`
   (U+00B7; `nm_chat_app_model_label` is the ONE `(no model)` spelling)
-  and the startup banner prints the SAME string, so the two cannot
-  drift. The composer owns the frame: it paints the row (and its
+  and it is the row's alone: the startup banner prints the version
+  only, so the pair is stated in exactly one place. The composer owns
+  the frame: it paints the row (and its
   `"\r\n"`) between the transcript and the input, adds the chrome row
   to the cursor row the view declares (boba's `cursor_pos` returns the
   INPUT's rows now), and `app->submitting` means "declare no row" —
