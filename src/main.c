@@ -3,9 +3,15 @@
  * nevermore — an interactive coding agent in pure C.
  *
  *   nevermore                      interactive chat (TUI)
- *   nevermore ask "prompt"         one-shot, non-interactive
+ *   nevermore "prompt"             one-shot, non-interactive (ask mode)
+ *   nevermore ask "prompt"         the same, spelled with the verb
  *   nevermore models               list the provider's model catalog
  *   nevermore --version
+ *
+ * `ask` and `models` are SUBCOMMANDS: the verb comes FIRST, and a mode
+ * word anywhere else is a usage error (never a prompt). The grammar —
+ * and that rule — is src/nm_args.c, pure C so tests/test_args.c can pin
+ * it; this file owns only the output and the exit status.
  *
  * Configuration (nm_config.h) resolves once, lowest to highest:
  *   built-in default < user config ~/.config/nevermore/config
@@ -32,6 +38,7 @@
 #include "history.h"
 #include "chat_app.h"
 #include "nm_config.h"
+#include "nm_args.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
@@ -54,7 +61,11 @@ static void usage(FILE *out)
             "nevermore - an interactive coding agent\n"
             "\n"
             "usage: nevermore [options] [\"prompt\"]\n"
-            "       nevermore models\n"
+            "       nevermore ask [options] \"prompt\"\n"
+            "       nevermore models [options]\n"
+            "\n"
+            "`ask` and `models` are subcommands and come first; a bare\n"
+            "prompt is ask mode (nevermore \"prompt\").\n"
             "\n"
             "options:\n"
             "  -p, --provider NAME   hyper | ollama:cloud | ollama:local |\n"
@@ -389,67 +400,24 @@ int main(int argc, char *argv[])
     nm_os_console_init();
 #endif
     const char *base_url = getenv("NEVERMORE_BASE_URL");
-    const char *cli_provider = NULL;
-    const char *cli_model = NULL;
-    const char *prompt = NULL;
-    int want_models = 0;
-    /* -i: images attached to the ask-mode prompt, in order (repeatable).
-     * Ask mode only — the TUI attaches with /image, where the pending set
-     * is visible in the transcript. */
-    const char *image_paths[16];
-    size_t n_image_paths = 0;
 
-    for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "-p") == 0 || strcmp(argv[i], "--provider") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "nevermore: --provider needs a value\n");
-                return 1;
-            }
-            cli_provider = argv[i];
-        } else if (strcmp(argv[i], "-m") == 0 || strcmp(argv[i], "--model") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "nevermore: --model needs a value\n");
-                return 1;
-            }
-            cli_model = argv[i];
-        } else if (strcmp(argv[i], "-i") == 0 || strcmp(argv[i], "--image") == 0) {
-            if (++i >= argc) {
-                fprintf(stderr, "nevermore: --image needs a value\n");
-                return 1;
-            }
-            if (n_image_paths ==
-                sizeof(image_paths) / sizeof(image_paths[0])) {
-                fprintf(stderr, "nevermore: too many --image arguments "
-                                "(max %zu)\n",
-                        sizeof(image_paths) / sizeof(image_paths[0]));
-                return 1;
-            }
-            image_paths[n_image_paths++] = argv[i];
-        } else if (strcmp(argv[i], "models") == 0) {
-            want_models = 1;
-        } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            usage(stdout);
-            return 0;
-        } else if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
-            print_version();
-            return 0;
-        } else if (argv[i][0] == '-') {
-            fprintf(stderr, "nevermore: unknown option %s\n", argv[i]);
-            usage(stderr);
-            return 1;
-        } else {
-            prompt = argv[i];
-        }
-    }
-
-    /* -i is an ask-mode flag: the TUI attaches with /image, where the
-     * pending set is visible in the transcript. Silently ignoring the
-     * paths (which is what a fall-through to interactive would do) is
-     * the one outcome a user cannot debug. */
-    if (n_image_paths > 0 && !prompt) {
-        fprintf(stderr, "nevermore: --image needs a prompt "
-                        "(interactive mode attaches with /image)\n");
+    /* The command line, parsed once (src/nm_args.c): flags, the verb
+     * position, the prompt. A usage failure names its reason, so the
+     * refusal and the help agree by construction. */
+    NmArgs args;
+    char arg_err[256];
+    if (nm_args_parse(argc, argv, &args, arg_err, sizeof(arg_err)) != 0) {
+        fprintf(stderr, "nevermore: %s\n", arg_err);
+        usage(stderr);
         return 1;
+    }
+    if (args.want_help) {
+        usage(stdout);
+        return 0;
+    }
+    if (args.want_version) {
+        print_version();
+        return 0;
     }
 
     /* One resolution, one place (nm_config.h): user file < runtime
@@ -463,8 +431,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     nm_config_set_env(cfg);
-    nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, cli_provider);
-    nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, cli_model);
+    nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, args.provider);
+    nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, args.model);
 
     /* Publish the store: the machinery (connect walk, web_search probe,
      * agent round cap + reasoning echo) resolves its settings from it
@@ -492,7 +460,7 @@ int main(int argc, char *argv[])
      * transport underneath, one wiring). Off unless set. */
     wire_debug_startup(provider_name, model);
 
-    if (want_models) {
+    if (args.mode == NM_ARG_MODE_MODELS) {
         size_t n = 0;
         const NmModel *models = provider->models(provider, NULL, NULL, &n);
         for (size_t i = 0; i < n; i++)
@@ -503,7 +471,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    if (prompt) {
+    if (args.mode == NM_ARG_MODE_ASK) {
         /* One-shot ask mode (phase 3): the full agent loop — stream,
          * tool calls, file edits — with deltas on stdout and tool
          * activity on stderr. No model for this provider = no turn: say
@@ -563,13 +531,13 @@ int main(int argc, char *argv[])
          * bytes are the model's input, not a reason to fail the ask. */
         size_t image_ids[16];
         size_t n_ids = 0;
-        for (size_t i = 0; i < n_image_paths; i++) {
+        for (size_t i = 0; i < args.n_images; i++) {
             char reason[64];
-            long id = nm_agent_attach_image(agent, image_paths[i], reason,
+            long id = nm_agent_attach_image(agent, args.images[i], reason,
                                             sizeof(reason));
             if (id < 0) {
                 fprintf(stderr, "[image] %s — not attached: %s\n",
-                        image_paths[i], reason);
+                        args.images[i], reason);
                 continue;
             }
             const NmImage *img = nm_agent_image(agent, (size_t)id);
@@ -579,12 +547,13 @@ int main(int argc, char *argv[])
                               img ? img->w : 0, img ? img->h : 0,
                               img ? img->bytes : 0, desc, sizeof(desc));
             fprintf(stderr, "[image] %s — %s\n",
-                    img ? img->alt : image_paths[i], desc);
+                    img ? img->alt : args.images[i], desc);
             image_ids[n_ids++] = (size_t)id;
         }
 
         setvbuf(stdout, NULL, _IONBF, 0); /* stream tokens as they land */
-        int rc = nm_agent_turn(agent, prompt, n_ids ? image_ids : NULL, n_ids);
+        int rc = nm_agent_turn(agent, args.prompt, n_ids ? image_ids : NULL,
+                               n_ids);
         if (rc != 0) {
             const char *err = nm_agent_last_error(agent);
             fprintf(stderr, "nevermore: %s\n", err ? err : "turn failed");

@@ -74,6 +74,7 @@ run_build test_json tests/test_json.c src/json.c
 run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_config tests/test_config.c src/nm_config.c
+run_build test_args tests/test_args.c src/nm_args.c
 run_build test_session tests/test_session.c src/session.c src/nm_image_bytes.c src/nm_size.c
 run_build test_context tests/test_context.c src/context.c src/nm_reminder.c
 

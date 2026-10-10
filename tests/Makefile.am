@@ -7,6 +7,7 @@ check_PROGRAMS = \
     test_xxh3 \
     test_authinfo \
     test_config \
+    test_args \
     test_provider \
     test_source \
     test_wire \
@@ -118,6 +119,12 @@ test_authinfo_CFLAGS = $(TEST_CFLAGS)
 # no network, no registry (the provider-name validator is a hook).
 test_config_SOURCES = test_config.c ../src/nm_config.c
 test_config_CFLAGS = $(TEST_CFLAGS)
+
+# The command line (src/nm_args.c): the verb position, the flags, the
+# prompt rules — pure C, so the grammar is pinned without a process
+# (main.c owns the printing and the exit status).
+test_args_SOURCES = test_args.c ../src/nm_args.c
+test_args_CFLAGS = $(TEST_CFLAGS)
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).

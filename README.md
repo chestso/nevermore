@@ -50,6 +50,12 @@ nevermore -p openai -m glm-5.3     # one run, ignoring the saved config
 nevermore -i shot.png "what is wrong in this screenshot?"
 ```
 
+`ask` and `models` are subcommands and come **first**: a bare prompt is
+ask mode (`nevermore "explain this repo"` is the same as the verb
+spelling), and a mode word anywhere else is a usage error rather than a
+prompt — `nevermore ask` alone says the prompt is missing instead of
+asking the model about the word "ask".
+
 Provider keys come from the environment (`HYPER_API_KEY`,
 `OLLAMA_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
 `OPENCODE_API_KEY`) or, when an
@@ -473,10 +479,10 @@ You watch the same jobs from the chat:
 ```
 
 The spinner keeps ticking while a command runs, so a silent child never
-looks like a hang. Ask mode (`nevermore ask`) drains the same jobs while
-its turn streams — the blocking pump waits on the live round AND every
-registered job — so a chatty background command is never left wedged
-mid-write waiting for the next tool call to read it.
+looks like a hang. Ask mode (`nevermore ask "prompt"`) drains the same
+jobs while its turn streams — the blocking pump waits on the live round
+AND every registered job — so a chatty background command is never left
+wedged mid-write waiting for the next tool call to read it.
 
 Jobs run on both platforms, over the shell each one's spawn uses
 (`/bin/sh -c` on POSIX; `cmd.exe /d /c` on Windows, whose jobs are
