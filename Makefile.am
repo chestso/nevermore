@@ -10,6 +10,7 @@ EXTRA_DIST = \
     version \
     COPYING \
     README.md \
+    ARCHITECTURE.md \
     .clang-format \
     scripts \
     tools \

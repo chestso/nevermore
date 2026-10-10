@@ -505,7 +505,9 @@ docs/               wire specs + platform notes
 data/               static model catalogs
 ```
 
-See [docs/PORTTY.md](docs/PORTTY.md) for the terminal-feature matrix.
+See [docs/PORTTY.md](docs/PORTTY.md) for the terminal-feature matrix,
+and [ARCHITECTURE.md](ARCHITECTURE.md) for the module design and the
+principles behind it.
 
 ## Attributions
 
