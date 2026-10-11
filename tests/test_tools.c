@@ -1156,6 +1156,23 @@ static void test_read_file_description_names_the_attachable_set(void)
     ASSERT_NOT_NULL(strstr(nm_tool_read_file.description, list));
 }
 
+/* The description leads with the image case. The model reads its tool
+ * list to find out how to LOOK at something, and a "Read a UTF-8 text
+ * file" opening reads as a text tool — the 2026-10-11 wire spent 116
+ * requests on `magick ... txt:` pixel dumps and ASCII art with
+ * read_file-on-a-PNG never once tried. The pin is the PROPERTY, not the
+ * prose: the image case is stated before the text case. */
+static void test_read_file_description_leads_with_the_image_case(void)
+{
+    const char *desc = nm_tool_read_file.description;
+    ASSERT_NOT_NULL(desc);
+    const char *img = strstr(desc, "image");
+    const char *text = strstr(desc, "UTF-8");
+    ASSERT_NOT_NULL(img);
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(img < text);
+}
+
 /* A text file carries no image (the common case: every textual tool). */
 static void test_read_file_text_has_no_image(void)
 {
@@ -4549,6 +4566,7 @@ int main(void)
     RUN_TEST(test_read_file_jpeg_metadata_before_sof);
     RUN_TEST(test_read_file_image_without_dimensions);
     RUN_TEST(test_read_file_description_names_the_attachable_set);
+    RUN_TEST(test_read_file_description_leads_with_the_image_case);
     RUN_TEST(test_read_file_text_has_no_image);
     RUN_TEST(test_read_file_truncates_with_resume_marker);
     RUN_TEST(test_read_file_resume_marker_counts_omitted_lines);

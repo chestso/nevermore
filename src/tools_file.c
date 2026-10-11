@@ -2079,13 +2079,17 @@ static const char search_dir_schema[] =
 
 const NmTool nm_tool_read_file = {
     .name = "read_file",
-    .description = "Read a UTF-8 text file, byte-exact, optionally "
-                   "line-numbered and windowed (offset/limit). If the file "
-                   "is an attachable image (PNG/JPEG/GIF), the image is "
-                   "attached to the conversation so you can see it; the "
-                   "result is a one-line summary. Another image container "
-                   "(WebP, BMP, ...) is named but not attached — convert "
-                   "it to PNG/JPEG/GIF first",
+    /* The image case comes FIRST: the model reads this list to find out
+     * how to look at something, and "Read a UTF-8 text file" reads as a
+     * text tool (the 2026-10-11 wire: 116 requests of pixel archaeology
+     * with read_file on a PNG never once tried). */
+    .description = "Read a file. An image (PNG/JPEG/GIF) is attached to "
+                   "the conversation — never returned as bytes — so this is "
+                   "how you look at a rendering; another image container "
+                   "(WebP, BMP, ...) is named but not attached, so convert "
+                   "it to PNG/JPEG/GIF first. A UTF-8 text file is returned "
+                   "byte-exact, optionally line-numbered and windowed "
+                   "(offset/limit)",
     .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,
