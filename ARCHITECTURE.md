@@ -9,11 +9,11 @@ Wire truth lives in the tracked `docs/*-API.md` specs. A rule stated
 here is stated as the rule it is, never as a pointer to a note that
 does not ship.
 
-nevermore: an interactive coding agent in pure C — quoth's spoken-word
-sibling ("quoth the raven: nevermore"). Seven providers (Charm Hyper,
-Ollama local + Cloud, OpenAI, OpenRouter, opencode Go + Zen) over a
-hand-rolled HTTP/1.1 + SSE transport with OS-native TLS (no libcurl,
-ever). boba TUI front-end modeled on ditty. First-class portty citizen.
+nevermore: an interactive coding agent in pure C. Seven providers
+(Charm Hyper, Ollama local + Cloud, OpenAI, OpenRouter, opencode Go +
+Zen) over a hand-rolled HTTP/1.1 + SSE transport with OS-native TLS (no
+libcurl, ever). boba TUI front-end modeled on ditty. First-class portty
+citizen.
 Pre-alpha: **no backwards-compatibility constraint** — internal
 and public APIs change freely; never write migration shims,
 compat wrappers, or deprecated aliases. We also **commit to
