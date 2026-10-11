@@ -107,6 +107,13 @@ struct NmContext
      * env block at all. */
     size_t env_git_pos;
     int env_git_wanted;
+    /* The capability clause's slot: where it goes (recorded during
+     * assembly, after the transport clause and before <env>) and whether
+     * it is in. nm_context_set_vision fills or empties it in place and
+     * keeps env_git_pos in step, so a late set — the first turn, a model
+     * change — can never misplace the git section's splice. */
+    size_t vision_pos;
+    int vision_applied;
     char wd[NM_CONTEXT_DIR_MAX]; /* the working directory the env names */
 };
 
@@ -651,6 +658,36 @@ typedef struct
     char label[NM_CONTEXT_DIR_MAX + 16];
 } Candidate;
 
+/* Fill or empty the capability clause's slot. Removal is the exact
+ * inverse of the insert, so the prompt is a pure function of `vision`:
+ * the same answer twice is a no-op (byte-identical — a warm prefix must
+ * never churn), and a model switched away from and back restores the
+ * earlier prompt byte for byte (agent.c's apply_vision_clause). */
+int nm_context_set_vision(NmContext *c, int vision)
+{
+    if (!c)
+        return 0;
+    int want = (vision == 1);
+    if (want == c->vision_applied)
+        return 0; /* already agrees: the bytes are already right */
+    size_t len = strlen(vision_clause);
+    if (want) {
+        if (insert_at(c, c->vision_pos, vision_clause, len) != 0)
+            return -1;
+        if (c->env_git_pos)
+            c->env_git_pos += len; /* the </env> footer moved with the tail */
+        c->vision_applied = 1;
+        return 1;
+    }
+    memmove(c->prompt + c->vision_pos, c->prompt + c->vision_pos + len,
+            c->len - c->vision_pos - len + 1);
+    c->len -= len;
+    if (c->env_git_pos)
+        c->env_git_pos -= len;
+    c->vision_applied = 0;
+    return 1;
+}
+
 NmContext *nm_context_new(const char *dir, int vision)
 {
     NmContext *c = calloc(1, sizeof(*c));
@@ -675,11 +712,15 @@ NmContext *nm_context_new(const char *dir, int vision)
         nm_context_free(c);
         return NULL;
     }
-    /* The capability clause sits between the identity and the project
-     * block: it is a fact about the model, not about the project. It is
-     * assembled ONCE here, so it is frozen for the chat's life and
-     * stays inside the provider's cached prefix. */
-    if (vision == 1 && append_str(c, vision_clause) != 0) {
+    /* The capability clause's slot sits between the identity and the
+     * project block: it is a fact about the model, not about the
+     * project. Record where it goes and fill it from the flag known
+     * HERE — which is often the cold-cache answer, so the agent may set
+     * it again while the active model's prefix is still cold (the first
+     * turn, a model change). Once a request has been built the bytes
+     * are frozen, inside the provider's cached prefix. */
+    c->vision_pos = c->len;
+    if (nm_context_set_vision(c, vision) < 0) {
         nm_context_free(c);
         return NULL;
     }

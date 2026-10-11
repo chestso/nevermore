@@ -3417,6 +3417,17 @@ static const NmModel stub_live_models[] = {
     { "stub-late", "Stub (live catalog)", 0, 0, 262144, 0 },
     { 0 }
 };
+/* The capability clause's rows: the SAME model id, first as a catalog
+ * that says it can see, then as one that says it is text-only — so a
+ * test can land a live catalog that contradicts the fallback. */
+static const NmModel stub_see_models[] = {
+    { "stub-see", "Stub (can see)", 1, 0, 128000, 0 },
+    { 0 }
+};
+static const NmModel stub_textonly_models[] = {
+    { "stub-see", "Stub (text-only)", 0, 0, 128000, 0 },
+    { 0 }
+};
 
 /* The provider's process-global cache: the seam the async fetch writes. */
 static const NmModel *g_stub_catalog;
@@ -3459,6 +3470,127 @@ static void test_agent_context_limit_follows_a_warmed_catalog(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
+}
+
+/* The capability clause follows the catalog the agent can see WHEN THE
+ * FIRST REQUEST IS BUILT, not the one it saw at construction. A wire
+ * provider's catalog is warmed asynchronously (the background warm), so
+ * the construction-time read is the cold one — -1, no clause, for the
+ * whole chat. That is the 2026-10-11 wire: the warm landed at t=0.61 s,
+ * the first request went out at t=68 s, and the prompt still never said
+ * the model could see, so the model spent the session dumping pixels
+ * with ImageMagick instead of looking at its own rendering. */
+static void test_agent_vision_clause_follows_a_warmed_catalog(void)
+{
+    reset_capture();
+    g_blocking_models_calls = 0;
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    struct NmProvider p = nm_test_provider;
+    p.models = stub_blocking_models_drive;
+    p.models_cached = stub_catalog_read;
+
+    /* Cold at construction: the cache does not carry the model. */
+    g_stub_catalog = stub_cold_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-see", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    /* The async fetch lands before the first turn. */
+    g_stub_catalog = stub_see_models;
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 1);
+
+    /* Frozen with the prefix once a request exists: the two rounds'
+     * system messages are byte-identical. */
+    const char *s1 = strstr(g_requests[0], "\"role\":\"system\"");
+    const char *s2 = strstr(g_requests[1], "\"role\":\"system\"");
+    ASSERT_NOT_NULL(s1);
+    ASSERT_NOT_NULL(s2);
+    const char *end1 = strstr(s1, "},{\"role\":\"user\"");
+    ASSERT_NOT_NULL(end1);
+    ASSERT_TRUE(memcmp(s1, s2, (size_t)(end1 + 1 - s1)) == 0);
+
+    /* And the resolution never took the blocking catalog drive. */
+    ASSERT_EQ(g_blocking_models_calls, 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The other side of the same gate: the live catalog can also TAKE the
+ * claim away. Here the construction-time table says the model can see
+ * (the clause goes in) and the fetch that lands before the first turn
+ * says the same id is text-only — so the first turn must take the clause
+ * out, or the prompt would claim a capability while the app's own
+ * warning tells the user the provider strips their images. */
+static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"blind\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    struct NmProvider p = nm_test_provider;
+    p.models_cached = stub_catalog_read;
+
+    g_stub_catalog = stub_see_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-see", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    g_stub_catalog = stub_textonly_models;
+
+    ASSERT_EQ(nm_agent_turn(agent, "look", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 1);
+
+    /* The harness clause is there (it is unconditional); the capability
+     * is not claimed. */
+    ASSERT_EQ(count_substr(g_requests[0], "An image the user attaches"), 1);
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
 }
 
 /* ---------------------------------------------------------------- */
@@ -5195,6 +5327,8 @@ int main(void)
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
     RUN_TEST(test_agent_never_takes_the_blocking_catalog_drive);
     RUN_TEST(test_agent_context_limit_follows_a_warmed_catalog);
+    RUN_TEST(test_agent_vision_clause_follows_a_warmed_catalog);
+    RUN_TEST(test_agent_vision_clause_absent_for_a_text_only_warm_catalog);
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);
     RUN_TEST(test_agent_cancel_drops_pending_image_fanout);

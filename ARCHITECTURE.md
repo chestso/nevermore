@@ -156,11 +156,11 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   round trip (~13 s on a `/provider` switch) and, with a dead peer,
   re-paid the per-request deadline every round (an empty catalog is
   never negatively cached) plus a spurious connect notice each time.
-  The agent's two catalog firing points are the sites that did it —
+  The agent's catalog firing points are the sites that did it —
   `nm_agent_new` (the prompt's vision clause) and `begin_round` (the
   toolset decision) — and both degrade correctly on a cold cache: an
   unknown model claims no capability and keeps its tools. **The context
-  window is the third reader and the same shape**: `agent.c`'s
+  window is the next reader and the same shape**: `agent.c`'s
   `model_entry(provider, model)` is the ONE lookup behind the vision
   claim, the tool-use claim and the window, and `nm_agent_context_limit`
   resolves it AT THE POINT OF USE, so the popup's async
@@ -168,11 +168,24 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   reminder with no push — the window used to be a copy the UI pushed at
   `build_agent`/`/model`, which the fetch could not update (a
   wire-catalog model outside the static fallback showed `ctx 47.1k/-`
-  for the whole session). The popup's
-  async fetch is what warms the cache, so a wire-catalog provider's
-  FIRST chat claims nothing until a catalog is cached (the explicit
-  decision: no async pre-flight on the agent, which would need the
-  prompt spliced late like the `<env>` stage). The one-shot CLI is the
+  for the whole session). **The vision clause is the last reader, and it
+  is resolved at the only moment it can be: while the active model's
+  cached prefix is cold.** It lives in the system prompt, so a clause
+  that landed under a warm prefix would throw the provider's cache away
+  — the same reason the `<env>` git stage makes the first round WAIT
+  rather than splicing late. The first request is that moment for a
+  chat: nothing has been cached yet. `agent.c`'s `apply_vision_clause`
+  resolves it there from the cached read, through
+  `nm_context_set_vision` — which inserts or removes the clause in
+  place and keeps the `<env>` block's splice offset in step — gated by
+  a `clause_pending` flag that `begin_round` clears, so a catalog that
+  warms mid-chat for the SAME model never churns a warm prefix. A
+  wire-catalog provider's first chat therefore declares the capability
+  as soon as the warm has landed — a beat after startup, seconds
+  before a human types — instead of staying mute for the session (the
+  reported wire: the warm landed at t=0.61 s, the first request went out
+  at t=68 s, and the prompt never said the model could see, so the model
+  spent the session dumping pixels with ImageMagick). The one-shot CLI is the
   exception that proves the rule: `main.c`'s ask mode warms the catalog
   itself, before the agent is built — it has no event loop to protect,
   exactly like `nevermore models`, and the agent it builds then reads
@@ -184,7 +197,12 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   blocking drive counts calls and answers differently from its cached
   read), `test_agent_context_limit_follows_a_warmed_catalog` (a stub
   whose cached table is swapped under a live agent: the window follows
-  the cache, and `/model`, with no push) and
+  the cache, and `/model`, with no push),
+  `test_agent_vision_clause_follows_a_warmed_catalog` (the same stub
+  shape for the clause: cold at construction, warm before the first
+  turn, and the prompt declares the capability exactly once),
+  `test_agent_vision_clause_absent_for_a_text_only_warm_catalog` (a
+  live table that contradicts the fallback takes the claim away) and
   `test_model_exact_id_never_fetches_on_the_ui_thread`.
 - **openai_client.c** — shared OpenAI-compatible wire client
   (openai/ollama/openrouter all reuse it; only endpoint/auth/catalog

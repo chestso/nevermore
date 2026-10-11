@@ -80,6 +80,14 @@ struct NmAgent
     int env_job;
     double env_deadline;
     int awaiting_env;
+    /* The capability clause's gate: 1 while the clause has not been
+     * resolved for a model whose prefix has been billed. Set at
+     * construction (a wire catalog's read there can be cold) and at
+     * every model change (the new model has never seen this
+     * conversation); cleared by begin_round, when the request being
+     * built carries the prefix to the provider. So apply_vision_clause
+     * runs at every moment resolving is FREE — see it. */
+    int clause_pending;
     NmAgentState state;
     char *last_error;
     const char *base_url;      /* borrowed; NULL = provider default */
@@ -290,6 +298,31 @@ static int model_vision(const NmProvider *p, const char *model)
     return m ? m->vision : -1;
 }
 
+/* Resolve the capability clause against the NOW-current catalog, and
+ * republish the session's system prompt when it changed. The one
+ * moment this may run is while the active model's cached prefix is
+ * cold, because a clause that landed under a warm prefix would throw
+ * the provider's cache away (the same reason the <env> git stage makes
+ * the first round WAIT). Two moments qualify: the chat's first request
+ * (nothing has been cached yet) and every model change (the new model
+ * has never seen this conversation, so its prefix is cold whatever we
+ * send — the switch has already re-billed the transcript).
+ *
+ * clause_pending is the gate, so this is per-model, never per-turn: a
+ * catalog that warms mid-chat for the SAME model must not churn. The
+ * read is the CACHED one (model_vision) — this runs on the UI thread,
+ * where a live fetch is the /provider freeze BUG 1 measured. */
+static void apply_vision_clause(NmAgent *a)
+{
+    if (!a->clause_pending)
+        return;
+    if (nm_context_set_vision(a->context,
+                              model_vision(a->provider, a->model)) > 0 &&
+        a->session)
+        nm_session_set_system(a->session,
+                              nm_context_system_prompt(a->context));
+}
+
 /* The active model's tool-use claim, from the provider catalog (the
  * one authority): NmModel.tools — 1 claimed, 0 the catalog says
  * nothing, -1 the catalog lists the parameters and does NOT claim
@@ -337,6 +370,10 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
      * BUG 1 measured. A cold cache claims nothing (context.c adds no
      * clause for -1); the /model popup's async fetch warms it. */
     a->context = nm_context_new(NULL, model_vision(provider, model));
+    /* That read can be cold (a wire provider's warm lands later), so the
+     * clause is not final: the first turn resolves it again, before its
+     * request is built. */
+    a->clause_pending = 1;
     /* The <env> git section is the one part that must not run on this
      * thread: `git status` on a monorepo can hang for seconds. Start it
      * as a hidden process job (drained by the app's event loop) and let
@@ -1083,6 +1120,12 @@ static int begin_round(NmAgent *a)
         return -1;
     }
 
+    /* The request built below carries this prompt to the provider: the
+     * active model's prefix stops being free here, so the capability
+     * clause is settled for the rest of this model's run (a model change
+     * re-opens it). */
+    a->clause_pending = 0;
+
     /* This round's reminders, before its request is built (the cap
      * check above already passed, so the last-round nudge can never be
      * appended for a round that will not happen). They land in the
@@ -1709,6 +1752,13 @@ int nm_agent_start(NmAgent *a, const char *user_input,
         set_error(a, "out of memory");
         return -1;
     }
+
+    /* The cached prefix is finalized here, before any request exists:
+     * the capability clause is the prompt's one catalog fact, and this
+     * is the last moment resolving it is free. Unconditional on the
+     * first turn — the non-git path never reaches env_finish, whose
+     * swap carries the git section only. */
+    apply_vision_clause(a);
 
     /* The user message owns this turn's images (ids into the session's
      * store; the bytes stay there for the rest of the conversation). The

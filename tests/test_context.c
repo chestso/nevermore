@@ -538,6 +538,54 @@ static void test_vision_clause_gated_on_the_catalog_flag(void)
     nm_context_free(unknown);
 }
 
+/* The setter is the exact inverse of the construction-time insert:
+ * setting the clause on reproduces a context built with the clause, and
+ * setting it off reproduces one built without — byte for byte, so a
+ * model switched away from and back restores the earlier prompt (the
+ * provider's cache keys on those bytes). */
+static void test_vision_clause_set_late_matches_a_warm_construction(void)
+{
+    char proj[600];
+    setup_tree("vision-set-late", proj, sizeof(proj));
+
+    NmContext *cold = nm_context_new(proj, -1);
+    NmContext *warm = nm_context_new(proj, 1);
+    ASSERT_NOT_NULL(cold);
+    ASSERT_NOT_NULL(warm);
+
+    /* 1 = the prompt changed; the second call already agrees. */
+    ASSERT_EQ(nm_context_set_vision(cold, 1), 1);
+    ASSERT_EQ(nm_context_set_vision(cold, 1), 0);
+    ASSERT_STR_EQ(nm_context_system_prompt(cold),
+                  nm_context_system_prompt(warm));
+    ASSERT_EQ(count_substr(nm_context_system_prompt(cold),
+                           "You can see images"),
+              1);
+    nm_context_free(cold);
+    nm_context_free(warm);
+}
+
+static void test_vision_clause_set_off_matches_a_cold_construction(void)
+{
+    char proj[600];
+    setup_tree("vision-set-off", proj, sizeof(proj));
+
+    NmContext *warm = nm_context_new(proj, 1);
+    NmContext *cold = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(warm);
+    ASSERT_NOT_NULL(cold);
+
+    ASSERT_EQ(nm_context_set_vision(warm, 0), 1);
+    ASSERT_EQ(nm_context_set_vision(warm, 0), 0);
+    ASSERT_STR_EQ(nm_context_system_prompt(warm),
+                  nm_context_system_prompt(cold));
+    ASSERT_EQ(count_substr(nm_context_system_prompt(warm),
+                           "You can see images"),
+              0);
+    nm_context_free(warm);
+    nm_context_free(cold);
+}
+
 /* ---------------------------------------------------------------- */
 /* The <env> block + its async git section                           */
 /* ---------------------------------------------------------------- */
@@ -653,6 +701,60 @@ static void test_env_git_section_is_spliced(void)
 }
 
 /* An empty status section reads "Status: clean" (quoth's shape). */
+/* A clause set AFTER assembly shifts the <env> footer, and the git
+ * section's splice offset must move with it — in either order, since
+ * the agent sets the clause at the first turn and the git stage lands
+ * whenever `git status` answers. */
+static void test_git_section_splice_follows_a_late_vision_clause(void)
+{
+    char proj[600];
+    setup_tree("vision-git-offset", proj, sizeof(proj));
+
+    char out[512];
+    git_output(out, sizeof(out), "main", "", "abc1234 first");
+
+    /* Clause first, then the stage. */
+    NmContext *a = nm_context_new(proj, -1);
+    ASSERT_NOT_NULL(a);
+    ASSERT_EQ(nm_context_set_vision(a, 1), 1);
+    ASSERT_EQ(nm_context_env_apply_git(a, out), 0);
+    const char *sp = nm_context_system_prompt(a);
+    ASSERT_EQ(count_substr(sp, "You can see images"), 1);
+    const char *clause = strstr(sp, "You can see images");
+    const char *open = strstr(sp, "<env>");
+    const char *git = strstr(sp, "Git status (snapshot");
+    const char *close = strstr(sp, "</env>");
+    ASSERT_NOT_NULL(clause);
+    ASSERT_NOT_NULL(open);
+    ASSERT_NOT_NULL(git);
+    ASSERT_NOT_NULL(close);
+    ASSERT_TRUE(clause < open);
+    ASSERT_TRUE(open < git);
+    ASSERT_TRUE(git < close);
+    nm_context_free(a);
+
+    /* The stage first, then the clause: the section stays inside <env>
+     * and the clause lands before it. */
+    NmContext *b = nm_context_new(proj, -1);
+    ASSERT_NOT_NULL(b);
+    ASSERT_EQ(nm_context_env_apply_git(b, out), 0);
+    ASSERT_EQ(nm_context_set_vision(b, 1), 1);
+    const char *sp2 = nm_context_system_prompt(b);
+    ASSERT_EQ(count_substr(sp2, "You can see images"), 1);
+    const char *clause2 = strstr(sp2, "You can see images");
+    const char *open2 = strstr(sp2, "<env>");
+    const char *git2 = strstr(sp2, "Git status (snapshot");
+    const char *close2 = strstr(sp2, "</env>");
+    ASSERT_NOT_NULL(clause2);
+    ASSERT_NOT_NULL(open2);
+    ASSERT_NOT_NULL(git2);
+    ASSERT_NOT_NULL(close2);
+    ASSERT_TRUE(clause2 < open2);
+    ASSERT_TRUE(open2 < git2);
+    ASSERT_TRUE(git2 < close2);
+    nm_context_free(b);
+}
+
 static void test_env_git_clean_status(void)
 {
     char proj[600];
@@ -732,6 +834,9 @@ int main(void)
     RUN_TEST(test_vision_clause_follows_the_identity);
     RUN_TEST(test_vision_clause_precedes_the_project_block);
     RUN_TEST(test_vision_clause_gated_on_the_catalog_flag);
+    RUN_TEST(test_vision_clause_set_late_matches_a_warm_construction);
+    RUN_TEST(test_vision_clause_set_off_matches_a_cold_construction);
+    RUN_TEST(test_git_section_splice_follows_a_late_vision_clause);
     RUN_TEST(test_env_block_names_the_environment);
     RUN_TEST(test_env_git_absent_when_not_a_repo);
     RUN_TEST(test_env_git_wanted_in_a_repo);

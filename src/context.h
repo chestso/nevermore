@@ -86,6 +86,22 @@ void nm_context_free(NmContext *c);
  * alone when nothing was found). */
 const char *nm_context_system_prompt(const NmContext *c);
 
+/* Set the image-capability clause to `vision`'s answer (1 accepts image
+ * content parts, 0 is text-only, -1 unknown): 1 puts the clause in,
+ * anything else takes it out. The clause's slot is recorded during
+ * assembly, and the <env> block's git splice position is kept in step,
+ * so a set after nm_context_new is safe in either order relative to
+ * nm_context_env_apply_git. Returns 1 when the prompt changed, 0 when
+ * it already agreed (byte-identical — never a reason to churn a warm
+ * prefix), -1 on allocation failure.
+ *
+ * The agent calls it at the moments the ACTIVE MODEL's cached prefix is
+ * cold (agent.c's apply_vision_clause): the chat's first request and
+ * every model change. Because the clause is then a pure function of the
+ * current model's flag, switching away and back restores the earlier
+ * prompt byte for byte. */
+int nm_context_set_vision(NmContext *c, int vision);
+
 /* --- the <env> block's async git section ---------------------------
  *
  * The <env> block (working directory, git-repo flag, platform, date) is
