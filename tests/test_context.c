@@ -58,6 +58,16 @@ static void path_of(char *out, size_t cap, const char *rel)
     snprintf(out, cap, "%s/%s", scratch_root(), rel);
 }
 
+/* Occurrences of `needle` in `hay` (the "exactly once" pins). */
+static int count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    for (const char *p = strstr(hay, needle); p;
+         p = strstr(p + strlen(needle), needle))
+        n++;
+    return n;
+}
+
 /* mkdir -p (forward slashes throughout; Windows accepts them). */
 static void mkdir_p(const char *path)
 {
@@ -432,6 +442,27 @@ static void test_null_dir_uses_process_cwd(void)
     nm_context_set_global_dir(NULL); /* restore the default chain */
 }
 
+/* The image-transport clause (how an attached image arrives) is
+ * UNCONDITIONAL, like the reminder clause: it describes the request
+ * nevermore builds, not the model's capability — so a text-only (0) or
+ * unknown (-1) model gets it too, and it never carries the capability
+ * claim (that stays the catalog's answer). */
+static void test_image_clause_is_unconditional(void)
+{
+    char proj[600];
+    setup_tree("image-clause", proj, sizeof(proj));
+
+    for (int vision = -1; vision <= 1; vision++) {
+        NmContext *c = nm_context_new(proj, vision);
+        ASSERT_NOT_NULL(c);
+        const char *sp = nm_context_system_prompt(c);
+        ASSERT_EQ(count_substr(sp, "An image the user attaches"), 1);
+        ASSERT_EQ(count_substr(sp, "never hunt for a tool"), 1);
+        ASSERT_EQ(count_substr(sp, "You can see images"), vision == 1 ? 1 : 0);
+        nm_context_free(c);
+    }
+}
+
 /* The image-capability clause: a model the catalog says
  * can see gets it, right after the identity — the identity alone is a
  * coding agent with file tools, which reads "tell me about this image"
@@ -447,12 +478,16 @@ static void test_vision_clause_follows_the_identity(void)
     const char *base = nm_context_base_system_prompt();
     ASSERT_TRUE(strncmp(sp, base, strlen(base)) == 0);
     /* The reminder clause (unconditional, the conversation protocol)
-     * comes first, then the capability clause. */
+     * comes first, then the image-transport clause (unconditional too),
+     * then the capability clause the catalog gates. */
     const char *rem = strstr(sp + strlen(base), "system-reminder");
     ASSERT_NOT_NULL(rem);
+    const char *img = strstr(sp + strlen(base), "An image the user attaches");
+    ASSERT_NOT_NULL(img);
     const char *vis = strstr(sp + strlen(base), "\n\nYou can see images");
     ASSERT_NOT_NULL(vis);
-    ASSERT_TRUE(rem < vis);
+    ASSERT_TRUE(rem < img);
+    ASSERT_TRUE(img < vis);
     nm_context_free(c);
 }
 
@@ -693,6 +728,7 @@ int main(void)
     RUN_TEST(test_fitting_file_has_no_notice);
     RUN_TEST(test_system_prompt_is_stable);
     RUN_TEST(test_null_dir_uses_process_cwd);
+    RUN_TEST(test_image_clause_is_unconditional);
     RUN_TEST(test_vision_clause_follows_the_identity);
     RUN_TEST(test_vision_clause_precedes_the_project_block);
     RUN_TEST(test_vision_clause_gated_on_the_catalog_flag);
