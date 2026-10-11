@@ -1,0 +1,215 @@
+<svg width="512" height="512" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- Background drop shadow -->
+    <filter id="icon-shadow" x="0" y="0" width="256" height="256" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#020108" flood-opacity="0.8"/>
+      <feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#020108" flood-opacity="0.5"/>
+    </filter>
+
+    <!-- Neon Glow Filter -->
+    <filter id="core-glow" x="10" y="10" width="236" height="236" filterUnits="userSpaceOnUse">
+      <feGaussianBlur stdDeviation="3" result="blur1"/>
+      <feGaussianBlur stdDeviation="8" result="blur2"/>
+      <feMerge>
+        <feMergeNode in="blur2"/>
+        <feMergeNode in="blur1"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Obsidian Container Fill -->
+    <radialGradient id="shield-grad" cx="50%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#181329"/>
+      <stop offset="50%" stop-color="#0e0a1a"/>
+      <stop offset="100%" stop-color="#05030a"/>
+    </radialGradient>
+
+    <!-- Bezel / Rim Gradient (Chest Magenta -> Purple -> Mint Cyan) -->
+    <linearGradient id="bezel-rim" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF60FF"/>
+      <stop offset="45%" stop-color="#6B50FF"/>
+      <stop offset="100%" stop-color="#00FFB2"/>
+    </linearGradient>
+
+    <!-- Slender Raven Body Gradient -->
+    <linearGradient id="raven-body" x1="20%" y1="10%" x2="80%" y2="90%">
+      <stop offset="0%" stop-color="#3c246c"/>
+      <stop offset="35%" stop-color="#221242"/>
+      <stop offset="70%" stop-color="#120824"/>
+      <stop offset="100%" stop-color="#06020c"/>
+    </linearGradient>
+
+    <!-- Wing Stream Gradient -->
+    <linearGradient id="wing-sweep" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#5a3298"/>
+      <stop offset="50%" stop-color="#2e1554"/>
+      <stop offset="100%" stop-color="#100524"/>
+    </linearGradient>
+
+    <linearGradient id="wing-feathers" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c44c8"/>
+      <stop offset="60%" stop-color="#3f1c7c"/>
+      <stop offset="100%" stop-color="#160832"/>
+    </linearGradient>
+
+    <!-- Golden / Brass Beak -->
+    <linearGradient id="beak-upper" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff8db"/>
+      <stop offset="25%" stop-color="#f2be4c"/>
+      <stop offset="65%" stop-color="#a86e24"/>
+      <stop offset="100%" stop-color="#5a3408"/>
+    </linearGradient>
+
+    <linearGradient id="beak-lower" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#dfa436"/>
+      <stop offset="50%" stop-color="#8c5416"/>
+      <stop offset="100%" stop-color="#3d2003"/>
+    </linearGradient>
+
+    <!-- Luminous Eye -->
+    <radialGradient id="eye-glow" cx="40%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#ffffff"/>
+      <stop offset="35%" stop-color="#00FFB2"/>
+      <stop offset="75%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#011b2b"/>
+    </radialGradient>
+
+    <!-- Terminal Prompt Stream Gradient -->
+    <linearGradient id="prompt-stream" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#00FFB2"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#FF60FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ==================== CONTAINER / SQUIRCLE ==================== -->
+  <g filter="url(#icon-shadow)">
+    <rect x="18" y="18" width="220" height="220" rx="52" fill="url(#shield-grad)"/>
+    <rect x="18.5" y="18.5" width="219" height="219" rx="51.5" fill="none" stroke="url(#bezel-rim)" stroke-width="2.5" stroke-opacity="0.9"/>
+    <rect x="22" y="22" width="212" height="212" rx="48" fill="none" stroke="#000000" stroke-width="2" stroke-opacity="0.6"/>
+  </g>
+
+  <!-- Background Scanlines / Terminal Coordinates -->
+  <g opacity="0.08" stroke="#38bdf8" stroke-width="1">
+    <line x1="28" y1="84" x2="228" y2="84"/>
+    <line x1="28" y1="128" x2="228" y2="128"/>
+    <line x1="28" y1="172" x2="228" y2="172"/>
+    <line x1="84" y1="28" x2="84" y2="228"/>
+    <line x1="128" y1="28" x2="128" y2="228"/>
+    <line x1="172" y1="28" x2="172" y2="228"/>
+  </g>
+
+  <!-- Chest Seam Line (Horizon) -->
+  <path d="M 32 188 L 224 188" stroke="#6B50FF" stroke-width="2" stroke-opacity="0.3" stroke-dasharray="8 5"/>
+
+  <!-- ==================== SLENDER RAVEN SILHOUETTE ==================== -->
+  <!--
+    Body is centered, sleek and upright.
+    Crown (156, 52) -> Nape/Back (188, 102) -> Tail (164, 196) -> Belly (142, 196)
+    -> Slender Breast (114, 162) -> Throat (102, 132) -> Gape (100, 112)
+    -> Culmen Base (94, 84) -> Crown
+  -->
+  <path d="M 156 52 
+           C 128 48 108 64 94 84 
+           L 100 112 
+           L 102 132 
+           C 108 156 124 196 150 196 
+           C 168 196 192 168 192 130 
+           C 192 84 182 52 156 52 Z" 
+        fill="url(#raven-body)"/>
+
+  <!-- Crown Highlight Glaze -->
+  <path d="M 154 52 C 132 50 116 62 102 76 C 114 68 132 60 150 58 C 154 58 156 62 156 66 C 156 58 155 54 154 52 Z" fill="#6B50FF" opacity="0.3"/>
+
+  <!-- ==================== WING (FOLDED ON SLENDER BODY) ==================== -->
+  <!-- Wing sits on the side from shoulder (132, 112) tapering down to (162, 192) -->
+  <path d="M 132 112 
+           C 156 106 182 122 186 152 
+           C 188 174 176 192 162 192 
+           C 146 192 134 178 128 160 
+           C 122 142 124 126 132 112 Z" 
+        fill="url(#wing-sweep)"/>
+
+  <!-- Wing Feather Coverts Layer -->
+  <path d="M 138 122 
+           C 156 118 176 130 178 154 
+           C 180 170 170 184 156 184 
+           C 142 184 136 170 132 156 
+           C 128 142 132 128 138 122 Z" 
+        fill="url(#wing-feathers)" opacity="0.9"/>
+
+  <!-- Wing Feather Accent Filaments (Magenta & Mint) -->
+  <path d="M 144 130 C 158 142 168 158 170 174" fill="none" stroke="#FF60FF" stroke-width="1.8" stroke-linecap="round" opacity="0.45"/>
+  <path d="M 152 138 C 162 148 168 160 170 172" fill="none" stroke="#00FFB2" stroke-width="1.2" stroke-linecap="round" opacity="0.4"/>
+
+  <!-- ==================== GOLDEN RAVEN BEAK (INSIDE FRAME) ==================== -->
+  <!--
+    UPPER MANDIBLE:
+    - Base sits at (94, 84) fitting the forehead.
+    - Tip stays well inside frame margin at (38, 108) (frame edge is at x=18).
+    - Tomium (cutting edge) back to gape at (100, 112).
+  -->
+  <path d="M 94 84 
+           C 72 88 52 97 38 108 
+           C 58 109 78 111 100 112 
+           C 98 102 96 92 94 84 Z" 
+        fill="url(#beak-upper)" 
+        filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.5))"/>
+
+  <!--
+    LOWER MANDIBLE:
+    - Tip (38, 108) along cutting edge to gape (100, 112).
+    - Chin curve back to (94, 118).
+  -->
+  <path d="M 38 108 
+           C 58 109 78 111 100 112 
+           C 96 115 94 117 94 118 
+           C 72 116 54 112 38 108 Z" 
+        fill="url(#beak-lower)"/>
+
+  <!-- Culmen Specular Highlight -->
+  <path d="M 94 84 C 72 88 52 97 38 108" fill="none" stroke="#fffdf0" stroke-width="1.8" stroke-linecap="round" opacity="0.95"/>
+
+  <!-- Beak Cutting Edge (Tomium Slit) -->
+  <path d="M 38 108 C 58 109 78 111 100 112" fill="none" stroke="#3d2102" stroke-width="1.5" stroke-linecap="round"/>
+
+  <!-- ==================== CYBERNETIC OBSERVER EYE ==================== -->
+  <!-- Positioned naturally in skull above gape (100, 112) and behind culmen (94, 84) -->
+  <circle cx="114" cy="88" r="8" fill="#030712"/>
+  <circle cx="114" cy="88" r="5" fill="url(#eye-glow)" filter="url(#core-glow)"/>
+  <circle cx="112.5" cy="86.5" r="1.8" fill="#ffffff"/>
+
+  <!-- ==================== TERMINAL PROMPT (> _) ==================== -->
+  <g filter="url(#core-glow)">
+    <!-- Terminal '>' prompt -->
+    <path d="M 48 162 L 70 178 L 48 194" 
+          fill="none" 
+          stroke="url(#prompt-stream)" 
+          stroke-width="7" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"/>
+
+    <!-- Terminal '_' cursor block -->
+    <line x1="82" y1="194" x2="112" y2="194" 
+          stroke="url(#prompt-stream)" 
+          stroke-width="7" 
+          stroke-linecap="round"/>
+
+    <!-- Specular highlight filament -->
+    <path d="M 48 162 L 70 178 L 48 194" 
+          fill="none" 
+          stroke="#ffffff" 
+          stroke-width="2.2" 
+          stroke-linecap="round" 
+          stroke-linejoin="round" 
+          opacity="0.95"/>
+    <line x1="82" y1="194" x2="112" y2="194" 
+          stroke="#ffffff" 
+          stroke-width="2.2" 
+          stroke-linecap="round" 
+          opacity="0.95"/>
+  </g>
+
+  <!-- Top Glass Sheen / Ambient Lighting -->
+  <path d="M 32 40 C 70 24 186 24 224 40 C 190 76 66 76 32 40 Z" fill="#ffffff" opacity="0.07"/>
+</svg>

@@ -16,6 +16,7 @@ EXTRA_DIST = \
     tools \
     docs \
     data \
+    icons \
     third_party/stb/stb_image.h \
     third_party/stb/stb_image_write.h
 
