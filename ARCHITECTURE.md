@@ -422,7 +422,13 @@ save [path]` writes session.c's markdown). Const on purpose: the
   UNCONDITIONAL and sits right after the identity — the escape runs
   whether or not nudges do — and every context file body is sanitized
   on the way in, so only the harness writes a tag anywhere in the
-  prompt.
+  prompt. **The image-transport clause is its unconditional sibling**:
+  an attached image arrives as an image content part inside the user's
+  message, never as a path to go read, which describes the request
+  nevermore builds and so is true for a text-only model too (the
+  provider strips the part; the `image-not-seen` reminder says why it
+  sees nothing). The capability half — "You can see images" — is the
+  catalog's answer and is resolved separately (see the catalog section).
 - **Reminders** (`src/nm_reminder.{h,c}` + the agent's firing points) —
   the harness's own speech in the conversation, the `<system-reminder>`
   convention. **One module, one tag vocabulary, one trust boundary, one
