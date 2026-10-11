@@ -1,8 +1,10 @@
 // nevermore.rc - Windows resource script
 //
 // Embeds the application icon and version metadata into nevermore.exe
-// (compiled via windres, see src/Makefile.am). Icon is a placeholder
-// raven glyph; version fields are wired from autotools by hand for now.
+// (compiled via windres, see src/Makefile.am). The icon is the committed
+// six-size icons/nevermore.ico, rendered from icons/nevermore.svg — the
+// regeneration recipe is the top-level Makefile's `regen-icon` target.
+// Version fields are wired from autotools by hand for now.
 
 #include <windows.h>
 

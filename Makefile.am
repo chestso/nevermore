@@ -71,3 +71,32 @@ bear:
     }
 	$(MAKE) clean
 	bear --output $(top_srcdir)/compile_commands.json -- $(MAKE)
+
+# Windows icon — the committed icons/nevermore.ico is a six-size
+# multi-resolution icon (256/128/64/48/32/16, 32bpp) rendered from the
+# source SVG by a 2-pass recipe: rsvg-convert renders each size
+# individually, icotool combines them. The SVG is the source of truth;
+# after changing it run `make regen-icon` and commit the result. The
+# rasterized PNGs are intermediates and stay in the build tree.
+.PHONY: regen-icon
+regen-icon:
+	@command -v rsvg-convert >/dev/null 2>&1 || { \
+        echo "rsvg-convert not installed (librsvg) - needed to render the SVG." >&2; \
+        exit 1; \
+    }
+	@command -v icotool >/dev/null 2>&1 || { \
+        echo "icotool not installed (icoutils) - needed to combine the PNGs." >&2; \
+        exit 1; \
+    }
+	@set -e; \
+    for size in 16 32 48 64 128 256; do \
+        rsvg-convert -w $$size -h $$size -f png \
+            $(top_srcdir)/icons/nevermore.svg \
+            -o nevermore-$$size.png; \
+    done; \
+    icotool -c -o $(top_srcdir)/icons/nevermore.ico \
+        nevermore-16.png nevermore-32.png nevermore-48.png \
+        nevermore-64.png nevermore-128.png nevermore-256.png; \
+    rm -f nevermore-16.png nevermore-32.png nevermore-48.png \
+        nevermore-64.png nevermore-128.png nevermore-256.png
+	@echo "  GEN      icons/nevermore.ico"
