@@ -4611,9 +4611,10 @@ static void *warm_catalog_server_thread(void *arg)
  *
  * The warm is silent and shows nothing (it is the gauge's, not the
  * user's): it fills the provider cache and the frame moves with it, no
- * push and no rebuild. The prompt's vision clause is deliberately NOT
- * covered here — it is assembled once at construction, inside the
- * provider's cached prefix.
+ * push and no rebuild. The prompt's vision clause is NOT resolved here
+ * — it is settled at the first turn, from the warm cache, before the
+ * first request exists (agent.c's apply_vision_clause); this test's
+ * subject is the gauge.
  *
  * REGISTERED LAST (see main): provider catalogs are process-global, so
  * the live commit this test makes is visible to every test after it —

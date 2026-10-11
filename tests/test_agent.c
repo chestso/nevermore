@@ -3428,6 +3428,12 @@ static const NmModel stub_textonly_models[] = {
     { "stub-see", "Stub (text-only)", 0, 0, 128000, 0 },
     { 0 }
 };
+/* Two models, one table: what a /model switch resolves against. */
+static const NmModel stub_switch_models[] = {
+    { "stub-see", "Stub (can see)", 1, 0, 128000, 0 },
+    { "stub-blind", "Stub (text-only)", 0, 0, 128000, 0 },
+    { 0 }
+};
 
 /* The provider's process-global cache: the seam the async fetch writes. */
 static const NmModel *g_stub_catalog;
@@ -3586,6 +3592,183 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
      * is not claimed. */
     ASSERT_EQ(count_substr(g_requests[0], "An image the user attaches"), 1);
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A model change re-resolves the clause. The switch is the second
+ * moment the active model's prefix is cold — the new model has never
+ * seen this conversation, so the transcript is re-billed whatever we
+ * send — and it is the moment the fact matters most: the new model is
+ * the one that must know whether IT can see. Switching away and back
+ * restores the earlier prompt byte for byte (the clause is a pure
+ * function of the current model's flag), so the return is a cache hit,
+ * not a re-bill. */
+static void test_agent_vision_clause_follows_a_model_switch(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"three\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    struct NmProvider p = nm_test_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_switch_models;
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-see", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+
+    /* To the text-only model: the claim goes. */
+    nm_agent_set_model(agent, "stub-blind");
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
+    ASSERT_EQ(count_substr(g_requests[1], "An image the user attaches"), 1);
+
+    /* And back: the original prompt, byte for byte. */
+    nm_agent_set_model(agent, "stub-see");
+    ASSERT_EQ(nm_agent_turn(agent, "third", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_EQ(count_substr(g_requests[2], "You can see images"), 1);
+    const char *s0 = strstr(g_requests[0], "\"role\":\"system\"");
+    const char *s2 = strstr(g_requests[2], "\"role\":\"system\"");
+    ASSERT_NOT_NULL(s0);
+    ASSERT_NOT_NULL(s2);
+    const char *end0 = strstr(s0, "},{\"role\":\"user\"");
+    ASSERT_NOT_NULL(end0);
+    ASSERT_TRUE(memcmp(s0, s2, (size_t)(end0 + 1 - s0)) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A re-set of the CURRENT id is not a change: even with the cache moved
+ * under it (the same id, now text-only), the prompt must not churn. */
+static void test_agent_model_reset_is_not_a_change(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    struct NmProvider p = nm_test_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_see_models;
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-see", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+
+    /* The catalog moves; the user re-sets the model they are already on. */
+    g_stub_catalog = stub_textonly_models;
+    nm_agent_set_model(agent, "stub-see");
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 1);
+
+    const char *s0 = strstr(g_requests[0], "\"role\":\"system\"");
+    const char *s1 = strstr(g_requests[1], "\"role\":\"system\"");
+    ASSERT_NOT_NULL(s0);
+    ASSERT_NOT_NULL(s1);
+    const char *end0 = strstr(s0, "},{\"role\":\"user\"");
+    ASSERT_NOT_NULL(end0);
+    ASSERT_TRUE(memcmp(s0, s1, (size_t)(end0 + 1 - s0)) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* `/model ! <id>` sets an id the catalog cannot confirm (a local daemon
+ * may run private models). An unknown flag is not a claim: the clause
+ * goes, and the harness transport clause stays. */
+static void test_agent_vision_clause_drops_for_an_unknown_model(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    struct NmProvider p = nm_test_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_see_models;
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-see", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
+
+    /* The exact-set escape hatch: the cache does not carry this id. */
+    nm_agent_set_model(agent, "private-daemon-model");
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
+    ASSERT_EQ(count_substr(g_requests[1], "An image the user attaches"), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -5329,6 +5512,9 @@ int main(void)
     RUN_TEST(test_agent_context_limit_follows_a_warmed_catalog);
     RUN_TEST(test_agent_vision_clause_follows_a_warmed_catalog);
     RUN_TEST(test_agent_vision_clause_absent_for_a_text_only_warm_catalog);
+    RUN_TEST(test_agent_vision_clause_follows_a_model_switch);
+    RUN_TEST(test_agent_model_reset_is_not_a_change);
+    RUN_TEST(test_agent_vision_clause_drops_for_an_unknown_model);
     RUN_TEST(test_agent_read_file_image_fans_out);
     RUN_TEST(test_agent_parallel_read_file_images_one_message);
     RUN_TEST(test_agent_cancel_drops_pending_image_fanout);

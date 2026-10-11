@@ -57,7 +57,11 @@ void nm_agent_set_endpoint(NmAgent *a, const char *base_url,
                            const char *api_key);
 
 /* Change the model id; the next round/turn uses it. Session and
- * in-flight state are untouched. */
+ * in-flight state are untouched — except the system prompt's
+ * capability clause, which FOLLOWS the model: the new model has never
+ * seen this conversation, so its cached prefix is cold whatever we send,
+ * and resolving the clause there costs nothing (agent.c's
+ * apply_vision_clause). A re-set of the current id is not a change. */
 void nm_agent_set_model(NmAgent *a, const char *model);
 
 /* Tool-call rounds allowed in one turn before the loop bails out with

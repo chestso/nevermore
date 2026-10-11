@@ -608,8 +608,23 @@ void nm_agent_set_model(NmAgent *a, const char *model)
 {
     if (!a || !model || !*model)
         return;
+    /* A re-set is not a change: only a NEW id makes a new model's cached
+     * prefix cold (apply_vision_clause), so re-setting the current one
+     * must not re-resolve and churn a warm prefix. (It also keeps a
+     * caller that passes the agent's own string from freeing it under
+     * itself.) */
+    if (a->model && strcmp(a->model, model) == 0)
+        return;
     free(a->model);
     a->model = strdup(model);
+    /* The new model has never seen this conversation, so its prefix is
+     * cold whatever we send — the switch has already re-billed the
+     * transcript, and there is no cache left to protect. Resolve the
+     * capability clause now (the prompt is right before the next turn)
+     * and again at that turn's start, where the cached read is fresher;
+     * begin_round closes the window. */
+    a->clause_pending = 1;
+    apply_vision_clause(a);
 }
 
 /* The tool-round cap is the config store's `rounds` key, resolved at

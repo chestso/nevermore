@@ -173,13 +173,19 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   cached prefix is cold.** It lives in the system prompt, so a clause
   that landed under a warm prefix would throw the provider's cache away
   — the same reason the `<env>` git stage makes the first round WAIT
-  rather than splicing late. The first request is that moment for a
-  chat: nothing has been cached yet. `agent.c`'s `apply_vision_clause`
-  resolves it there from the cached read, through
-  `nm_context_set_vision` — which inserts or removes the clause in
-  place and keeps the `<env>` block's splice offset in step — gated by
-  a `clause_pending` flag that `begin_round` clears, so a catalog that
-  warms mid-chat for the SAME model never churns a warm prefix. A
+  rather than splicing late. Two moments qualify: the chat's first
+  request (nothing has been cached yet) and every model change (the new
+  model has never seen this conversation, so its prefix is cold whatever
+  we send — the switch has already re-billed the transcript).
+  `agent.c`'s `apply_vision_clause` resolves it at both, from the cached
+  read, through `nm_context_set_vision` — which inserts or removes the
+  clause in place and keeps the `<env>` block's splice offset in step —
+  gated by a `clause_pending` flag that `begin_round` clears, so a
+  catalog that warms mid-chat for the SAME model never churns a warm
+  prefix and a re-set of the current id is not a change at all. Because
+  the clause is then a pure function of the current model's flag, a
+  switch away and back restores the earlier prompt byte for byte — a
+  cache hit on the return, not a re-bill. A
   wire-catalog provider's first chat therefore declares the capability
   as soon as the warm has landed — a beat after startup, seconds
   before a human types — instead of staying mute for the session (the
@@ -202,7 +208,11 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   shape for the clause: cold at construction, warm before the first
   turn, and the prompt declares the capability exactly once),
   `test_agent_vision_clause_absent_for_a_text_only_warm_catalog` (a
-  live table that contradicts the fallback takes the claim away) and
+  live table that contradicts the fallback takes the claim away),
+  `test_agent_vision_clause_follows_a_model_switch` (a switch to a
+  text-only model takes the clause out and switching back restores the
+  first prompt byte for byte), `test_agent_model_reset_is_not_a_change`
+  (a re-set with the cache moved under it must not churn) and
   `test_model_exact_id_never_fetches_on_the_ui_thread`.
 - **openai_client.c** — shared OpenAI-compatible wire client
   (openai/ollama/openrouter all reuse it; only endpoint/auth/catalog
