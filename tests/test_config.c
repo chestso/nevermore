@@ -649,7 +649,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_POLL_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_LOGIN_SHELL);
     ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
-    ASSERT_NULL(nm_config_key_at(17));
+    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_SPINNER_RAMP);
+    ASSERT_NULL(nm_config_key_at(18));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -1060,6 +1061,41 @@ static void test_login_shell_key(void)
     nm_config_free(c);
 }
 
+/* The spinner's size ramp: a bool, ON by default (the dot breathes),
+ * and normalized like every other bool key so the file, the env and the
+ * shadow write-back agree on the spelling. */
+static void test_spinner_ramp_key(void)
+{
+    pin_paths("spinnerramp");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SPINNER_RAMP, 1));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_SPINNER_RAMP), "on");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SPINNER_RAMP),
+                  "NEVERMORE_SPINNER_RAMP");
+
+    write_file_at(g_user, "spinner_ramp = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_SPINNER_RAMP, 1));
+
+    test_setenv("NEVERMORE_SPINNER_RAMP", "true");
+    nm_config_set_env(c2);
+    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_SPINNER_RAMP, 0));
+    /* Normalized to the file vocabulary, like every bool key. */
+    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_SPINNER_RAMP), "on");
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_SPINNER_RAMP");
+
+    /* A shadow write round-trips; a garbage value is refused. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SPINNER_RAMP, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "spinner_ramp = off\n");
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SPINNER_RAMP, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_SPINNER_RAMP), 0);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SPINNER_RAMP, 1));
+    nm_config_free(c);
+}
+
 /* The model key is PROVIDER-SCOPED: `model.<provider>` is the memory,
  * the plain `model` resolves below it, and -m / $NEVERMORE_MODEL stay
  * global. The precedence matrix, cell by cell. */
@@ -1229,6 +1265,7 @@ int main(void)
     RUN_TEST(test_new_keys);
     RUN_TEST(test_reminders_key);
     RUN_TEST(test_login_shell_key);
+    RUN_TEST(test_spinner_ramp_key);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);
     RUN_TEST(test_scoped_shadow_write_and_reset);

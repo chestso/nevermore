@@ -282,9 +282,12 @@ test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
 
-# Spinner: pure model — frames per agent state (braille streaming,
-# charset tool tier), cycle + stop semantics. No terminal I/O here;
-# chat_app wires the ticks to boba's on_tick.
+# Spinner: pure model — the spinner OBJECT (one phase per object, a
+# style switch resets it), the dot's size ramp + color pulse, the
+# 16-color blink, the star rotation, cycle + stop semantics. No
+# terminal I/O and no boba here (the color tier is an argument), so the
+# binary also runs under the Wine pre-flight; chat_app wires the ticks
+# to boba's on_tick and pins the app-side paint.
 test_spinner_SOURCES = test_spinner.c ../src/spinner.c
 test_spinner_CFLAGS = $(TEST_CFLAGS)
 

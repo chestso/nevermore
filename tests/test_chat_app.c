@@ -350,11 +350,30 @@ static void harness_free(AppHarness *h)
     free(h);
 }
 
+/* The spinner's color tier comes from the terminal profile's
+ * env-derived truecolor hint (COLORTERM, or a direct-color TERM), so the
+ * TEST PROCESS's own environment must not decide a frame's bytes: pin
+ * the 16-color tier — the blink — before the runtime exists. The probe
+ * reads the environment when it starts (the first flush, inside
+ * harness_new), so harness_new_rgb flips COLORTERM on for the duration
+ * of the call and back off after: the profile keeps the hint it read,
+ * and the tests that assert the pulse get the RGB tier. */
+static void pin_color_env(int truecolor)
+{
+    if (truecolor) {
+        test_setenv("COLORTERM", "truecolor");
+    } else {
+        test_unsetenv("COLORTERM");
+        test_setenv("TERM", "xterm-256color"); /* never a -direct/-truecolor */
+    }
+}
+
 /* Create the app + runtime pair wired like main.c does it. Provider
  * defaults to "openai" (static catalog + openai_client wire). */
-static AppHarness *harness_new(const char *provider, const char *model,
-                               const char *base_url)
+static AppHarness *harness_new_full(const char *provider, const char *model,
+                                    const char *base_url, int truecolor)
 {
+    pin_color_env(truecolor);
     /* A test starts from a known instant: deadlines are all relative,
      * but a stale advance from a previous test would make a failure
      * depend on test order. */
@@ -386,7 +405,26 @@ static AppHarness *harness_new(const char *provider, const char *model,
 
     /* The event loop's first flush (run() does this before reading). */
     tui_runtime_flush(h->rt);
+
+    /* The probe has read the environment: put the process back on the
+     * pinned 16-color tier, so one RGB harness cannot leak its hint
+     * into the next test's frames. */
+    pin_color_env(0);
     return h;
+}
+
+/* The default harness: the 16-color tier (the dot blinks). */
+static AppHarness *harness_new(const char *provider, const char *model,
+                               const char *base_url)
+{
+    return harness_new_full(provider, model, base_url, 0);
+}
+
+/* The same harness on a truecolor terminal (the dot pulses). */
+static AppHarness *harness_new_rgb(const char *provider, const char *model,
+                                   const char *base_url)
+{
+    return harness_new_full(provider, model, base_url, 1);
 }
 
 /* Type a string into the textinput (plain chars); each key is sent
@@ -995,18 +1033,18 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* The frame's first row is the spinner itself: no leading
      * line separator (the phantom row). */
     ASSERT_TRUE(strncmp(frame, "\r\n", 2) != 0);
-    /* The busy frame carries the INPUT AREA: its status row (the braille
-     * glyph in the activity role, the context gauge with no usage and no
-     * known limit yet, the separator rule filling the row, and the
-     * right-aligned identity block) on one row, then the accent prompt on
-     * the next — the input is always where the next prompt is gathered
-     * (R1). What the turn is doing is the glyph's TIER, so there is no
-     * label beside it. */
-    char *glyph = span_bytes(nm_color_spinner(), "\xe2\xa0\x8b ");
+    /* The busy frame carries the INPUT AREA: its status row (the
+     * spinner's glyph in its own color, the context gauge with no usage
+     * and no known limit yet, the separator rule filling the row, and
+     * the right-aligned identity block) on one row, then the accent
+     * prompt on the next — the input is always where the next prompt is
+     * gathered (R1). What the turn is doing is the glyph's STYLE, so
+     * there is no label beside it. */
+    char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
     char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     char *rule =
-        status_row_bytes("\xe2\xa0\x8b ctx -/- ", IDENT("openai", "test-model"));
+        status_row_bytes("\xc2\xb7 ctx -/- ", IDENT("openai", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -1059,6 +1097,143 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     close(sc.fd);
 }
 
+/* The dot on a TRUECOLOR terminal: the glyph's color is the pulse's,
+ * frame by frame — it starts at the style's low green and reaches the
+ * peak (Dracula Green) one cycle's midpoint later, at the 50 ms
+ * cadence. The tier comes from the terminal profile's env-derived
+ * hint, which is what harness_new_rgb pins. */
+static void test_dot_pulses_on_a_truecolor_terminal(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = ""; /* stalling round: the app sits in STREAMING */
+    sc.stall_at_end = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new_rgb("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    harness_enter(h);
+    harness_single_step(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* Tick 0: the ramp's first glyph (·) at the pulse's LOW end. */
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *low = span_bytes(tui_color_rgb(30, 120, 60), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(low);
+    ASSERT_TRUE(strstr(frame, low) != NULL);
+    free(low);
+
+    /* Eight ticks on: the peak — the palette's Green #50FA7B, on the
+     * ramp's big dot (step 2 of the ping-pong). */
+    for (int i = 0; i < 8; i++)
+        nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *peak = span_bytes(tui_color_rgb(80, 250, 123), "\xe2\x97\x8f ");
+    ASSERT_NOT_NULL(peak);
+    ASSERT_TRUE(strstr(frame, peak) != NULL);
+    free(peak);
+
+    /* The cadence is the style's: the pulse wants the finer clock, and
+     * the agent's own deadline is the only thing that may shorten it. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 50);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The dot on a 16-COLOR terminal: no pulse — the bright ANSI16 green
+ * holds — and the BLINK carries the animation. The dark phase declares
+ * its two columns as spaces rather than dropping the segment, so the
+ * row behind the glyph does not move: the same rule length, the same
+ * identity, one column of content swapped. */
+static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = "";
+    sc.stall_at_end = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    harness_enter(h);
+    harness_single_step(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* The lit phase (tick 0): the dot, in the bright green. */
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *lit = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(lit);
+    ASSERT_TRUE(strstr(frame, lit) != NULL);
+    free(lit);
+
+    /* Ten ticks on: the dark phase — the glyph's two columns are spaces
+     * in the same color, and the row's LAYOUT is byte-identical to the
+     * lit one (same left chrome width, so the same rule). */
+    for (int i = 0; i < 10; i++)
+        nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *dark = span_bytes(tui_color_ansi(10), "  ");
+    char *dark_row =
+        status_row_bytes("  ctx -/- ", IDENT("openai", "test-model"));
+    char *lit_glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(dark);
+    ASSERT_NOT_NULL(dark_row);
+    ASSERT_NOT_NULL(lit_glyph);
+    ASSERT_TRUE(strstr(frame, dark) != NULL);
+    ASSERT_TRUE(strstr(frame, dark_row) != NULL);
+    ASSERT_TRUE(strstr(frame, lit_glyph) == NULL); /* the dot is dark */
+    free(dark);
+    free(dark_row);
+    free(lit_glyph);
+
+    /* The 16-color tier still ticks at the dot's cadence (the pulse and
+     * the blink share the style's clock). */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 50);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The ramp glyphs are one display cell each in boba's width table — the
+ * status row's layout and the cursor arithmetic rest on that, and a
+ * table change (or a glyph swap for an East-Asian-Wide one) must be
+ * caught here rather than as a drifting row. */
+static void test_spinner_glyphs_are_one_cell(void)
+{
+    ASSERT_EQ(tui_utf8_display_width("\xe2\x97\x8f"), 1); /* ● U+25CF */
+    ASSERT_EQ(tui_utf8_display_width("\xe2\x80\xa2"), 1); /* • U+2022 */
+    ASSERT_EQ(tui_utf8_display_width("\xc2\xb7"), 1);     /* · U+00B7 */
+}
+
 static void test_streaming_frame_shows_tail_and_spinner(void)
 {
     struct ServerScript sc;
@@ -1106,9 +1281,12 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(prompt);
     free(gauge);
-    /* A braille spinner glyph is on the frame, painted in its own
-     * (Yellow) role. */
-    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER "\xe2\xa0\x8b") != NULL);
+    /* A spinner glyph is on the frame, painted in its own color: the
+     * 16-color tier's bright green (this harness pins the tier). */
+    char *dot = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(dot);
+    ASSERT_TRUE(strstr(frame, dot) != NULL);
+    free(dot);
 
     /* The tail is live-region content: nothing has committed to the
      * scrollback since the turn began. This is a real state assertion
@@ -2964,15 +3142,15 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(app_fd(h->app) >= 0);
 
-    /* The status row while a child runs carries the CHARSET-tier glyph
-     * in the activity role (the tool tier, vs the braille streaming
-     * tier): the tier is the whole "what is it doing" readout, so no
+    /* The status row while a child runs carries the STAR style's first
+     * frame in the star set's yellow: the style is the whole "what is
+     * it doing" readout (the dot streams, the stars execute), so no
      * label follows it. The gauge is still the row's landmark. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") == NULL);
-    char *glyph = span_bytes(nm_color_spinner(), "\xc2\xb7 ");
+    char *glyph = span_bytes(tui_color_ansi(11), "\xc2\xb7 ");
     char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
@@ -5590,9 +5768,8 @@ static void test_ps_command_column_elides_safely(void)
 }
 
 /* The exec spinner tier: while exec_command's yield window is open the
- * status row animates the CHARSET tier's glyph — the same tier
- * run_command gets (P4's spinner item), and now the only readout of
- * it. */
+ * status row animates the STAR style — the same style run_command gets
+ * (P4's spinner item), and now the only readout of it. */
 static void test_exec_command_spinner_tier(void)
 {
     struct ServerScript sc;
@@ -5643,13 +5820,12 @@ static void test_exec_command_spinner_tier(void)
     ASSERT_TRUE(app_fd(h->app) >= 0);
 
     /* The yield window is open (a silent child): the spinner still
-     * animates, in the tool tier — a charset glyph in the activity
-     * role, and no label beside it. */
+     * animates, in the star style — a rotating glyph in the star set's
+     * yellow, and no label beside it. */
     nm_chat_app_tick(h->app);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    ASSERT_TRUE(strstr(frame, NM_SGR_SPINNER) != NULL);
-    char *glyph = span_bytes(nm_color_spinner(), "\xc2\xb7 ");
+    char *glyph = span_bytes(tui_color_ansi(11), "\xc2\xb7 ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
     free(glyph);
@@ -7311,6 +7487,9 @@ int main(void)
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
+    RUN_TEST(test_dot_pulses_on_a_truecolor_terminal);
+    RUN_TEST(test_dot_blinks_and_holds_its_column_on_16_colors);
+    RUN_TEST(test_spinner_glyphs_are_one_cell);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);

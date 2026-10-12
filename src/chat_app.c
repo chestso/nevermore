@@ -174,8 +174,8 @@ struct NmChatApp
     NmToolset *tools;
     NmAgent *agent;
     NmSpinner *spinner;
-    const char *spinner_frame; /* last ticked frame (static string) */
-    int tool_running;          /* a tool call is in flight (START seen) */
+    NmSpinnerFrame spinner_frame; /* the last ticked frame, by value */
+    int tool_running;             /* a tool call is in flight (START seen) */
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
@@ -705,13 +705,60 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
     tui_runtime_wakeup(app->rt);
 }
 
+/* Is the dot's size ramp on? (The `spinner_ramp` key, default on.) The
+ * knob picks the STYLE — the model has no ramp bit to keep honest. */
+static int spinner_ramp_on(const NmChatApp *app)
+{
+    return app->cfg ? nm_config_resolve_bool(app->cfg,
+                                             NM_CFG_KEY_SPINNER_RAMP, 1)
+                    : 1;
+}
+
+/* The terminal's color tier, from the probe's env-derived hint: 24-bit
+ * where the environment advertises it (COLORTERM, or a direct-color
+ * TERM), 16-color otherwise — which is where the dot blinks instead of
+ * pulsing. Read at the point of use, like the keyboard tier: the hint
+ * lands when the probe starts, so there is nothing to cache. */
+static NmColorDepth spinner_depth(const NmChatApp *app)
+{
+    if (!app->rt)
+        return NM_COLOR_16;
+    const TuiTerminalProfile *p = tui_runtime_terminal_profile(app->rt);
+    return (p && p->truecolor) ? NM_COLOR_RGB : NM_COLOR_16;
+}
+
+/* The agent's state, as the spinner sees it: streaming and tool-running
+ * animate, each with its own style, and everything else stops. WHICH
+ * style is the app's policy (the model animates what it is told to, and
+ * knows nothing of agent states); re-asserting the state an animation
+ * already runs is a no-op inside the model, so a repeated callback
+ * cannot freeze the phase. */
+static void spinner_follow_state(NmChatApp *app, NmAgentState state)
+{
+    switch (state) {
+    case NM_AGENT_STREAMING:
+        nm_spinner_set_style(app->spinner, spinner_ramp_on(app)
+                                               ? NM_SPINNER_PULSE_DOT
+                                               : NM_SPINNER_PULSE_DOT_FIXED);
+        nm_spinner_set_running(app->spinner, 1);
+        break;
+    case NM_AGENT_RUNNING_TOOL:
+        nm_spinner_set_style(app->spinner, NM_SPINNER_STARS);
+        nm_spinner_set_running(app->spinner, 1);
+        break;
+    default:
+        nm_spinner_set_running(app->spinner, 0);
+        break;
+    }
+}
+
 void nm_chat_app_on_state(NmAgentState state, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
     if (!app)
         return;
-    nm_spinner_set_state(app->spinner, state);
+    spinner_follow_state(app, state);
 
     /* A completed tool block already emitted its own blank line (the
      * END event in on_tool). A block whose END never arrives — a fatal
@@ -1284,7 +1331,7 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     app->popup_kind = POPUP_NONE;
 
     app->tools = nm_toolset_new_defaults();
-    app->spinner = nm_spinner_new();
+    app->spinner = nm_spinner_new(NM_SPINNER_PULSE_DOT);
     app->tool_body = dynamic_buffer_create(256);
     if (!app->tools || !app->spinner || !app->tool_body)
         goto oom;
@@ -1700,11 +1747,10 @@ void nm_chat_app_tick(NmChatApp *app)
     if (app->catalog_src)
         catalog_step(app);
 
-    const char *frame = nm_spinner_tick(app->spinner);
-    if (frame && frame != app->spinner_frame) {
-        app->spinner_frame = frame;
+    NmSpinnerFrame frame = nm_spinner_tick(app->spinner, spinner_depth(app));
+    app->spinner_frame = frame;
+    if (frame.glyph)
         tui_runtime_wakeup(app->rt);
-    }
 }
 
 int nm_chat_app_tick_ms(NmChatApp *app)
@@ -1718,11 +1764,14 @@ int nm_chat_app_tick_ms(NmChatApp *app)
          * The spinner is the turn's, so no cadence otherwise. */
         return app->catalog_src ? 100 : -1;
     }
-    /* Spinner cadence while busy (100 ms), shortened to the nearest
-     * agent deadline so a stalled stream / a due tool fires promptly.
-     * The step that results clears the deadline (tool done, new round,
-     * or the turn errors), so this cannot spin. */
-    int ms = 100;
+    /* The animation's own cadence (the dot's 50 ms pulse, the stars'
+     * 100 ms rotation), shortened to the nearest agent deadline so a
+     * stalled stream / a due tool fires promptly. The step that results
+     * clears the deadline (tool done, new round, or the turn errors),
+     * so this cannot spin. */
+    int ms = nm_spinner_tick_ms(app->spinner);
+    if (ms <= 0)
+        ms = 100; /* not animating: the plain busy cadence */
     int to = nm_agent_next_timeout_ms(app->agent);
     if (to >= 0 && to < ms)
         ms = to;
@@ -3022,7 +3071,7 @@ static void print_jobs(NmChatApp *app)
         /* The state carries the color (activity yellow while running,
          * muted Comment once exited); the id and command stay plain. */
         sys_line(app, "%2d  %s%-9s" NM_SGR_RESET " %s  (%s buffered)",
-                 nm_proc_id(p), code >= 0 ? NM_SGR_TOOL : NM_SGR_SPINNER,
+                 nm_proc_id(p), code >= 0 ? NM_SGR_TOOL : NM_SGR_ACTIVITY,
                  state, cmd, size);
     }
 }
@@ -3922,9 +3971,9 @@ static TuiSegment status_segment(const char *text, TuiSegmentAlign align,
  * set, so an unchanged row costs no copy and no relayout — what the
  * app's own status_last/strcmp pair used to buy.
  *
- * WHAT the turn is doing is the spinner's TIER, not a text label: the
- * braille tier animates while the model streams, the charset tier while
- * a tool runs (nm_spinner_set_state) — so the glyph alone says
+ * WHAT the turn is doing is the spinner's STYLE, not a text label: the
+ * pulsing dot animates while the model streams, the rotating stars
+ * while a tool runs (spinner_follow_state) — so the glyph alone says
  * "thinking" or "executing", with no word beside it to go stale
  * between states. */
 static void compose_status(NmChatApp *app)
@@ -3942,12 +3991,10 @@ static void compose_status(NmChatApp *app)
         return;
     }
 
-    NmAgentState st = nm_agent_state(app->agent);
-    int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
-    /* spinner_frame is a stale frame once the animation stops (a NULL
-     * tick does not overwrite it), so the busy check is what keeps an
-     * idle row glyphless. */
-    const char *glyph = busy ? app->spinner_frame : NULL;
+    /* A stopped animation hands back a NULL glyph (the tick stores it),
+     * so the row is glyphless exactly when nothing is running — no
+     * separate busy check that could disagree with the animation. */
+    const NmSpinnerFrame *frame = &app->spinner_frame;
 
     /* The gauge carries its own trailing space: the spacing between the
      * row's left segments is CONTENT here (the app owns the text), while
@@ -3966,10 +4013,19 @@ static void compose_status(NmChatApp *app)
     TuiSegment segs[4];
     size_t n = 0;
     char glyph_text[16];
-    if (glyph && *glyph) {
-        snprintf(glyph_text, sizeof(glyph_text), "%s ", glyph);
-        segs[n++] = status_segment(glyph_text, TUI_SEGMENT_LEFT, 0, 0, 0,
-                                   nm_color_spinner());
+    if (frame->glyph) {
+        /* The dark phase of a blink keeps the column: the segment is
+         * declared as spaces rather than dropped, or the gauge behind it
+         * would jitter one column twice a second. */
+        if (frame->lit)
+            snprintf(glyph_text, sizeof(glyph_text), "%s ", frame->glyph);
+        else
+            snprintf(glyph_text, sizeof(glyph_text), "  ");
+        NmColorDepth depth = spinner_depth(app);
+        TuiColor color = depth == NM_COLOR_RGB
+                             ? tui_color_rgb(frame->r, frame->g, frame->b)
+                             : tui_color_ansi(frame->ansi16);
+        segs[n++] = status_segment(glyph_text, TUI_SEGMENT_LEFT, 0, 0, 0, color);
     }
     segs[n++] =
         status_segment(gauge, TUI_SEGMENT_LEFT, 0, 0, 0, gauge_color(app));

@@ -229,6 +229,14 @@ extern "C" {
  * NEVERMORE_KBD. */
 #define NM_CFG_KEY_KBD "kbd"
 
+/* The spinner's size ramp (the "ping-pong"): `on` (the default) lets
+ * the thinking dot breathe through · • ● • while it works, `off` holds
+ * it at a single ● — the color pulse on a truecolor terminal and the
+ * blink on a 16-color one are unaffected either way, so this is a
+ * matter of taste, not of capability. Env spelling:
+ * NEVERMORE_SPINNER_RAMP. */
+#define NM_CFG_KEY_SPINNER_RAMP "spinner_ramp"
+
 typedef enum
 {
     NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */

@@ -72,11 +72,15 @@ jobs:
           # prompt is two cells wide, the inline-frame reflow-erase fix
           # so a terminal resize no longer strands the frame's top rows,
           # and the Windows stdin-reader teardown fix this repo's
-          # Windows loop inherits).
+          # Windows loop inherits — plus the terminal profile's
+          # env-derived truecolor hint
+          # (TuiTerminalProfile::truecolor, readable before the
+          # probe resolves: COLORTERM and the direct-color TERM
+          # variants), which the spinner's color tier reads).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: c7611fdfa4fb72f92145a91a74fa0ca1e0a865cc
+          ref: 6c8a20cbdedc2bb661784a275d443a18981741d3
           path: boba
           fetch-depth: 0
 

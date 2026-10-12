@@ -99,13 +99,13 @@
 /* Dracula Foreground - the tool result body, secondary text. */
 #define NM_SGR_RESULT "\033[38;2;248;248;242m"
 
-/* Dracula Yellow - the spinner animation glyph (the braille / charset
- * frame). Its own role on purpose: the animated glyph is the one live
- * "activity" pixel in the frame, so it takes the palette's brightest
- * accent while the trailing label stays muted Comment. The braille
- * "dots" preset is canonically yellow (cli-spinners), which the
- * portty spinner research records. */
-#define NM_SGR_SPINNER "\033[38;2;241;250;140m"
+/* Dracula Yellow - the ACTIVITY role: the /ps state of a RUNNING job
+ * (its exited state is muted Comment). Not the spinner: the spinner's
+ * glyph carries its own color in its frame (a green dot, or the star
+ * set's yellow), so the animation and the job table no longer share a
+ * role — they only ever shared one by accident of both meaning
+ * "working". */
+#define NM_SGR_ACTIVITY "\033[38;2;241;250;140m"
 
 /* Dracula Cyan - the `╰─` tool-result elbow: the structural accent that
  * ties a result body to its panel. Its own role on purpose: Comment
@@ -184,9 +184,10 @@ static inline TuiColor nm_color_popup_meta(void)
 /* The input row's gutter (P2): the status chrome left of the prompt —
  * the spinner glyph and the context gauge. The gauge takes its tier from
  * how full the window is: Comment at rest, Orange at ~85 %, Red at
- * ~95 %. The spinner glyph keeps the activity role the SGR spinner
- * alias uses (Yellow), so the live pixel reads the same painted through
- * boba's span path as through a byte writer. */
+ * ~95 %. The spinner glyph's color is NOT here: it rides its own frame
+ * (nm_spinner_tick), because the dot pulses and blinks and the stars
+ * rotate — one live pixel with a color that changes per tick has no
+ * business being a static role. */
 static inline TuiColor nm_color_gutter(void)
 {
     return tui_color_rgb(NM_DRACULA_COMMENT_R, NM_DRACULA_COMMENT_G,
@@ -203,12 +204,6 @@ static inline TuiColor nm_color_gutter_warn_hot(void)
 {
     return tui_color_rgb(NM_DRACULA_RED_R, NM_DRACULA_RED_G,
                          NM_DRACULA_RED_B);
-}
-
-static inline TuiColor nm_color_spinner(void)
-{
-    return tui_color_rgb(NM_DRACULA_YELLOW_R, NM_DRACULA_YELLOW_G,
-                         NM_DRACULA_YELLOW_B);
 }
 
 /* The status row's right-aligned identity block (`provider · model`):
