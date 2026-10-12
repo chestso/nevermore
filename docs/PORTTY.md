@@ -6,7 +6,6 @@ in any terminal (boba's runtime handles capability detection).
 | Feature                 | Carrier             | portty/coffer support                       | nevermore use                                                                  | Fallback                     |
 | ----------------------- | ------------------- | ------------------------------------------- | ------------------------------------------------------------------------------ | ---------------------------- |
 | Kitty keyboard protocol | escape sequences    | coffer kitty keys via boba                  | full-fidelity prompt editing, unambiguous ESC                                  | legacy sequences             |
-| Clipboard copy/paste    | OSC 52              | portty osc52 support                        | yank assistant output, paste long prompts                                      | terminal-native paste        |
 | Thinking spinner        | OSC 5555 (Lottie)   | coffer Lottie protocol; ConPTY-safe carrier | streaming/"thinking" indicator                                                 | charset frames, braille dots |
 | Image attach (vision)   | sixel               | coffer sixel                                | attach screenshots to vision models                                            | file path only               |
 | Hyperlinks/styling      | SGR via boba styles | coffer SGR pipeline                         | chat styling, tool-call blocks                                                 | plain SGR                    |
