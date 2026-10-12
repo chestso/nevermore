@@ -24,6 +24,7 @@
 
 #include "colors.h"
 #include "nm_image.h"
+#include "nm_image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 
@@ -349,11 +350,71 @@ static void test_measure_format_tier_matrix(void)
     ASSERT_FALSE(measure_src(&m, FIX_PNG_URI));
     ASSERT_STR_EQ(m.rs.img.reason, "no graphics support");
 
-    /* sixel-only: v1 ignores it (the pixel tier is deferred) */
+    /* sixel-only + PNG: the source is PNG but the stub header does not
+     * DECODE (the sixel lane needs pixels), so it degrades at the pixel
+     * prep — the same "undecodable source" rung a corrupt container
+     * gets. The header still sniffed, for the marker. */
     m_profile(&m, 0, 0, 10, 20);
     m.profile.sixel = 1;
     ASSERT_FALSE(measure_src(&m, FIX_PNG_URI));
-    ASSERT_STR_EQ(m.rs.img.reason, "no graphics support");
+    ASSERT_STR_EQ(m.rs.img.reason, "undecodable source");
+    ASSERT_EQ(m.rs.img.w, 64); /* the header still sniffed */
+    nm_markdown_render_state_free(&m.rs);
+}
+
+/* The sixel lane: a real container decodes, resamples to the
+ * cell-aligned pixel rect, and quantizes to INDEXED8 + a palette. */
+static void test_measure_sixel_scales_to_cell_rect(void)
+{
+    M m;
+    m_init(&m);
+    m_profile(&m, 0, 0, 10, 20);
+    m.profile.sixel = 1;
+
+    /* a REAL 16x16 JPEG: 2 cols at 10x20 cells → 20x18 px (the largest
+     * multiple of 6 that fits one 20px row) */
+    ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_SIXEL);
+    ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_JPEG); /* the SOURCE */
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_INDEXED8);
+    ASSERT_EQ(m.rs.img.disp_cols, 2);
+    ASSERT_EQ(m.rs.img.disp_rows, 1);
+    ASSERT_EQ(m.rs.img.pix_w, 20);
+    ASSERT_EQ(m.rs.img.pix_h, 18);
+    /* one index per pixel, and the palette is in the spec's range */
+    ASSERT_EQ(m.rs.img.enc_len, (size_t)20 * 18);
+    ASSERT_TRUE(m.rs.img.ncolors >= 1 &&
+                m.rs.img.ncolors <= NM_IMAGE_SIXEL_MAX_COLORS);
+    for (size_t i = 0; i < m.rs.img.enc_len; i++)
+        ASSERT_TRUE(m.rs.img.enc[i] == NM_IMAGE_TRANSPARENT_INDEX ||
+                    m.rs.img.enc[i] < m.rs.img.ncolors);
+    for (int i = 0; i < m.rs.img.ncolors * 3; i++)
+        ASSERT_TRUE(m.rs.img.palette[i] <= 100);
+    ASSERT_TRUE(m.rows >= 1);
+
+    /* a sixel image whose cell height is unknown cannot be aligned, so
+     * the tier degrades (the row count would be the terminal's guess) */
+    m_profile(&m, 0, 0, 10, 0);
+    m.profile.sixel = 1;
+    ASSERT_FALSE(measure_src(&m, FIX_JPEG_REAL_URI));
+    ASSERT_STR_EQ(m.rs.img.reason, "cell size unknown");
+
+    /* a cell under 6px breaks the band alignment the same way */
+    m_profile(&m, 0, 0, 10, 5);
+    m.profile.sixel = 1;
+    ASSERT_FALSE(measure_src(&m, FIX_JPEG_REAL_URI));
+    ASSERT_STR_EQ(m.rs.img.reason, "cell size unknown");
+
+    /* kitty + sixel: the native transport wins — a JPEG on kitty takes
+     * the PNG-transcode lane (D6), never the sixel lane */
+    m_profile(&m, 1, 0, 10, 20);
+    m.profile.sixel = 1;
+    ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
+    ASSERT_TRUE(m.rs.img.ncolors == 0);
+    ASSERT_TRUE(strncmp((const char *)m.rs.img.enc, PNG_MAGIC, 8) == 0);
+
     nm_markdown_render_state_free(&m.rs);
 }
 
@@ -377,8 +438,24 @@ static void test_supported_matches_the_tier_table(void)
     ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
     ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_UNKNOWN));
 
-    m_profile(&m, 0, 0, 10, 20); /* no graphics */
-    m.profile.sixel = 1;         /* v1 ignores the pixel tier */
+    m_profile(&m, 0, 0, 10, 20); /* no kitty, no iTerm2 */
+    m.profile.sixel = 1;         /* sixel takes every wire container */
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_UNKNOWN));
+
+    m_profile(&m, 0, 0, 10, 20); /* sixel but no usable cell size */
+    m.profile.sixel = 1;
+    m.profile.cell_h_px = 0;
+    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+
+    m_profile(&m, 0, 0, 10, 20); /* sixel loses to kitty */
+    m.profile.sixel = 1;
+    m.profile.kitty_graphics = 1;
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
+
+    m_profile(&m, 0, 0, 10, 20); /* no graphics at all */
     ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
 
     /* An unresolved verdict answers no: the UI then leaves the image to
@@ -665,6 +742,16 @@ static IH *ih_new_prof(int kitty, int iterm2)
 
 static IH *ih_new(int kitty) { return ih_new_prof(kitty, 0); }
 
+/* A sixel-only terminal: no kitty graphics, no iTerm2 images. */
+static IH *ih_new_sixel(void)
+{
+    IH *h = ih_new_prof(0, 0);
+    if (!h)
+        return NULL;
+    h->rt->profile.sixel = 1;
+    return h;
+}
+
 static void ih_free(IH *h)
 {
     if (h->rt)
@@ -738,6 +825,42 @@ static void test_integration_kitty_transcodes_jpeg(void)
     ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) == NULL);
     ASSERT_TRUE(strstr(out, "undecodable") == NULL);
     ASSERT_TRUE(strstr(out, "format not supported") == NULL);
+
+    ih_free(h);
+}
+
+/* sixel: the commit carries one DCS (boba framing the app's quantized
+ * payload) and exactly ONE row terminator. The VT340 spec lands the text
+ * cursor on the image's last row, so one break leaves the image;
+ * disp_rows terminators would leave a gap. */
+static void test_integration_sixel_commits_dcs(void)
+{
+    IH *h = ih_new_sixel();
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_JPEG_REAL_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    ih_flush(h);
+
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
+    const char *out = ih_read(h);
+    /* the DCS head: P1=0/P2=1/P3=0, square pixels, the cell-aligned
+     * rect (16x16 fit to 2 cols at 10x20 cells → 20x18 px) */
+    ASSERT_TRUE(strstr(out, "\x1bP0;1;0q\"1;1;20;18") != NULL);
+    /* a palette definition in the spec's 0-100 range */
+    ASSERT_TRUE(strstr(out, ";2;") != NULL);
+    /* the ST, then exactly one row terminator, then the next unit */
+    const char *st = strstr(out, "\x1b\\");
+    ASSERT_NOT_NULL(st);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n", 2) == 0);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n", 4) != 0);
+    const char *after = strstr(out, "after");
+    ASSERT_TRUE(after && after > st);
+    /* never the source payload, never a marker */
+    ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) == NULL);
+    ASSERT_TRUE(strstr(out, "undecodable") == NULL);
 
     ih_free(h);
 }
@@ -1284,6 +1407,7 @@ int main(void)
     RUN_TEST(test_image_ref_parses);
     RUN_TEST(test_measure_data_uri_png_kitty);
     RUN_TEST(test_measure_format_tier_matrix);
+    RUN_TEST(test_measure_sixel_scales_to_cell_rect);
     RUN_TEST(test_supported_matches_the_tier_table);
     RUN_TEST(test_measure_display_math);
     RUN_TEST(test_measure_remote_and_malformed);
@@ -1301,6 +1425,7 @@ int main(void)
     RUN_TEST(test_integration_kitty_commits_apc);
     RUN_TEST(test_integration_kitty_transcodes_jpeg);
     RUN_TEST(test_integration_iterm2_carries_jpeg_source);
+    RUN_TEST(test_integration_sixel_commits_dcs);
     RUN_TEST(test_integration_dumb_terminal_gets_marker);
     RUN_TEST(test_integration_remote_url_marker);
     RUN_TEST(test_integration_marker_size_is_the_source_size);

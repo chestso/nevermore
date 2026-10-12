@@ -34,6 +34,7 @@
 #include <boba/stream.h>
 
 #include "nm_image_bytes.h"
+#include "nm_image_codec.h"
 
 /* There is NO display-side size cap (revised D7, see the plan's D16):
  * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, nm_image_bytes.h) is the ONE
@@ -73,10 +74,22 @@ typedef struct NmImageSlot
      * reused across images (grown geometrically like `data`). enc ==
      * NULL means the source rides as-is; otherwise the spec takes
      * `enc`/`enc_len` and render_format (the wire bytes are never
-     * touched — the derived PNG is display-local). */
+     * touched — the derived payload is display-local).
+     *
+     * The sixel lane reuses the SAME buffer for its own derived
+     * payload: one palette index per pixel (pix_w * pix_h bytes), with
+     * the palette below. */
     unsigned char *enc;
     size_t enc_cap, enc_len;
     int render_format; /* the format handed to boba (an NmImageFormat) */
+
+    /* The sixel lane's payload geometry + palette. pix_w/pix_h are the
+     * DERIVED payload's pixel dims (the cell-aligned rect the terminal
+     * will occupy), which differ from the source's w/h; the spec's
+     * src_w/src_h take them. ncolors is 0 for every other lane. */
+    int pix_w, pix_h;
+    int ncolors;
+    unsigned char palette[NM_IMAGE_SIXEL_MAX_COLORS * 3];
 } NmImageSlot;
 
 /* Drop the held unit but KEEP the buffer (it is the reuse); used by

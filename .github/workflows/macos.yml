@@ -57,7 +57,11 @@ jobs:
           # model picker's capability badges + context window — and the
           # earlier APIs this repo already depends on: the image tier's
           # kitty transport (a=T with s/v, without which an IMAGE unit
-          # reserves its rows and places nothing), the explicit image
+          # reserves its rows and places nothing) and its sixel
+          # transport (TUI_IMAGE_SIXEL + TUI_IMAGE_INDEXED8, the spec's
+          # DCS framed from the app's quantized payload, which reserves
+          # ONE row — the terminal lands the cursor on the image's last
+          # row), the explicit image
           # unit message
           # (tui_msg_stream_image), the display-column metrics fix that
           # lands the cursor on the right cell when a prompt is two
@@ -72,7 +76,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 6c8a20cbdedc2bb661784a275d443a18981741d3
+          ref: 25ddead1b10b1c39af746cca88cc5a85223ac53f
           path: boba
           fetch-depth: 0
 
