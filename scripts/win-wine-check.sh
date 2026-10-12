@@ -71,6 +71,40 @@ run_build() {
 	head -5 "$buildlog"
 }
 
+# The Windows resource script (the .exe's icon + version metadata) is
+# compiled only by MSYS2 CI, so compile it here too: a broken include
+# path or macro name in src/nevermore.rc is otherwise invisible until
+# CI. Its version fields come from the build-generated
+# nevermore_version.h, so the resource must carry THIS tree's version —
+# a hand-kept number in the .rc is exactly what the grep catches.
+WR=x86_64-w64-mingw32-windres
+[ -f build/src/nevermore_version.h ] ||
+	make -C build/src nevermore_version.h >/dev/null 2>&1 || true
+rm -f "$OUT/nevermore-res.o"
+if ! $WR --define _UNICODE --define UNICODE \
+	-Ibuild/src -I. -Isrc src/nevermore.rc -O coff \
+	-o "$OUT/nevermore-res.o" >"$OUT/nevermore-res.build.log" 2>&1; then
+	echo "BUILD FAIL: nevermore-res.o (src/nevermore.rc)"
+	cat "$OUT/nevermore-res.build.log"
+	exit 1
+fi
+version=$(sed -n 's/^#define NEVERMORE_VERSION "\(.*\)"$/\1/p' \
+	build/src/nevermore_version.h)
+if command -v strings >/dev/null 2>&1 && [ -n "$version" ]; then
+	# Into a file, not a pipe: grep -q exits on the first match, and the
+	# early close would SIGPIPE strings (the same trap as a compiler
+	# piped into head) — plus the dump is evidence to read.
+	strings -el "$OUT/nevermore-res.o" >"$OUT/nevermore-res.strings"
+	if grep -qF "$version" "$OUT/nevermore-res.strings"; then
+		echo "PASS: nevermore-res.o (version $version)"
+	else
+		echo "FAIL: nevermore-res.o does not carry version $version"
+		exit 1
+	fi
+else
+	echo "SKIP: nevermore-res.o version grep (no strings, or no header)"
+fi
+
 run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
 run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
@@ -164,6 +198,10 @@ run_build test_agent src/nm_clock.c tests/test_agent.c src/agent.c src/session.c
 	-lws2_32 -lpthread
 
 run_build test_spinner tests/test_spinner.c src/spinner.c
+
+# The generated version header's fields (what the .rc above embeds):
+# pure C, no boba. -Ibuild/src is the header's build dir.
+run_build test_version tests/test_version.c -Ibuild/src
 
 run_build test_highlight tests/test_highlight.c src/nm_highlight.c
 

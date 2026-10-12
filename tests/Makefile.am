@@ -8,6 +8,7 @@ check_PROGRAMS = \
     test_authinfo \
     test_config \
     test_args \
+    test_version \
     test_provider \
     test_source \
     test_wire \
@@ -125,6 +126,19 @@ test_config_CFLAGS = $(TEST_CFLAGS)
 # (main.c owns the printing and the exit status).
 test_args_SOURCES = test_args.c ../src/nm_args.c
 test_args_CFLAGS = $(TEST_CFLAGS)
+
+# The generated version header (nevermore_version.h): the version string
+# and the numeric quad src/nevermore.rc embeds as the .exe's
+# FILEVERSION/PRODUCTVERSION must agree. The header is generated in the
+# src subdir's build dir, so this binary needs that dir on its include
+# path and a rule to build the header when it is invoked on its own
+# (SUBDIRS order covers `make check`; ditty carries the same rule).
+test_version_SOURCES = test_version.c
+test_version_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src
+
+test_version.$(OBJEXT): $(top_builddir)/src/nevermore_version.h
+$(top_builddir)/src/nevermore_version.h:
+	$(MAKE) -C $(top_builddir)/src nevermore_version.h
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
