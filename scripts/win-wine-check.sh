@@ -32,7 +32,9 @@ mkdir -p "$OUT"
 PTHREAD_DLL=/usr/x86_64-w64-mingw32/sys-root/mingw/bin/libwinpthread-1.dll
 [ -f "$PTHREAD_DLL" ] && cp "$PTHREAD_DLL" "$OUT/" 2>/dev/null
 
-COMMON="-Wall -Wextra -Isrc -Itests -Ibuild -I."
+COMMON="-Wall -Wextra -Isrc -Itests -Ibuild -I. -Ithird_party/stb"
+# (the last is for nm_image_codec.c, the ONE TU that includes the
+# vendored stb headers — the same mirror the macOS script needed)
 TLS_SRC=src/tls_openssl.c # cross-compiled MinGW + OpenSSL; wine
 # runs the schannel path via winemapped
 # dlls only for the real backend tests
@@ -165,6 +167,10 @@ run_build test_spinner tests/test_spinner.c src/spinner.c
 
 run_build test_highlight tests/test_highlight.c src/nm_highlight.c
 
+# The pixel half is pure C (no boba), so it cross-checks under wine.
+run_build test_image_codec tests/test_image_codec.c src/nm_image_codec.c \
+	src/nm_image_bytes.c src/nm_size.c
+
 # test_history needs boba's textinput. No MinGW-built boba exists on
 # this box (boba has no Windows CI of its own; nevermore's MSYS2
 # workflow builds it natively at CI time). Wine can't link the Linux
@@ -174,6 +180,7 @@ run_build test_highlight tests/test_highlight.c src/nm_highlight.c
 echo "SKIP: test_history.exe (needs MinGW boba; MSYS2 CI covers it)"
 echo "SKIP: test_markdown.exe (needs MinGW boba; MSYS2 CI covers it)"
 echo "SKIP: test_chat_app.exe (needs MinGW boba; MSYS2 CI covers it)"
+echo "SKIP: test_image.exe (needs MinGW boba; MSYS2 CI covers it)"
 
 echo "=== running under wine ==="
 fail=0
