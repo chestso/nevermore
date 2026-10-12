@@ -2,7 +2,7 @@
  *
  * Pure model, no terminal I/O: frames per agent state, cycle
  * behavior, stop semantics. The chat_app wires ticks to boba's
- * on_tick later; the Lottie/OSC-5555 tier is phase 6.
+ * on_tick.
  */
 
 #include <stddef.h>

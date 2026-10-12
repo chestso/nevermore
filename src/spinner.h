@@ -1,11 +1,8 @@
 /* spinner.h - thinking indicator (portty-first)
  *
- * Tiers, best to worst, detected via boba/coffer terminal caps:
- *   1. Lottie animation via OSC 5555 (coffer Lottie protocol; on
- *      Windows ConPTY the carrier is OSC 5555 rather than APC)
- *      — phase 6
- *   2. Charset frames (portty/docs/claude-code-spinner.md)
- *   3. Braille dots
+ * Frame sets, both plain text: charset frames
+ * (portty/docs/claude-code-spinner.md) while a tool runs, braille
+ * dots while the model streams.
  *
  * This module is the pure model: which frame for this tick, given
  * the agent state. It does no terminal I/O and knows nothing about

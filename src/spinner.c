@@ -1,14 +1,10 @@
-/* spinner.c - thinking indicator model (portty-first tiers)
+/* spinner.c - thinking indicator model (portty-first)
  *
  * Braille dots while the model streams; charset frames (the Claude
  * Code set, portty/docs/claude-code-spinner.md — non-Ghostty array)
  * while a tool runs; stopped otherwise. Pure model: no I/O, no
  * event loop, no per-tick allocation (all frames are static
  * strings — memory-reuse principle by construction).
- *
- * The Lottie/OSC-5555 tier (phase 6) slots in at the top of the
- * same state mapping: detection then selects the tier; the model
- * here is the guaranteed bottom rung.
  */
 
 #include <stddef.h>
