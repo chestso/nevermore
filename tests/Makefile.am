@@ -35,6 +35,7 @@ AM_CPPFLAGS = \
     -I$(top_srcdir)/src \
     -I$(top_srcdir)/third_party/stb \
     -I$(top_builddir) \
+    -I$(top_builddir)/src \
     $(BOBA_CFLAGS)
 
 # Per-test runtime cap (house rule: a hang is a bug, not a condition
@@ -130,11 +131,13 @@ test_args_CFLAGS = $(TEST_CFLAGS)
 # The generated version header (nevermore_version.h): the version string
 # and the numeric quad src/nevermore.rc embeds as the .exe's
 # FILEVERSION/PRODUCTVERSION must agree. The header is generated in the
-# src subdir's build dir, so this binary needs that dir on its include
-# path and a rule to build the header when it is invoked on its own
-# (SUBDIRS order covers `make check`; ditty carries the same rule).
+# src subdir's build dir (on the include path above), and this rule
+# builds it when it is missing — which is the macOS CI's case, where the
+# tests subdir is the ONLY thing built (`make -C tests check-programs`,
+# so no `make all` ever reached src). The object keeps its default name
+# on purpose: per-target CFLAGS would rename it and the prerequisite
+# below would miss.
 test_version_SOURCES = test_version.c
-test_version_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src
 
 test_version.$(OBJEXT): $(top_builddir)/src/nevermore_version.h
 $(top_builddir)/src/nevermore_version.h:
@@ -206,7 +209,7 @@ test_openai_client_SOURCES = test_openai_client.c ../src/nm_clock.c \
     ../src/provider_openai.c ../src/provider_openrouter.c \
     ../src/provider_opencode.c ../src/provider_opencode_zen.c \
     ../src/provider_test.c
-test_openai_client_CFLAGS = $(TEST_CFLAGS) -I$(top_builddir)/src $(TEST_TLS_CFLAGS_EXTRA)
+test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
 
