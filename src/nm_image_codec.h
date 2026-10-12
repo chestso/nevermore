@@ -77,6 +77,41 @@ size_t nm_png_encode_bound(int w, int h);
 long nm_png_encode(const unsigned char *rgba, int w, int h,
                    unsigned char *dst, size_t cap);
 
+/* ---------------------------------------------------------------- */
+/* The pixel tier: resample + quantize (the sixel transport's prep)   */
+/* ---------------------------------------------------------------- */
+
+/* The sixel payload is one palette INDEX per pixel, so a fully
+ * transparent source pixel needs an index no palette entry uses. 255 is
+ * that marker, which caps the palette at 255 entries (one below the
+ * terminal's 256 registers). The sixel encoder renders an index outside
+ * [0, ncolors) as no pixel at all (transparent). */
+#define NM_IMAGE_SIXEL_MAX_COLORS  255
+#define NM_IMAGE_TRANSPARENT_INDEX 255
+
+/* Resample a tightly packed RGBA image from sw×sh into dw×dh (dst is
+ * dw*dh*4 bytes, caller-owned). Area-average when shrinking, bilinear
+ * when growing; a same-size copy is a memcpy. Integer math only (the
+ * link stays free of -lm). No-op on a non-positive dimension. */
+void nm_image_scale_rgba(const unsigned char *src, int sw, int sh,
+                         unsigned char *dst, int dw, int dh);
+
+/* Median-cut quantize a tightly packed RGBA image to at most
+ * `max_colors` entries (clamped to NM_IMAGE_SIXEL_MAX_COLORS), writing
+ * one index per pixel into `indices` (w*h bytes) and the palette's RGB
+ * triples into `palette` (max_colors*3 bytes), each channel scaled to
+ * 0-100 — the VT340 spec's color range, which is what the sixel
+ * transport transmits. Floyd-Steinberg dithers the error, so gradients
+ * do not band. A source pixel with alpha < 128 is written as
+ * NM_IMAGE_TRANSPARENT_INDEX and excluded from the histogram (a
+ * transparent region stays transparent on the terminal).
+ *
+ * Returns the number of palette entries used (>= 1), or 0 when nothing
+ * could be allocated — the caller then degrades to the marker. */
+int nm_image_quantize(const unsigned char *rgba, int w, int h,
+                      unsigned char *indices, unsigned char *palette,
+                      int max_colors);
+
 #ifdef __cplusplus
 }
 #endif

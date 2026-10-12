@@ -295,6 +295,174 @@ static void test_decode_screen_refuses_bombs(void)
               NM_CODEC_ERR_DECODE);
 }
 
+/* ---------------------------------------------------------------- */
+/* The pixel tier: resample + quantize (the sixel payload's prep)     */
+/* ---------------------------------------------------------------- */
+
+static void test_codec_scale_same_size_copies(void)
+{
+    unsigned char src[2 * 2 * 4], dst[2 * 2 * 4];
+    for (int i = 0; i < 16; i++)
+        src[i] = (unsigned char)(i * 7);
+    memset(dst, 0, sizeof(dst));
+    nm_image_scale_rgba(src, 2, 2, dst, 2, 2);
+    ASSERT_EQ(memcmp(src, dst, sizeof(src)), 0);
+}
+
+/* Box filter: a 4x4 of two colors shrinks to 2x2, each destination
+ * pixel the average of its 2x2 block. */
+static void test_codec_scale_box_averages(void)
+{
+    /* 4x4: left half red (200,0,0), right half blue (0,0,200) */
+    unsigned char src[4 * 4 * 4];
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++) {
+            unsigned char *p = src + (y * 4 + x) * 4;
+            p[0] = x < 2 ? 200 : 0;
+            p[1] = 0;
+            p[2] = x < 2 ? 0 : 200;
+            p[3] = 255;
+        }
+    unsigned char dst[2 * 2 * 4];
+    nm_image_scale_rgba(src, 4, 4, dst, 2, 2);
+    /* columns 0 and 1 average to red; 2 and 3 to blue */
+    ASSERT_EQ(dst[0], 200); /* (0,0) R */
+    ASSERT_EQ(dst[2], 0);   /* (0,0) B */
+    ASSERT_EQ(dst[4], 0);   /* (0,1) R */
+    ASSERT_EQ(dst[6], 200); /* (0,1) B */
+    ASSERT_EQ(dst[3], 255); /* alpha carried */
+}
+
+/* Bilinear upscale: the corners sample the source corners (center
+ * alignment), and the alpha channel is resampled too. */
+static void test_codec_scale_up_corners(void)
+{
+    unsigned char src[2 * 2 * 4] = {
+        10,
+        20,
+        30,
+        255,
+        40,
+        50,
+        60,
+        255, /* row 0 */
+        70,
+        80,
+        90,
+        255,
+        100,
+        110,
+        120,
+        255, /* row 1 */
+    };
+    unsigned char dst[4 * 4 * 4];
+    memset(dst, 0, sizeof(dst));
+    nm_image_scale_rgba(src, 2, 2, dst, 4, 4);
+    /* top-left of the destination is the source's top-left */
+    ASSERT_EQ(dst[0], 10);
+    ASSERT_EQ(dst[1], 20);
+    ASSERT_EQ(dst[2], 30);
+    ASSERT_EQ(dst[3], 255);
+    /* bottom-right is the source's bottom-right */
+    unsigned char *br = dst + (3 * 4 + 3) * 4;
+    ASSERT_EQ(br[0], 100);
+    ASSERT_EQ(br[1], 110);
+    ASSERT_EQ(br[2], 120);
+}
+
+/* Median cut separates two distinct colors into two entries, the
+ * palette in the spec's 0-100 range. */
+static void test_codec_quantize_two_colors(void)
+{
+    unsigned char rgba[2 * 2 * 4] = {
+        255,
+        0,
+        0,
+        255,
+        0,
+        0,
+        255,
+        255, /* red, blue */
+        255,
+        0,
+        0,
+        255,
+        0,
+        0,
+        255,
+        255,
+    };
+    unsigned char idx[4];
+    unsigned char pal[255 * 3];
+    memset(idx, 0xff, sizeof(idx));
+    int n = nm_image_quantize(rgba, 2, 2, idx, pal, NM_IMAGE_SIXEL_MAX_COLORS);
+    ASSERT_EQ(n, 2);
+    /* the two reds share an entry, the two blues another */
+    ASSERT_EQ(idx[0], idx[2]);
+    ASSERT_EQ(idx[1], idx[3]);
+    ASSERT_TRUE(idx[0] != idx[1]);
+    ASSERT_TRUE(idx[0] < n && idx[1] < n);
+    /* palette entries are the colors, in the spec's 0-100 range */
+    unsigned char *red = pal + idx[0] * 3;
+    unsigned char *blue = pal + idx[1] * 3;
+    ASSERT_EQ(red[0], 100);
+    ASSERT_EQ(red[1], 0);
+    ASSERT_EQ(red[2], 0);
+    ASSERT_EQ(blue[0], 0);
+    ASSERT_EQ(blue[2], 100);
+}
+
+/* A transparent source pixel is excluded from the histogram and lands
+ * on the reserved transparent index. */
+static void test_codec_quantize_transparent(void)
+{
+    unsigned char rgba[2 * 1 * 4] = {
+        10,
+        200,
+        10,
+        255, /* opaque green */
+        255,
+        255,
+        255,
+        0, /* fully transparent */
+    };
+    unsigned char idx[2];
+    unsigned char pal[255 * 3];
+    int n = nm_image_quantize(rgba, 2, 1, idx, pal, NM_IMAGE_SIXEL_MAX_COLORS);
+    ASSERT_EQ(n, 1); /* only the opaque pixel shapes the palette */
+    ASSERT_EQ(idx[0], 0);
+    ASSERT_EQ(idx[1], NM_IMAGE_TRANSPARENT_INDEX);
+    ASSERT_TRUE(NM_IMAGE_TRANSPARENT_INDEX >= n); /* out of palette range */
+}
+
+/* A gradient quantizes to at most max_colors entries, every palette
+ * channel in 0-100, every index in range. */
+static void test_codec_quantize_gradient_bounded(void)
+{
+    enum
+    {
+        W = 64,
+        H = 16
+    };
+    unsigned char rgba[W * H * 4];
+    for (int y = 0; y < H; y++)
+        for (int x = 0; x < W; x++) {
+            unsigned char *p = rgba + (y * W + x) * 4;
+            p[0] = (unsigned char)(x * 255 / (W - 1));
+            p[1] = (unsigned char)(y * 255 / (H - 1));
+            p[2] = 128;
+            p[3] = 255;
+        }
+    unsigned char idx[W * H];
+    unsigned char pal[255 * 3];
+    int n = nm_image_quantize(rgba, W, H, idx, pal, 16);
+    ASSERT_TRUE(n >= 1 && n <= 16);
+    for (int i = 0; i < W * H; i++)
+        ASSERT_TRUE(idx[i] < n);
+    for (int i = 0; i < n * 3; i++)
+        ASSERT_TRUE(pal[i] <= 100);
+}
+
 int main(void)
 {
     RUN_TEST(test_png_roundtrip_is_lossless);
@@ -304,5 +472,11 @@ int main(void)
     RUN_TEST(test_jpeg_progressive);
     RUN_TEST(test_decode_rejects_junk);
     RUN_TEST(test_decode_screen_refuses_bombs);
+    RUN_TEST(test_codec_scale_same_size_copies);
+    RUN_TEST(test_codec_scale_box_averages);
+    RUN_TEST(test_codec_scale_up_corners);
+    RUN_TEST(test_codec_quantize_two_colors);
+    RUN_TEST(test_codec_quantize_transparent);
+    RUN_TEST(test_codec_quantize_gradient_bounded);
     TEST_SUMMARY();
 }

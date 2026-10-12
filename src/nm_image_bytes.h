@@ -27,7 +27,13 @@ typedef enum
     NM_IMAGE_FMT_UNKNOWN = -1,
     NM_IMAGE_FMT_PNG = 0,
     NM_IMAGE_FMT_JPEG,
-    NM_IMAGE_FMT_GIF
+    NM_IMAGE_FMT_GIF,
+    /* A DISPLAY-ONLY payload: one palette index per pixel (the sixel
+     * tier's quantizer output). It is not a container the wire takes,
+     * so nm_image_format_from_kind never returns it, it has no MIME
+     * type, and it names nothing a user attaches — it exists so the
+     * slot's render_format can carry what the display path derived. */
+    NM_IMAGE_FMT_INDEXED8
 } NmImageFormat;
 
 /* What container the bytes ARE — a WIDER question than what the WIRE
