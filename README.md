@@ -95,9 +95,10 @@ the `⚡` marker is simply absent until a read count exists. The row's
 right end names the endpoint it is talking to — `provider · model` —
 elided from the tail when the terminal is narrow, and dropped when there
 is no room for it at all; what the turn is DOING is the spinner glyph at
-the row's left (the braille tier animates while the model streams, the
-charset tier while a tool runs), so there is no word beside it to go
-stale between states. `/context` prints the exact breakdown — the last
+the row's left — the green dot pulses while the model streams (blinking
+on a terminal without 24-bit color), the star set rotates while a tool
+runs — so there is no word beside it to go stale between states.
+`/context` prints the exact breakdown — the last
 round's numbers plus the session totals, the cache read (and its rate),
 and the cache write count.
 
@@ -172,6 +173,7 @@ run_command_timeout = 300000
 login_shell      = off
 reminders        = on
 kbd              = auto
+spinner_ramp     = on
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -299,6 +301,15 @@ a plain Enter.
 `/config` shows the value _and_ what the terminal answered
 (`terminal: kitty protocol` / `terminal: legacy encodings`), since the
 store alone cannot say whether the protocol is in use.
+
+`spinner_ramp` (a bool, default `on`) is the thinking dot's size ramp:
+while the model streams, the glyph breathes through `· • ● •`, and
+turning it `off` holds a single `●`. It changes nothing about the
+color: on a 24-bit terminal the dot pulses between a deep green and
+Dracula's green, and on a terminal without truecolor (no `COLORTERM`,
+no direct-color `TERM`) it blinks instead — the same animation, told in
+the color the terminal can actually show. The star set that rotates
+while a tool runs is unaffected either way.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation

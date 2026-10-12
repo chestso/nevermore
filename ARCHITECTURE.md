@@ -578,7 +578,8 @@ save [path]` writes session.c's markdown). Const on purpose: the
   It used to be a field of the text input (`TuiSpan` +
   `tui_textinput_set_status_line`, both deleted): chrome a text widget
   could not measure, sitting inside the input's height and cursor
-  arithmetic. Four segments, in order: the spinner glyph (LEFT, FIXED)
+  arithmetic. Four segments, in order: the spinner glyph (LEFT, FIXED;
+  its color rides the frame the spinner hands over, not a static role)
   and the gauge (LEFT, FIXED) — the row's chrome, never cut — then a
   `─` FILL (priority 1, min_cols 1) and the right-aligned identity
   (priority 2, min_cols 1, pad_left 1). So the ladder is a DECLARATION,
@@ -596,6 +597,28 @@ save [path]` writes session.c's markdown). Const on purpose: the
   to the cursor row the view declares (boba's `cursor_pos` returns the
   INPUT's rows now), and `app->submitting` means "declare no row" —
   the submit frame finalizes no chrome into the scrollback.
+- **The thinking indicator** (`src/spinner.{h,c}`) — a spinner OBJECT:
+  it owns the phase of ONE animation and nothing else, while the
+  animation itself is a const style descriptor (cadence, frame set,
+  colors). So two spinners share no mutable state, and a style switch
+  resets the phase: the frame index cannot outlive the set it indexes,
+  which is exactly the cross-tier index that read past the end in the
+  2026-09-18 "eaten description". Two animations, both plain text: the
+  DOT (`· • ● •` — a ping-pong, because a size ramp that wrapped would
+  jump; the `spinner_ramp` key, default `on`, turns the ramp off and
+  holds a single `●`) while the model streams, and the rotating STARS
+  (`· ✢ * ✶ ✻ ✽`, the Claude Code set) while a tool runs. The dot has
+  two channels beyond its glyph: on a **truecolor** terminal its green
+  PULSES (a 16-point cosine between a deep green and Dracula's
+  `#50FA7B`, sampled — the link carries no libm), on a **16-color** one
+  it BLINKS instead, and the dark phase declares its columns as spaces
+  so the row behind it never moves. The tier is the terminal profile's
+  env-derived `truecolor` hint (`COLORTERM`, or a direct-color `TERM`),
+  read at the point of use and passed INTO the tick: the model knows
+  nothing of boba, and the app owns the policy (which agent state shows
+  which style). The frame comes back BY VALUE — no static frame string,
+  so no consumer can lean on pointer identity over a frame whose color
+  changes while its glyph does not.
 - **Images** — two halves, one sniffer. `src/nm_image_bytes.{h,c}` is
   the BYTE half (pure C, no boba): the container sniffer (headers only
   — a pixel decode is the OTHER half's job), base64 both ways, the
