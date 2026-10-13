@@ -576,7 +576,7 @@ static void ws_finalize(NmToolExec *e)
     nm_json_free(doc);
     e->result = nm_tool_format_result(out.p, 0);
     /* Rendered results are EXTERNAL content: the model must weigh them
-     * as data, never act on instructions inside them (nm_reminder.h's
+     * as data, never act on instructions inside them (reminder.h's
      * `web-untrusted`). A response with nothing to render (no hits, no
      * infoboxes, no suggestions) put no external text in context, so it
      * carries no such fact. */

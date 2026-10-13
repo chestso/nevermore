@@ -60,7 +60,7 @@ typedef enum
 
 /* read_file's finding about the path it was asked for
  * (NmToolResult.read_state) — the facts the reminder framework turns
- * into `empty-file` / `offset-past-eof` (nm_reminder.h). Distinct from
+ * into `empty-file` / `offset-past-eof` (reminder.h). Distinct from
  * `truncated`: an empty file is COMPLETE (nothing was withheld), and a
  * past-EOF offset returned nothing at all. The zero value is "nothing
  * to say", so a tool that never fills it needs no code. */
@@ -89,7 +89,7 @@ typedef struct NmToolResult
     size_t image_len;
     char image_alt[64]; /* the image's base name (marker/alt text) */
     /* How much of this result the MODEL did not get — the actionable
-     * fact the reminder framework reads (nm_reminder.h), distinct from
+     * fact the reminder framework reads (reminder.h), distinct from
      * the `... omitted ...` marker in the body (which says WHERE the gap
      * is). 0 = complete, 1 = the output was clamped by the tool-output
      * cap, 2 = the tool returned only part of its SOURCE (read_file's
@@ -100,7 +100,7 @@ typedef struct NmToolResult
     /* This output came from OUTSIDE the machine (web_search's fetched
      * results), so it is untrusted DATA, never harness or user speech:
      * the reminder framework tells the model not to act on instructions
-     * found in it (nm_reminder.h's `web-untrusted`). 0 = the tool's own
+     * found in it (reminder.h's `web-untrusted`). 0 = the tool's own
      * output — a file on this machine, a command's stdout — which is
      * the zero value, so every other tool needs no code. */
     int untrusted;

@@ -172,7 +172,7 @@ static void test_root_agents_md_is_embedded(void)
     nm_context_free(c);
 }
 
-/* The reminder clause (nm_reminder.h) is UNCONDITIONAL: it declares how
+/* The reminder clause (reminder.h) is UNCONDITIONAL: it declares how
  * to read a `<system-reminder>` tag and what an escaped one means, and
  * the escape runs whether or not the harness injects nudges — so the
  * clause must be there even for a model whose catalog claims nothing. */

@@ -547,7 +547,7 @@ static void test_read_file_line_numbers_and_window(void)
 
 /* The truncation FACT (NmToolResult.truncated), separate from the
  * marker text in the body: the reminder framework acts on it
- * (nm_reminder.h), so it must say WHICH kind of gap this is — a clamped
+ * (reminder.h), so it must say WHICH kind of gap this is — a clamped
  * output (1) or a partial view of the source (2) — and 0 when the
  * result is complete. */
 static void test_truncated_fact_is_reported(void)
@@ -1318,7 +1318,7 @@ static void test_read_file_resume_marker_counts_omitted_lines(void)
     ASSERT_TRUE(strstr(r.output, "offset 6 is past the last line (5)") !=
                 NULL);
     /* The finding behind the message: the file is SHORTER than the
-     * offset (nm_reminder.h's offset-past-eof), and it is not a
+     * offset (reminder.h's offset-past-eof), and it is not a
      * truncation — nothing of the file was withheld. */
     ASSERT_EQ(r.read_state, NM_READ_STATE_PAST_EOF);
     ASSERT_EQ(r.truncated, 0);

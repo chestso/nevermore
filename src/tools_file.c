@@ -1126,7 +1126,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(path);
         nm_json_free(args);
         /* The fact behind the message: the file is SHORTER than the
-         * offset, not missing and not unreadable (nm_reminder.h's
+         * offset, not missing and not unreadable (reminder.h's
          * offset-past-eof). */
         return (NmToolResult){ .status = NM_TOOL_ERR,
                                .output = msg,
@@ -1254,14 +1254,14 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     NmToolResult r = nm_tool_format_result((full && full[0]) ? full : NULL, 0);
     /* A windowed read is a PARTIAL VIEW (2), not a clamped render (1):
      * the rest of the file exists on disk and is not in context, which
-     * is the fact the model has to act on (nm_reminder.h's read-partial
+     * is the fact the model has to act on (reminder.h's read-partial
      * rule). The window is the stronger statement, so it wins. */
     if (marker_len)
         r.truncated = 2;
     /* An empty file is COMPLETE — nothing was withheld — but it is
      * worth saying: the model asked for content and got none, and the
      * body's "(empty)" reads like a failed or wrong-path read
-     * (nm_reminder.h's empty-file). A DIRECTORY never reaches here: the
+     * (reminder.h's empty-file). A DIRECTORY never reaches here: the
      * read fails now instead of reporting zero bytes. */
     if (len == 0)
         r.read_state = NM_READ_STATE_EMPTY;

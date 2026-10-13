@@ -235,7 +235,7 @@ typedef void (*NmAgentNoticeFn)(const char *msg, void *userdata);
 void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
 
 /* A reminder the harness injected into the conversation (see
- * nm_reminder.h). Fired for EVERY reminder, in table order, whether it
+ * reminder.h). Fired for EVERY reminder, in table order, whether it
  * was nested in a tool result (NM_REMINDER_CHANNEL_TOOL — the panel
  * already shows it, since the result's bytes are the reminder's bytes)
  * or carried by its own synthetic user message

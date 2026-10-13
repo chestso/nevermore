@@ -54,7 +54,7 @@
 
 #include "chat_app.h"
 #include "conf.h"
-#include "nm_reminder.h"
+#include "reminder.h"
 #include "colors.h"
 #include "markdown.h"
 #include "markdown_render.h"
@@ -1585,7 +1585,7 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-/* A reminder the harness injected (nm_reminder.h). TRANSPARENCY: the
+/* A reminder the harness injected (reminder.h). TRANSPARENCY: the
  * human sees the harness's own speech — the rule's name and the exact
  * text the model received. The TOOL channel is already on screen (it
  * rides the result's body, styled by sys_tool_result), so only the

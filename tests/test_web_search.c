@@ -306,7 +306,7 @@ static void test_web_search_happy_path(void)
     ASSERT_NOT_NULL(strstr(r.output, "Info: Example"));
     ASSERT_NOT_NULL(strstr(r.output, "Suggestions: hello, world"));
     /* Rendered results are EXTERNAL content: the fact the reminder
-     * framework turns into the web-untrusted boundary (nm_reminder.h). */
+     * framework turns into the web-untrusted boundary (reminder.h). */
     ASSERT_EQ(r.untrusted, 1);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);

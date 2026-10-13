@@ -15,7 +15,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_reminder.h"
+#include "reminder.h"
 #include "test_helpers.h"
 
 /* How many times `needle` occurs in `hay` (non-overlapping). */

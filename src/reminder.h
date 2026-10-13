@@ -1,4 +1,4 @@
-/* nm_reminder.h - harness reminders: the tag vocabulary, the framing,
+/* reminder.h - harness reminders: the tag vocabulary, the framing,
  * the trust boundary, and the rule table.
  *
  * A "reminder" is a short, harness-authored note injected into the

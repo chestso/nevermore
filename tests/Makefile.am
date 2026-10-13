@@ -232,7 +232,7 @@ test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,
 # links context.c only — no network, no boba).
-test_context_SOURCES = test_context.c ../src/context.c ../src/nm_reminder.c
+test_context_SOURCES = test_context.c ../src/context.c ../src/reminder.c
 test_context_CFLAGS = $(TEST_CFLAGS)
 
 # Tools: registry + schemas + file tools + spawn (canned temp files).
@@ -284,7 +284,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/image_bytes.c ../src/nm_size.c \
-    ../src/context.c ../src/nm_reminder.c \
+    ../src/context.c ../src/reminder.c \
     ../src/file_ledger.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
@@ -344,7 +344,7 @@ test_image_codec_CFLAGS = $(TEST_CFLAGS)
 
 # Reminders: the tag framing, the trust boundary (sanitizer) and the
 # rule table — pure C (no boba, no I/O, no config store).
-test_reminder_SOURCES = test_reminder.c ../src/nm_reminder.c
+test_reminder_SOURCES = test_reminder.c ../src/reminder.c
 test_reminder_CFLAGS = $(TEST_CFLAGS)
 
 # File ledger: the per-session read memory behind `file-already-read` /
@@ -368,7 +368,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/markdown.c ../src/markdown_render.c ../src/highlight.c \
-    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

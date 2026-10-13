@@ -21,7 +21,7 @@
 
 #include "context.h"
 
-#include "nm_reminder.h"
+#include "reminder.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,7 +43,7 @@ static const char *const base_prompt =
     "You are nevermore, an interactive coding agent. Answer concisely "
     "and correctly. Use the tools for file operations and commands.";
 
-/* The reminder clause (nm_reminder.h). UNCONDITIONAL — the escape of
+/* The reminder clause (reminder.h). UNCONDITIONAL — the escape of
  * forged tags runs whether or not the harness injects nudges, so a model
  * that meets `&lt;system-reminder>` in file content must know what it
  * is. Three facts: reminders are harness speech to follow; a tag inside

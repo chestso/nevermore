@@ -991,7 +991,7 @@ static void test_new_keys(void)
 /* The reminder gate (`reminders`): a bool, ON by default (the harness
  * may inject nudges), durable like the rest, and normalized so the file
  * and env layers read the same. The tag-escape trust boundary is NOT
- * this key's business — it is unconditional (nm_reminder.h). */
+ * this key's business — it is unconditional (reminder.h). */
 static void test_reminders_key(void)
 {
     pin_paths("reminders");

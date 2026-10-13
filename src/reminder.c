@@ -1,13 +1,13 @@
-/* nm_reminder.c - the framing, the trust boundary and the rule table.
+/* reminder.c - the framing, the trust boundary and the rule table.
  *
- * See nm_reminder.h for the contract. House rules observed here:
+ * See reminder.h for the contract. House rules observed here:
  * character-level scans (no regex), no allocation on a steady-state
  * path (the buffer grows geometrically and is reused), and every rule's
  * text composed with snprintf into a fixed buffer — a reminder is
  * capped, never a growing document.
  */
 
-#include "nm_reminder.h"
+#include "reminder.h"
 
 #include <stdio.h>
 #include <stdlib.h>

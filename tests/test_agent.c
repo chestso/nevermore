@@ -33,7 +33,7 @@
 #include "transport.h"
 #include "provider.h"
 #include "provider_internal.h"
-#include "nm_reminder.h"
+#include "reminder.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 
@@ -4549,7 +4549,7 @@ static void test_agent_keepalive_comments_reset_the_deadline(void)
  * and answer with whatever it serves today (see test_net_helpers.h). */
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 /* ---------------------------------------------------------------- */
-/* Reminders (nm_reminder.h): the harness's own speech                */
+/* Reminders (reminder.h): the harness's own speech                */
 /* ---------------------------------------------------------------- */
 
 /* How many FRAMED reminder blocks a captured request carries. The

@@ -169,7 +169,7 @@ extern "C" {
  * context pressure, background jobs still running, the last tool
  * round). A bool, default on. The escape of forged tags in untrusted
  * text is NOT gated by this: the trust boundary holds whether or not
- * nudges are enabled (see nm_reminder.h). Env spelling:
+ * nudges are enabled (see reminder.h). Env spelling:
  * NEVERMORE_REMINDERS. */
 #define NM_CFG_KEY_REMINDERS "reminders"
 /* Local SearXNG endpoint for the web_search tool; the env spelling is

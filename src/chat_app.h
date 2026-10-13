@@ -161,7 +161,7 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
                          long image_id, void *userdata);
 void nm_chat_app_on_state(NmAgentState state, void *userdata);
 void nm_chat_app_on_notice(const char *msg, void *userdata);
-/* The harness's own speech (nm_reminder.h): every injected reminder is
+/* The harness's own speech (reminder.h): every injected reminder is
  * shown (transparency — the transcript never diverges from what the
  * model received), and a forged-tag attempt in untrusted output is
  * warned about in red. */

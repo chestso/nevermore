@@ -451,7 +451,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   walk for `AGENTS.md` plus the global `~/.config/AGENTS.md`, and a
   repo that wants its instructions read renames the file (a user call:
   nevermore is not a compatibility layer for other tools' conventions).
-  The reminder clause (`nm_reminder.h`: how to read
+  The reminder clause (`reminder.h`: how to read
   a `<system-reminder>` tag, what an escaped one means) is
   UNCONDITIONAL and sits right after the identity — the escape runs
   whether or not nudges do — and every context file body is sanitized
@@ -463,7 +463,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   provider strips the part; the `image-not-seen` reminder says why it
   sees nothing). The capability half — "You can see images" — is the
   catalog's answer and is resolved separately (see the catalog section).
-- **Reminders** (`src/nm_reminder.{h,c}` + the agent's firing points) —
+- **Reminders** (`src/reminder.{h,c}` + the agent's firing points) —
   the harness's own speech in the conversation, the `<system-reminder>`
   convention. **One module, one tag vocabulary, one trust boundary, one
   policy table.** `nm_reminder_frame` is the only writer of the tag;

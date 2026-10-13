@@ -46,7 +46,7 @@
 #include "clock.h"
 
 #include "file_ledger.h"
-#include "nm_reminder.h"
+#include "reminder.h"
 
 #include "provider_internal.h"
 
@@ -96,7 +96,7 @@ struct NmAgent
     NmToolCallback on_tool;    /* tool start/end */
     NmAgentStateFn on_state;   /* spinner state */
     NmAgentNoticeFn on_notice; /* transport notices (connect walk) */
-    /* Reminders (nm_reminder.h): every injected reminder is handed to
+    /* Reminders (reminder.h): every injected reminder is handed to
      * the UI (transparency), and the user gets a warning of its own
      * when untrusted output tried to forge one. */
     NmAgentReminderFn on_reminder;
@@ -1504,7 +1504,7 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
         }
     }
 
-    /* The trust boundary (nm_reminder.h): tool output is DATA. One
+    /* The trust boundary (reminder.h): tool output is DATA. One
      * sanitized copy serves the panel and the wire — they must never
      * diverge — and a forgery attempt is reported to the user. The
      * model is not told: the escaped bytes are self-evident, and the
@@ -1532,7 +1532,7 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
 
     /* Reminders about THIS result ride its content (the TOOL channel),
      * so the panel shows exactly what the model reads. The facts are
-     * the result's own (nm_reminder.h): what the tool withheld, whether
+     * the result's own (reminder.h): what the tool withheld, whether
      * the text came from outside the machine, whether an image rode
      * along, and — for read_file — what the path turned out to be. The
      * vision flag comes from the catalog the UI reads, never fetched:
