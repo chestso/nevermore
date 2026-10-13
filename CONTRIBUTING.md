@@ -109,7 +109,7 @@ missing prerequisite.
   capability the test does not control is a coin flip.
 - **A test never sleeps a DEADLINE out — it moves the clock.** Pick by
   what is being waited FOR:
-  - a deadline → virtual time: `src/nm_clock.c` is a TU so a test links
+  - a deadline → virtual time: `src/clock.c` is a TU so a test links
     `tests/fake_clock.c` instead; drive at boba's reported cadence and
     advance the fake by that cadence. No test hook in production — the
     fake IS the definition.

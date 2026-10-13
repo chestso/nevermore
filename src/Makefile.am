@@ -53,7 +53,7 @@ EXTRA_DIST = \
     history.h \
     json.h \
     nevermore.h \
-    nm_clock.h \
+    clock.h \
     nm_highlight.h \
     nm_image.h \
     nm_image_bytes.h \
@@ -139,7 +139,7 @@ nevermore_SOURCES = \
     json.c \
     xxh3.h \
     xxh3.c \
-    nm_clock.c \
+    clock.c \
     nm_size.c \
     agent.c \
     conversation_id.c \

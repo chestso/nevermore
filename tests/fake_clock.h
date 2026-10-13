@@ -1,6 +1,6 @@
-/* fake_clock.h - the test-owned clock (the fake half of src/nm_clock.h)
+/* fake_clock.h - the test-owned clock (the fake half of src/clock.h)
  *
- * A test binary that links fake_clock.c INSTEAD of src/nm_clock.c owns
+ * A test binary that links fake_clock.c INSTEAD of src/clock.c owns
  * time: it stands still unless the test advances it. A deadline test
  * then *moves* the clock past the deadline instead of sleeping through
  * it — exact, instant, and identical on every platform (a loaded

@@ -26,7 +26,7 @@
 
 #include "tools_internal.h"
 
-#include "nm_clock.h" /* nm_monotonic_seconds (the inactivity deadline) */
+#include "clock.h" /* nm_monotonic_seconds (the inactivity deadline) */
 
 #define SPAWN_CAPTURE_MAX (256 * 1024) /* hard cap; clamped result body */
 

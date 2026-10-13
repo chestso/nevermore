@@ -1,4 +1,4 @@
-/* nm_clock.h - the one clock
+/* clock.h - the one clock
  *
  * Monotonic where the OS offers it, wall clock otherwise. The single
  * time source for every deadline in the program — the connect walk's

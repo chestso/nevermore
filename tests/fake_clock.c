@@ -1,6 +1,6 @@
 /* fake_clock.c - the test-owned clock (see fake_clock.h)
  *
- * Deliberately NOT linked alongside src/nm_clock.c: this TU IS the
+ * Deliberately NOT linked alongside src/clock.c: this TU IS the
  * definition the test link set supplies, which is how the seam works
  * without a test hook in the production code.
  */

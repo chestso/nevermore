@@ -1,4 +1,4 @@
-/* nm_clock.c - the one clock (see nm_clock.h)
+/* clock.c - the one clock (see clock.h)
  *
  * Its own TU so a test can supply the definition instead (the deadline
  * tests advance time rather than sleeping through it) — the same

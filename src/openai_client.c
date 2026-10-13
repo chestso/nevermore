@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "openai_client.h"
-#include "nm_clock.h" /* nm_monotonic_seconds (the pump's deadline) */
+#include "clock.h" /* nm_monotonic_seconds (the pump's deadline) */
 #include "sse.h"
 #include "transport_internal.h"
 

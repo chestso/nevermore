@@ -42,7 +42,7 @@
  * allocation.
  */
 
-/* winsock2.h must precede <windows.h>, which nm_clock.h pulls in. */
+/* winsock2.h must precede <windows.h>, which clock.h pulls in. */
 #ifdef _WIN32
 #include <winsock2.h>
 #else
@@ -60,7 +60,7 @@
 #include "tools_internal.h"
 #include "transport.h"
 
-#include "nm_clock.h"
+#include "clock.h"
 
 #define NM_WEBSEARCH_DEFAULT_URL         "http://127.0.0.1:8888"
 #define NM_WEBSEARCH_DEFAULT_MAX_RESULTS 8

@@ -39,10 +39,10 @@
 #include <unistd.h>
 #endif
 
-/* The one clock (nm_clock.h) for the connect walk's per-attempt
- * budget. Included after winsock2.h on Windows (nm_clock.h pulls in
+/* The one clock (clock.h) for the connect walk's per-attempt
+ * budget. Included after winsock2.h on Windows (clock.h pulls in
  * <windows.h>, and winsock2.h must come first — house rule). */
-#include "nm_clock.h"
+#include "clock.h"
 
 /* ---------------------------------------------------------------- */
 /* Diagnostics                                                        */
@@ -253,7 +253,7 @@ int nm_socket_set_blocking(int fd)
 /* ---------------------------------------------------------------- */
 
 /* Monotonic seconds, for the per-attempt budget arithmetic. The one
- * clock lives in nm_clock.h (nm_monotonic_seconds); this is a thin
+ * clock lives in clock.h (nm_monotonic_seconds); this is a thin
  * alias so the walk's call sites read in its own vocabulary. */
 double nm_socket_now(void)
 {

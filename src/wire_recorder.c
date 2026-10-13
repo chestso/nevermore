@@ -28,7 +28,7 @@
 
 #ifdef _WIN32
 /* MUST precede the two includes below: each reaches windows.h on its
- * own (nm_clock.h directly, connection_layout.h by way of
+ * own (clock.h directly, connection_layout.h by way of
  * winsock2.h), and a later winsock2.h then trips MinGW's
  * include-order #warning. Same rule as transport.c /
  * transport_socket.c. (The `hyper` macro that rpcndr.h smuggles into
@@ -37,7 +37,7 @@
 #include <winsock2.h>
 #endif
 
-#include "nm_clock.h"
+#include "clock.h"
 
 /* The recorder reads (conn_id, xchg, tls) off the connection for the
  * correlation pair — the shared layout include (same pattern as
@@ -101,7 +101,7 @@ static struct NmWireRecorder g_rec;
 
 /* Monotonic-ish clock: monotonic where the OS offers it, wall clock
  * otherwise. The t field's contract is "seconds since the banner",
- * immune to NTP jumps where possible. Extracted to nm_clock.h so
+ * immune to NTP jumps where possible. Extracted to clock.h so
  * the conversation-id fallback shares one definition. */
 static double wire_now_wall(void)
 {

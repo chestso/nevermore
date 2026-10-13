@@ -127,7 +127,7 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/conf.c src/wire_recorder.c src/nm_image_bytes.c src/nm_size.c \
 	$TLS_SRC -lws2_32 -lpthread
 
-run_build test_web_search src/nm_clock.c tests/test_web_search.c src/tools.c \
+run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
 	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/proc.c \
 	src/nm_file_ledger.c src/xxh3.c \
 	src/proc_w32.c src/tools_spawn_w32.c \
@@ -136,15 +136,15 @@ run_build test_web_search src/nm_clock.c tests/test_web_search.c src/tools.c \
 	src/nm_image_bytes.c src/nm_size.c $TLS_SRC \
 	-lws2_32 -lpthread
 
-run_build test_wire src/nm_clock.c tests/test_wire.c src/transport.c src/transport_socket.c \
+run_build test_wire src/clock.c tests/test_wire.c src/transport.c src/transport_socket.c \
 	src/conf.c src/wire_recorder.c src/json.c $TLS_SRC \
 	-lws2_32 -lpthread
 
-run_build test_wire_recorder src/nm_clock.c tests/test_wire_recorder.c src/wire_recorder.c \
+run_build test_wire_recorder src/clock.c tests/test_wire_recorder.c src/wire_recorder.c \
 	src/json.c src/transport.c src/transport_socket.c \
 	src/conf.c $TLS_SRC -lws2_32 -lpthread
 
-run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
+run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
@@ -158,7 +158,7 @@ run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
 
-run_build test_source src/nm_clock.c tests/test_source.c src/source.c src/nevermore.c \
+run_build test_source src/clock.c tests/test_source.c src/source.c src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
@@ -172,7 +172,7 @@ run_build test_source src/nm_clock.c tests/test_source.c src/source.c src/neverm
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
 
-run_build test_openai_client src/nm_clock.c tests/test_openai_client.c src/openai_client.c \
+run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
 	src/transport_socket.c src/conf.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
@@ -185,7 +185,7 @@ run_build test_openai_client src/nm_clock.c tests/test_openai_client.c src/opena
 	src/provider_test.c \
 	-lws2_32 -lpthread
 
-run_build test_agent src/nm_clock.c tests/test_agent.c src/agent.c src/session.c src/nm_image_bytes.c src/nm_size.c \
+run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/nm_image_bytes.c src/nm_size.c \
 	src/context.c src/nm_reminder.c src/nm_file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
 	src/tools_exec.c src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/sse.c \

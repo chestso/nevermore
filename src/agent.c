@@ -41,9 +41,9 @@
 #endif
 
 /* The one monotonic clock, for the deadline seam. Included AFTER
- * winsock2.h on Windows: nm_clock.h pulls in <windows.h>, and
+ * winsock2.h on Windows: clock.h pulls in <windows.h>, and
  * winsock2.h must come first (house rule). */
-#include "nm_clock.h"
+#include "clock.h"
 
 #include "nm_file_ledger.h"
 #include "nm_reminder.h"

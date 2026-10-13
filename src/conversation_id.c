@@ -29,7 +29,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include "nm_clock.h"
+#include "clock.h"
 
 #ifdef _WIN32
 #include <process.h>

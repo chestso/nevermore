@@ -49,7 +49,7 @@
 #include "tools_internal.h"
 #include "transport.h" /* NM_INTEREST_* (the write_stdin wait set) */
 
-#include "nm_clock.h"
+#include "clock.h"
 
 /* Codex's yield windows — PER CALL SITE, not one flat range. The
  * initial exec_command window is 250-30000 ms (a Windows floor of 10 s,
