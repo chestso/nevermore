@@ -1,4 +1,4 @@
-/* nm_markdown_render.h - nevermore's markdown renderers for boba's
+/* markdown_render.h - nevermore's markdown renderers for boba's
  * streaming transcript.
  *
  * Pure functions over (text, width, TuiRowSink*): no I/O, no regex,

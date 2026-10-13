@@ -59,7 +59,7 @@ EXTRA_DIST = \
     image_bytes.h \
     image_codec.h \
     markdown.h \
-    nm_markdown_render.h \
+    markdown_render.h \
     proc.h \
     proc_internal.h \
     nm_size.h \
@@ -159,8 +159,8 @@ nevermore_SOURCES = \
     session.c \
     markdown.h \
     markdown.c \
-    nm_markdown_render.h \
-    nm_markdown_render.c \
+    markdown_render.h \
+    markdown_render.c \
     image.h \
     image_bytes.h \
     image_bytes.c \

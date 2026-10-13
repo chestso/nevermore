@@ -13,7 +13,7 @@
  * State is per stream (a fence on content must not share a block
  * comment with one on reasoning), so the renderer holds one
  * NmHighlight per stream; see NmMarkdownRenderState in
- * nm_markdown_render.h.
+ * markdown_render.h.
  *
  * Unlabeled fences never reach this module: they are byte-granular and
  * stream verbatim by design.

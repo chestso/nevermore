@@ -8,7 +8,7 @@
  * image byte half is boba-free).
  *
  * Not the transcript's text machinery — that is markdown /
- * nm_markdown_render. This is the home for the same shape of thing when
+ * markdown_render. This is the home for the same shape of thing when
  * it is needed again (a compact token count, a duration).
  */
 

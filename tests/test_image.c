@@ -26,7 +26,7 @@
 #include "image.h"
 #include "image_codec.h"
 #include "markdown.h"
-#include "nm_markdown_render.h"
+#include "markdown_render.h"
 
 /* ---------------------------------------------------------------- */
 /* Fixtures: minimal container headers (the sniffer reads headers

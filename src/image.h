@@ -138,7 +138,7 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
 /* The container's short name for markers ("PNG" / "JPEG" / "GIF";
  * "image" for unknown) lives in image_bytes.h, with the sniffer
  * that decides it — re-exported through this header's include so the
- * renderer pair (nm_markdown_render.c) reads it from the slot's
+ * renderer pair (markdown_render.c) reads it from the slot's
  * vocabulary. */
 
 #endif /* NM_IMAGE_H */

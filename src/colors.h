@@ -10,7 +10,7 @@
  *   - the system-stream byte writers in chat_app.c (tool panels, error
  *     bodies, command replies) build a line with vsnprintf, so they
  *     need byte-exact SGR strings: NM_SGR_*.
- *   - the markdown renderers (nm_markdown_render.c) write through a
+ *   - the markdown renderers (markdown_render.c) write through a
  *     boba TuiRowSink, which wants a TuiAttr: nm_attr_*().
  *   - the chat frame (prompt, popup, the input row's gutter) draws
  *     through boba styles, which want a TuiColor: nm_color_*().

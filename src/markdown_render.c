@@ -1,4 +1,4 @@
-/* nm_markdown_render.c - nevermore's markdown renderers.
+/* markdown_render.c - nevermore's markdown renderers.
  *
  * Structure and styling in one pass. Character-level scans only (no
  * regex, no allocation on the render path): runs are emitted straight
@@ -26,7 +26,7 @@
  *     after row_end is only legal for boba's own live_attr reset.
  */
 
-#include "nm_markdown_render.h"
+#include "markdown_render.h"
 
 #include <stdio.h>
 #include <string.h>

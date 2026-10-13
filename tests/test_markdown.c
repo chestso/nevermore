@@ -24,7 +24,7 @@
 #include <boba/unicode.h>
 
 #include "markdown.h"
-#include "nm_markdown_render.h"
+#include "markdown_render.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -349,7 +349,7 @@ static unsigned g_block_calls;
 
 /* Renderer: one row per logical line, marked "R|". Tables are out of
  * scope for this binary (the classifier's table verdict is asserted
- * above; the box renderer is nm_markdown_render, tested elsewhere). */
+ * above; the box renderer is markdown_render, tested elsewhere). */
 static void md_render_block(const TuiBlock *blk, const char *text, size_t len,
                             int width, TuiRowSink *sink, void *ud)
 {

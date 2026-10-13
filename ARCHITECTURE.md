@@ -624,7 +624,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
 - **chat_app** (`src/chat_app.c`) — the boba Elm component:
   textinput + popups + spinner + a boba `TuiTranscript` driven by
   nevermore's markdown grammar (`markdown.c` /
-  `nm_markdown_render.c`). See "The chat transcript protocol" below —
+  `markdown_render.c`). See "The chat transcript protocol" below —
   the one design that is NOT obvious from the code.
 - **The keyboard tier** (`src/chat_app.c`'s `kbd_declaration`) — the
   terminal's kitty keyboard protocol is DECLARED per frame from the
@@ -1003,7 +1003,7 @@ stream messages; boba is the only caller of
   `"reasoning"` (CoT), and boba's system stream `-1` for every
   non-agent writer (tool panels, command replies, error bodies,
   `/help`). Stream ids are nevermore's vocabulary and live in
-  `nm_markdown_render.h` (`NM_STREAM_ID_*`) — the renderer reads
+  `markdown_render.h` (`NM_STREAM_ID_*`) — the renderer reads
   `blk->stream` to dim reasoning, so the ids are its public
   vocabulary; `chat_app.c` consumes them from there. `NM_STREAM_*`
   stays a wire concept.
@@ -1021,7 +1021,7 @@ stream messages; boba is the only caller of
   `finish_inline`.
 - **The markdown grammar is nevermore's**: `markdown.c` classifies
   each completed line (fence / table / heading / list / quote);
-  `nm_markdown_render.c` draws committed rows and owns all styling
+  `markdown_render.c` draws committed rows and owns all styling
   (reasoning dim, line-scoped inline spans, per-kind roles from
   `src/colors.h`). A styled row always resets before `tui_row_end`,
   and base/span attrs compose by OR-ing into ONE SGR run — never

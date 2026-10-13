@@ -21,7 +21,7 @@
  *
  *   nevermore supplies the grammar: src/markdown.c classifies each
  *   line (fence / table / heading / list / quote) and
- *   src/nm_markdown_render.c draws the committed rows. The scrollback
+ *   src/markdown_render.c draws the committed rows. The scrollback
  *   receives only bytes whose rendering can no longer change; the
  *   live region (drawn by view()) holds the provisional tail.
  *
@@ -57,7 +57,7 @@
 #include "nm_reminder.h"
 #include "colors.h"
 #include "markdown.h"
-#include "nm_markdown_render.h"
+#include "markdown_render.h"
 #include "image.h"
 #include "nm_size.h"
 #include "source.h"
@@ -67,7 +67,7 @@
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
-/* Stream ids live in nm_markdown_render.h: they are the renderer pair's
+/* Stream ids live in markdown_render.h: they are the renderer pair's
  * vocabulary now (the renderer reads blk->stream to decide the reasoning
  * dim), and this file consumes them from there. boba dispatches
  * positionally; -1 is boba's system stream. NM_STREAM_* stays a wire
@@ -534,7 +534,7 @@ void nm_chat_app_on_delta(NmStreamChannel channel, const char *text,
     }
 
     /* Content rides stream 0, reasoning stream 1; the renderer dims
-     * stream 1 (nm_markdown_render.c reads blk->stream), so the phase
+     * stream 1 (markdown_render.c reads blk->stream), so the phase
      * boundary below also fixes commit order. */
     int stream_id = channel == NM_STREAM_REASONING ? NM_STREAM_ID_REASONING
                                                    : NM_STREAM_ID_CONTENT;
