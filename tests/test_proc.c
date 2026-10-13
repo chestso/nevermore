@@ -1,4 +1,4 @@
-/* test_process.c - process jobs (registry + renderer + OS seam)
+/* test_proc.c - process jobs (registry + renderer + OS seam)
  *
  * The pure renderer is exercised on every platform; the job lifecycle
  * runs for real on both — POSIX over a PTY (/bin/sh), Windows over
@@ -31,7 +31,7 @@ static long now_ms(void)
 }
 #endif
 
-#include "nm_process.h"
+#include "proc.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */

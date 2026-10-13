@@ -1,10 +1,10 @@
-/* nm_process.c - process-job registry, buffer, and dumb-terminal render
+/* proc.c - process-job registry, buffer, and dumb-terminal render
  *
- * Platform-neutral half of the process layer (nm_process.h): the registry,
+ * Platform-neutral half of the process layer (proc.h): the registry,
  * the bounded per-job output buffer with its omission counter, the
  * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
- * half (spawn/read/write/kill/reap) is nm_process_posix.c /
- * nm_process_w32.c.
+ * half (spawn/read/write/kill/reap) is proc_posix.c /
+ * proc_w32.c.
  *
  * Memory-reuse: one raw buffer and one report buffer per job, both
  * grown geometrically and reused across drains and takes (the report is
@@ -33,8 +33,8 @@ typedef char NmProcLock;
 #define PROC_UNLOCK(l)    ((void)0)
 #endif
 
-#include "nm_process.h"
-#include "nm_process_internal.h"
+#include "proc.h"
+#include "proc_internal.h"
 
 #define PROC_BUF_MAX_DEFAULT (256 * 1024) /* == SPAWN_CAPTURE_MAX */
 #define PROC_REPORT_SEED     256

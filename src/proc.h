@@ -1,4 +1,4 @@
-/* nm_process.h - process jobs (Codex-style unified exec)
+/* proc.h - process jobs (Codex-style unified exec)
  *
  * A job is a long-lived command (a dev server, a REPL, `ssh`, a
  * test watch) the model can poll and feed stdin to, instead of the
@@ -8,8 +8,8 @@
  * knobs) so the tool `NmToolCtx` — a workdir plus the session's file
  * ledger — never has to carry it.
  *
- * The layer is platform-neutral above the OS seam (nm_process_posix.c /
- * nm_process_w32.c): spawn, read/write, group-kill, reap.  What the
+ * The layer is platform-neutral above the OS seam (proc_posix.c /
+ * proc_w32.c): spawn, read/write, group-kill, reap.  What the
  * loop waits on is a HANDLE, not a descriptor — a PTY master on POSIX,
  * a waitable event fed by a pipe reader on Windows — so the job's
  * readiness object travels as an NmSource handle (intptr_t) and its

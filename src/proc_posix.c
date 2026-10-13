@@ -1,4 +1,4 @@
-/* nm_process_posix.c - PTY-backed process jobs (POSIX)
+/* proc_posix.c - PTY-backed process jobs (POSIX)
  *
  * The OS half of the process layer: spawn a command on a PTY with a
  * sanitized environment (under /bin/sh unless the caller names another
@@ -29,8 +29,8 @@
 #include <termios.h>
 #include <unistd.h>
 
-#include "nm_process.h"
-#include "nm_process_internal.h"
+#include "proc.h"
+#include "proc_internal.h"
 
 extern char **environ;
 

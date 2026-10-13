@@ -315,7 +315,7 @@ int nm_tool_run_command_timeout_ms(void);
 
 /* Portable process spawn: run a command, capture stdout+stderr, report
  * exit status. Used by tests too. (Long-lived process jobs live in
- * nm_process.h.) */
+ * proc.h.) */
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code);
 
 #ifdef __cplusplus

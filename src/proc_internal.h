@@ -1,4 +1,4 @@
-/* nm_process_internal.h - OS seam between nm_process.c and per-OS spawn */
+/* proc_internal.h - OS seam between proc.c and per-OS spawn */
 
 #ifndef NM_PROCESS_INTERNAL_H
 #define NM_PROCESS_INTERNAL_H
@@ -7,7 +7,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "nm_process.h"
+#include "proc.h"
 
 /* Fill err (when non-NULL) with `msg`, truncated; harmless when err is
  * NULL or errsz is 0. */
@@ -77,7 +77,7 @@ long nm_proc_os_write(NmProcOs *os, const char *buf, size_t n);
  * interpret a marker.  Idempotent; a no-op once stdin is closed. */
 void nm_proc_os_write_eof(NmProcOs *os);
 
-/* Implemented by nm_process.c for the OS layer's reader: append child
+/* Implemented by proc.c for the OS layer's reader: append child
  * output to the job's bounded buffer.  Thread-safe — the Windows reader
  * thread is an off-loop caller. */
 void nm_proc_feed(NmProc *p, const char *data, size_t n);

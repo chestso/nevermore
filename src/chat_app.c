@@ -61,7 +61,7 @@
 #include "nm_image.h"
 #include "nm_size.h"
 #include "source.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "spinner.h"
 #include "provider_internal.h" /* nm_live_catalog_enabled (the warm's gate) */
 
@@ -1644,7 +1644,7 @@ NmSource nm_chat_app_source(NmChatApp *app)
 
 /* boba's I/O-source pool must hold every job PLUS the agent's own
  * stream source: a job left out of the set is never drained, so its
- * child stalls on a full pipe (see NM_PROC_MAX_JOBS in nm_process.h). */
+ * child stalls on a full pipe (see NM_PROC_MAX_JOBS in proc.h). */
 typedef char nm_proc_source_budget_fits
     [(TUI_IO_SOURCE_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
 

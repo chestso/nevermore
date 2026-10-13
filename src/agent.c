@@ -24,8 +24,8 @@
 #include "agent.h"
 #include "context.h"
 #include "json.h"
-#include "conf.h"       /* the store the machinery reads (no proxies) */
-#include "nm_process.h" /* the <env> git stage runs as a hidden job */
+#include "conf.h" /* the store the machinery reads (no proxies) */
+#include "proc.h" /* the <env> git stage runs as a hidden job */
 #include "session.h"
 #include "transport.h"
 

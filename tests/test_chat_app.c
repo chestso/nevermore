@@ -51,7 +51,7 @@
 #include "authinfo.h"
 #include "colors.h"
 #include "nm_image_bytes.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"
 #include "test_net_helpers.h"
@@ -5319,7 +5319,7 @@ static void test_family_skip_notice_prints_once(void)
 /* ---------------------------------------------------------------- */
 /* P3: the multi-fd wait set + job teardown                      */
 /*                                                                    */
-/* Jobs cannot be started on Windows yet (nm_process_w32.c stub,   */
+/* Jobs cannot be started on Windows yet (proc_w32.c stub,   */
 /* P5), so the tests that need a live job are POSIX-only; the     */
 /* fd-budget arithmetic below is checked on every platform.           */
 /* ---------------------------------------------------------------- */

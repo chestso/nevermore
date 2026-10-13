@@ -9,10 +9,10 @@
  * synchronous spawn + blocking read (direct callers: nm_toolset_execute,
  * tests), and begin/step/source/end is the event-driven path the agent
  * uses in the TUI, where a blocking read would freeze the UI.  The async
- * half rides the process layer (src/nm_process.c), because on Windows a
+ * half rides the process layer (src/proc.c), because on Windows a
  * one-shot command and a long-lived job are the *same* mechanism — a
  * child on anonymous pipes, read by a per-job thread whose auto-reset
- * event is the loop's wait handle (see nm_process_w32.c).
+ * event is the loop's wait handle (see proc_w32.c).
  */
 
 #include <stdio.h>
@@ -21,7 +21,7 @@
 #include <windows.h>
 
 #include "json.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "tools.h"
 
 #include "tools_internal.h"

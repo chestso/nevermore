@@ -433,7 +433,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   run on the UI thread (`git status` hangs on a monorepo). So the
   context exposes the stage as data (`nm_context_env_git_pending` /
   `_cwd` / `_git_command` / `_apply_git`) and the AGENT owns the
-  process: a **hidden `nm_process` job** spawned at `nm_agent_new`
+  process: a **hidden process job** spawned at `nm_agent_new`
   (hidden = `/ps` skips it; it is machinery, not a job the user
   started), driven through the agent's own `nm_agent_source` /
   `nm_agent_step` / `nm_agent_next_timeout_ms` seam, bounded by
@@ -842,7 +842,7 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   context_length, image_gen, tools) — image_gen and tools were once
   silently dropped, so a live row read 0 while its table claimed
   otherwise.
-- **Process jobs** (`src/nm_process.c` + `nm_process_posix.c`) — the
+- **Process jobs** (`src/proc.c` + `proc_posix.c`) — the
   process-global job registry behind Codex-style `exec_command` /
   `write_stdin`: a long-lived command on a PTY (fork/exec, child-side
   `setsid` + `TIOCSCTTY` — posix_spawn can't express that), merged
@@ -878,7 +878,7 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   `cmd.exe`), the deterministic shell the machinery's own commands
   assume (the `<env>` git stage's `;`/`&`-joined line, `run_command`),
   so naming a shell is opt-in and never a global. The vocabulary is
-  ONE table in `nm_process.c` (`nm_proc_shell_kind` /
+  ONE table in `proc.c` (`nm_proc_shell_kind` /
   `_has_login` / `_flags`, Codex's `derive_exec_args` shapes: `-c` /
   `-lc`, PowerShell's `-NoProfile` unless login, cmd's `/d /c` with
   login ignored), so the flag vector and "does this shell have a login
@@ -925,7 +925,7 @@ such file or directory`) instead of a bare 127 that a legitimate
   activity. A job's readiness handle joins the loop's wait set for as
   long as it is registered, and `nm_proc_close_all` is on the teardown
   path.
-- **The Windows-jobs gotcha (`src/nm_process_w32.c`)** — a Windows job
+- **The Windows-jobs gotcha (`src/proc_w32.c`)** — a Windows job
   is pipes + a Job Object + a reader thread, and the traps:
   `CREATE_UNICODE_ENVIRONMENT` is required whenever a custom
   `lpEnvironment` block is passed (else `ERROR_INVALID_PARAMETER` (87),

@@ -24,7 +24,7 @@
 #include "json.h"
 #include "conf.h" /* the store the run_command budget resolves from */
 #include "nm_image_bytes.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
 
@@ -3947,7 +3947,7 @@ static void test_exec_command_login_garbage_refused(void)
 /* The gate ON is what makes `login: true` run a REAL login shell:
  * bash's own `shopt -q login_shell` is the identity check (no profile
  * needed, so the test is hermetic — the profile path is pinned in
- * test_process). */
+ * test_proc). */
 static void test_exec_command_login_gate_on_runs_a_login_shell(void)
 {
     if (access("/bin/bash", X_OK) != 0)

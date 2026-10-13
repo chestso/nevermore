@@ -29,7 +29,7 @@
 #include "agent.h"
 #include "conf.h"
 #include "nm_image_bytes.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "transport.h"
 #include "provider.h"
 #include "provider_internal.h"

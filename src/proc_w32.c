@@ -1,4 +1,4 @@
-/* nm_process_w32.c - process jobs on Windows (pipes + Job Object + reader)
+/* proc_w32.c - process jobs on Windows (pipes + Job Object + reader)
  *
  * The OS half of the process layer on Windows.  A job is a shell
  * (`cmd.exe /d /c` unless the caller names another — see NmProcShell)
@@ -35,8 +35,8 @@
 #include <string.h>
 #include <wchar.h>
 
-#include "nm_process.h"
-#include "nm_process_internal.h"
+#include "proc.h"
+#include "proc_internal.h"
 
 struct NmProcOs
 {

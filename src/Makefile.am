@@ -60,8 +60,8 @@ EXTRA_DIST = \
     nm_image_codec.h \
     nm_markdown.h \
     nm_markdown_render.h \
-    nm_process.h \
-    nm_process_internal.h \
+    proc.h \
+    proc_internal.h \
     nm_size.h \
     opencode_models_data.h \
     openai_client.h \
@@ -82,10 +82,10 @@ EXTRA_DIST = \
 # Portable process spawn: one file per OS.
 if HOST_WINDOWS
 TOOLS_SPAWN_SOURCE = tools_spawn_w32.c os_compat_w32.c
-PROCESS_SOURCE = nm_process_w32.c
+PROCESS_SOURCE = proc_w32.c
 else
 TOOLS_SPAWN_SOURCE = tools_spawn_posix.c
-PROCESS_SOURCE = nm_process_posix.c
+PROCESS_SOURCE = proc_posix.c
 endif
 
 # TLS: exactly one backend, selected by configure. Each backend .c
@@ -152,9 +152,9 @@ nevermore_SOURCES = \
     tools_file.c \
     tools_websearch.c \
     tools_exec.c \
-    nm_process.h \
-    nm_process_internal.h \
-    nm_process.c \
+    proc.h \
+    proc_internal.h \
+    proc.c \
     $(PROCESS_SOURCE) \
     session.c \
     nm_markdown.h \

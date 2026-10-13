@@ -31,7 +31,7 @@
 #include "nevermore.h"
 #include "agent.h"
 #include "nm_image_bytes.h"
-#include "nm_process.h"
+#include "proc.h"
 #include "provider.h"
 #include "session.h"
 #include "tools.h"

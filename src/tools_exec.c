@@ -1,7 +1,7 @@
 /* tools_exec.c - process-job tools: exec_command, write_stdin,
  * kill_job
  *
- * The model-facing surface over src/nm_process.c's PTY job registry
+ * The model-facing surface over src/proc.c's PTY job registry
  * (a port of quoth's quoth-process.el / quoth-tools.el exec_command +
  * write_stdin pair). exec_command starts a long-lived command — a dev
  * server, a REPL, `ssh`, a test watcher — and reports either its exit
@@ -44,7 +44,7 @@
 
 #include "json.h"
 #include "conf.h" /* the store the empty-poll ceiling resolves from */
-#include "nm_process.h"
+#include "proc.h"
 #include "tools.h"
 #include "tools_internal.h"
 #include "transport.h" /* NM_INTEREST_* (the write_stdin wait set) */
@@ -291,7 +291,7 @@ static int has_interior_eof_marker(const char *input, size_t n)
 /* ---------------------------------------------------------------- */
 
 /* One in-flight call. The job itself lives in the process registry
- * (nm_process.h), addressed by id — never by pointer (see the file head).
+ * (proc.h), addressed by id — never by pointer (see the file head).
  * outbox is write_stdin's pending stdin bytes, built once at begin and
  * drained across steps so a write that would block never stalls the
  * loop. */
