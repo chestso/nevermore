@@ -1,6 +1,6 @@
-/* nm_args.c - see nm_args.h. The CLI grammar, in one function. */
+/* args.c - see args.h. The CLI grammar, in one function. */
 
-#include "nm_args.h"
+#include "args.h"
 
 #include <stdarg.h>
 #include <stdio.h>

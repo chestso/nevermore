@@ -61,7 +61,7 @@ architecture "the right way"**: fix a design flaw at its root
 
 ## Modules
 
-- **Command line** (`src/nm_args.{h,c}`) — the argv grammar, PURE C: it
+- **Command line** (`src/args.{h,c}`) — the argv grammar, PURE C: it
   fills `NmArgs` or hands back a reason STRING (never a print, never an
   exit), so `tests/test_args.c` pins the CLI's shape without a process
   while main.c keeps the output and the exit status. **`ask` and

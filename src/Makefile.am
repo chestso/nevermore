@@ -43,7 +43,7 @@ bin_PROGRAMS = nevermore
 
 # Internal headers (no separate public include/ — CLI app, no library).
 EXTRA_DIST = \
-    nm_args.h \
+    args.h \
     agent.h \
     chat_app.h \
     colors.h \
@@ -114,8 +114,8 @@ nevermore_SOURCES = \
     authinfo.c \
     conf.h \
     conf.c \
-    nm_args.h \
-    nm_args.c \
+    args.h \
+    args.c \
     provider_internal.h \
     provider_openaicompat.h \
     provider_openaicompat.c \

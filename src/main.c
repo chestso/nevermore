@@ -10,7 +10,7 @@
  *
  * `ask` and `models` are SUBCOMMANDS: the verb comes FIRST, and a mode
  * word anywhere else is a usage error (never a prompt). The grammar —
- * and that rule — is src/nm_args.c, pure C so tests/test_args.c can pin
+ * and that rule — is src/args.c, pure C so tests/test_args.c can pin
  * it; this file owns only the output and the exit status.
  *
  * Configuration (conf.h) resolves once, lowest to highest:
@@ -38,7 +38,7 @@
 #include "history.h"
 #include "chat_app.h"
 #include "conf.h"
-#include "nm_args.h"
+#include "args.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
@@ -397,7 +397,7 @@ int main(int argc, char *argv[])
 #endif
     const char *base_url = getenv("NEVERMORE_BASE_URL");
 
-    /* The command line, parsed once (src/nm_args.c): flags, the verb
+    /* The command line, parsed once (src/args.c): flags, the verb
      * position, the prompt. A usage failure names its reason, so the
      * refusal and the help agree by construction. */
     NmArgs args;

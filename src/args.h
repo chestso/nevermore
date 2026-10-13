@@ -1,4 +1,4 @@
-/* nm_args.h - the command line, parsed (nevermore's argv seam).
+/* args.h - the command line, parsed (nevermore's argv seam).
  *
  * The grammar is PURE C: nm_args_parse reads argv and fills NmArgs, and
  * a usage failure comes back as a STRING (never a print, never an

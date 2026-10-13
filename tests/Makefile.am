@@ -122,10 +122,10 @@ test_authinfo_CFLAGS = $(TEST_CFLAGS)
 test_config_SOURCES = test_config.c ../src/conf.c
 test_config_CFLAGS = $(TEST_CFLAGS)
 
-# The command line (src/nm_args.c): the verb position, the flags, the
+# The command line (src/args.c): the verb position, the flags, the
 # prompt rules — pure C, so the grammar is pinned without a process
 # (main.c owns the printing and the exit status).
-test_args_SOURCES = test_args.c ../src/nm_args.c
+test_args_SOURCES = test_args.c ../src/args.c
 test_args_CFLAGS = $(TEST_CFLAGS)
 
 # The generated version header (nevermore_version.h): the version string

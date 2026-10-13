@@ -1,4 +1,4 @@
-/* test_args.c - the command line, parsed (src/nm_args.c).
+/* test_args.c - the command line, parsed (src/args.c).
  *
  * Pure C: no process, no I/O, no config store — nm_args_parse takes
  * argv and hands back a struct or a reason STRING, which is exactly what
@@ -15,7 +15,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "nm_args.h"
+#include "args.h"
 #include "test_helpers.h"
 
 /* NULL-terminated argv, so a case reads like the command line it is. */
