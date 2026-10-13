@@ -245,9 +245,12 @@ list` / `gh run watch <id> --exit-status` / `gh run view <id>
     create it): block a directory by putting a regular FILE where it
     must go — assert the shape, not the permission model.
   - **A `src/` header shadowing a platform header breaks `<...>`
-    includes** (`src/process.h` ate MinGW's `<process.h>`): fix by
-    renaming to the `nm_*` convention, never by include order. Check:
-    `git grep -n '#include <'` against `ls src/*.h`.
+    includes** (`src/process.h` ate MinGW's `<process.h>`): rename to a
+    different WORD (`proc.*`, the module's own vocabulary), never by
+    include order and never with a prefix — see `ARCHITECTURE.md`
+    §Naming (a file name carries no `nm_`; the Windows token is `w32`,
+    never `win`). Check: `git grep -n '#include <'` against
+    `ls src/*.h`.
   - **The version resource** (`src/nevermore.rc` + `icons/nevermore.ico`)
     is compiled by src/Makefile.am's windres rule: the .rc includes the
     build-generated `nevermore_version.h` (the single version source)

@@ -974,6 +974,22 @@ such file or directory`) instead of a bare 127 that a legitimate
   unprefixed. Coffer `cfr_` pattern.
 - Internal cross-file helpers: also `nm_` (no prefix split), declared
   in `src/*_internal.h`.
+- **File names are the module word, unprefixed**: `markdown_render.c`,
+  `conf.h`, `proc_w32.c`, `test_config.c`. The `nm_` prefix is the
+  symbol namespace and a file name is not a symbol. Generated build
+  headers (`config.h`, `nevermore_version.h`) are not modules.
+- **`w32`, never `win`**, is our token for the platform in a file name,
+  a shell variable, a glob or an identifier; the full word `Windows`
+  is fine in prose and so is the platform's own spelling
+  (`winsock2.h`, `WINAPI`, `_WIN32`, `windres`, `libwinpthread`,
+  `windows.yml`, and the `host_windows` / `HOST_WINDOWS` conditionals).
+- **A `src/` header must never share a name with a header the toolchain
+  resolves by that name** (`process.h` on MinGW-w64/zig, `config.h` for
+  configure's output). Pick a different WORD — `process.*` → `proc.*`
+  (the module's own vocabulary: `NmProc`, `nm_proc_*`), `config.*` →
+  `conf.*` (the ONE file whose stem differs from its symbols) — never a
+  prefix and never include order. Before adding a header: `ls src/*.h`
+  against `git grep -n '#include <'` and the platform's include dir.
 
 ## The chat transcript protocol (chat_app) — read before touching it
 
