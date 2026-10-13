@@ -67,6 +67,7 @@ EXTRA_DIST = \
     openai_client.h \
     provider.h \
     provider_internal.h \
+    provider_openaicompat.h \
     session.h \
     source.h \
     spinner.h \
@@ -116,6 +117,8 @@ nevermore_SOURCES = \
     nm_args.h \
     nm_args.c \
     provider_internal.h \
+    provider_openaicompat.h \
+    provider_openaicompat.c \
     provider_hyper.c \
     provider_ollama.c \
     provider_ollama_local.c \

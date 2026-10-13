@@ -143,17 +143,26 @@ test_version.$(OBJEXT): $(top_builddir)/src/nevermore_version.h
 $(top_builddir)/src/nevermore_version.h:
 	$(MAKE) -C $(top_builddir)/src nevermore_version.h
 
+# The provider TUs: one variable, referenced BARE (never
+# ../src/$(TEST_PROVIDER_SOURCES) — automake silently drops a path
+# prefix glued to a variable). Every test binary that links the
+# registry pulls the same set, so a new provider TU lands in all of
+# them at once instead of in each hand-kept list.
+TEST_PROVIDER_SOURCES = \
+    ../src/provider_openaicompat.c \
+    ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_ollama_local.c \
+    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/provider_test.c
+
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
 test_provider_SOURCES = test_provider.c ../src/nm_clock.c ../src/nm_config.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
-    ../src/provider_hyper.c ../src/provider_ollama.c \
-    ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c \
+    $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -166,11 +175,7 @@ test_source_SOURCES = test_source.c ../src/nm_clock.c ../src/source.c ../src/nm_
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
-    ../src/provider_hyper.c ../src/provider_ollama.c \
-    ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c \
+    $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -204,11 +209,7 @@ test_openai_client_SOURCES = test_openai_client.c ../src/nm_clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
-    ../src/provider_hyper.c \
-    ../src/provider_ollama.c ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c
+    $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -290,11 +291,8 @@ test_agent_SOURCES = test_agent.c ../src/nm_clock.c ../src/agent.c ../src/conver
     $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/authinfo.c ../src/provider_hyper.c \
-    ../src/provider_ollama.c ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c
+    ../src/nevermore.c ../src/authinfo.c \
+    $(TEST_PROVIDER_SOURCES)
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -375,12 +373,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
-    ../src/provider_hyper.c \
-    ../src/provider_ollama.c ../src/provider_ollama_local.c \
-    ../src/provider_openai.c \
-    ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c
+    $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
