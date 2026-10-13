@@ -57,7 +57,7 @@ EXTRA_DIST = \
     highlight.h \
     image.h \
     image_bytes.h \
-    nm_image_codec.h \
+    image_codec.h \
     nm_markdown.h \
     nm_markdown_render.h \
     proc.h \
@@ -168,8 +168,8 @@ nevermore_SOURCES = \
     nm_reminder.c \
     file_ledger.h \
     file_ledger.c \
-    nm_image_codec.h \
-    nm_image_codec.c \
+    image_codec.h \
+    image_codec.c \
     image.c \
     highlight.h \
     highlight.c \

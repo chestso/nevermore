@@ -320,7 +320,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
     ../src/nm_markdown_render.c ../src/highlight.c ../src/image.c \
-    ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c
+    ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
 
@@ -329,16 +329,16 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # TuiRowSink/transport path) and the markdown grammar (the image line
 # is classified + parsed by nm_markdown).
 test_image_SOURCES = test_image.c ../src/image.c \
-    ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c \
+    ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
 
-# Image codec: the vendored stb decode/encode wrapper (src/nm_image_codec.c).
+# Image codec: the vendored stb decode/encode wrapper (src/image_codec.c).
 # Pure C, NO boba — it links the codec + the byte half only, which is
 # the point (the codec must be usable without boba, exactly as
 # image_bytes is for the session/agent tests).
-test_image_codec_SOURCES = test_image_codec.c ../src/nm_image_codec.c \
+test_image_codec_SOURCES = test_image_codec.c ../src/image_codec.c \
     ../src/image_bytes.c ../src/nm_size.c
 test_image_codec_CFLAGS = $(TEST_CFLAGS)
 
@@ -368,7 +368,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c \
-    ../src/image.c ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

@@ -1,4 +1,4 @@
-/* nm_image_codec.h - the image tier's PIXEL half.
+/* image_codec.h - the image tier's PIXEL half.
  *
  * Container sniffing and base64 live in image_bytes (the byte half,
  * headers only, never a decode). THIS module is the other half: it

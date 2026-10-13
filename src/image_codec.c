@@ -1,4 +1,4 @@
-/* nm_image_codec.c - the vendored stb codecs (see nm_image_codec.h).
+/* image_codec.c - the vendored stb codecs (see image_codec.h).
  *
  * The ONE translation unit that compiles stb_image.h /
  * stb_image_write.h (D14). The defines mirror ../coffer's posture:
@@ -6,7 +6,7 @@
  * a decode failure is a value we return, never a crash.
  */
 
-#include "nm_image_codec.h"
+#include "image_codec.h"
 
 #include <limits.h>
 #include <stdlib.h>

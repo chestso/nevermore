@@ -33,7 +33,7 @@ PTHREAD_DLL=/usr/x86_64-w64-mingw32/sys-root/mingw/bin/libwinpthread-1.dll
 [ -f "$PTHREAD_DLL" ] && cp "$PTHREAD_DLL" "$OUT/" 2>/dev/null
 
 COMMON="-Wall -Wextra -Isrc -Itests -Ibuild -I. -Ithird_party/stb"
-# (the last is for nm_image_codec.c, the ONE TU that includes the
+# (the last is for image_codec.c, the ONE TU that includes the
 # vendored stb headers — the same mirror the macOS script needed)
 TLS_SRC=src/tls_openssl.c # cross-compiled MinGW + OpenSSL; wine
 # runs the schannel path via winemapped
@@ -210,7 +210,7 @@ run_build test_version tests/test_version.c -Ibuild/src
 run_build test_highlight tests/test_highlight.c src/highlight.c
 
 # The pixel half is pure C (no boba), so it cross-checks under wine.
-run_build test_image_codec tests/test_image_codec.c src/nm_image_codec.c \
+run_build test_image_codec tests/test_image_codec.c src/image_codec.c \
 	src/image_bytes.c src/nm_size.c
 
 # test_history needs boba's textinput. No MinGW-built boba exists on

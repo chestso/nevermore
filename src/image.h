@@ -8,7 +8,7 @@
  * dimensions from the container headers, choosing the transport from
  * the terminal profile, sizing the display in cells, and - when the
  * terminal cannot take the source container - TRANSCODING it to one it
- * can (JPEG -> PNG for kitty's f=100) through nm_image_codec.
+ * can (JPEG -> PNG for kitty's f=100) through image_codec.
  *
  * No pixel decode happens for a container the terminal already takes
  * (kitty takes PNG via f=100; iTerm2 decodes its own PNG/JPEG/GIF);
@@ -34,7 +34,7 @@
 #include <boba/stream.h>
 
 #include "image_bytes.h"
-#include "nm_image_codec.h"
+#include "image_codec.h"
 
 /* There is NO display-side size cap (revised D7, see the plan's D16):
  * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, image_bytes.h) is the ONE
@@ -70,7 +70,7 @@ typedef struct NmImageSlot
     char reason[48];          /* degradation reason (empty = rendered)     */
 
     /* The DISPLAY payload when a transcode was needed (D6): a PNG
-     * derived from the source by nm_image_codec, owned by the slot and
+     * derived from the source by image_codec, owned by the slot and
      * reused across images (grown geometrically like `data`). enc ==
      * NULL means the source rides as-is; otherwise the spec takes
      * `enc`/`enc_len` and render_format (the wire bytes are never
@@ -111,7 +111,7 @@ void nm_image_slot_free(NmImageSlot *s);
  * the point of attach; the same table nm_image_measure picks the
  * transport from, so the answer cannot drift from what the commit pass
  * will do. It answers the TIER, not "these bytes decode": a corrupt
- * payload (or one past nm_image_codec's pixel screen) still degrades
+ * payload (or one past image_codec's pixel screen) still degrades
  * at commit, exactly as a PNG always could. */
 int nm_image_supported(const TuiTerminalProfile *p, int format);
 

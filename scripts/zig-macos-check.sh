@@ -227,7 +227,7 @@ fail=0
 # hit, where a warning-flooded TU "failed" with its error unprinted).
 #
 # The -I list mirrors configure's nevermore_CPPFLAGS: the build dirs,
-# src, third_party/stb (the vendored stb headers — nm_image_codec.c is
+# src, third_party/stb (the vendored stb headers — image_codec.c is
 # the one TU that includes them, and without the -I it "FAIL"s for a
 # header that is right there), and boba's install prefix. A new include
 # dir in configure.ac belongs here too.

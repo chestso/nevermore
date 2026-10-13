@@ -173,7 +173,7 @@ dnl to RGBA) and stb_image_write.h (encode RGBA to PNG). Vendored
 dnl unmodified and auto-fetched at configure time by
 dnl scripts/fetch-stb.sh (pinned commit), exactly as ../coffer does it:
 dnl the two headers are gitignored, not committed. Used by
-dnl src/nm_image_codec.c for the kitty-vs-JPEG transcode.
+dnl src/image_codec.c for the kitty-vs-JPEG transcode.
 dnl ------------------------------------------------------------------
 STB_DIR="$srcdir/third_party/stb"
 STB_HEADERS="$STB_DIR/stb_image.h $STB_DIR/stb_image_write.h"

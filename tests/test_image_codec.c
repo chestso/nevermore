@@ -1,4 +1,4 @@
-/* test_image_codec.c - the image tier's PIXEL half (src/nm_image_codec.c).
+/* test_image_codec.c - the image tier's PIXEL half (src/image_codec.c).
  *
  * Pure C, no boba: it links the codec + the byte half only — the point
  * is that the codec is usable without boba, exactly like
@@ -19,7 +19,7 @@
 #include "test_helpers.h"
 
 #include "image_bytes.h"
-#include "nm_image_codec.h"
+#include "image_codec.h"
 
 /* 16x16, quadrants: red | blue / green | near-white. Baseline 4:4:4. */
 static const char FIX_JPEG_444_B64[] =

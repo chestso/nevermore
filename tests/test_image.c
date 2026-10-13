@@ -24,7 +24,7 @@
 
 #include "colors.h"
 #include "image.h"
-#include "nm_image_codec.h"
+#include "image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 

@@ -3,7 +3,7 @@
  * sniffing for every container the terminal already takes (PNG via
  * kitty's f=100, any of them via iTerm2); the ONE decode is the
  * kitty-vs-JPEG lane, where a JPEG is transcoded to PNG through
- * nm_image_codec (the vendored stb).
+ * image_codec (the vendored stb).
  */
 
 #include "image.h"
@@ -13,7 +13,7 @@
 #include <string.h>
 
 #include "image_bytes.h"
-#include "nm_image_codec.h"
+#include "image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
 

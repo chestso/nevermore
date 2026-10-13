@@ -713,7 +713,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   text. `src/image.c` is the DISPLAY half (the boba
   transports, the profile ladder, the one-slot cache) and stores
   nevermore's `NmImageFormat` — boba's `TuiImageFormat` appears only at
-  the spec it fills. **The PIXEL half is `src/nm_image_codec.{h,c}`**
+  the spec it fills. **The PIXEL half is `src/image_codec.{h,c}`**
   (pure C, no boba; the ONE TU that includes the vendored stb headers):
   the transcode lane's decode + PNG re-encode. kitty's `f=100` is
   PNG-only, so a JPEG the provider returns (Gemini does) has no ride to
