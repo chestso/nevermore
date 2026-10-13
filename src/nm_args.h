@@ -5,7 +5,7 @@
  * exit), so the CLI's shape is testable without a process
  * (tests/test_args.c) while main.c keeps the output and the exit
  * status. Nothing here reads the environment or the config store — the
- * env layer is nm_config.c's, and main.c hands these flags to it.
+ * env layer is conf.c's, and main.c hands these flags to it.
  *
  * The verb position is the grammar's one structural rule: `ask` and
  * `models` are SUBCOMMANDS, recognized in the FIRST argument only

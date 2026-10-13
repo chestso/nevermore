@@ -23,7 +23,7 @@
 #include <unistd.h>
 #endif
 
-#include "nm_config.h"
+#include "conf.h"
 #include "agent.h"     /* NM_AGENT_DEFAULT_MAX_ROUNDS */
 #include "transport.h" /* NM_CONNECT_ATTEMPT_MS */
 #include "test_helpers.h"

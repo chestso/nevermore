@@ -294,7 +294,7 @@ static int utf8_valid(const unsigned char *b, size_t n)
  * target. A crash, disk-full or kill mid-write therefore leaves the
  * PREVIOUS content intact — never a truncated file, which is the worst
  * failure mode a write tool can have. No fsync: parity with
- * nm_config.c's shadow flush (a crash may lose the write, never
+ * conf.c's shadow flush (a crash may lose the write, never
  * corrupt what was there). The tmp name is `<path>.tmp-<pid>-<n>` — a
  * process-global counter, because a pid alone repeats across calls in
  * one process, so sequential writes cannot collide; a crash can strand

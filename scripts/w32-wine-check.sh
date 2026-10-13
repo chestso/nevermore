@@ -109,7 +109,7 @@ run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
 run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
-run_build test_config tests/test_config.c src/nm_config.c
+run_build test_config tests/test_config.c src/conf.c
 run_build test_args tests/test_args.c src/nm_args.c
 run_build test_session tests/test_session.c src/session.c src/nm_image_bytes.c src/nm_size.c
 run_build test_context tests/test_context.c src/context.c src/nm_reminder.c
@@ -124,7 +124,7 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/tools_websearch.c src/tools_exec.c src/nm_process.c src/nm_process_w32.c \
 	src/tools_spawn_w32.c src/os_compat_w32.c \
 	src/json.c src/transport.c src/transport_socket.c \
-	src/nm_config.c src/wire_recorder.c src/nm_image_bytes.c src/nm_size.c \
+	src/conf.c src/wire_recorder.c src/nm_image_bytes.c src/nm_size.c \
 	$TLS_SRC -lws2_32 -lpthread
 
 run_build test_web_search src/nm_clock.c tests/test_web_search.c src/tools.c \
@@ -132,17 +132,17 @@ run_build test_web_search src/nm_clock.c tests/test_web_search.c src/tools.c \
 	src/nm_file_ledger.c src/xxh3.c \
 	src/nm_process_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/transport.c \
-	src/transport_socket.c src/nm_config.c src/wire_recorder.c \
+	src/transport_socket.c src/conf.c src/wire_recorder.c \
 	src/nm_image_bytes.c src/nm_size.c $TLS_SRC \
 	-lws2_32 -lpthread
 
 run_build test_wire src/nm_clock.c tests/test_wire.c src/transport.c src/transport_socket.c \
-	src/nm_config.c src/wire_recorder.c src/json.c $TLS_SRC \
+	src/conf.c src/wire_recorder.c src/json.c $TLS_SRC \
 	-lws2_32 -lpthread
 
 run_build test_wire_recorder src/nm_clock.c tests/test_wire_recorder.c src/wire_recorder.c \
 	src/json.c src/transport.c src/transport_socket.c \
-	src/nm_config.c $TLS_SRC -lws2_32 -lpthread
+	src/conf.c $TLS_SRC -lws2_32 -lpthread
 
 run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
@@ -153,7 +153,7 @@ run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/nm_config.c \
+	src/transport.c src/transport_socket.c src/conf.c \
 	src/wire_recorder.c \
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
@@ -167,14 +167,14 @@ run_build test_source src/nm_clock.c tests/test_source.c src/source.c src/neverm
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/nm_config.c \
+	src/transport.c src/transport_socket.c src/conf.c \
 	src/wire_recorder.c \
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
 
 run_build test_openai_client src/nm_clock.c tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
-	src/transport_socket.c src/nm_config.c src/wire_recorder.c $TLS_SRC \
+	src/transport_socket.c src/conf.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \
@@ -190,7 +190,7 @@ run_build test_agent src/nm_clock.c tests/test_agent.c src/agent.c src/session.c
 	src/tools_exec.c src/nm_process.c src/nm_process_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
-	src/transport_socket.c src/nm_config.c src/wire_recorder.c $TLS_SRC \
+	src/transport_socket.c src/conf.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \

@@ -17,7 +17,7 @@
 
 #include "transport.h"
 
-#include "nm_config.h" /* the store the machinery reads (no proxies) */
+#include "conf.h" /* the store the machinery reads (no proxies) */
 #include "transport_internal.h"
 
 #ifdef _WIN32

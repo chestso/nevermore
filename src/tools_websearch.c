@@ -55,7 +55,7 @@
 #include <string.h>
 
 #include "json.h"
-#include "nm_config.h" /* the store the tool reads (no proxies) */
+#include "conf.h" /* the store the tool reads (no proxies) */
 #include "tools.h"
 #include "tools_internal.h"
 #include "transport.h"

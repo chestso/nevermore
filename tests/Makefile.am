@@ -119,7 +119,7 @@ test_authinfo_CFLAGS = $(TEST_CFLAGS)
 
 # Central config (user file + runtime shadow layer): pure C, no boba,
 # no network, no registry (the provider-name validator is a hook).
-test_config_SOURCES = test_config.c ../src/nm_config.c
+test_config_SOURCES = test_config.c ../src/conf.c
 test_config_CFLAGS = $(TEST_CFLAGS)
 
 # The command line (src/nm_args.c): the verb position, the flags, the
@@ -158,7 +158,7 @@ TEST_PROVIDER_SOURCES = \
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
-test_provider_SOURCES = test_provider.c ../src/nm_clock.c ../src/nm_config.c \
+test_provider_SOURCES = test_provider.c ../src/nm_clock.c ../src/conf.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
@@ -171,7 +171,7 @@ test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
-test_source_SOURCES = test_source.c ../src/nm_clock.c ../src/source.c ../src/nm_config.c \
+test_source_SOURCES = test_source.c ../src/nm_clock.c ../src/source.c ../src/conf.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
@@ -185,7 +185,7 @@ test_source_LDADD = $(TEST_TLS_LIBS)
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
 test_wire_SOURCES = test_wire.c ../src/nm_clock.c ../src/transport.c ../src/transport_socket.c \
-    ../src/nm_config.c \
+    ../src/conf.c \
     ../src/wire_recorder.c ../src/json.c $(TEST_TLS_SOURCE)
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -197,7 +197,7 @@ test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 # real network.
 test_wire_recorder_SOURCES = test_wire_recorder.c ../src/nm_clock.c ../src/wire_recorder.c \
     ../src/json.c ../src/transport.c ../src/transport_socket.c \
-    ../src/nm_config.c \
+    ../src/conf.c \
     $(TEST_TLS_SOURCE)
 test_wire_recorder_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_recorder_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -207,7 +207,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 # chat/completions SSE server (request validation + delta assembly).
 test_openai_client_SOURCES = test_openai_client.c ../src/nm_clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
     $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -218,7 +218,7 @@ test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
 # cert (system trust must reject it). Live probe is manual
 # (NM_LIVE_TLS=1), never in make check.
 test_tls_SOURCES = test_tls.c ../src/nm_clock.c ../src/transport.c ../src/transport_socket.c \
-    ../src/nm_config.c \
+    ../src/conf.c \
     $(TEST_TLS_SOURCE)
 test_tls_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tls_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -252,7 +252,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/nm_file_ledger.c ../src/xxh3.c \
     ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
+    ../src/transport.c ../src/transport_socket.c ../src/conf.c \
     ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -267,7 +267,7 @@ test_web_search_SOURCES = test_web_search.c ../src/nm_clock.c \
     ../src/nm_file_ledger.c ../src/xxh3.c \
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c \
+    ../src/transport.c ../src/transport_socket.c ../src/conf.c \
     ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -290,7 +290,7 @@ test_agent_SOURCES = test_agent.c ../src/nm_clock.c ../src/agent.c ../src/conver
     ../src/tools_exec.c ../src/nm_process.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
-    ../src/transport.c ../src/transport_socket.c ../src/nm_config.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c \
     $(TEST_PROVIDER_SOURCES)
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -365,7 +365,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # canned SSE servers. The full source stack rides along: the app owns
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
-test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/nm_config.c \
+test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
     ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/nm_file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \

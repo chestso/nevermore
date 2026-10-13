@@ -22,7 +22,7 @@
 #endif
 
 #include "json.h"
-#include "nm_config.h" /* the store the run_command budget resolves from */
+#include "conf.h" /* the store the run_command budget resolves from */
 #include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "tools.h"

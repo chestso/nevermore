@@ -1,4 +1,9 @@
-/* nm_config.h - central configuration: user file + runtime shadow layer
+/* conf.h - the app's config store: user file + runtime shadow layer.
+ *
+ * NOT configure's config.h, the build's generated header (BOBA_VERSION,
+ * HAVE_*, NM_TLS_*): nothing includes this file in its stead. The
+ * store's symbols are nm_config_* / NmConfig; only the file name moved,
+ * because the build owns `config.h`.
  *
  * One name per knob, one resolution order. Lowest to highest:
  *
@@ -489,7 +494,7 @@ NmKbdMode nm_config_kbd_mode(const NmConfig *c);
 /* Is `value` a family set: `none`, or one or both families joined by
  * '+' (`IPv4`, `IPv6`, `IPv4+IPv6`)? The tokens are the nm_family_name
  * vocabulary (transport.h); this file spells them literally because
- * its unit test links nothing but nm_config.c (a drift test pins the
+ * its unit test links nothing but conf.c (a drift test pins the
  * two). Validation is case-sensitive on the canonical form; the file
  * layer normalizes accepted spellings (see nm_config_family_set_canon).
  * A valid set is normalized to its canonical order (IPv4 before IPv6,

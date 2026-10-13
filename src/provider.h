@@ -58,8 +58,8 @@
  * (reasoning_echo below) using the SAME value space the store's
  * `reasoning_echo` key resolves to — one vocabulary, so a provider
  * default and a user override cannot mean different things.
- * nm_config.h is self-contained (stddef only), so this adds no cycle. */
-#include "nm_config.h"
+ * conf.h is self-contained (stddef only), so this adds no cycle. */
+#include "conf.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -395,7 +395,7 @@ struct NmProvider
 
     /* Does this provider's WIRE need the reasoning trace echoed back
      * on replayed assistant messages (an NmReasoningEcho from
-     * nm_config.h; the zero value NM_REASONING_ECHO_OFF = "no
+     * conf.h; the zero value NM_REASONING_ECHO_OFF = "no
      * opinion", so a provider that says nothing is unchanged)? A
      * provider whose upstream refuses a replayed tool-call turn that
      * omits `reasoning_content` declares NM_REASONING_ECHO_TOOLS

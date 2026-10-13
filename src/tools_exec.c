@@ -43,7 +43,7 @@
 #include <string.h>
 
 #include "json.h"
-#include "nm_config.h" /* the store the empty-poll ceiling resolves from */
+#include "conf.h" /* the store the empty-poll ceiling resolves from */
 #include "nm_process.h"
 #include "tools.h"
 #include "tools_internal.h"

@@ -10,7 +10,7 @@
 #include <string.h>
 
 #include "json.h"
-#include "nm_config.h" /* the store the run_command budget is read from */
+#include "conf.h" /* the store the run_command budget is read from */
 #include "tools.h"
 
 #include "tools_internal.h"

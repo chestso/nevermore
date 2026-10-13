@@ -53,7 +53,7 @@
 #include <boba/unicode.h>
 
 #include "chat_app.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "nm_reminder.h"
 #include "colors.h"
 #include "nm_markdown.h"
@@ -165,7 +165,7 @@ struct NmChatApp
      * of use — the app mirrors none of them. */
     int skipped_families;
 
-    /* The resolved config (nm_config.h), borrowed; NULL = no
+    /* The resolved config (conf.h), borrowed; NULL = no
      * persistence. The app owns it as the process's config store (it
      * installs it via nm_config_set_store), and every setting is read
      * through it — the machinery included. */

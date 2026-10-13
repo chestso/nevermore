@@ -258,19 +258,19 @@ NmToolset *nm_toolset_new_defaults(void);
 /* ---------------------------------------------------------------- */
 
 /* Built-in SearXNG endpoint (the store's `searxng` default). The macro
- * lives here (the tool owns the value) and nm_config's key table
+ * lives here (the tool owns the value) and the store's key table
  * references it, so there is one spelling. */
 #define NM_WEBSEARCH_DEFAULT_URL "http://127.0.0.1:8888"
 
 /* Per-request timeout in ms — the tool's built-in default, and the
  * `searxng_timeout` key's default text (the macro lives here, the tool
- * owns the value, nm_config's key table stringizes it). The tool
+ * owns the value, the store's key table stringizes it). The tool
  * resolves the key from the store at the point of use, so /config
  * shows it and the shadow/env layers carry it. */
 #define NM_WEBSEARCH_DEFAULT_TIMEOUT_MS 10000
 
 /* The effective SearXNG endpoint, enable flag and per-request timeout,
- * resolved from the store (nm_config) at the point of use — the tool
+ * resolved from the store (conf.h) at the point of use — the tool
  * keeps no copy. With no store installed, the built-in defaults apply
  * (the default URL, enabled=on, the default timeout). The
  * `searxng_enabled` RUNTIME layer is written `off` by the tool when a

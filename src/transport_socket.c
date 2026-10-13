@@ -25,7 +25,7 @@
 
 #include "transport_internal.h"
 
-#include "nm_config.h" /* the store the machinery reads (no proxies) */
+#include "conf.h" /* the store the machinery reads (no proxies) */
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -276,7 +276,7 @@ static const char *addr_family_name(const struct sockaddr_storage *a)
 /* ---------------------------------------------------------------- */
 
 /* The connect walk's family state lives in the config store
- * (nm_config), NOT in transport globals: `family_skip` (bool) is the
+ * (conf.h), NOT in transport globals: `family_skip` (bool) is the
  * user's POLICY — the ONE switch, gating both earning and honouring
  * the latch — and `skip_families` (a family set) is the latch the walk
  * writes on the store's RUNTIME layer. The transport resolves both at

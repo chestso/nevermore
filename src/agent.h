@@ -11,7 +11,7 @@
 #ifndef NM_AGENT_H
 #define NM_AGENT_H
 
-#include "nm_config.h"
+#include "conf.h"
 #include "provider.h"
 #include "session.h"
 #include "tools.h"
@@ -167,7 +167,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 /* Reasoning echo-back: which assistant messages riding a later request
  * carry their trace as "reasoning_content" — the store's
  * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / ALL (see
- * nm_config.h for what each mode means), with the provider's own
+ * conf.h for what each mode means), with the provider's own
  * declaration (NmProvider.reasoning_echo) as the DEFAULT. The agent
  * keeps no copy: it resolves at the point of use. The trace is
  * received, displayed and kept in the session in every mode — the mode

@@ -114,7 +114,7 @@ architecture "the right way"**: fix a design flaw at its root
   registry-level base provider: the `NmProvider` vtable stays the flat
   seam, and a descriptor that would need a callback per vtable slot is
   the signal that the provider does not belong here.
-- **Config store** (`src/nm_config.c`) — one name per knob, one
+- **Config store** (`src/conf.c`) — one name per knob, one
   resolution order (built-in default < user file < runtime shadow <
   environment < CLI), and never a proxy: the machinery resolves each
   value from the store at its point of use. The app writes only the

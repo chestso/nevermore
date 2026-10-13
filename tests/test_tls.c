@@ -30,7 +30,7 @@
 #include <time.h>
 
 #include "transport.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 

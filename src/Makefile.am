@@ -47,7 +47,7 @@ EXTRA_DIST = \
     agent.h \
     chat_app.h \
     colors.h \
-    nm_config.h \
+    conf.h \
     connection_layout.h \
     context.h \
     history.h \
@@ -112,8 +112,8 @@ nevermore_SOURCES = \
     nevermore.c \
     authinfo.h \
     authinfo.c \
-    nm_config.h \
-    nm_config.c \
+    conf.h \
+    conf.c \
     nm_args.h \
     nm_args.c \
     provider_internal.h \

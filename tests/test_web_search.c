@@ -24,7 +24,7 @@
 #include <string.h>
 
 #include "json.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* */
 

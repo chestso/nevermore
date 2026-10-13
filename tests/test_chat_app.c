@@ -46,7 +46,7 @@
 
 #include "chat_app.h"
 #include "agent.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "nm_reminder.h"
 #include "authinfo.h"
 #include "colors.h"

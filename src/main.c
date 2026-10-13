@@ -13,7 +13,7 @@
  * and that rule — is src/nm_args.c, pure C so tests/test_args.c can pin
  * it; this file owns only the output and the exit status.
  *
- * Configuration (nm_config.h) resolves once, lowest to highest:
+ * Configuration (conf.h) resolves once, lowest to highest:
  *   built-in default < user config ~/.config/nevermore/config
  *   < runtime shadow ~/.local/state/nevermore/config (written by the
  *   chat's /model /provider /config) < environment < -p/-m.
@@ -37,7 +37,7 @@
 #include "tools.h"
 #include "history.h"
 #include "chat_app.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "nm_args.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
@@ -416,7 +416,7 @@ int main(int argc, char *argv[])
         return 0;
     }
 
-    /* One resolution, one place (nm_config.h): user file < runtime
+    /* One resolution, one place (conf.h): user file < runtime
      * shadow < environment < -p/-m. The shadow is what a previous
      * session typed; the environment still wins over it so a scripted
      * run is reproducible. */

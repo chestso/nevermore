@@ -1,6 +1,6 @@
-/* nm_config.c - central configuration: user file + runtime shadow layer
+/* conf.c - central configuration: user file + runtime shadow layer
  *
- * See nm_config.h for the contract, the precedence table and the grammar.
+ * See conf.h for the contract, the precedence table and the grammar.
  * Character-level scans throughout (the authinfo.c tokenizer family):
  * no regex, no quoting, no per-line allocation.
  *
@@ -15,7 +15,7 @@
  * (main.c loads exactly one, tests load one per test).
  */
 
-#include "nm_config.h"
+#include "conf.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,7 +98,7 @@ struct NmConfig
 static char g_user_override[NM_CONFIG_PATH];
 static char g_shadow_override[NM_CONFIG_PATH];
 
-/* The process-global store the machinery reads (see nm_config.h).
+/* The process-global store the machinery reads (see conf.h).
  * main.c installs it; tests install a scratch one (or leave it NULL
  * for built-in defaults). */
 static NmConfig *g_store;

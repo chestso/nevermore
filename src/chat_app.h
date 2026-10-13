@@ -104,7 +104,7 @@ void nm_chat_app_warm_catalog(NmChatApp *app);
  * unlike the others, is frozen for the conversation once a request has
  * carried a trace — see nm_agent_reasoning_echo_frozen. */
 
-/* The resolved config (nm_config.h), BORROWED: the app writes runtime
+/* The resolved config (conf.h), BORROWED: the app writes runtime
  * changes (/config set, /model, /provider, …) to its shadow file AND
  * installs the config as the process-wide store (nm_config_set_store)
  * the machinery resolves from. NULL (the default, and what tests get)

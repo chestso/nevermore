@@ -27,7 +27,7 @@
 #include <string.h>
 
 #include "agent.h"
-#include "nm_config.h"
+#include "conf.h"
 #include "nm_image_bytes.h"
 #include "nm_process.h"
 #include "transport.h"

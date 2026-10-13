@@ -25,7 +25,7 @@
 #include <string.h>
 #include <time.h>
 
-#include "nm_config.h"
+#include "conf.h"
 #include "transport.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
