@@ -83,7 +83,7 @@ entry counts.
 The input row is always on screen, busy or not: it gathers the next
 prompt while a turn runs (keys edit it; Enter is a no-op until the turn
 ends; Ctrl+C interrupts). Above the prompt its status row carries the
-context gauge, `ctx <used>/<limit>`, where the used count is the prompt
+context gauge, `<used>/<limit>`, where the used count is the prompt
 the provider last reported and the limit the active model's catalog
 window — plus, once some round has reported a cache read, the session's
 cache rate `⚡<pct>`: the share of this conversation's input that came

@@ -1041,10 +1041,10 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * gathered (R1). What the turn is doing is the glyph's STYLE, so
      * there is no label beside it. */
     char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     char *rule =
-        status_row_bytes("\xc2\xb7 ctx -/- ", IDENT("openai", "test-model"));
+        status_row_bytes("\xc2\xb7 -/- ", IDENT("openai", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -1202,7 +1202,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_NOT_NULL(frame);
     char *dark = span_bytes(tui_color_ansi(10), "  ");
     char *dark_row =
-        status_row_bytes("  ctx -/- ", IDENT("openai", "test-model"));
+        status_row_bytes("  -/- ", IDENT("openai", "test-model"));
     char *lit_glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(dark);
     ASSERT_NOT_NULL(dark_row);
@@ -1274,8 +1274,8 @@ static void test_spinner_clears_when_round_completes(void)
     /* The status row is glyphless now: the gauge, the rule and the
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
-    char *rule = status_row_bytes("ctx -/- ", IDENT("openai", "test-model"));
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *rule = status_row_bytes("-/- ", IDENT("openai", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(rule);
@@ -1344,7 +1344,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
     ASSERT_TRUE(strstr(frame, "go") == NULL); /* submitted text cleared */
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, prompt) != NULL); /* the input row is here */
@@ -1388,9 +1388,9 @@ static void test_context_gauge_unknown_reads_as_dash(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *rule = status_row_bytes("ctx -/- ", IDENT("openai", "test-model"));
+    char *rule = status_row_bytes("-/- ", IDENT("openai", "test-model"));
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
@@ -1437,7 +1437,7 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     ASSERT_NOT_NULL(frame);
 
     /* The status row (gauge + rule) appears exactly once. */
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(gauge);
     const char *seed = strstr(frame, gauge);
     ASSERT_NOT_NULL(seed);
@@ -1723,7 +1723,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
      * rate (the one round's 8100 read / 12400 input = 65.3 %). */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "ctx 12.4k/131k \xe2\x9a\xa1"
+    char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x9a\xa1"
                                                 "65.3% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
@@ -1753,7 +1753,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
 }
 
 /* The ⚡ rate is CUMULATIVE over the session, not a per-round number:
- * round 1 reports no cache fact at all (the gauge shows ctx alone), then
+ * round 1 reports no cache fact at all (the gauge shows the counts alone), then
  * two read-reporting rounds move the rate to the session's own
  * read/base. A reported 0 counts as a miss (its input in the base). */
 static void test_context_gauge_cache_rate_is_cumulative(void)
@@ -1800,7 +1800,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "ctx 8.9k/131k ");
+    char *gauge = span_bytes(nm_color_gutter(), "8.9k/131k ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -1818,7 +1818,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "ctx 11.3k/131k \xe2\x9a\xa1"
+    gauge = span_bytes(nm_color_gutter(), "11.3k/131k \xe2\x9a\xa1"
                                           "80.3% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
@@ -1831,7 +1831,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "ctx 10k/131k \xe2\x9a\xa1"
+    gauge = span_bytes(nm_color_gutter(), "10k/131k \xe2\x9a\xa1"
                                           "42.6% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
@@ -1884,7 +1884,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = span_bytes(nm_color_gutter_warn(), "ctx 170k/200k ");
+    char *warn = span_bytes(nm_color_gutter_warn(), "170k/200k ");
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -1894,7 +1894,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = span_bytes(nm_color_gutter_warn_hot(), "ctx 190k/200k ");
+    char *hot = span_bytes(nm_color_gutter_warn_hot(), "190k/200k ");
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -1999,7 +1999,7 @@ static void test_status_row_identity_no_model(void)
 static void test_status_row_identity_elides_on_narrow_terminal(void)
 {
     /* A long, catalog-unknown id: the identity is 57 columns and the left
-     * chrome 8 (the gauge reads "ctx -/- ", no known window). */
+     * chrome 4 (the gauge reads "-/- ", no known window). */
     AppHarness *h = harness_new(
         "openrouter", "vendor/very-long-model-identifier-abcdefghij", NULL);
     ASSERT_NOT_NULL(h);
@@ -2016,7 +2016,7 @@ static void test_status_row_identity_elides_on_narrow_terminal(void)
     ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 46u);
 
     /* The gauge is untouched (its own span, at full text). */
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -2040,7 +2040,9 @@ static void test_status_row_identity_dropped_when_short(void)
     AppHarness *h = harness_new(
         "openrouter", "vendor/very-long-model-identifier-abcdefghij", NULL);
     ASSERT_NOT_NULL(h);
-    tui_runtime_send(h->rt, tui_msg_window_size(10, 24));
+    /* 6 columns: the 4-column gauge and a one-column rule, with no room
+     * left for the identity's own one-column floor plus its pad. */
+    tui_runtime_send(h->rt, tui_msg_window_size(6, 24));
     tui_runtime_drain(h->rt);
     tui_runtime_flush(h->rt);
 
@@ -2050,7 +2052,7 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_NOT_NULL(prompt);
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 10u);
+    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 6u);
     ASSERT_TRUE(strstr(row, "openrouter") == NULL);
     ASSERT_TRUE(strstr(row, "vendor/") == NULL);
     /* No identity bytes at all — not even the elided head or the pad. */
@@ -2059,7 +2061,7 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_TRUE(strstr(row, sgr) == NULL);
     free(sgr);
     /* The chrome is whole and the rule fills what is left. */
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -3221,7 +3223,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") == NULL);
     char *glyph = span_bytes(tui_color_ansi(11), "\xc2\xb7 ");
-    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
@@ -4127,7 +4129,7 @@ static void test_submit_echoes_once(void)
  * history: it must never be finalized into the scrollback. The frame
  * finish_inline persists is the echoed prompt row ALONE — the chrome row
  * sits directly above it in the live frame, so finishing the whole frame
- * would strand a `--- ctx -/- ---…` row in the scrollback above every
+ * would strand a `--- -/- ---…` row in the scrollback above every
  * submitted line. The tell is the byte immediately before the echoed
  * row's prompt span: a CLEARED row (`\r\x1b[K`, the textinput's own
  * erase) with the fix, versus the status row's `\r\n\x1b[K` separator
@@ -4853,7 +4855,7 @@ static void *warm_catalog_server_thread(void *arg)
  * cannot be the only warm site, because the model id is PERSISTED (the
  * config shadow), so a session that never opens the picker reads the
  * catalog cold. That was the reported bug's remaining half: after the
- * point-of-use fix, `ctx 11k/-` against `hyper · deepseek-v4.1-flash`
+ * point-of-use fix, `11k/-` against `hyper · deepseek-v4.1-flash`
  * still lasted the whole session — hyper's static fallback is one row,
  * and nothing else had warmed the cache.
  *
@@ -4889,7 +4891,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 
     /* Cold: the static fallback does not carry the id, so the limit is
      * honestly unknown. */
-    char *cold = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *cold = span_bytes(nm_color_gutter(), "-/- ");
     ASSERT_NOT_NULL(cold);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), cold) != NULL);
     free(cold);
@@ -4905,7 +4907,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
     /* It lands and fills the cache: the gauge resolves the new row on
      * the spot. */
     ASSERT_EQ(harness_pump_catalog(h, 50), 0);
-    char *warm = span_bytes(nm_color_gutter(), "ctx -/1M ");
+    char *warm = span_bytes(nm_color_gutter(), "-/1M ");
     ASSERT_NOT_NULL(warm);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), warm) != NULL);
     free(warm);
@@ -5002,7 +5004,7 @@ static int server_bind_full(int *port, int *fillers, int max_fill,
  * a slow TLS handshake — then failed the fetch BEFORE the peer had
  * been asked anything, and the background warm has no retry, so the
  * gauge's denominator read `-` for the whole session (the reported
- * `ctx 11k/-`).
+ * `11k/-`).
  *
  * Here the fetch is still CONNECTING when the fake clock crosses the
  * deadline: the connect is the walk's to bound (its budget is raised

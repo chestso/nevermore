@@ -167,7 +167,7 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   fetch moves the gauge, the tier colour and the `context-pressure`
   reminder with no push — the window used to be a copy the UI pushed at
   `build_agent`/`/model`, which the fetch could not update (a
-  wire-catalog model outside the static fallback showed `ctx 47.1k/-`
+  wire-catalog model outside the static fallback showed `47.1k/-`
   for the whole session). **The vision clause is the last reader, and it
   is resolved at the only moment it can be: while the active model's
   cached prefix is cold.** It lives in the system prompt, so a clause

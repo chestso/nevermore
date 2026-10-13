@@ -2446,7 +2446,7 @@ static void open_models_popup(NmChatApp *app, const ModelQuery *q)
  * never opened it — the common case, since the model id is persisted
  * in the config shadow — read the catalog COLD all session: a
  * wire-catalog model outside the provider's static fallback showed
- * `ctx 11k/-` in the status row for the whole chat (and the tier, the
+ * `11k/-` in the status row for the whole chat (and the tier, the
  * `context-pressure` reminder and the first round's tool-use claim
  * resolved cold with it). Every one of those readers resolves at the
  * point of use from `models_cached` (agent.c's model_entry), so the
@@ -2513,7 +2513,7 @@ static void catalog_step(NmChatApp *app)
     } else if (app->rt) {
         /* A warm's landing changes what the gauge (and the tier colour)
          * draws, and it is the ONLY event: nothing else wakes the loop
-         * for it, so the frame would keep the pre-warm `ctx -/-` until
+         * for it, so the frame would keep the pre-warm `-/-` until
          * the next keystroke. */
         tui_runtime_wakeup(app->rt);
     }
@@ -3920,8 +3920,8 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 /* Status row (P2): spinner + gauge + separator rule + identity      */
 /* ---------------------------------------------------------------- */
 
-/* The gauge text: `ctx <used>/<limit>`, with the SESSION's cache-read
- * rate appended when any round has reported a cached count. Both ctx
+/* The gauge text: `<used>/<limit>`, with the SESSION's cache-read
+ * rate appended when any round has reported a cached count. Both
  * numbers are provider-reported (used) / catalog metadata (limit); "-"
  * is an honest unknown, never an estimate. The ⚡ rate is
  * cache_read / cache_base (see nm_agent_session_*): reads over the input
@@ -3939,7 +3939,7 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
     char u[24], l[24];
     format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
     format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
-    int n = snprintf(dst, cap, "ctx %s/%s", u, l);
+    int n = snprintf(dst, cap, "%s/%s", u, l);
     long read = nm_agent_session_cache_read_tokens(app->agent);
     long base = nm_agent_session_cache_base_tokens(app->agent);
     if (read >= 0 && base > 0 && n > 0 && (size_t)n < cap)

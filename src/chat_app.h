@@ -83,7 +83,7 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
  * the only thing that does: the model id is persisted (the config
  * shadow), so a session that never opens the picker reads the catalog
  * cold, and a wire-catalog model outside the provider's static fallback
- * shows `ctx 11k/-` for the whole chat.
+ * shows `11k/-` for the whole chat.
  *
  * Called by main.c once the endpoint is resolved (never from the
  * constructor: the endpoint is not known yet, and a unit test's app must

@@ -124,7 +124,7 @@ byte-identical** to OpenAI — four deltas from real responses:
    member on _each_ reasoning/content chunk, with the real object only
    at the end of the round. A client that reads the member's presence
    as "usage reported" hands its receiver an all-unknown report
-   mid-round — nevermore's context gauge blanked to `ctx -/-` while the
+   mid-round — nevermore's context gauge blanked to `-/-` while the
    model thought, then snapped back at the round's end. Fire on a
    usage **object** (JSON type), never on the key's mere presence.
 

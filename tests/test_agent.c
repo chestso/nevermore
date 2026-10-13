@@ -3448,7 +3448,7 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
  * — the gauge follows with NO push and NO agent rebuild. The bug this
  * pins: the limit used to be a copy pushed at construction, so a model
  * the static fallback did not carry (hyper's `deepseek-v4.1-flash`, the
- * user's `ctx 47.1k/-`) stayed `-` for the whole session, however warm
+ * user's `47.1k/-`) stayed `-` for the whole session, however warm
  * the cache got. */
 static const NmModel stub_cold_models[] = {
     { "other-model", "Stub (static fallback)", 0, 0, 8192, 0 },
