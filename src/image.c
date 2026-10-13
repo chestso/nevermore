@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "nm_image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"

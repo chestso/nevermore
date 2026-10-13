@@ -23,7 +23,7 @@
 
 #include "json.h"
 #include "conf.h" /* the store the run_command budget resolves from */
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "proc.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */

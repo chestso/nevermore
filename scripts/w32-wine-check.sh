@@ -111,7 +111,7 @@ run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_config tests/test_config.c src/conf.c
 run_build test_args tests/test_args.c src/args.c
-run_build test_session tests/test_session.c src/session.c src/nm_image_bytes.c src/nm_size.c
+run_build test_session tests/test_session.c src/session.c src/image_bytes.c src/nm_size.c
 run_build test_context tests/test_context.c src/context.c src/nm_reminder.c
 
 run_build test_file_ledger tests/test_file_ledger.c src/file_ledger.c
@@ -124,7 +124,7 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/tools_websearch.c src/tools_exec.c src/proc.c src/proc_w32.c \
 	src/tools_spawn_w32.c src/os_compat_w32.c \
 	src/json.c src/transport.c src/transport_socket.c \
-	src/conf.c src/wire_recorder.c src/nm_image_bytes.c src/nm_size.c \
+	src/conf.c src/wire_recorder.c src/image_bytes.c src/nm_size.c \
 	$TLS_SRC -lws2_32 -lpthread
 
 run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
@@ -133,7 +133,7 @@ run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
 	src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/transport.c \
 	src/transport_socket.c src/conf.c src/wire_recorder.c \
-	src/nm_image_bytes.c src/nm_size.c $TLS_SRC \
+	src/image_bytes.c src/nm_size.c $TLS_SRC \
 	-lws2_32 -lpthread
 
 run_build test_wire src/clock.c tests/test_wire.c src/transport.c src/transport_socket.c \
@@ -185,7 +185,7 @@ run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_c
 	src/provider_test.c \
 	-lws2_32 -lpthread
 
-run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/nm_image_bytes.c src/nm_size.c \
+run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/image_bytes.c src/nm_size.c \
 	src/context.c src/nm_reminder.c src/file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
 	src/tools_exec.c src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/sse.c \
@@ -211,7 +211,7 @@ run_build test_highlight tests/test_highlight.c src/highlight.c
 
 # The pixel half is pure C (no boba), so it cross-checks under wine.
 run_build test_image_codec tests/test_image_codec.c src/nm_image_codec.c \
-	src/nm_image_bytes.c src/nm_size.c
+	src/image_bytes.c src/nm_size.c
 
 # test_history needs boba's textinput. No MinGW-built boba exists on
 # this box (boba has no Windows CI of its own; nevermore's MSYS2

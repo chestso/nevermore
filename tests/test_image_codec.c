@@ -2,7 +2,7 @@
  *
  * Pure C, no boba: it links the codec + the byte half only — the point
  * is that the codec is usable without boba, exactly like
- * nm_image_bytes (so the display tier and the session/agent tests
+ * image_bytes (so the display tier and the session/agent tests
  * share one byte vocabulary).
  *
  * The JPEG fixtures are committed blobs: one 16x16 four-quadrant image
@@ -18,7 +18,7 @@
 
 #include "test_helpers.h"
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "nm_image_codec.h"
 
 /* 16x16, quadrants: red | blue / green | near-white. Baseline 4:4:4. */

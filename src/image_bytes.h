@@ -1,4 +1,4 @@
-/* nm_image_bytes.h - the image tier's byte half.
+/* image_bytes.h - the image tier's byte half.
  *
  * Container sniffing (headers only, NEVER a pixel decode), base64 in
  * both directions, the `data:` URL builder, and the one file probe.

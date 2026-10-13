@@ -697,7 +697,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   which style). The frame comes back BY VALUE — no static frame string,
   so no consumer can lean on pointer identity over a frame whose color
   changes while its glyph does not.
-- **Images** — two halves, one sniffer. `src/nm_image_bytes.{h,c}` is
+- **Images** — two halves, one sniffer. `src/image_bytes.{h,c}` is
   the BYTE half (pure C, no boba): the container sniffer (headers only
   — a pixel decode is the OTHER half's job), base64 both ways, the
   `data:` URL builder, and

@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "session.h"
 #include "test_helpers.h"
 

@@ -30,7 +30,7 @@
 
 #include "nevermore.h"
 #include "agent.h"
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "proc.h"
 #include "provider.h"
 #include "session.h"

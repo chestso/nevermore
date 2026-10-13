@@ -33,11 +33,11 @@
 
 #include <boba/stream.h>
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "nm_image_codec.h"
 
 /* There is NO display-side size cap (revised D7, see the plan's D16):
- * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, nm_image_bytes.h) is the ONE
+ * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, image_bytes.h) is the ONE
  * cap, and it sits where the bytes are actually committed — the
  * attach. An image that is in the conversation has already paid for
  * its bytes (they ride every request), so refusing to RENDER one here
@@ -63,7 +63,7 @@ typedef struct NmImageSlot
                                * probe held only the head */
     int w, h;                 /* source pixels (0 = unknown)                  */
     int format;               /* NmImageFormat of the SOURCE
-                               * (nm_image_bytes.h); boba's TuiImageFormat
+                               * (image_bytes.h); boba's TuiImageFormat
                                * appears only at the spec */
     int transport;            /* TuiImageTransport, -1 = degrade            */
     int disp_cols, disp_rows; /* the committed display size (cells) */
@@ -136,7 +136,7 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
                      void *user_data);
 
 /* The container's short name for markers ("PNG" / "JPEG" / "GIF";
- * "image" for unknown) lives in nm_image_bytes.h, with the sniffer
+ * "image" for unknown) lives in image_bytes.h, with the sniffer
  * that decides it — re-exported through this header's include so the
  * renderer pair (nm_markdown_render.c) reads it from the slot's
  * vocabulary. */

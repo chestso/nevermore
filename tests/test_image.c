@@ -989,7 +989,7 @@ static void test_integration_live_placeholder_not_payload(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* The byte half (src/nm_image_bytes.c): base64, data URLs, sniffing, */
+/* The byte half (src/image_bytes.c): base64, data URLs, sniffing, */
 /* the file probe. Pure C — no boba on this path, which is the point  */
 /* (session.c links it too).                                          */
 /* ---------------------------------------------------------------- */

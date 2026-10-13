@@ -1,6 +1,6 @@
 /* nm_image_codec.h - the image tier's PIXEL half.
  *
- * Container sniffing and base64 live in nm_image_bytes (the byte half,
+ * Container sniffing and base64 live in image_bytes (the byte half,
  * headers only, never a decode). THIS module is the other half: it
  * turns bytes into pixels and back, and it is the ONE translation unit
  * that includes the vendored stb single-file libraries (D14):

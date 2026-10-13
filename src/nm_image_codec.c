@@ -12,7 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 
 #define STB_IMAGE_IMPLEMENTATION
 #define STBI_NO_STDIO /* decode from memory only */

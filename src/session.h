@@ -60,7 +60,7 @@ typedef struct NmImage
     char alt[64]; /* the display name: the file's base name for an
                    * attached image, "image" for a received one (a
                    * generated picture has no file) */
-    int format;   /* NmImageFormat (nm_image_bytes.h) */
+    int format;   /* NmImageFormat (image_bytes.h) */
     int w, h;     /* source pixels (0 = unknown) */
     size_t bytes; /* decoded byte count (the attach line) */
 } NmImage;

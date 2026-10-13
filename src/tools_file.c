@@ -51,7 +51,7 @@
 
 #include "json.h"
 #include "file_ledger.h"
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "nm_size.h"
 #include "tools.h"
 #include "xxh3.h"
@@ -843,7 +843,7 @@ static NmToolResult oversize_result(const char *path, const NmImageProbe *p)
 
 /* Common non-text containers, named for the refusal line below. A tiny
  * table, not a file(1): these are the ones a model actually asks a text
- * tool to read. Image containers are NOT here — nm_image_bytes owns
+ * tool to read. Image containers are NOT here — image_bytes owns
  * container identity, and the image branch has already had its turn.
  * Ordered; the first match wins. */
 static const struct

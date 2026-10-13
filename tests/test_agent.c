@@ -28,7 +28,7 @@
 
 #include "agent.h"
 #include "conf.h"
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "proc.h"
 #include "transport.h"
 #include "provider.h"

@@ -50,7 +50,7 @@
 #include "nm_reminder.h"
 #include "authinfo.h"
 #include "colors.h"
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 #include "proc.h"
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"

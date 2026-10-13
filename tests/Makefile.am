@@ -226,8 +226,8 @@ test_tls_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Session: transcript + context window (pure C, links session.c +
 # the image byte half, which the attach path shares with the display
-# path — nm_image_bytes.c is boba-free precisely so this stays so).
-test_session_SOURCES = test_session.c ../src/session.c ../src/nm_image_bytes.c ../src/nm_size.c
+# path — image_bytes.c is boba-free precisely so this stays so).
+test_session_SOURCES = test_session.c ../src/session.c ../src/image_bytes.c ../src/nm_size.c
 test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,
@@ -253,7 +253,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/conf.c \
-    ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
+    ../src/wire_recorder.c ../src/image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -268,7 +268,7 @@ test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/conf.c \
-    ../src/wire_recorder.c ../src/nm_image_bytes.c ../src/nm_size.c \
+    ../src/wire_recorder.c ../src/image_bytes.c ../src/nm_size.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_web_search_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -283,7 +283,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
 test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
-    ../src/nm_image_bytes.c ../src/nm_size.c \
+    ../src/image_bytes.c ../src/nm_size.c \
     ../src/context.c ../src/nm_reminder.c \
     ../src/file_ledger.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
@@ -320,7 +320,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
     ../src/nm_markdown_render.c ../src/highlight.c ../src/image.c \
-    ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c
+    ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
 
@@ -329,7 +329,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # TuiRowSink/transport path) and the markdown grammar (the image line
 # is classified + parsed by nm_markdown).
 test_image_SOURCES = test_image.c ../src/image.c \
-    ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c \
+    ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
@@ -337,9 +337,9 @@ test_image_LDADD = $(BOBA_LIBS)
 # Image codec: the vendored stb decode/encode wrapper (src/nm_image_codec.c).
 # Pure C, NO boba — it links the codec + the byte half only, which is
 # the point (the codec must be usable without boba, exactly as
-# nm_image_bytes is for the session/agent tests).
+# image_bytes is for the session/agent tests).
 test_image_codec_SOURCES = test_image_codec.c ../src/nm_image_codec.c \
-    ../src/nm_image_bytes.c ../src/nm_size.c
+    ../src/image_bytes.c ../src/nm_size.c
 test_image_codec_CFLAGS = $(TEST_CFLAGS)
 
 # Reminders: the tag framing, the trust boundary (sanitizer) and the
@@ -368,7 +368,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c \
-    ../src/image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/image.c ../src/image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

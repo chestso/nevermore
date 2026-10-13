@@ -1,10 +1,10 @@
-/* nm_image_bytes.c - the image tier's byte half (see nm_image_bytes.h).
+/* image_bytes.c - the image tier's byte half (see image_bytes.h).
  *
  * Character-level scans only, no regex; no pixel decode ever (headers
  * only: kitty takes PNG containers via f=100, iTerm2 decodes its own).
  */
 
-#include "nm_image_bytes.h"
+#include "image_bytes.h"
 
 #include <stdio.h>
 #include <stdlib.h>
