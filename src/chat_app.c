@@ -58,7 +58,7 @@
 #include "colors.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
-#include "nm_image.h"
+#include "image.h"
 #include "nm_size.h"
 #include "source.h"
 #include "proc.h"
@@ -993,7 +993,7 @@ static TuiKeyboardEnhancements kbd_declaration(const NmChatApp *app)
 
 /* Does the terminal render this image? The "if supported" gate: the
  * runtime's profile (resolved by the startup probe) through
- * nm_image.c's tier table, so the answer is exactly what the commit
+ * image.c's tier table, so the answer is exactly what the commit
  * pass will do. No runtime, an unresolved probe, a terminal without
  * graphics, or a container the terminal cannot take all answer 0, and
  * the image is left to the submit-time echo. */

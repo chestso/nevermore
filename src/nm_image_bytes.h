@@ -3,7 +3,7 @@
  * Container sniffing (headers only, NEVER a pixel decode), base64 in
  * both directions, the `data:` URL builder, and the one file probe.
  * Pure C — no boba, no transport — because BOTH halves of the tier
- * stand on it: the transcript's display path (nm_image.c, which owns
+ * stand on it: the transcript's display path (image.c, which owns
  * the boba transports) and the conversation's attach path (session.c,
  * which freezes the captured bytes into its image store). One place
  * knows what a PNG header is.
@@ -57,7 +57,7 @@ typedef enum
  * request — chat/completions has no upload/reference endpoint — so this
  * bounds the body, not the display. Not a config key: the degradation
  * ladder is the switch, and a knob without a user is noise. It is the
- * ONE cap: there is no display-side cap (nm_image.h), because an image
+ * ONE cap: there is no display-side cap (image.h), because an image
  * that is in the conversation has already paid for its bytes — a 4 MiB
  * photo sends fine and renders. */
 #define NM_IMAGE_MAX_WIRE_BYTES ((size_t)8 * 1024 * 1024)
@@ -100,7 +100,7 @@ const char *nm_image_kind_name(NmImageKind kind);
 
 /* The same sniff, answered as the WIRE's question: NM_IMAGE_FMT_UNKNOWN
  * for a container we recognise but cannot send. The wire-side consumers
- * (session.c's attach, nm_image.c's tier) ask this; the tool boundary
+ * (session.c's attach, image.c's tier) ask this; the tool boundary
  * asks nm_image_sniff_kind. */
 NmImageFormat nm_image_sniff(const unsigned char *d, size_t n, int *w, int *h);
 
@@ -132,7 +132,7 @@ char *nm_image_data_url(int format, const unsigned char *bytes, size_t len,
  * (NM_IMAGE_FMT_UNKNOWN when it is not one the wire names), and the
  * b64 out-params borrow the payload range inside url. 0 on success,
  * -1 when the shape is not a base64 data URL. The ONE parse of this
- * shape: the display path (nm_image.c), the session's received-image
+ * shape: the display path (image.c), the session's received-image
  * attach, and ask mode's file save all stand on it. */
 int nm_image_data_url_split(const char *url, size_t len, NmImageFormat *fmt,
                             const char **b64, size_t *b64_len);

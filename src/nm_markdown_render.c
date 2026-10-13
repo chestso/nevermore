@@ -34,7 +34,7 @@
 #include <boba/unicode.h>
 
 #include "colors.h"
-#include "nm_image.h"
+#include "image.h"
 #include "nm_markdown.h"
 #include "nm_size.h"
 

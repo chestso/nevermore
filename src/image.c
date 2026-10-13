@@ -1,12 +1,12 @@
-/* nm_image.c - the transcript IMAGE tier's policy half.
- * See nm_image.h. Character-level scans only, no regex. Header-only
+/* image.c - the transcript IMAGE tier's policy half.
+ * See image.h. Character-level scans only, no regex. Header-only
  * sniffing for every container the terminal already takes (PNG via
  * kitty's f=100, any of them via iTerm2); the ONE decode is the
  * kitty-vs-JPEG lane, where a JPEG is transcoded to PNG through
  * nm_image_codec (the vendored stb).
  */
 
-#include "nm_image.h"
+#include "image.h"
 
 #include <stdio.h>
 #include <stdlib.h>

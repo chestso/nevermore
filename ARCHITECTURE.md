@@ -710,7 +710,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   builder or the display tier. `read_file` uses the width: a container
   it can see is an image but cannot attach is named (container, dims,
   size, and the attachable set) instead of being reported as unreadable
-  text. `src/nm_image.c` is the DISPLAY half (the boba
+  text. `src/image.c` is the DISPLAY half (the boba
   transports, the profile ladder, the one-slot cache) and stores
   nevermore's `NmImageFormat` — boba's `TuiImageFormat` appears only at
   the spec it fills. **The PIXEL half is `src/nm_image_codec.{h,c}`**
@@ -1082,7 +1082,7 @@ stream messages; boba is the only caller of
   commit-time, deferral is what keeps emission order through the gap.
   boba encodes (kitty `f=100` APC
   / iTerm2 1337, explicit cells, `C=1` so the terminal never moves
-  the cursor); nevermore decides (`src/nm_image.c`: tier table,
+  the cursor); nevermore decides (`src/image.c`: tier table,
   display math, the one-slot cache). Degradation is a one-line
   MARKER (alt · format WxH · size — reason) — the payload is NEVER
   the fallback text. `TuiBlock.image_id` is boba-assigned and

@@ -27,7 +27,7 @@
 #include <boba/stream.h>
 
 #include "highlight.h"
-#include "nm_image.h"
+#include "image.h"
 
 /* nevermore's stream vocabulary, addressed positionally by boba's
  * transcript (-1 is boba's system stream). These are the ids the
@@ -42,7 +42,7 @@
  *  - the fence token highlighter's cross-line state (an open block
  *    comment), per stream: a fence on content must not share it with
  *    one on reasoning;
- *  - the image tier's one-slot cache (see nm_image.h) and the layout
+ *  - the image tier's one-slot cache (see image.h) and the layout
  *    width the display math needs (measure_image's seam carries no
  *    width, so the app maintains it here — set at construction and on
  *    every resize; it is layout input, not stream state, so a clear

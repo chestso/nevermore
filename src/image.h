@@ -1,4 +1,4 @@
-/* nm_image.h - the transcript IMAGE tier's policy half.
+/* image.h - the transcript IMAGE tier's policy half.
  *
  * boba owns the transports (kitty APC / iTerm2 1337) and the commit
  * gate; this module owns every decision around them: parsing the

@@ -1,6 +1,6 @@
 /* test_image.c - the transcript IMAGE tier's policy half.
  *
- * Unit tests for src/nm_image.c (source parsing, base64 decode,
+ * Unit tests for src/image.c (source parsing, base64 decode,
  * header sniffing, tier selection, display math, the one-slot reuse)
  * plus integration through boba's transcript: a data-URI image line
  * in a content stream commits as a kitty APC (golden bytes) on a
@@ -23,7 +23,7 @@
 #include "test_helpers.h"
 
 #include "colors.h"
-#include "nm_image.h"
+#include "image.h"
 #include "nm_image_codec.h"
 #include "nm_markdown.h"
 #include "nm_markdown_render.h"
