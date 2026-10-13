@@ -24,12 +24,6 @@ jobs:
       # linux.yml / macos.yml (bump all three together). The boba commit
       # must be PUSHED before nevermore, or CI cannot fetch it.
       BOBA_REF: 25ddead1b10b1c39af746cca88cc5a85223ac53f
-      # Install prefix shared by boba and nevermore. Pinned to a Windows
-      # home path (NOT $HOME) so actions/cache — which runs on the host,
-      # not inside the MSYS2 shell, where $HOME resolves to
-      # /home/runneradmin inside the MSYS2 root — sees the same directory
-      # the msys2 steps write. Forward slashes stay escape-free in both.
-      LOCAL_PREFIX: C:/Users/runneradmin/.local
 
     steps:
       - name: Checkout nevermore
@@ -114,10 +108,14 @@ jobs:
         id: boba-cache
         uses: actions/cache@v4
         with:
-          path: ${{ env.LOCAL_PREFIX }}
-          # Keyed on the boba ref + the MSYS2 environment: a pin bump or
-          # a different msystem rebuilds; otherwise the install (built
-          # once) is restored in seconds instead of recompiled.
+          # The prefix ($HOME/.local inside the MSYS2 shell) maps to the
+          # MSYS2 install root + /home/runneradmin on the host. We cache
+          # the host-side Windows path because actions/cache runs on the
+          # host, not in the MSYS2 shell. Keyed on the boba ref + msystem:
+          # a pin bump rebuilds; otherwise the install is restored in
+          # seconds instead of recompiled. A stale key (moved MSYS2 root)
+          # degrades to a miss+rebuild, never a break.
+          path: C:/msys64/home/runneradmin/.local
           key: boba-install-ucrt64-${{ env.BOBA_REF }}
 
       - name: Build and install boba
@@ -126,7 +124,7 @@ jobs:
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$LOCAL_PREFIX"
+          ../configure --prefix="$HOME/.local"
           make -j && make install
 
       - name: Build (Schannel TLS — native, no deps)
@@ -135,11 +133,13 @@ jobs:
           # MSYS2 environment (msys2/setup-msys2#98), and /etc/profile
           # overwrites it on every login shell; export it here so
           # pkgconf finds the boba.pc we just installed (from the cache
-          # or the fresh build above).
-          export PKG_CONFIG_PATH="$LOCAL_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
+          # or the fresh build above). $HOME/.local is a POSIX path
+          # (no drive letter) — a C:/... path here would split on the
+          # drive-letter colon and pkg-config would see two bogus dirs.
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$LOCAL_PREFIX"
+          ../configure --prefix="$HOME/.local"
           make -j
           # Pre-build the test binaries in parallel HERE, so `make check`
           # below does not compile ~28 of them SERIALly inside the timed
