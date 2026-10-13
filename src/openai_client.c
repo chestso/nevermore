@@ -299,7 +299,20 @@ struct NmChatStream
     NmStreamCallback on_delta;
     NmUsageFn on_usage;
     void *userdata;
-    int done;     /* [DONE] seen or fatal error */
+    /* Provider response-metadata hook (endpoint's, copied at begin):
+     * called once per round with the live connection, so the provider
+     * can fill result->meta from the retained response headers. NULL
+     * for a provider with no such metadata. */
+    void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
+    int done;     /* stream finished: a fatal error, or the OK path
+                   * (framing end reached). NOT "[DONE] seen" — that is
+                   * saw_done, because a chunked response's trailers
+                   * arrive AFTER [DONE] and must still be read. */
+    int saw_done; /* the [DONE] marker was seen (the stream is
+                   * logically complete, but the transport may still
+                   * carry the chunked trailer section: the transport
+                   * framing end, not [DONE], is what completes the
+                   * round — docs/HYPER-API.md §3.5.2). */
     int finished; /* a non-empty choices[0].finish_reason was
                    * seen: the generation is complete. [DONE]
                    * is not universal — OpenCode Go's
@@ -398,7 +411,7 @@ static void parse_usage(NmJson *uobj, NmUsage *u)
 static void handle_event(NmChatStream *st, const char *data, size_t len)
 {
     if (strcmp(data, "[DONE]") == 0) {
-        st->done = 1;
+        st->saw_done = 1;
         return;
     }
     const char *err = NULL;
@@ -650,15 +663,18 @@ static void stream_teardown(NmChatStream *h)
  * recorded; the stream data carries them). */
 static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
 {
-    if (len == 0)
-        return 0;
+    if (len == 0 || st->done || st->saw_done)
+        return 0; /* stream finished (fatal error) or [DONE] seen:
+                   * nothing more is dispatched. After [DONE] the bytes
+                   * still drain — the trailer section is read for the
+                   * response metadata, not for events. */
     NmSseEvent ev;
     int r = nm_sse_feed(st->sse, data, len, &ev);
     while (r == 1) {
         nm_wire_tap_stream_event(st->conn, ev.event, ev.data,
                                  strlen(ev.data));
         handle_event(st, ev.data, strlen(ev.data));
-        if (st->done)
+        if (st->done || st->saw_done)
             break;
         r = nm_sse_feed(st->sse, "", 0, &ev);
     }
@@ -697,8 +713,14 @@ static NmChatStatus stream_one_step(NmChatStream *st)
             st->status = NM_CHAT_ERR_PARSE;
             return NM_CHAT_ERR_PARSE;
         }
-        if (st->done)
+        if (st->done) /* a fatal event rode the head-adjacent bytes */
+            return st->status;
+        if (st->saw_done) {
+            char sink[512];
+            while (nm_read_body(st->conn, sink, sizeof(sink)) > 0)
+                ;
             return NM_CHAT_OK;
+        }
     }
 
     for (;;) {
@@ -723,8 +745,24 @@ static NmChatStatus stream_one_step(NmChatStream *st)
             st->status = NM_CHAT_ERR_PARSE;
             return NM_CHAT_ERR_PARSE;
         }
+        /* A fatal event (a provider error object) finished the stream
+         * outright: return its status, do not keep draining. */
         if (st->done)
+            return st->status;
+        /* [DONE]: the content is complete. Consume any tail the
+         * transport ALREADY holds — the chunked terminator and trailer
+         * section, where a streamed Prism savings lands
+         * (docs/HYPER-API.md §3.5.2) — with a NON-BLOCKING drain: a
+         * read that would block is the "not here yet" answer, and the
+         * round completes anyway (the savings are telemetry, never a
+         * reason to stall a finished turn). The dispatch guard above
+         * keeps the SSE parser out of the drained bytes. */
+        if (st->saw_done) {
+            char sink[512];
+            while (nm_read_body(st->conn, sink, sizeof(sink)) > 0)
+                ;
             return NM_CHAT_OK;
+        }
         /* Bytes arrived: loop for the next read, which returns
          * would-block (or 0) the moment the transport is drained. */
     }
@@ -823,6 +861,14 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
      * never reported one publishes "" — never reported, not "stop". */
     snprintf(result->finish_reason, sizeof(result->finish_reason), "%s",
              h->finish_reason);
+    /* Provider response metadata (Hyper's Prism routing, §3.5.2): read
+     * from the live connection's retained headers/trailers. All-empty
+     * when the provider reports none — the "direct" case. The
+     * connection is still open here (every caller publishes before
+     * stream_teardown). */
+    memset(&result->meta, 0, sizeof(result->meta));
+    if (h->read_response_meta && h->conn)
+        h->read_response_meta(h->conn, result);
     switch (h->status) {
     case NM_CHAT_OK:
     case NM_CHAT_PENDING:
@@ -959,6 +1005,7 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     st->on_delta = req->on_delta;
     st->on_usage = req->on_usage;
     st->userdata = req->userdata;
+    st->read_response_meta = ep->read_response_meta;
     st->status = NM_CHAT_OK;
 
     /* Queue the request; the connect/send phases drain inside
@@ -1068,6 +1115,7 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         result->http_status = 0;
         result->message[0] = '\0';
         result->finish_reason[0] = '\0';
+        memset(&result->meta, 0, sizeof(result->meta));
     }
     if (!h) {
         if (result) {
@@ -1160,9 +1208,14 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
     /* SSE body: pull what's ready. */
     NmChatStatus s = stream_one_step(h);
     if (s == NM_CHAT_OK) {
-        /* Complete stream. Two ways to get here:
+        /* Complete stream. stream_one_step returns OK either because
+         * the TRANSPORT reached its framing end (nm_read_body == 0) or
+         * because `[DONE]` was seen and the transport's already-buffered
+         * tail (the chunked terminator + trailer section, where a
+         * streamed Prism savings lands) was drained. What "complete"
+         * means for the CONTENT:
          *
-         *  - `[DONE]` was seen (h->done), the OpenAI-compatible
+         *  - `[DONE]` was seen (h->saw_done), the OpenAI-compatible
          *    marker almost every provider sends; or
          *  - the transport ended the body at a real framing
          *    boundary with a finish_reason chunk already delivered.
@@ -1178,7 +1231,7 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
          *
          * EOF with neither is still a truncated stream: deliver
          * what arrived but flag the transport condition. */
-        if (!h->done && !h->finished) {
+        if (!h->saw_done && !h->finished) {
             h->status = NM_CHAT_ERR_TRANSPORT;
             /* Prefer the transport's specific truncation detail
              * (byte counts); the generic note is the fallback. */
@@ -1188,6 +1241,7 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
                      *d ? d : "stream ended before [DONE]");
             h->error_len = strlen(h->error_body);
         }
+        h->done = 1;
         stream_finish(h);
         result_publish(h, result);
         stream_teardown(h);

@@ -285,6 +285,27 @@ typedef enum
  * one (a stream that ended on [DONE]/EOF without it). */
 #define NM_CHAT_FINISH_MAX 32
 
+/* Provider response metadata for one round: facts the wire reported
+ * ABOUT the round, distinct from content and usage. Currently Hyper's
+ * Prism model router (docs/HYPER-API.md §3.5.2) — which model actually
+ * answered a routed turn and the savings it produced. Response-side
+ * only: a client never sends these. All-empty = not reported (the
+ * "direct" case: the turn was not routed, or the provider has no such
+ * metadata). */
+#define NM_ROUND_META_STR_MAX 64
+
+typedef struct NmRoundMeta
+{
+    /* The model that actually answered (Hyper's X-Prism-Model-Id /
+     * -Name), empty when the turn was not routed. */
+    char routed_model[NM_ROUND_META_STR_MAX];
+    char routed_name[NM_ROUND_META_STR_MAX];
+    /* Savings produced by routing (Hyper's X-Prism-Hypercredit-Savings
+     * / -Dollar-Savings), verbatim, empty when not reported. */
+    char hc_savings[NM_ROUND_META_STR_MAX];
+    char usd_savings[NM_ROUND_META_STR_MAX];
+} NmRoundMeta;
+
 /* A chat call's outcome. message is ALWAYS set when status is an
  * NM_CHAT_ERR_* (the always-set contract: every failure carries a
  * human-readable reason, so callers never guess a fallback string).
@@ -311,6 +332,9 @@ typedef struct NmChatResult
      * chunks); the agent reads it to tell a cut round
      * (`finish_reason: "length"`) from a finished one. */
     char finish_reason[NM_CHAT_FINISH_MAX];
+    /* Provider response metadata for the round (Prism routing, §3.5.2).
+     * All-empty when the provider reports none (the "direct" case). */
+    NmRoundMeta meta;
 } NmChatResult;
 
 /* Event-driven stream handle (chat_begin/step/end below). Opaque;

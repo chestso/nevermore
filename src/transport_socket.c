@@ -986,6 +986,9 @@ static void reset_response_state(NmConnection *conn)
     conn->chunk_state = CHUNK_SIZE;
     conn->chunk_remaining = 0;
     conn->trailer_line_empty = 1;
+    conn->trailer_len = 0;
+    conn->resp_hdr_n = 0;
+    conn->resp_head_hdr_n = 0;
     conn->err = NM_TRANSPORT_OK;
     conn->err_detail[0] = '\0';
     free(conn->resp.content_type);
@@ -1221,6 +1224,43 @@ int nm_socket_fd(NmConnection *conn)
 /* Response head parsing + body streaming                           */
 /* ---------------------------------------------------------------- */
 
+/* Store one response header line ("Name: value") into the retained
+ * set, trimmed, bounded. Used by BOTH the head parser (from its line
+ * buffer) and the chunked trailer scanner (from trailer_line), so a
+ * trailer is retained exactly like a head header and nm_response_header
+ * reads either. Silently drops the header when the name is empty or
+ * too long, or when the store is full (the cap bounds a verbose peer;
+ * the retention contract in transport.h says the first N win). */
+static void resp_hdr_store(NmConnection *conn, const char *line, size_t llen)
+{
+    if (conn->resp_hdr_n >= NM_RESPONSE_HEADERS_MAX)
+        return;
+    const char *colon = memchr(line, ':', llen);
+    if (!colon)
+        return; /* not a header line */
+    size_t nlen = (size_t)(colon - line);
+    const char *v = colon + 1;
+    size_t vlen = llen - nlen - 1;
+    while (nlen > 0 && (line[nlen - 1] == ' ' || line[nlen - 1] == '\t'))
+        nlen--;
+    while (vlen > 0 && (*v == ' ' || *v == '\t')) {
+        v++;
+        vlen--;
+    }
+    while (vlen > 0 && (v[vlen - 1] == ' ' || v[vlen - 1] == '\t'))
+        vlen--;
+    if (nlen == 0 || nlen >= NM_RESPONSE_HEADER_NAME_MAX)
+        return;
+    NmResponseHeader *h = &conn->resp_hdrs[conn->resp_hdr_n];
+    memcpy(h->name, line, nlen);
+    h->name[nlen] = '\0';
+    if (vlen >= NM_RESPONSE_HEADER_VALUE_MAX)
+        vlen = NM_RESPONSE_HEADER_VALUE_MAX - 1;
+    memcpy(h->value, v, vlen);
+    h->value[vlen] = '\0';
+    conn->resp_hdr_n++;
+}
+
 /* Parse the response head from conn->scratch once the blank line is
  * present. Character-level, case-insensitive header names we care
  * about; everything else is skipped. Returns:
@@ -1292,6 +1332,10 @@ static int parse_head(NmConnection *conn)
         if (llen == 0)
             break; /* blank line: end of headers */
 
+        /* Retain the header (head headers; trailers are stored the
+         * same way by the de-chunker) for nm_response_header. */
+        resp_hdr_store(conn, line, llen);
+
         /* Case-insensitive match helpers, character level. */
         if (llen > 19 && strncasecmp(line, "Transfer-Encoding:", 18) == 0 && strncasecmp(line + 19, "chunked", 7) == 0) {
             conn->resp.chunked = 1;
@@ -1315,6 +1359,11 @@ static int parse_head(NmConnection *conn)
         }
         /* every other header: skipped */
     }
+
+    /* The head's retained headers are the first resp_hdr_n; anything
+     * the de-chunker adds later is a trailer (the wire recorder splits
+     * the two groups on this index). */
+    conn->resp_head_hdr_n = conn->resp_hdr_n;
 
     /* response-head capture point: the head is fully parsed. Fires
      * BEFORE the body-byte relocation below — the memmove overwrites
@@ -1554,6 +1603,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 else
                     conn->chunk_state = CHUNK_DATA;
                 conn->trailer_line_empty = 1;
+                conn->trailer_len = 0;
             } else if (c != '\r') {
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL;
                 conn_set_err_detail(conn,
@@ -1572,6 +1622,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 else
                     conn->chunk_state = CHUNK_DATA;
                 conn->trailer_line_empty = 1;
+                conn->trailer_len = 0;
             }
             break; /* eat everything else in the extension */
         case CHUNK_DATA_CRLF:
@@ -1593,17 +1644,31 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             return -1;
         case CHUNK_TRAILER:
             /* Lines until an empty one. trailer_line_empty tracks
-             * whether only CR has been seen on this line so far. */
+             * whether only CR has been seen on this line so far; the
+             * line's bytes accumulate in trailer_line and are stored
+             * as a response header when the line ends — a trailer is
+             * retained exactly like a head header, so
+             * nm_response_header reads either. */
             if (c == '\n') {
                 if (conn->trailer_line_empty) {
                     conn->chunk_state = CHUNK_DONE;
+                    /* Trailers complete: the late headers (a streamed
+                     * Prism savings, docs/HYPER-API.md §3.5.2) are all
+                     * retained now. Fired only when at least one
+                     * trailer line was actually stored. */
+                    if (conn->resp_hdr_n > conn->resp_head_hdr_n)
+                        nm_wire_tap_response_trailers(conn);
                     return (long)out; /* may be 0: stream complete */
                 }
+                resp_hdr_store(conn, conn->trailer_line, conn->trailer_len);
                 conn->trailer_line_empty = 1; /* new line, empty so far */
+                conn->trailer_len = 0;
             } else if (c == '\r') {
                 /* stays; an LF next on an empty line terminates */
             } else {
                 conn->trailer_line_empty = 0;
+                if (conn->trailer_len + 1 < sizeof(conn->trailer_line))
+                    conn->trailer_line[conn->trailer_len++] = c;
             }
             break;
         default:
@@ -1658,6 +1723,7 @@ long nm_conn_read(NmConnection *conn, char *buf, size_t len)
     do {
         n = recv(conn->fd, buf, (int)len, 0);
     } while (n < 0 && errno == EINTR);
+
 #ifdef _WIN32
     if (n < 0 && conn->nonblocking &&
         (WSAGetLastError() == WSAEWOULDBLOCK))

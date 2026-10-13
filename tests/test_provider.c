@@ -393,6 +393,57 @@ static void *hyper_chat_server_thread(void *arg)
     return NULL;
 }
 
+/* Prism chat server: the four Hyper Prism headers — model id/name on
+ * the head, the two savings as chunked TRAILERS — sent in ONE write so
+ * the trailer section rides the [DONE] read and the transport retains
+ * it before the round completes (docs/HYPER-API.md §3.5.2). */
+static void *hyper_prism_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    static const char body[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    char resp[1024];
+    size_t n = (size_t)snprintf(resp, sizeof(resp),
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
+                          strlen(body));
+    memcpy(resp + n, body, strlen(body));
+    n += strlen(body);
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
+                          "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
+                          "X-Prism-Dollar-Savings: 0.0021\r\n\r\n");
+    send(cfd, resp, n, 0);
+    for (;;) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(cfd, &r);
+        struct timeval tv = { 0, 50 * 1000 };
+#ifdef _WIN32
+        if (select(0, &r, NULL, NULL, &tv) <= 0)
+            break;
+#else
+        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
+            break;
+#endif
+        char sink[64];
+        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
+            break; /* peer gone */
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
 /* Catalog server: the OpenAI {"object": "list", "data": [...]} shape
  * hyper's /v1/models answers (tokenless — HYPER-API.md §5), with
  * Content-Length (no chunked, exercise the other body path). */
@@ -619,6 +670,43 @@ static void test_hyper_chat_end_to_end(void)
     ASSERT_TRUE(strstr(last_request, "\"model\":\"gpt-oss-120b\"") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"role\":\"user\"") != NULL);
+}
+
+/* The provider's Prism hook reads all four Hyper router headers off the
+ * response — the model id/name from the head, the two savings from the
+ * chunked TRAILERS — into the round meta (docs/HYPER-API.md §3.5.2).
+ * Driven through the hyper vtable, so the hook is the provider's own,
+ * not a test stand-in. */
+static void test_hyper_prism_round_meta(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_prism_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1,
+        "nm-conv-prism", /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.meta.routed_model, "glm-5.3-flash");
+    ASSERT_STR_EQ(r.meta.routed_name, "GLM 5.3 Flash");
+    ASSERT_STR_EQ(r.meta.hc_savings, "12.5");
+    ASSERT_STR_EQ(r.meta.usd_savings, "0.0021");
+
+    pthread_join(th, NULL);
+    close(lfd);
 }
 
 static void test_hyper_chat_begin_step(void)
@@ -1603,6 +1691,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_models_fetch);
     RUN_TEST(test_hyper_models_live_then_fallback);
     RUN_TEST(test_hyper_chat_end_to_end);
+    RUN_TEST(test_hyper_prism_round_meta);
     RUN_TEST(test_hyper_chat_begin_step);
     RUN_TEST(test_hyper_chat_carries_affinity_headers);
     RUN_TEST(test_hyper_chat_null_conversation_id_falls_back);

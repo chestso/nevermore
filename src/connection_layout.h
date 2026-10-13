@@ -148,6 +148,22 @@ struct NmConnection
      * empty so far (only CRLF so far). The final CRLF of the chunked
      * body is an empty trailer line. */
     int trailer_line_empty;
+
+    /* Retained response headers (head + chunked trailers) for
+     * nm_response_header. resp_head_hdr_n is how many were captured
+     * from the HEAD — the wire recorder logs the head and the trailer
+     * groups separately (trailers are the ones after that index).
+     * Fixed-size, in the connection (memory-reuse: nothing allocated
+     * per header). */
+    NmResponseHeader resp_hdrs[NM_RESPONSE_HEADERS_MAX];
+    size_t resp_hdr_n;
+    size_t resp_head_hdr_n;
+
+    /* Trailer-line assembly: the de-chunker's CHUNK_TRAILER state
+     * accumulates one trailer line here (bounded) and stores it as a
+     * response header when the line ends. */
+    char trailer_line[NM_RESPONSE_HEADER_NAME_MAX + NM_RESPONSE_HEADER_VALUE_MAX + 4];
+    size_t trailer_len;
 };
 
 #endif /* NM_TRANSPORT_LAYOUT_HERE */

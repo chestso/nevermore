@@ -20,13 +20,13 @@ and the embedded
 
 ## 1. Overview
 
-| Field              | Value                                                                                                                                    |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Base URL (default) | `https://hyper.charm.land/v1`                                                                                                            |
-| Override           | `$HYPER_URL` — when set, Chat + provider endpoints use `$HYPER_URL`                                                                      |
-| Auth               | `Authorization: Bearer sk-hyper-...` (the model-catalog endpoints also answer without a token; the device-flow endpoints never take one) |
-| Content type       | `application/json`                                                                                                                       |
-| User-Agent         | `quoth` (device/token/introspect endpoints)                                                                                              |
+| Field              | Value                                                                                                                                                                                                                                              |
+| ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Base URL (default) | `https://hyper.charm.land/v1`                                                                                                                                                                                                                      |
+| Override           | `$HYPER_URL` — host root; when set, `BaseURL()` is `$HYPER_URL` and `/v1` (chat/credits/models) plus the device endpoints (§2, served at the root) are appended to it (crush `hyper.BaseURL()` = `cmp.Or($HYPER_URL, "https://hyper.charm.land")`) |
+| Auth               | `Authorization: Bearer sk-hyper-...` (the model-catalog endpoints also answer without a token; the device-flow endpoints never take one)                                                                                                           |
+| Content type       | `application/json`                                                                                                                                                                                                                                 |
+| User-Agent         | `quoth` (device/token/introspect endpoints)                                                                                                                                                                                                        |
 
 The chat-completions, credits, and model-catalog endpoints live under `{base}` =
 `https://hyper.charm.land/v1` (or `$HYPER_URL` when set). The OAuth device
@@ -480,6 +480,63 @@ declaration, and is frozen for a chat once a request has carried a trace
 immediately followed by `tool` role messages carrying each result. This whole
 block is treated as one assistant + tool exchange in the history.
 
+#### 3.5.2 Prism model router (response headers)
+
+Hyper may route a request through a **Prism model** — a server-side model
+router that selects the upstream model that actually answers a given turn.
+The routed model and the savings it produced are reported back on the
+**response**, not the request, so a client that cares which model answered
+reads them from headers (and, on streams, from trailers). Crush captures all
+four (`internal/agent/hyper/provider.go`'s `HeaderFunc`, wired via
+`openai.WithLanguageModelHeaderFunc` in `coordinator.go`'s hyper branch) into
+its provider metadata's `ExtraFields`:
+
+| Header (response)             | Meaning                                          |
+| ----------------------------- | ------------------------------------------------ |
+| `X-Prism-Model-Id`            | The model id that actually answered the request. |
+| `X-Prism-Model-Name`          | The display name of the model that answered.     |
+| `X-Prism-Hypercredit-Savings` | Hypercredits saved by routing through Prism.     |
+| `X-Prism-Dollar-Savings`      | Dollars saved by routing through Prism.          |
+
+The two savings figures are only known once the request has been served, so on
+**streaming** responses they arrive as HTTP **trailers** (after the final
+`data: [DONE]`), not regular headers; on non-streamed responses all four are
+ordinary response headers. A request that is not routed through a Prism model
+carries none of the four — their absence is the "direct" case, not an error.
+This is response-side metadata only; nothing extra is sent on the request.
+Source: `crush` `internal/agent/hyper/provider.go` on `main`, 2026-10-12.
+
+**Live probe (2026-10-12):** the four Prism headers were **not observed** on
+the live gateway — a streamed and a non-streamed chat completion against
+`deepseek-v4.1-flash` and `qwen3.8-max` (authed, `sk-hyper-` token) carried
+none of them, and no catalog or docs page names "Prism" as a live feature. So
+today every turn is the "direct" case; the crush client's capture is
+forward-compatible (it reads headers the gateway does not yet emit, or emits
+only under conditions a standard token did not exercise — e.g. a Prism-routed
+model not in the public catalog). The header contract above stands as crush
+defines it; the live evidence is "not yet routed", not "no such feature".
+
+#### 3.5.3 Rate-limit response headers
+
+Chat responses (authed, `/v1/chat/completions`) carry Hyper's rate-limit
+window, distinct from the `usage.remaining.hypercredits` balance (which is the
+credit purse, not the request cap). Probed live 2026-10-12 on both streamed and
+non-streamed 200 responses:
+
+| Header                       | Meaning                                 |
+| ---------------------------- | --------------------------------------- |
+| `x-ratelimit-limit-day`      | Requests per team per day (e.g. 10000). |
+| `x-ratelimit-limit-hour`     | Requests per team per hour (e.g. 1000). |
+| `x-ratelimit-remaining-day`  | Remaining in the current day window.    |
+| `x-ratelimit-remaining-hour` | Remaining in the current hour window.   |
+
+These are **response-only** and appear on chat, not on the tokenless catalog
+endpoints (`/v1/models`, `/v1/provider` carry none). They are not secrets (a
+window quota, not a key) and a wire dump may log them verbatim. Hyper does not
+publish the window-reset semantics (the day/hour boundaries); a client treats
+them as advisory telemetry, not as a backoff signal — a `429` is the
+authoritative throttle, and none was probed here.
+
 ---
 
 ## 4. Credits
@@ -497,9 +554,13 @@ Response `200`:
 
 Special cases:
 
-- `{ "balance": null }` — the team has **hypercredit display disabled**; Hyper
-  reports the balance in dollars instead, so no hypercredit figure is shown.
-  Crush returns `nil` (no balance) rather than `0`.
+- No `balance` field (the team has **hypercredit display disabled**) — Hyper
+  reports the balance in dollars under `balance_usd` instead, so there is no
+  hypercredit figure to show. Crush decodes `balance` as `*int`; its absence
+  (the `balance_usd` shape carries no `balance` key) yields `nil`, and a stale
+  figure is cleared so a team that turns display off stops showing one
+  (`FetchCredits` → `clearBalance`; `internal/agent/hyper/credits_test.go`
+  pins `{"balance_usd":1.5}` → `nil`, 2026-10-12).
 - Crush normally avoids this call entirely: it extracts remaining hypercredits
   from the `usage.remaining.hypercredits` field of chat response metadata and
   only falls back to `GET /v1/credits` when no cached value is available from
@@ -515,6 +576,16 @@ refreshed via:
 ```
 GET /v1/provider        // go:generate wget -O provider.json https://hyper.charm.land/v1/provider
 ```
+
+The embedded catalog now carries an `api_endpoint` field
+(`https://hyper.charm.land/api/v1/fantasy`, settable to
+`$HYPER_URL + "/api/v1/fantasy"` when `HYPER_URL` is set — the `Embedded`
+`sync.OnceValue` in `provider.go`). This is the catwalk provider's declared
+endpoint, **not** the chat path Crush actually uses: `coordinator.go` overrides
+the base to `hyper.BaseURL() + "/v1"` for the openai-compat language model, so
+chat completions still POST to `/v1/chat/completions` (§3). The `/api/v1/fantasy`
+route is a newer gateway path the catalog advertises; Crush does not send chat
+traffic there as of `main`, 2026-10-12.
 
 Quoth consumes the gateway's **OpenAI-compatible public list** instead:
 `GET /v1/models` (shape `{"object": "list", "data": [...]}`, no Bearer token
@@ -572,6 +643,30 @@ request". nevermore therefore claims tool use for **every** hyper model by a
 provider-level rule (`tools = 1` in `provider_hyper.c`, both the static table
 and the live scanner) rather than reading a field that does not exist — the
 honest claim, and one that changes no wire behavior (`1` still means "send").
+
+**Catalog drift (2026-10-12, crush `provider.json` + live probe).** The
+embedded catalog crush ships (the `/v1/provider` snapshot in
+`internal/agent/hyper/provider.json`) lists **23** models, but the **live**
+gateway now serves fewer: a tokenless probe of both `/v1/provider` and
+`/v1/models` on 2026-10-12 returns **21** apiece, identical sets — the embedded
+crush snapshot is stale, still carrying `deepseek-v4-pro` and
+`deepseek-v4-flash` (the older v4 variants) that the live gateway no longer
+lists. Against the §3.4 reasoning taxonomy (probed 2026-09 against 33
+`/v1/models` entries), these named models are **gone from the live catalog**:
+`glm-5`, `glm-5.1`, `kimi-k2.5`, `kimi-k2.6`, `llama-3.3-70b`,
+`llama-4-maverick`, `qwen3-next-80b-a3b-instruct`, `qwen3-coder-480b`, and the
+`qwen3.6` family. Added since: `deepseek-v4.1-flash`, `deepseek-v4-pro-0813`,
+`deepseek-v4-flash-0731`, `glm-5.3-flash`, and the `qwen3.7`/`qwen3.8`
+`-max`/`-flash`/`-plus`/`-27b` variants (`gemma-4-26b` is now
+`gemma-4-26b-a4b-it`). One taxonomy flip, confirmed live (not just the
+embedded catalog): `qwen3.8-2.4t-a95b` is now `can_reason: true` with a
+`reasoning` block / `reasoning_levels` (`minimal`/`low`/`medium`/`high`,
+default `medium`) on both endpoints — the §3.4 list still carries it as
+un-silenceable (`can_reason: false`), which was the 2026-09 probe. The two
+remaining `can_reason: false` entries (live `/v1/provider`) are `kimi-k2.7-code`
+and `minimax-m2.7`, both with no levels. The live `/v1/models` `capabilities`
+union is still exactly `{vision}`, and `pricing` still carries
+`input`/`output`/`cache_create`/`cache_hit`.
 
 ---
 

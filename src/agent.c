@@ -238,6 +238,13 @@ struct NmAgent
     long sess_in, sess_out;
     long sess_cache_read, sess_cache_write, sess_cache_base;
     int sess_rounds, sess_read_seen, sess_write_seen;
+
+    /* The last COMPLETED round's provider response metadata (Hyper's
+     * Prism routing: which model actually answered, savings — §3.5.2).
+     * Zeroed at round start and on a failed round; set at finish_round
+     * from the result. All-empty = the provider reported none (the
+     * "direct" case). Read through nm_agent_round_meta. */
+    NmRoundMeta round_meta;
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -655,6 +662,15 @@ long nm_agent_context_used_tokens(const NmAgent *a)
 long nm_agent_context_cached_tokens(const NmAgent *a)
 {
     return a ? a->last_usage.cached_tokens : -1;
+}
+
+void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (a)
+        *out = a->round_meta;
 }
 
 /* The active model's window, from the provider catalog (the one
@@ -1097,6 +1113,9 @@ static void round_reset(NmAgent *a)
     /* A fresh round has not reported usage yet: the session ledger must
      * not re-add the previous round's last_usage (see finish_round). */
     a->round_usage_seen = 0;
+    /* The previous round's provider metadata goes with the previous
+     * round: a fresh round reports its own (or none). */
+    memset(&a->round_meta, 0, sizeof(a->round_meta));
 }
 
 /* Compose the user-facing error from a failed chat round. The
@@ -1367,6 +1386,11 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         set_error(a, msg);
         return -1;
     }
+
+    /* The round's provider response metadata (Hyper's Prism routing:
+     * which model actually answered, savings — §3.5.2). A failed round
+     * above never reaches here, so it leaves the meta zeroed. */
+    a->round_meta = r->meta;
 
     /* A round the output limit cut short is incomplete by construction:
      * the model was still writing when the cap landed and nothing was

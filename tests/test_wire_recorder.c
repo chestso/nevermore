@@ -129,6 +129,32 @@ static int server_listen(int *port)
     return fd;
 }
 
+/* A response whose head carries a header and whose chunked TRAILER
+ * section carries another — the shape of Hyper's Prism router
+ * (docs/HYPER-API.md §3.5.2). The recorder logs the head group on the
+ * response-head event and the trailer group on its own event. */
+static void *prism_roundtrip_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "X-Prism-Model-Id: glm-5.3-flash\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "12\r\ndata: hello-event\n\n\r\n" /* 18 = 0x12 */
+        "0\r\n"
+        "X-Prism-Dollar-Savings: 0.0021\r\n"
+        "\r\n";
+    send(cfd, resp, sizeof(resp) - 1, 0);
+    close(cfd);
+    return NULL;
+}
+
 /* ---------------------------------------------------------------- */
 /* Helpers                                                           */
 /* ---------------------------------------------------------------- */
@@ -265,6 +291,53 @@ static void test_banner_and_redaction(void)
     free(log);
 }
 
+static void test_response_headers_and_trailers_recorded(void)
+{
+    /* The retained response headers land in the dump: the head group on
+     * the response-head event, the chunked trailer group on its own
+     * "trailers" event (the wire-dump home of a streamed Prism savings).
+     * Response headers are never secret, so they ride verbatim. */
+    log_reset();
+    test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
+    ASSERT_EQ(nm_wire_recorder_init("hyper", "glm-5.3-flash"), 1);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, prism_roundtrip_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    /* nm_request_queue (not the blocking nm_request): the request tap
+     * rides the queue path, so the dump carries the request event too. */
+    ASSERT_EQ(nm_request_queue(c, "POST", "/v1/chat/completions", NULL, 0,
+                               NULL, 0),
+              NM_TRANSPORT_OK);
+    ASSERT_EQ(nm_connection_step(c), NM_TRANSPORT_OK);
+    char buf[256];
+    while (nm_read_body(c, buf, sizeof(buf)) > 0)
+        ;
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(lfd);
+    nm_wire_recorder_shutdown();
+
+    char *log = log_read();
+    ASSERT_NOT_NULL(log);
+    ASSERT_TRUE(strstr(log, "\"kind\":\"response-head\"") != NULL);
+    ASSERT_TRUE(strstr(log, "X-Prism-Model-Id") != NULL);
+    ASSERT_TRUE(strstr(log, "glm-5.3-flash") != NULL);
+    ASSERT_TRUE(strstr(log, "\"kind\":\"trailers\"") != NULL);
+    ASSERT_TRUE(strstr(log, "X-Prism-Dollar-Savings") != NULL);
+    ASSERT_TRUE(strstr(log, "0.0021") != NULL);
+    size_t parsed = assert_lines_parse(log);
+    ASSERT_TRUE(parsed >= 4); /* connect + request + response-head + trailers */
+    free(log);
+}
+
 static void test_explicit_path_and_empty_env(void)
 {
     /* Explicit path form ($NEVERMORE_DEBUG_WIRE=/path). */
@@ -398,6 +471,7 @@ int main(int argc, char *argv[])
     printf("test_wire_recorder:\n");
     RUN_TEST(test_off_by_default);
     RUN_TEST(test_banner_and_redaction);
+    RUN_TEST(test_response_headers_and_trailers_recorded);
     RUN_TEST(test_explicit_path_and_empty_env);
     RUN_TEST(test_truncation_tolerance);
     RUN_TEST(test_error_line_shape);

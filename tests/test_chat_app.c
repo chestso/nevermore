@@ -7445,6 +7445,95 @@ static void test_reminder_forgery_warning_is_red(void)
     harness_free(h);
 }
 
+/* One-shot Prism responder: the whole response in one write, so the
+ * chunked trailer section rides the [DONE] read (docs/HYPER-API.md
+ * §3.5.2). Drives the /context routed-model line. */
+static void *prism_responder_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    static const char body[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    char resp[1024];
+    size_t n = (size_t)snprintf(resp, sizeof(resp),
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
+                          strlen(body));
+    memcpy(resp + n, body, strlen(body));
+    n += strlen(body);
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
+                          "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
+                          "X-Prism-Dollar-Savings: 0.0021\r\n\r\n");
+    send(cfd, resp, n, 0);
+    for (;;) {
+        struct timeval tv = { 0, 50 * 1000 };
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(cfd, &rfds);
+        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+            break;
+        char sink[64];
+        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
+            break; /* peer gone */
+    }
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+/* /context spells out the last completed round's Prism routing: which
+ * model actually answered, and the savings (docs/HYPER-API.md §3.5.2).
+ * A turn with no routing headers shows neither line (the "direct"
+ * case, which is what the gateway does today). */
+static void test_context_reports_the_prism_routed_model(void)
+{
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "context: last round routed to glm-5.3-flash "
+                            "(GLM 5.3 Flash)") != NULL);
+    ASSERT_TRUE(strstr(out, "context: routing saved 12.5 hypercredits / "
+                            "$0.0021") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -7484,6 +7573,7 @@ int main(void)
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_separator_blank_line_after_answer);
     RUN_TEST(test_separator_collapses_trailing_blank_lines);
+    RUN_TEST(test_context_reports_the_prism_routed_model);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);

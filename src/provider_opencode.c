@@ -106,6 +106,10 @@ static void opencode_endpoint(const NmProvider *p, const NmChatRequest *req,
                               const char *base_url, const char *api_key,
                               NmExtraHeader *sess, NmOpenaiEndpoint *ep)
 {
+    /* Zero first: the endpoint is built field-by-field, so a field the
+     * builder does not name (read_response_meta) must not be garbage —
+     * the client copies it and would call through a wild pointer. */
+    memset(ep, 0, sizeof(*ep));
     sess->name = "x-opencode-session";
     sess->value = opencode_conv_for(req);
     sess->secret = 0; /* explicitly not a secret (design §2) */
@@ -230,7 +234,8 @@ int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
     NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
     NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
                             NM_USER_AGENT, &sess, 1,
-                            0 /* include_usage: a catalog GET has no stream */ };
+                            0, /* include_usage: a catalog GET has no stream */
+                            NULL /* read_response_meta: no Prism on a GET */ };
     return nm_catalog_fetch_begin(&oc_fetches[slot], &ep,
                                   opencode_parse_slot, (void *)p);
 }

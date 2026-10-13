@@ -179,12 +179,44 @@ static size_t hyper_affinity_headers(const NmChatRequest *req,
     return n;
 }
 
+/* Read Hyper's Prism router metadata off the response (HYPER-API.md
+ * §3.5.2): which model actually answered a routed turn, and the savings
+ * it produced. The model id/name are ordinary response headers; the two
+ * savings figures arrive as chunked TRAILERS on a streamed response
+ * (ordinary headers on a non-streamed one), which is why the transport
+ * retains both kinds and this hook reads them once the round completes.
+ * All-empty = not routed (the "direct" case: the gateway sends none of
+ * the four), which is what hyper.charm.land does today (live-probed
+ * 2026-10-12). The hook is forward-compatible: it reads headers the
+ * gateway does not yet emit. */
+static void hyper_read_response_meta(const NmConnection *conn,
+                                     NmChatResult *result)
+{
+    const char *v;
+    if ((v = nm_response_header(conn, "X-Prism-Model-Id")) != NULL)
+        snprintf(result->meta.routed_model, sizeof(result->meta.routed_model),
+                 "%s", v);
+    if ((v = nm_response_header(conn, "X-Prism-Model-Name")) != NULL)
+        snprintf(result->meta.routed_name, sizeof(result->meta.routed_name),
+                 "%s", v);
+    if ((v = nm_response_header(conn, "X-Prism-Hypercredit-Savings")) != NULL)
+        snprintf(result->meta.hc_savings, sizeof(result->meta.hc_savings),
+                 "%s", v);
+    if ((v = nm_response_header(conn, "X-Prism-Dollar-Savings")) != NULL)
+        snprintf(result->meta.usd_savings, sizeof(result->meta.usd_savings),
+                 "%s", v);
+}
+
 /* One place where the hyper endpoint is assembled: base + auth + the
  * affinity extras, so chat and chat_begin cannot drift. */
 static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
                            const char *api_key, NmExtraHeader hdrs[3],
                            NmOpenaiEndpoint *ep)
 {
+    /* Zero first: built field-by-field, so any field this builder does
+     * not name stays NULL rather than garbage (the client copies
+     * read_response_meta and would call through a wild pointer). */
+    memset(ep, 0, sizeof(*ep));
     ep->base_url = hyper_base(base_url);
     ep->auth_header = "Bearer %s";
     ep->api_key = api_key;
@@ -195,6 +227,8 @@ static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
      * the flag Hyper emits a standalone choices:[] usage chunk; without it
      * usage still rides the finish_reason chunk. */
     ep->include_usage = 1;
+    /* Prism router metadata (which model answered, savings). */
+    ep->read_response_meta = hyper_read_response_meta;
 }
 
 static NmChatResult hyper_chat(const NmProvider *p, const NmChatRequest *req,
@@ -290,7 +324,8 @@ static int hyper_models_begin(const NmProvider *p, const char *base_url,
     NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
     NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
                             NM_USER_AGENT, &crush, 1,
-                            0 /* include_usage: a catalog GET has no stream */ };
+                            0, /* include_usage: a catalog GET has no stream */
+                            NULL /* read_response_meta: no Prism on a GET */ };
     return nm_catalog_fetch_begin(&hyper_fetch, &ep, hyper_parse_catalog,
                                   NULL);
 }

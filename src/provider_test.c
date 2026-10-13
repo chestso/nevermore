@@ -50,6 +50,9 @@ static const NmModel test_replay_static_models[] = {
 static void test_replay_endpoint(const char *base_url, const char *api_key,
                                  NmOpenaiEndpoint *ep)
 {
+    /* Zero first: built field-by-field, so read_response_meta (which
+     * this provider has no use for) must be NULL, not garbage. */
+    memset(ep, 0, sizeof(*ep));
     ep->base_url = (base_url && *base_url) ? base_url : TEST_REPLAY_DEFAULT;
     ep->auth_header = NULL;
     ep->api_key = api_key;

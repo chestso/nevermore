@@ -282,6 +282,14 @@ static void tap_connect_retry(const NmConnection *conn, const char *host,
  * along — the request event redacts through the same marker. */
 static void stash_headers(const NmRequestHeader *headers, size_t n)
 {
+    if (n == 0) {
+        /* No headers (a GET, or a caller that passed NULL/0): nothing
+         * to copy. Guarded because scratch_reserve(0) allocates
+         * nothing, so g_rec.hdrs stays NULL and memcpy(NULL, …, 0) is
+         * UB the sanitizer rejects. */
+        g_rec.n_hdrs = 0;
+        return;
+    }
     if (scratch_reserve((char **)&g_rec.hdrs, &g_rec.hdr_cap,
                         n * sizeof(NmRequestHeader)) != 0)
         return;
@@ -330,6 +338,29 @@ static void tap_request(const NmConnection *conn, const char *method,
     write_line(o);
 }
 
+/* Build a JSON array of the retained response headers [from, to) —
+ * the head group and the trailer group are logged separately (a
+ * trailer is where a streamed Prism savings lands, docs/HYPER-API.md
+ * §3.5.2). Response headers are never secret (a routed model id, a
+ * rate-limit quota, a savings figure), so they are logged verbatim,
+ * exactly as the routing hashes are. */
+static NmJson *response_headers_json(const NmConnection *conn, size_t from,
+                                     size_t to)
+{
+    if (to > conn->resp_hdr_n)
+        to = conn->resp_hdr_n;
+    NmJson *arr = nm_json_new_array();
+    if (!arr)
+        return NULL;
+    for (size_t i = from; i < to; i++) {
+        NmJson *h = nm_json_new_object();
+        nm_json_set(h, "name", nm_json_new_string(conn->resp_hdrs[i].name));
+        nm_json_set(h, "value", nm_json_new_string(conn->resp_hdrs[i].value));
+        nm_json_push(arr, h);
+    }
+    return arr;
+}
+
 static void tap_response_head(const NmConnection *conn, int status,
                               const char *status_text, const char *http_version,
                               const char *content_type, int chunked,
@@ -346,10 +377,27 @@ static void tap_response_head(const NmConnection *conn, int status,
     nm_json_set(o, "contentType", nm_json_new_string(content_type));
     nm_json_set(o, "chunked", nm_json_new_bool(chunked));
     nm_json_set(o, "contentLength", nm_json_new_number((double)content_length));
-    /* headers: [] — only the fields above are parsed; the wire head
-     * itself is reconstructible from the connection. Kept as an empty
-     * array so consumers can rely on the key existing. */
-    nm_json_set(o, "headers", nm_json_new_array());
+    /* The retained head headers (the trailer group, when a chunked
+     * body carries one, rides a separate "trailers" event at body
+     * end). */
+    NmJson *harr = response_headers_json(conn, 0, conn->resp_head_hdr_n);
+    nm_json_set(o, "headers", harr ? harr : nm_json_new_array());
+    write_line(o);
+}
+
+/* The chunked trailer section ended: log the trailer headers (the ones
+ * retained after the head group) — the wire-dump home of a streamed
+ * Prism savings. Fired only when the response carried trailers. */
+static void tap_response_trailers(const NmConnection *conn)
+{
+    if (!g_rec.f || !conn)
+        return;
+    NmJson *o = new_event("trailers", conn, 1);
+    if (!o)
+        return;
+    NmJson *harr = response_headers_json(conn, conn->resp_head_hdr_n,
+                                         conn->resp_hdr_n);
+    nm_json_set(o, "headers", harr ? harr : nm_json_new_array());
     write_line(o);
 }
 
@@ -392,8 +440,8 @@ static void tap_stream_event(const NmConnection *conn, const char *event,
 
 /* Process-global tap, installed once at startup (nm_transport_set_wire_tap). */
 static NmWireTap g_tap = {
-    tap_connect, tap_request, tap_response_head, tap_response,
-    tap_stream_event, tap_error, tap_connect_retry
+    tap_connect, tap_request, tap_response_head, tap_response_trailers,
+    tap_response, tap_stream_event, tap_error, tap_connect_retry
 };
 
 /* ---------------------------------------------------------------- */

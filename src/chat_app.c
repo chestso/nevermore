@@ -1952,6 +1952,22 @@ static void print_context(NmChatApp *app)
         sys_line(app, "context: limit unknown (the catalog reports none "
                       "for this model)");
 
+    /* Prism routing (Hyper): the model that ACTUALLY answered the last
+     * completed round, and the savings — reported only when the turn
+     * was routed (docs/HYPER-API.md §3.5.2). The "direct" case shows
+     * nothing, which is what the gateway does today. */
+    NmRoundMeta meta;
+    nm_agent_round_meta(app->agent, &meta);
+    if (meta.routed_model[0]) {
+        sys_line(app, "context: last round routed to %s (%s)",
+                 meta.routed_model,
+                 meta.routed_name[0] ? meta.routed_name : "?");
+        if (meta.hc_savings[0] || meta.usd_savings[0])
+            sys_line(app, "context: routing saved %s hypercredits / $%s",
+                     meta.hc_savings[0] ? meta.hc_savings : "0",
+                     meta.usd_savings[0] ? meta.usd_savings : "0");
+    }
+
     if (!nm_agent_context_has_usage(app->agent) || used < 0) {
         sys_line(app, "context: no usage reported by the provider yet");
         return;

@@ -91,6 +91,14 @@ long nm_agent_context_used_tokens(const NmAgent *a);
 long nm_agent_context_cached_tokens(const NmAgent *a);
 long nm_agent_context_limit(const NmAgent *a);
 
+/* The last COMPLETED round's provider response metadata — Hyper's Prism
+ * router facts (which model actually answered, the savings it produced;
+ * docs/HYPER-API.md §3.5.2). out is zeroed first and filled from the
+ * last round; all-empty means the provider reported none (the "direct"
+ * case, which is what hyper.charm.land does today). Safe with a NULL
+ * agent or a NULL out. */
+void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out);
+
 /* Session accounting: the provider-agnostic ledger over COMPLETED
  * rounds (the facts in NmUsage — see the contract there). The agent
  * owns the only conversation, so it owns the accumulation; the UI never

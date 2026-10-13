@@ -103,6 +103,12 @@ void nm_wire_tap_response_head(const struct NmConnection *conn, int status,
                                      content_type, chunked, content_length);
 }
 
+void nm_wire_tap_response_trailers(const struct NmConnection *conn)
+{
+    if (g_wire_tap && g_wire_tap->on_response_trailers)
+        g_wire_tap->on_response_trailers(conn);
+}
+
 void nm_wire_tap_response(const struct NmConnection *conn, const char *body,
                           size_t body_len)
 {
@@ -605,6 +611,34 @@ NmTransportStatus nm_request_send(NmConnection *conn, const char *method,
 const NmResponse *nm_response(NmConnection *conn)
 {
     return conn ? &conn->resp : NULL;
+}
+
+/* Case-insensitive ASCII name equality (no strcasecmp: the house style
+ * hand-rolls it, chat_app.c's precedent, so no platform shim is
+ * needed). */
+static int hdr_name_eq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
+}
+
+const char *nm_response_header(const NmConnection *conn, const char *name)
+{
+    if (!conn || !name)
+        return NULL;
+    for (size_t i = 0; i < conn->resp_hdr_n; i++)
+        if (hdr_name_eq(conn->resp_hdrs[i].name, name))
+            return conn->resp_hdrs[i].value;
+    return NULL;
 }
 
 long nm_read_body(NmConnection *conn, char *buf, size_t buf_len)

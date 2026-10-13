@@ -70,6 +70,14 @@ typedef struct NmOpenaiEndpoint
      * stream_options field is sent. The composer decides nothing: this is
      * the provider's wire fact, set where the endpoint is built. */
     int include_usage;
+    /* Optional response-metadata hook: called once per round, when the
+     * round completes and the connection is still open (before the
+     * result is published), so a provider can read response
+     * headers/trailers (nm_response_header) into result->meta. NULL =
+     * none. Hyper wires this for its Prism router headers, whose
+     * savings arrive as chunked trailers (docs/HYPER-API.md §3.5.2).
+     * The connection is borrowed, valid only for the call. */
+    void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

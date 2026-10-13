@@ -68,7 +68,8 @@ static NmChatResult openrouter_chat(const NmProvider *p,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage: harmless; OpenRouter always sends usage */
+        1,   /* include_usage: harmless; OpenRouter always sends usage */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -86,7 +87,8 @@ static NmChatStream *openrouter_chat_begin(const NmProvider *p,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage */
+        1,   /* include_usage */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }
@@ -187,7 +189,7 @@ static int openrouter_models_begin(const NmProvider *p, const char *base_url,
     NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
                             NM_USER_AGENT,
                             NULL, 0,
-                            0 /* include_usage: a catalog GET has no stream */ };
+                            0 /* include_usage: a catalog GET has no stream */, NULL };
     return nm_catalog_fetch_begin(&openrouter_fetch, &ep,
                                   openrouter_parse_catalog, NULL);
 }

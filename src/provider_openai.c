@@ -67,7 +67,8 @@ static NmChatResult openai_chat(const NmProvider *p, const NmChatRequest *req,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage */
+        1,   /* include_usage */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -85,7 +86,8 @@ static NmChatStream *openai_chat_begin(const NmProvider *p,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage */
+        1,   /* include_usage */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }
@@ -150,7 +152,7 @@ static int openai_models_begin(const NmProvider *p, const char *base_url,
     const char *base =
         (base_url && *base_url) ? base_url : OPENAI_DEFAULT_BASE;
     NmOpenaiEndpoint ep = { base, "Bearer %s", api_key, NM_USER_AGENT,
-                            NULL, 0, 0 };
+                            NULL, 0, 0, NULL };
     return nm_catalog_fetch_begin(&openai_fetch, &ep, openai_parse_catalog,
                                   NULL);
 }

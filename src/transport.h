@@ -347,6 +347,39 @@ typedef struct NmResponse
 
 const NmResponse *nm_response(NmConnection *conn);
 
+/* ---------------------------------------------------------------- */
+/* Response-header retention (named lookup)                          */
+/* ---------------------------------------------------------------- */
+
+/* Bounded retention of response headers — the head AND, for a chunked
+ * response, its trailers — so a caller can read a header AFTER the
+ * exchange. Two live readers motivate it: Hyper's Prism router headers
+ * (whose savings figures arrive as chunked TRAILERS, docs/HYPER-API.md
+ * §3.5.2) and Hyper's rate-limit headers (§3.5.3). The store is
+ * FIXED-SIZE (memory-reuse principle: nothing allocated per header,
+ * per read, or per chunk); a response carrying more than
+ * NM_RESPONSE_HEADERS_MAX headers keeps the first N and drops the
+ * rest, and an over-long value is truncated — a malformed or verbose
+ * peer is bounded, never trusted. Names are matched case-insensitively
+ * and retained trimmed. */
+#define NM_RESPONSE_HEADERS_MAX      24
+#define NM_RESPONSE_HEADER_NAME_MAX  48
+#define NM_RESPONSE_HEADER_VALUE_MAX 192
+
+typedef struct NmResponseHeader
+{
+    char name[NM_RESPONSE_HEADER_NAME_MAX];
+    char value[NM_RESPONSE_HEADER_VALUE_MAX];
+} NmResponseHeader;
+
+/* Look up a retained response header by name (case-insensitive).
+ * Returns the value (borrowed; valid until the connection is closed or
+ * reused), or NULL when the header was not sent, was past the
+ * retention cap, or — for a chunked trailer — has not arrived yet
+ * (trailers are retained only once the body is complete, so a read
+ * before then misses them). */
+const char *nm_response_header(const NmConnection *conn, const char *name);
+
 /* Stream the body. Returns chunk size > 0, 0 = complete, -1 = error.
  * For chunked responses the de-chunking is transparent: the caller sees
  * a plain byte stream.
@@ -447,6 +480,12 @@ typedef struct NmWireTap
                              const char *status_text, const char *http_version,
                              const char *content_type, int chunked,
                              long long content_length);
+    /* Chunked trailers complete: the trailer section ended (its
+     * terminating empty line). Fired only when the response carried at
+     * least one trailer line — the moment a streamed response's late
+     * headers (Hyper's Prism savings, docs/HYPER-API.md §3.5.2) are all
+     * retained; nm_response_header reads them. */
+    void (*on_response_trailers)(const struct NmConnection *conn);
     void (*on_response)(const struct NmConnection *conn, const char *body,
                         size_t body_len);
     void (*on_stream_event)(const struct NmConnection *conn,
@@ -485,6 +524,7 @@ void nm_wire_tap_response_head(const struct NmConnection *conn, int status,
                                const char *http_version,
                                const char *content_type, int chunked,
                                long long content_length);
+void nm_wire_tap_response_trailers(const struct NmConnection *conn);
 void nm_wire_tap_response(const struct NmConnection *conn, const char *body,
                           size_t body_len);
 void nm_wire_tap_stream_event(const struct NmConnection *conn,

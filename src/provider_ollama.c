@@ -78,7 +78,8 @@ NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage: ask for the streaming usage chunk */
+        1,   /* include_usage: ask for the streaming usage chunk */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat(&ep, req);
 }
@@ -95,7 +96,8 @@ NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
         api_key,
         NM_USER_AGENT,
         NULL, 0,
-        1 /* include_usage */
+        1,   /* include_usage */
+        NULL /* read_response_meta: no provider metadata */
     };
     return nm_openai_chat_begin(&ep, req, err);
 }

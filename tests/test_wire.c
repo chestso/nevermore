@@ -234,6 +234,62 @@ static void test_wire_chunked_sse(void)
     close(sc.fd);
 }
 
+static void test_wire_response_headers_and_trailers(void)
+{
+    /* Head headers are retained for nm_response_header; a chunked
+     * response's TRAILERS (the late headers — e.g. a streamed Prism
+     * savings, docs/HYPER-API.md §3.5.2) are retained the same way and
+     * become readable once the body completes. */
+    struct ServerCase sc = {
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "X-RateLimit-Limit-Day: 10000\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n" /* 14 = 0xe */
+        "0\r\n"
+        "X-Prism-Model-Id: glm-5.3-flash\r\n"
+        "X-Prism-Dollar-Savings: 0.0021\r\n"
+        "\r\n",
+        0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "POST", "/v1/chat/completions", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+
+    /* A head header is readable right after the head, case-insensitively
+     * (the name the caller passes need not match the wire's case). */
+    ASSERT_STR_EQ(nm_response_header(c, "X-RateLimit-Limit-Day"), "10000");
+    ASSERT_STR_EQ(nm_response_header(c, "x-ratelimit-limit-day"), "10000");
+    /* A trailer is NOT there before the body completes. */
+    ASSERT_NULL(nm_response_header(c, "X-Prism-Model-Id"));
+
+    /* Drain the body to its framing end: the trailers land. */
+    char buf[256];
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+    }
+    ASSERT_STR_EQ(nm_response_header(c, "X-Prism-Model-Id"),
+                  "glm-5.3-flash");
+    ASSERT_STR_EQ(nm_response_header(c, "x-prism-dollar-savings"), "0.0021");
+    /* An absent header is NULL, never "". */
+    ASSERT_NULL(nm_response_header(c, "X-Prism-Model-Name"));
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_wire_http_error_status(void)
 {
     struct ServerCase sc = {
@@ -1527,6 +1583,7 @@ int main(int argc, char *argv[])
     nm_config_set_store(g_cfg);
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_wire_chunked_sse);
+    RUN_TEST(test_wire_response_headers_and_trailers);
     RUN_TEST(test_wire_http_error_status);
     RUN_TEST(test_wire_refused);
     RUN_TEST(test_wire_connect_error_detail_always_set);

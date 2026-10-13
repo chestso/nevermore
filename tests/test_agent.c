@@ -221,6 +221,47 @@ static void *agent_server_thread(void *arg)
     return NULL;
 }
 
+/* One-shot Prism responder: the whole response in ONE write, so the
+ * chunked trailer section rides the [DONE] read and the transport
+ * retains it before the round completes (docs/HYPER-API.md §3.5.2).
+ * The agent's own round-meta copy is what this test drives. */
+static void *agent_prism_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    static const char body[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    char resp[1024];
+    size_t n = (size_t)snprintf(resp, sizeof(resp),
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
+                          strlen(body));
+    memcpy(resp + n, body, strlen(body));
+    n += strlen(body);
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
+                          "0\r\nX-Prism-Dollar-Savings: 0.0021\r\n\r\n");
+    send(cfd, resp, n, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
 /* One-shot stall responder (the P0 deadline test): accept once, drain
  * the request, then sit silent — no bytes, no terminal chunk — until
  * the peer tears down. A closed peer is READABLE (EOF), so the loop
@@ -5465,6 +5506,46 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
     remove(img);
 }
 
+/* The agent keeps the last COMPLETED round's provider response metadata
+ * (Hyper's Prism routing) and exposes it through nm_agent_round_meta:
+ * which model actually answered, and the savings. Driven through the
+ * hyper vtable against a Prism-stamping canned server. */
+static void test_agent_round_meta_from_prism(void)
+{
+    reset_capture();
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_prism_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "glm-5.3-flash", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "hi", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(agent, 5000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    NmRoundMeta meta;
+    nm_agent_round_meta(agent, &meta);
+    ASSERT_STR_EQ(meta.routed_model, "glm-5.3-flash");
+    ASSERT_STR_EQ(meta.usd_savings, "0.0021");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -5505,6 +5586,7 @@ int main(void)
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
+    RUN_TEST(test_agent_round_meta_from_prism);
     RUN_TEST(test_agent_env_git_stage_lands_in_the_system_prompt);
     RUN_TEST(test_agent_env_stage_is_skipped_outside_a_repo);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);
