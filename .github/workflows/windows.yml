@@ -23,7 +23,7 @@ jobs:
       # commit that consumes a new boba API; the same SHA lives in
       # linux.yml / macos.yml (bump all three together). The boba commit
       # must be PUSHED before nevermore, or CI cannot fetch it.
-      BOBA_REF: 25ddead1b10b1c39af746cca88cc5a85223ac53f
+      BOBA_REF: 0322e54c26d21ed6f84d3fe9477289c21a314933
 
     steps:
       - name: Checkout nevermore

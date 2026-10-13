@@ -1720,10 +1720,22 @@ static void test_context_gauge_reports_usage_and_limit(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
     /* The idle frame's gauge: 12.4k of 131k, with the SESSION cache-read
-     * rate (the one round's 8100 read / 12400 input = 65.3 %). */
+     * rate (the one round's 8100 read / 12400 input = 65.3 %). The rate
+     * marker is the small ⚡ — U+26A1 + VS15 (the text-presentation
+     * request), so the assert pins the selector: a bare ⚡ is a prefix of
+     * it and would slip back in unnoticed.
+     *
+     * The cluster measures ONE cell — that is the whole reason for the
+     * selector, and the row's column math (the rule's fill, the
+     * identity's right edge) is built on it. Pin the width here too: a
+     * boba regression that re-widened the cluster would leave this
+     * frame's bytes unchanged but shift every cell after the gauge. */
+    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1\xef\xb8\x8e"), 1);
+    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1"), 2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x9a\xa1"
+                                                "\xef\xb8\x8e"
                                                 "65.3% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
@@ -1804,7 +1816,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
-    ASSERT_TRUE(strstr(frame, "\xe2\x9a\xa1") == NULL);
+    ASSERT_TRUE(strstr(frame, "\xe2\x9a\xa1\xef\xb8\x8e") == NULL);
     harness_type(h, "/context");
     harness_enter(h);
     const char *out = harness_read(h);
@@ -1819,6 +1831,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     gauge = span_bytes(nm_color_gutter(), "11.3k/131k \xe2\x9a\xa1"
+                                          "\xef\xb8\x8e"
                                           "80.3% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
@@ -1832,6 +1845,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     gauge = span_bytes(nm_color_gutter(), "10k/131k \xe2\x9a\xa1"
+                                          "\xef\xb8\x8e"
                                           "42.6% ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);

@@ -76,7 +76,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 25ddead1b10b1c39af746cca88cc5a85223ac53f
+          ref: 0322e54c26d21ed6f84d3fe9477289c21a314933
           path: boba
           fetch-depth: 0
 
