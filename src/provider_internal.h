@@ -20,32 +20,18 @@ extern const struct NmProvider nm_opencode_provider;     /* :go */
 extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
 extern const struct NmProvider nm_test_provider;         /* test:replay */
 
-/* Shared OpenCode wire surface (provider_opencode.c): the Go vtable
- * lives there and provider_opencode_zen.c holds only the second
- * vtable — same one-implementation-two-vtables shape as the ollama
- * pair. The two tiers differ only in base URL and catalog data. */
-NmChatResult nm_opencode_chat(const NmProvider *p, const NmChatRequest *req,
-                              const char *base_url, const char *api_key);
-NmChatStream *nm_opencode_chat_begin(const NmProvider *p,
-                                     const NmChatRequest *req,
-                                     const char *base_url, const char *api_key,
-                                     NmChatResult *err);
-const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
-                                  const char *api_key, size_t *n_out);
-const NmModel *nm_opencode_models_cached(const NmProvider *p, size_t *n_out);
-/* The async catalog seam, shared by both tiers (the vtable slots). */
-int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
-                             const char *api_key);
-NmCatalogStatus nm_opencode_models_step(const NmProvider *p);
-NmSource nm_opencode_models_source(const NmProvider *p);
-void nm_opencode_models_end(const NmProvider *p);
+/* Shared OpenCode wire surface (provider_opencode.c): the two tiers
+ * differ only in base URL and shipped table, so they share one vtable
+ * surface — the descriptors live there (provider_openaicompat.h) and
+ * this is the auth rule they both point at. */
 int nm_opencode_needs_auth(const NmProvider *p, const char *base_url);
 
 /* Shared Ollama wire surface (provider_ollama.c): the cloud vtable
  * and the local daemon vtable (provider_ollama_local.c) sit on the
  * same OpenAI-compatible client + native /api catalog; only the
  * endpoint default differs, so the implementation lives in one file
- * and is parameterized by the provider's id. */
+ * and is parameterized by the provider's id. (The chat half itself is
+ * the shared OpenAI-compatible surface — provider_openaicompat.h.) */
 NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
                             const char *base_url, const char *api_key);
 NmChatStream *nm_ollama_chat_begin(const NmProvider *p,

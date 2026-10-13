@@ -28,50 +28,38 @@
  * Identity: one env key (OPENCODE_API_KEY, no alias — nm_provider_api_key
  * supports exactly one), one authinfo machine (opencode.ai for both
  * tiers).
+ *
+ * The endpoint pair, the live cache and the fetch seam are the shared
+ * surface (provider_openaicompat.h); the session header and the
+ * ids-only row dialect below are this file's own wire truth.
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "provider_internal.h"
 #include "openai_client.h"
-#include "json.h"
+#include "provider_internal.h" /* nm_conversation_id_new */
+#include "provider_openaicompat.h"
 
 /* The shipped catalogs (generated, committed): full models.dev
- * metadata per tier. Included AFTER provider_internal.h so NmModel is
- * in scope. */
+ * metadata per tier. Included AFTER provider_openaicompat.h so NmModel
+ * is in scope. */
 #include "opencode_models_data.h"
 
 #define OPENCODE_GO_DEFAULT  "https://opencode.ai/zen/go/v1"
 #define OPENCODE_ZEN_DEFAULT "https://opencode.ai/zen/v1"
 
-/* The tier's metadata table: the offline catalog AND the enrichment
- * source for the live ids-only list. */
-static const NmModel *opencode_meta_table(const NmProvider *p)
-{
-    return p->id == NM_PROVIDER_OPENCODE_ZEN ? opencode_zen_models
-                                             : opencode_go_models;
-}
-
 /* Metadata row for a live id, or NULL for an id models.dev has not
- * seen yet (a brand-new model). */
-static const NmModel *opencode_meta_find(const NmProvider *p, const char *id)
+ * seen yet (a brand-new model). The table is the row mapper's context,
+ * so each tier's descriptor carries its own. */
+static const NmModel *opencode_meta_find(const NmModel *table, const char *id)
 {
-    const NmModel *t = opencode_meta_table(p);
-    for (size_t i = 0; t[i].id; i++) {
-        if (strcmp(t[i].id, id) == 0)
-            return &t[i];
+    for (size_t i = 0; table[i].id; i++) {
+        if (strcmp(table[i].id, id) == 0)
+            return &table[i];
     }
     return NULL;
-}
-
-static const char *opencode_base(const NmProvider *p, const char *base_url)
-{
-    if (base_url && *base_url)
-        return base_url;
-    return p->id == NM_PROVIDER_OPENCODE_ZEN ? OPENCODE_ZEN_DEFAULT
-                                             : OPENCODE_GO_DEFAULT;
 }
 
 /* Process-stable conversation id for catalog requests and for a chat
@@ -99,189 +87,88 @@ static const char *opencode_conv_for(const NmChatRequest *req)
     return opencode_catalog_conv();
 }
 
-/* Build the endpoint with the session header pointing at a borrowed
- * id (the request's, which outlives compose+queue; or the provider's
- * static slot). No stack copy, no truncation path. */
-static void opencode_endpoint(const NmProvider *p, const NmChatRequest *req,
-                              const char *base_url, const char *api_key,
-                              NmExtraHeader *sess, NmOpenaiEndpoint *ep)
+/* The session header's value slot: a borrowed id (the request's, which
+ * outlives compose+queue; or the provider's static slot). No stack
+ * copy, no truncation path. */
+static void opencode_session_header(const char *conv,
+                                    NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX])
 {
-    /* Zero first: the endpoint is built field-by-field, so a field the
-     * builder does not name (read_response_meta) must not be garbage —
-     * the client copies it and would call through a wild pointer. */
-    memset(ep, 0, sizeof(*ep));
-    sess->name = "x-opencode-session";
-    sess->value = opencode_conv_for(req);
-    sess->secret = 0; /* explicitly not a secret (design §2) */
-    ep->base_url = opencode_base(p, base_url);
+    hdrs[0].name = "x-opencode-session";
+    hdrs[0].value = conv;
+    hdrs[0].secret = 0; /* explicitly not a secret (design §2) */
+}
+
+static void opencode_chat_endpoint(const NmProvider *p,
+                                   const NmChatRequest *req,
+                                   const char *api_key,
+                                   NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                   NmOpenaiEndpoint *ep)
+{
+    (void)p;
+    opencode_session_header(opencode_conv_for(req), hdrs);
     ep->auth_header = "Bearer %s";
     ep->api_key = api_key;
-    ep->user_agent = NM_USER_AGENT;
-    ep->extra_headers = sess;
+    ep->extra_headers = hdrs;
     ep->n_extra_headers = 1;
     /* Usage rides the wire with or without the flag here (OPENCODE-API.md
      * §3); request it explicitly for uniformity. */
     ep->include_usage = 1;
 }
 
-NmChatResult nm_opencode_chat(const NmProvider *p, const NmChatRequest *req,
-                              const char *base_url, const char *api_key)
+/* The catalog GET carries the session header too (consistency;
+ * harmless), and no auth: the catalog is tokenless (OPENCODE-API.md
+ * §5). */
+static void opencode_catalog_endpoint(const NmProvider *p, const char *api_key,
+                                      NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                      NmOpenaiEndpoint *ep)
 {
-    NmExtraHeader sess;
-    NmOpenaiEndpoint ep;
-    opencode_endpoint(p, req, base_url, api_key, &sess, &ep);
-    return nm_openai_chat(&ep, req);
+    (void)p;
+    (void)api_key;
+    opencode_session_header(opencode_catalog_conv(), hdrs);
+    ep->extra_headers = hdrs;
+    ep->n_extra_headers = 1;
+    ep->include_usage = 0; /* a catalog GET has no stream */
 }
 
-NmChatStream *nm_opencode_chat_begin(const NmProvider *p,
-                                     const NmChatRequest *req,
-                                     const char *base_url, const char *api_key,
-                                     NmChatResult *err)
+/* One /models entry -> one row. The wire is ids-only (OPENCODE-API.md
+ * §5): membership comes from the live list and metadata from the
+ * shipped table by id (the row's context); an id models.dev has not
+ * seen yet keeps the merge loop's presets (id label, -1, 0). */
+static const char *opencode_row(NmJson *entry, NmModel *out, void *ud)
 {
-    NmExtraHeader sess;
-    NmOpenaiEndpoint ep;
-    opencode_endpoint(p, req, base_url, api_key, &sess, &ep);
-    return nm_openai_chat_begin(&ep, req, err);
+    (void)entry;
+    const NmModel *meta = opencode_meta_find((const NmModel *)ud, out->id);
+    if (!meta)
+        return NULL; /* id-only: the label falls back to the id */
+    out->vision = meta->vision;
+    out->context_length = meta->context_length;
+    /* EVERY table field the picker/agent read must be copied here:
+     * image_gen and tools were silently dropped (a live row showed
+     * 0 while the table claimed otherwise), which the badges make
+     * visible. */
+    out->image_gen = meta->image_gen;
+    out->tools = meta->tools;
+    return meta->label;
 }
 
-/* Live catalog cache: provider-owned, process lifetime. One per tier
- * (the two talk to different endpoints), indexed like the ollama
- * pair. */
-typedef struct
-{
-    NmModel *models;
-    size_t n;
-} OpencodeCatalog;
+/* One descriptor per tier: same wire, same session header, different
+ * shipped table (which is both the offline catalog and the row's
+ * enrichment source). */
+const NmOpenaiCompat nm_opencode_compat = {
+    opencode_chat_endpoint,
+    opencode_catalog_endpoint,
+    opencode_go_models,
+    opencode_row,
+    (void *)opencode_go_models,
+};
 
-static OpencodeCatalog oc_catalogs[2];
-
-static size_t opencode_catalog_slot(const NmProvider *p)
-{
-    return p->id == NM_PROVIDER_OPENCODE_ZEN ? 1 : 0;
-}
-
-/* GET {base}/models -> data[] -> cache as NmModel[]. The wire is
- * ids-only (OPENCODE-API.md §5), so membership comes from the live
- * list and metadata from the shipped table by id (opencode_meta_find);
- * an id models.dev has not seen yet falls back to id / -1 / 0. One-time
- * per process; static fallback on failure. */
-static int opencode_parse_catalog(const NmJson *doc, const NmProvider *p)
-{
-    NmJson *data = nm_json_get(doc, "data");
-    size_t count = nm_json_len(data);
-    if (count == 0)
-        return 0;
-    NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models)
-        return 0;
-    size_t out = 0;
-    for (size_t i = 0; i < count; i++) {
-        NmJson *e = nm_json_at(data, i);
-        const char *id = nm_json_str(nm_json_get(e, "id"));
-        if (!id || !*id)
-            continue;
-        /* Strings belong to the parsed document (freed by the caller):
-         * copy into the cache. One-time per process. */
-        models[out].id = strdup(id);
-        /* Enrich the ids-only wire row from the shipped table: the
-         * live list is membership, the table is the metadata. */
-        const NmModel *meta = opencode_meta_find(p, id);
-        models[out].label = strdup(meta ? meta->label : id);
-        models[out].vision = meta ? meta->vision : 0;
-        models[out].context_length = meta ? meta->context_length : -1;
-        /* EVERY table field the picker/agent read must be copied here:
-         * image_gen and tools were silently dropped (a live row showed
-         * 0 while the table claimed otherwise), which the badges make
-         * visible. */
-        models[out].image_gen = meta ? meta->image_gen : 0;
-        models[out].tools = meta ? meta->tools : 0;
-        if (!models[out].id || !models[out].label) {
-            free((void *)models[out].id);
-            free((void *)models[out].label);
-            continue;
-        }
-        out++;
-    }
-    if (out == 0) {
-        free(models);
-        return 0;
-    }
-    size_t slot = opencode_catalog_slot(p);
-    oc_catalogs[slot].models = models;
-    oc_catalogs[slot].n = out;
-    return 1;
-}
-
-/* The async seam (the /model popup's non-blocking drive). The parse is
- * per-provider (the table differs by tier), so the slot's fetch carries
- * the provider it belongs to as the parse's context. */
-static NmCatalogFetch oc_fetches[2];
-
-static int opencode_parse_slot(const NmJson *doc, void *ud)
-{
-    return opencode_parse_catalog(doc, (const NmProvider *)ud);
-}
-
-int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
-                             const char *api_key)
-{
-    (void)api_key; /* catalog is tokenless (OPENCODE-API.md §5) */
-    size_t slot = opencode_catalog_slot(p);
-    if (oc_catalogs[slot].models || oc_fetches[slot].f)
-        return 0;
-    if (!base_url && !nm_live_catalog_enabled())
-        return 0;
-    NmExtraHeader sess = { "x-opencode-session", opencode_catalog_conv(), 0 };
-    NmOpenaiEndpoint ep = { opencode_base(p, base_url), NULL, NULL,
-                            NM_USER_AGENT, &sess, 1,
-                            0, /* include_usage: a catalog GET has no stream */
-                            NULL /* read_response_meta: no Prism on a GET */ };
-    return nm_catalog_fetch_begin(&oc_fetches[slot], &ep,
-                                  opencode_parse_slot, (void *)p);
-}
-
-NmCatalogStatus nm_opencode_models_step(const NmProvider *p)
-{
-    return nm_catalog_fetch_step(&oc_fetches[opencode_catalog_slot(p)]);
-}
-
-NmSource nm_opencode_models_source(const NmProvider *p)
-{
-    return nm_catalog_fetch_source(&oc_fetches[opencode_catalog_slot(p)]);
-}
-
-void nm_opencode_models_end(const NmProvider *p)
-{
-    nm_catalog_fetch_end(&oc_fetches[opencode_catalog_slot(p)]);
-}
-
-const NmModel *nm_opencode_models_cached(const NmProvider *p, size_t *n_out)
-{
-    size_t slot = opencode_catalog_slot(p);
-    if (oc_catalogs[slot].models) {
-        if (n_out)
-            *n_out = oc_catalogs[slot].n;
-        return oc_catalogs[slot].models;
-    }
-    const NmModel *statics = opencode_meta_table(p);
-    if (n_out) {
-        size_t n = 0;
-        while (statics[n].id)
-            n++;
-        *n_out = n;
-    }
-    return statics;
-}
-
-const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
-                                  const char *api_key, size_t *n_out)
-{
-    /* The BLOCKING drive of the async seam (one implementation, two
-     * drives). */
-    if (nm_opencode_models_begin(p, base_url, api_key))
-        nm_catalog_run(p);
-    return nm_opencode_models_cached(p, n_out);
-}
+const NmOpenaiCompat nm_opencode_zen_compat = {
+    opencode_chat_endpoint,
+    opencode_catalog_endpoint,
+    opencode_zen_models,
+    opencode_row,
+    (void *)opencode_zen_models,
+};
 
 int nm_opencode_needs_auth(const NmProvider *p, const char *base_url)
 {
@@ -305,19 +192,19 @@ const struct NmProvider nm_opencode_provider = {
     NM_REASONING_ECHO_TOOLS, /* the deepseek endpoint 400s a replayed
                               * tool-call turn without the trace
                               * (docs/OPENCODE-API.md §3) */
-    nm_opencode_chat,
-    nm_opencode_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
-    nm_opencode_models,
-    nm_opencode_models_cached,
-    nm_opencode_models_begin,
-    nm_opencode_models_step,
-    nm_opencode_models_source,
-    nm_opencode_models_end,
+    nm_openaicompat_models,
+    nm_openaicompat_models_cached,
+    nm_openaicompat_models_begin,
+    nm_openaicompat_models_step,
+    nm_openaicompat_models_source,
+    nm_openaicompat_models_end,
     nm_opencode_needs_auth,
     opencode_env_key,
 };

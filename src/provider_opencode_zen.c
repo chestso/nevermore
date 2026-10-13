@@ -13,8 +13,7 @@
  */
 
 #include "provider_internal.h"
-
-#include "openai_client.h"
+#include "provider_openaicompat.h"
 
 static const char *opencode_zen_env_key(const NmProvider *p)
 {
@@ -28,19 +27,19 @@ const struct NmProvider nm_opencode_zen_provider = {
     "https://opencode.ai/zen/v1",
     "opencode.ai",
     NM_REASONING_ECHO_OFF, /* Zen: unprobed — the 400 was observed on Go */
-    nm_opencode_chat,
-    nm_opencode_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
-    nm_opencode_models,
-    nm_opencode_models_cached,
-    nm_opencode_models_begin,
-    nm_opencode_models_step,
-    nm_opencode_models_source,
-    nm_opencode_models_end,
+    nm_openaicompat_models,
+    nm_openaicompat_models_cached,
+    nm_openaicompat_models_begin,
+    nm_openaicompat_models_step,
+    nm_openaicompat_models_source,
+    nm_openaicompat_models_end,
     nm_opencode_needs_auth,
     opencode_zen_env_key,
 };
