@@ -79,18 +79,41 @@ architecture "the right way"**: fix a design flaw at its root
   **Enum order is the whole discipline** (the table is indexed by
   `NmProviderId`): the new `src/provider_<name>.c` vtable, the registry
   line, the `NmProviderId` arm in `provider.h`, the
-  `provider_internal.h` extern, `provider_labels[]` in `source.c`, every
-  test `_SOURCES` list in `tests/Makefile.am` **and**
+  `provider_internal.h` extern, `provider_labels[]` in `source.c`, the
+  shared `TEST_PROVIDER_SOURCES` variable in `tests/Makefile.am`
+  (one place, referenced bare — see the automake note there) **and**
   `scripts/win-wine-check.sh`, `test_source.c`'s provider-count
   assertion, and main.c's usage + README when it is user-visible.
   `grep -rn provider_ollama_local` enumerates every spot from any one
   existing provider; the `NM_PROVIDER_MAX`-bounded stack arrays
   (picker, sources, error hint) need nothing until the registry passes 16.
+  **A provider speaking the shared OpenAI-compatible wire** (seven of
+  the eight do) adds one thing more: an `NmOpenaiCompat` descriptor
+  (`src/provider_openaicompat.h`) registered in that module's table —
+  its endpoint builders, its static table and a row mapper for one
+  catalog entry — and points its vtable's chat/catalog slots at the
+  shared functions. A provider whose wire diverges beyond the
+  descriptor keeps its own slots (ollama's native `/api` catalog is the
+  precedent).
   **Auth preflight**: a provider that `needs_auth` and has no key
   configured is announced BEFORE the turn (`warn_missing_key`, at
   startup and on a `/provider` switch) — the preflight twin of agent.c's
   post-401 hint, and gated on the SAME `nm_provider_api_key` seam the
   request uses, so a `~/.authinfo` entry counts (never `getenv`).
+- **OpenAI-compatible provider surface** (`src/provider_openaicompat.c`)
+  — the endpoint pair (chat + chat_begin off ONE build call site), the
+  process-lifetime live-catalog cache, the async fetch seam, and the
+  merge loop that turns a fetched document into `NmModel` rows. The
+  descriptor (`NmOpenaiCompat`) carries only what a provider's own wire
+  truth needs: the two endpoint builders, the static fallback table, and
+  a row mapper for ONE catalog entry. State is indexed by `NmProviderId`
+  (one slot per provider, so two tiers of a service never share a
+  cache), and the merge loop is the only place that copies an id/label,
+  presets a field, or commits a cache — a provider cannot silently drop
+  a field the picker or the agent reads. Deliberately **not** a
+  registry-level base provider: the `NmProvider` vtable stays the flat
+  seam, and a descriptor that would need a callback per vtable slot is
+  the signal that the provider does not belong here.
 - **Config store** (`src/nm_config.c`) — one name per knob, one
   resolution order (built-in default < user file < runtime shadow <
   environment < CLI), and never a proxy: the machinery resolves each

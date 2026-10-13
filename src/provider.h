@@ -31,10 +31,13 @@
  *                  never a shipping endpoint.
  *
  * All of them share one wire client (openai_client.h); only base URL,
- * auth headers, extra headers, and model catalogs differ.
- * provider_openai.c is the reference implementation. Provider-specific
- * surfaces are narrow: hyper's OAuth device flow, ollama's native
- * /api catalog, opencode's session header.
+ * auth headers, extra headers, and model catalogs differ. The shared
+ * plumbing (the endpoint pair, the live catalog cache, the fetch seam,
+ * the merge loop) is provider_openaicompat.c, and each provider's file
+ * is its own wire truth: the static table, a row mapper for one catalog
+ * entry, its extra headers, and the vtable. Provider-specific surfaces
+ * are narrow: hyper's OAuth device flow, ollama's native /api catalog,
+ * opencode's session header.
  *
  * API keys resolve via nm_provider_api_key: $<env_key>, else the
  * provider's authinfo_machine password in ~/.authinfo (authinfo.h).

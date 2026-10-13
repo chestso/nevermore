@@ -146,6 +146,7 @@ run_build test_wire_recorder src/nm_clock.c tests/test_wire_recorder.c src/wire_
 
 run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
+	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -159,6 +160,7 @@ run_build test_provider src/nm_clock.c tests/test_provider.c src/nevermore.c \
 
 run_build test_source src/nm_clock.c tests/test_source.c src/source.c src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
+	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -175,6 +177,7 @@ run_build test_openai_client src/nm_clock.c tests/test_openai_client.c src/opena
 	src/transport_socket.c src/nm_config.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
+	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
@@ -190,6 +193,7 @@ run_build test_agent src/nm_clock.c tests/test_agent.c src/agent.c src/session.c
 	src/transport_socket.c src/nm_config.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
+	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
 	src/provider_openai.c src/provider_openrouter.c \
