@@ -748,6 +748,14 @@ static void spinner_follow_state(NmChatApp *app, NmAgentState state)
         break;
     default:
         nm_spinner_set_running(app->spinner, 0);
+        /* A stopped spinner's tick returns a NULL glyph, but the idle
+         * cadence (nm_chat_app_tick_ms) is -1 once the turn ends, so the
+         * loop never ticks again to refresh the cached frame — the last
+         * animated glyph would linger in the status row until the next
+         * turn starts. Clear it here so the row goes glyphless the
+         * moment the round completes, matching the invariant
+         * compose_status assumes (glyphless when nothing runs). */
+        app->spinner_frame = (NmSpinnerFrame){ 0 };
         break;
     }
 }

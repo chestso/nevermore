@@ -1223,6 +1223,76 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     close(sc.fd);
 }
 
+/* The spinner stops the moment the round completes (DONE), and the
+ * status row must go glyphless then — not hold the last animated glyph
+ * until the next turn starts. The idle cadence (nm_chat_app_tick_ms) is
+ * -1 once the turn ends, so the loop never ticks again to refresh the
+ * cached frame; the DONE transition clears it (the invariant
+ * compose_status reads: glyphless when nothing runs). */
+static void test_spinner_clears_when_round_completes(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* Tick the spinner once mid-stream: an animated glyph is now cached
+     * in the frame (the very condition the bug leaves lingering). */
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
+    ASSERT_NOT_NULL(glyph);
+    ASSERT_TRUE(strstr(frame, glyph) != NULL);
+    free(glyph);
+
+    /* Drive the round to completion. harness_drive steps + flushes but
+     * never ticks, so the only thing that can clear the cached glyph is
+     * the DONE transition itself — exactly what the fix does. */
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+
+    /* The status row is glyphless now: the gauge, the rule and the
+     * identity stand without a spinner (the idle-row layout), and the
+     * glyph that was animated above is gone. */
+    char *gauge = span_bytes(nm_color_gutter(), "ctx -/- ");
+    char *rule = status_row_bytes("ctx -/- ", IDENT("openai", "test-model"));
+    char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_NOT_NULL(rule);
+    ASSERT_NOT_NULL(dead);
+    char joined[512];
+    snprintf(joined, sizeof(joined), "%s%s", gauge, rule);
+    ASSERT_TRUE(strstr(frame, joined) != NULL);
+    ASSERT_TRUE(strstr(frame, dead) == NULL);
+    free(gauge);
+    free(rule);
+    free(dead);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The ramp glyphs are one display cell each in boba's width table — the
  * status row's layout and the cursor arithmetic rest on that, and a
  * table change (or a glyph swap for an East-Asian-Wide one) must be
@@ -7579,6 +7649,7 @@ int main(void)
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_dot_pulses_on_a_truecolor_terminal);
     RUN_TEST(test_dot_blinks_and_holds_its_column_on_16_colors);
+    RUN_TEST(test_spinner_clears_when_round_completes);
     RUN_TEST(test_spinner_glyphs_are_one_cell);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
