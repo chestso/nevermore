@@ -1,4 +1,4 @@
-/* nm_size.h - the human byte size, spelled once.
+/* size.h - the human byte size, spelled once.
  *
  * "24 B" / "812.0 KiB" / "1.2 MiB": the image tier's attach lines and
  * its degradation markers, and /ps's byte column, all read the same

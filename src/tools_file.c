@@ -52,7 +52,7 @@
 #include "json.h"
 #include "file_ledger.h"
 #include "image_bytes.h"
-#include "nm_size.h"
+#include "size.h"
 #include "tools.h"
 #include "xxh3.h"
 

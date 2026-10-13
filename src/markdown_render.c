@@ -36,7 +36,7 @@
 #include "colors.h"
 #include "image.h"
 #include "markdown.h"
-#include "nm_size.h"
+#include "size.h"
 
 #define MAX_COLS      16
 #define MIN_COL_WIDTH 1

@@ -10,7 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_size.h"
+#include "size.h"
 
 /* ---------------------------------------------------------------- */
 /* Container sniffing (headers only)                                 */

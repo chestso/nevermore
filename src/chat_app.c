@@ -59,7 +59,7 @@
 #include "markdown.h"
 #include "markdown_render.h"
 #include "image.h"
-#include "nm_size.h"
+#include "size.h"
 #include "source.h"
 #include "proc.h"
 #include "spinner.h"

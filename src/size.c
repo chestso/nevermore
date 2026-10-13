@@ -1,6 +1,6 @@
-/* nm_size.c - the human byte size (see nm_size.h). */
+/* size.c - the human byte size (see size.h). */
 
-#include "nm_size.h"
+#include "size.h"
 
 #include <stdio.h>
 
