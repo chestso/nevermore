@@ -33,7 +33,12 @@ make install
 
 Dependencies:
 
-- **boba** (required) — TUI runtime, textinput, styles
+- **boba** (required) — TUI runtime, textinput, styles. A separate
+  project, not vendored: build and install a checkout of it, then let
+  pkg-config find it —
+  `PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig"`
+  (the `configure` line above already sets it; `./configure` names the
+  same path if `boba.pc` is not found).
 - **TLS** (optional, per-OS, never libcurl) — Schannel on Windows,
   Secure Transport on macOS, mbedTLS (≥ 2.28) or OpenSSL on Linux;
   `--with-tls=none` builds a plain-HTTP-only client (fine against a

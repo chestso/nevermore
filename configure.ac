@@ -82,7 +82,11 @@ PKG_PROG_PKG_CONFIG
 # boba is required (TUI: textinput, viewport, runtime event loop)
 PKG_CHECK_MODULES([BOBA], [boba],
     [have_boba=yes],
-    [AC_MSG_ERROR([boba TUI library is required. Build and install the boba sibling project first (make boba from the chestso monorepo root), or: apt install libboba-dev])])
+    [AC_MSG_ERROR([boba TUI library is required: pkg-config found no boba.pc.
+  boba is a separate project — a sibling checkout built and installed on
+  its own (see README.md's Dependencies), then found through pkg-config
+  (PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig").
+  A distro package providing boba.pc works the same way.])])
 AC_DEFINE([HAVE_BOBA], [1], [boba TUI library is available])
 BOBA_VERSION_STRING=$($PKG_CONFIG --modversion boba)
 AC_DEFINE_UNQUOTED([BOBA_VERSION], ["$BOBA_VERSION_STRING"], [boba library version])
