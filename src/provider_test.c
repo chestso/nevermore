@@ -26,9 +26,9 @@
 
 #include <string.h>
 
-#include "provider_internal.h"
-
 #include "openai_client.h"
+#include "provider_internal.h"
+#include "provider_openaicompat.h"
 
 #define TEST_REPLAY_DEFAULT "http://localhost:11434/v1"
 
@@ -45,44 +45,33 @@ static const NmModel test_replay_static_models[] = {
 };
 
 /* One endpoint shape for both drives (blocking chat + event-driven
- * begin), exactly as the shipped providers do — no auth header at
- * all (the replay server has no auth surface). */
-static void test_replay_endpoint(const char *base_url, const char *api_key,
-                                 NmOpenaiEndpoint *ep)
+ * begin), exactly as the shipped providers do — no auth header at all
+ * (the replay server has no auth surface), and no usage flag (the
+ * fixtures are hand-written). The shared surface zeroes and presets the
+ * endpoint; the base is this provider's vtable default (loopback). */
+static void test_replay_chat_endpoint(const NmProvider *p,
+                                      const NmChatRequest *req,
+                                      const char *api_key,
+                                      NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                      NmOpenaiEndpoint *ep)
 {
-    /* Zero first: built field-by-field, so read_response_meta (which
-     * this provider has no use for) must be NULL, not garbage. */
-    memset(ep, 0, sizeof(*ep));
-    ep->base_url = (base_url && *base_url) ? base_url : TEST_REPLAY_DEFAULT;
+    (void)p;
+    (void)req;
+    (void)api_key;
+    (void)hdrs;
     ep->auth_header = NULL;
-    ep->api_key = api_key;
-    ep->user_agent = NM_USER_AGENT;
-    ep->extra_headers = NULL;
-    ep->n_extra_headers = 0;
-    ep->include_usage = 0; /* replay fixtures are hand-written; no flag */
+    ep->include_usage = 0;
 }
 
-static NmChatResult test_replay_chat(const NmProvider *p,
-                                     const NmChatRequest *req,
-                                     const char *base_url, const char *api_key)
-{
-    (void)p;
-    NmOpenaiEndpoint ep;
-    test_replay_endpoint(base_url, api_key, &ep);
-    return nm_openai_chat(&ep, req);
-}
-
-static NmChatStream *test_replay_chat_begin(const NmProvider *p,
-                                            const NmChatRequest *req,
-                                            const char *base_url,
-                                            const char *api_key,
-                                            NmChatResult *err)
-{
-    (void)p;
-    NmOpenaiEndpoint ep;
-    test_replay_endpoint(base_url, api_key, &ep);
-    return nm_openai_chat_begin(&ep, req, err);
-}
+/* The chat pair is the shared surface; the catalog stays local and
+ * static (no live fetch: a replay has no server catalog to fetch). */
+const NmOpenaiCompat nm_test_replay_compat = {
+    test_replay_chat_endpoint,
+    NULL, /* no live catalog: the static replay table is all there is */
+    NULL,
+    NULL,
+    NULL,
+};
 
 static const NmModel *test_replay_models_cached(const NmProvider *p,
                                                 size_t *n_out)
@@ -133,8 +122,8 @@ const struct NmProvider nm_test_provider = {
     TEST_REPLAY_DEFAULT,
     NULL, /* no authinfo machine */
     NM_REASONING_ECHO_OFF,
-    test_replay_chat,
-    test_replay_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
