@@ -1,4 +1,4 @@
-/* nm_highlight.c - nevermore's fence token highlighter.
+/* highlight.c - nevermore's fence token highlighter.
  *
  * Character-level scans only (no-regex principle): a small state
  * machine per language that reports contiguous runs to a callback.
@@ -12,7 +12,7 @@
  * correct rather than merely cheap.
  */
 
-#include "nm_highlight.h"
+#include "highlight.h"
 
 #include <string.h>
 

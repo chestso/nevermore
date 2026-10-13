@@ -1,18 +1,18 @@
 /* test_highlight.c - the fence token highlighter (IR step 4b).
  *
- * Pure module: nm_highlight.{c,h} tokenizes one fence body line at a
+ * Pure module: highlight.{c,h} tokenizes one fence body line at a
  * time and reports contiguous runs to a callback. Every case asserts
  * the exact run sequence AND the coverage invariant — runs are in
  * order, non-empty, and cover the whole line — which is the contract
  * the renderer relies on (each run maps to one styled write).
  *
- * No boba, no I/O: this binary links nm_highlight.c alone.
+ * No boba, no I/O: this binary links highlight.c alone.
  */
 
 #include <stdio.h>
 #include <string.h>
 
-#include "nm_highlight.h"
+#include "highlight.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -273,7 +273,7 @@ static void test_json_numbers_and_strings(void)
 
 int main(void)
 {
-    printf("nm_highlight tests\n");
+    printf("highlight tests\n");
 
     RUN_TEST(test_lang_detection);
     RUN_TEST(test_active_and_none_line);

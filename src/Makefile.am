@@ -54,7 +54,7 @@ EXTRA_DIST = \
     json.h \
     nevermore.h \
     clock.h \
-    nm_highlight.h \
+    highlight.h \
     nm_image.h \
     nm_image_bytes.h \
     nm_image_codec.h \
@@ -171,8 +171,8 @@ nevermore_SOURCES = \
     nm_image_codec.h \
     nm_image_codec.c \
     nm_image.c \
-    nm_highlight.h \
-    nm_highlight.c \
+    highlight.h \
+    highlight.c \
     chat_app.h \
     chat_app.c \
     history.h \

@@ -316,10 +316,10 @@ test_history_LDADD = $(BOBA_LIBS)
 # Markdown: nevermore's line classifier (pure C, no I/O) + the boba
 # transcript integration (classifier verdicts -> commit behavior).
 # Links boba because the renderer writes through a TuiRowSink; the
-# renderer's fence path calls the highlighter, so nm_highlight.c links
+# renderer's fence path calls the highlighter, so highlight.c links
 # too.
 test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
-    ../src/nm_markdown_render.c ../src/nm_highlight.c ../src/nm_image.c \
+    ../src/nm_markdown_render.c ../src/highlight.c ../src/nm_image.c \
     ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_markdown_LDADD = $(BOBA_LIBS)
@@ -330,7 +330,7 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # is classified + parsed by nm_markdown).
 test_image_SOURCES = test_image.c ../src/nm_image.c \
     ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c \
-    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c
+    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
 
@@ -357,7 +357,7 @@ test_file_ledger_CFLAGS = $(TEST_CFLAGS)
 # per-line tokenizer behind the labeled-fence body styling (IR step
 # 4b). Unit-tests every language's token classes, cross-line block
 # comment state, and language detection.
-test_highlight_SOURCES = test_highlight.c ../src/nm_highlight.c
+test_highlight_SOURCES = test_highlight.c ../src/highlight.c
 test_highlight_CFLAGS = $(TEST_CFLAGS)
 
 # Chat app: the inline TUI component, driven through boba without a
@@ -367,7 +367,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
-    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
+    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c \
     ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \

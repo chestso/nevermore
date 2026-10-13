@@ -207,7 +207,7 @@ run_build test_spinner tests/test_spinner.c src/spinner.c
 # pure C, no boba. -Ibuild/src is the header's build dir.
 run_build test_version tests/test_version.c -Ibuild/src
 
-run_build test_highlight tests/test_highlight.c src/nm_highlight.c
+run_build test_highlight tests/test_highlight.c src/highlight.c
 
 # The pixel half is pure C (no boba), so it cross-checks under wine.
 run_build test_image_codec tests/test_image_codec.c src/nm_image_codec.c \

@@ -1,4 +1,4 @@
-/* nm_highlight.h - nevermore's fence token highlighter (IR step 4b).
+/* highlight.h - nevermore's fence token highlighter (IR step 4b).
  *
  * A resumable, character-level tokenizer for the body of a LABELED
  * fence (```c / ```bash / ```json). Pure C: no I/O, no regex, no

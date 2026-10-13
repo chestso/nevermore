@@ -26,7 +26,7 @@
 
 #include <boba/stream.h>
 
-#include "nm_highlight.h"
+#include "highlight.h"
 #include "nm_image.h"
 
 /* nevermore's stream vocabulary, addressed positionally by boba's
