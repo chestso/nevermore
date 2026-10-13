@@ -12,18 +12,18 @@
  * Sep 2026. Entry mapping differs from the OpenAI shape: label is
  * "name" (not display_name), context is TOP-LEVEL context_length
  * (not context_window), vision is architecture.input_modalities
- * containing "image" (not capabilities.vision). Cached
- * provider-owned for the process lifetime; static fallback offline.
- * GET /models/{id} 404s even for valid ids — always the full list.
+ * containing "image" (not capabilities.vision). GET /models/{id} 404s
+ * even for valid ids — always the full list.
+ *
+ * The endpoint, the live cache and the fetch seam are the shared
+ * surface (provider_openaicompat.h); the entry dialect below is this
+ * file's own wire truth.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 
-#include "provider_internal.h"
 #include "openai_client.h"
-#include "json.h"
+#include "provider_openaicompat.h"
 
 #define OPENROUTER_DEFAULT_BASE "https://openrouter.ai/api/v1"
 
@@ -50,54 +50,7 @@ static const NmModel openrouter_static_models[] = {
     { 0 }
 };
 
-static const char *openrouter_base(const char *base_url)
-{
-    if (base_url && *base_url)
-        return base_url;
-    return OPENROUTER_DEFAULT_BASE;
-}
-
-static NmChatResult openrouter_chat(const NmProvider *p,
-                                    const NmChatRequest *req,
-                                    const char *base_url, const char *api_key)
-{
-    (void)p;
-    NmOpenaiEndpoint ep = {
-        openrouter_base(base_url),
-        "Bearer %s",
-        api_key,
-        NM_USER_AGENT,
-        NULL, 0,
-        1,   /* include_usage: harmless; OpenRouter always sends usage */
-        NULL /* read_response_meta: no provider metadata */
-    };
-    return nm_openai_chat(&ep, req);
-}
-
-static NmChatStream *openrouter_chat_begin(const NmProvider *p,
-                                           const NmChatRequest *req,
-                                           const char *base_url,
-                                           const char *api_key,
-                                           NmChatResult *err)
-{
-    (void)p;
-    NmOpenaiEndpoint ep = {
-        openrouter_base(base_url),
-        "Bearer %s",
-        api_key,
-        NM_USER_AGENT,
-        NULL, 0,
-        1,   /* include_usage */
-        NULL /* read_response_meta: no provider metadata */
-    };
-    return nm_openai_chat_begin(&ep, req, err);
-}
-
-/* Live catalog cache: provider-owned, process lifetime. */
-static NmModel *openrouter_live_models;
-static size_t openrouter_live_n;
-
-/* Does the string array at `arr` carry `want`? The scanner's one
+/* Does the string array at `arr` carry `want`? The row's one
  * membership test — architecture.<key>_modalities carrying "image"
  * (OPENROUTER-API.md §2: vision is input_modalities; §5.1: image_gen
  * is output_modalities — NOT capabilities.vision) and
@@ -114,132 +67,39 @@ static int array_has(NmJson *arr, const char *want)
     return 0;
 }
 
-/* Fetch /v1/models once, cache as NmModel[] (one-time per process;
- * memory-reuse principle). */
-static NmCatalogFetch openrouter_fetch;
-
-/* Build the cache from a fetched document; 1 when it committed one. */
-static int openrouter_parse_catalog(const NmJson *doc, void *ud)
+/* One /v1/models entry -> one row (the dialect in the header comment). */
+static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
 {
     (void)ud;
-    NmJson *data = nm_json_get(doc, "data");
-    size_t count = nm_json_len(data);
-    if (count == 0)
-        return 0;
-    NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models)
-        return 0;
-    size_t out = 0;
-    for (size_t i = 0; i < count; i++) {
-        NmJson *e = nm_json_at(data, i);
-        const char *id = nm_json_str(nm_json_get(e, "id"));
-        if (!id)
-            continue;
-        /* Strings are owned by the parsed document — freed by the
-         * caller — so copy into the cache. One-time per process. */
-        models[out].id = strdup(id);
-        const char *name = nm_json_str(nm_json_get(e, "name"));
-        models[out].label = strdup(name ? name : id);
-        NmJson *arch = nm_json_get(e, "architecture");
-        models[out].vision =
-            array_has(nm_json_get(arch, "input_modalities"), "image");
-        /* The receive direction (IMAGEGEN): output_modalities contains
-         * "image" — the input scanner's twin (OPENROUTER-API.md §5.1). */
-        models[out].image_gen =
-            array_has(nm_json_get(arch, "output_modalities"), "image");
-        /* Tool use: supported_parameters carrying "tools" is the
-         * claim (OPENROUTER-API.md §2), and the KEY's presence is what
-         * makes the claim definite — an entry that lists parameters
-         * without "tools" takes none (omit the toolset; OpenRouter
-         * 404s otherwise), while a catalog that says nothing at all
-         * keeps the toolset (0). */
-        NmJson *params = nm_json_get(e, "supported_parameters");
-        models[out].tools =
-            params && nm_json_type(params) == NM_JSON_ARRAY
-                ? (array_has(params, "tools") ? 1 : -1)
-                : 0;
-        double ctx = nm_json_num(nm_json_get(e, "context_length"));
-        models[out].context_length = ctx > 0 ? (long)ctx : -1;
-        if (!models[out].id || !models[out].label) {
-            free((void *)models[out].id);
-            free((void *)models[out].label);
-            continue;
-        }
-        out++;
-    }
-    if (out == 0) {
-        free(models);
-        return 0;
-    }
-    openrouter_live_models = models;
-    openrouter_live_n = out;
-    return 1;
+    NmJson *arch = nm_json_get(entry, "architecture");
+    out->vision = array_has(nm_json_get(arch, "input_modalities"), "image");
+    /* The receive direction (IMAGEGEN): output_modalities contains
+     * "image" — the input scanner's twin (OPENROUTER-API.md §5.1). */
+    out->image_gen =
+        array_has(nm_json_get(arch, "output_modalities"), "image");
+    /* Tool use: supported_parameters carrying "tools" is the
+     * claim (OPENROUTER-API.md §2), and the KEY's presence is what
+     * makes the claim definite — an entry that lists parameters
+     * without "tools" takes none (omit the toolset; OpenRouter
+     * 404s otherwise), while a catalog that says nothing at all
+     * keeps the toolset (0). */
+    NmJson *params = nm_json_get(entry, "supported_parameters");
+    out->tools = params && nm_json_type(params) == NM_JSON_ARRAY
+                     ? (array_has(params, "tools") ? 1 : -1)
+                     : 0;
+    double ctx = nm_json_num(nm_json_get(entry, "context_length"));
+    out->context_length = ctx > 0 ? (long)ctx : -1;
+    /* No "name" on the wire: the merge loop falls back to the id. */
+    return nm_json_str(nm_json_get(entry, "name"));
 }
 
-/* The async seam (the /model popup's non-blocking drive). */
-static int openrouter_models_begin(const NmProvider *p, const char *base_url,
-                                   const char *api_key)
-{
-    (void)p;
-    (void)api_key; /* the catalog is public (OPENROUTER-API.md §1) */
-    if (openrouter_live_models || openrouter_fetch.f)
-        return 0;
-    if (!base_url && !nm_live_catalog_enabled())
-        return 0;
-    NmOpenaiEndpoint ep = { openrouter_base(base_url), NULL, NULL,
-                            NM_USER_AGENT,
-                            NULL, 0,
-                            0 /* include_usage: a catalog GET has no stream */, NULL };
-    return nm_catalog_fetch_begin(&openrouter_fetch, &ep,
-                                  openrouter_parse_catalog, NULL);
-}
-
-static NmCatalogStatus openrouter_models_step(const NmProvider *p)
-{
-    (void)p;
-    return nm_catalog_fetch_step(&openrouter_fetch);
-}
-
-static NmSource openrouter_models_source(const NmProvider *p)
-{
-    (void)p;
-    return nm_catalog_fetch_source(&openrouter_fetch);
-}
-
-static void openrouter_models_end(const NmProvider *p)
-{
-    (void)p;
-    nm_catalog_fetch_end(&openrouter_fetch);
-}
-
-static const NmModel *openrouter_models_cached(const NmProvider *p,
-                                               size_t *n_out)
-{
-    (void)p;
-    if (openrouter_live_models) {
-        if (n_out)
-            *n_out = openrouter_live_n;
-        return openrouter_live_models;
-    }
-    if (n_out) {
-        size_t n = 0;
-        while (openrouter_static_models[n].id)
-            n++;
-        *n_out = n;
-    }
-    return openrouter_static_models;
-}
-
-static const NmModel *openrouter_models(const NmProvider *p,
-                                        const char *base_url,
-                                        const char *api_key, size_t *n_out)
-{
-    /* The BLOCKING drive of the async seam (one implementation, two
-     * drives). */
-    if (openrouter_models_begin(p, base_url, api_key))
-        nm_catalog_run(p);
-    return openrouter_models_cached(p, n_out);
-}
+const NmOpenaiCompat nm_openrouter_compat = {
+    nm_openaicompat_bearer_chat_endpoint,
+    nm_openaicompat_anon_catalog_endpoint, /* public catalog: tokenless */
+    openrouter_static_models,
+    openrouter_row,
+    NULL, /* one tier: the row needs no context */
+};
 
 static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
 {
@@ -260,19 +120,19 @@ const struct NmProvider nm_openrouter_provider = {
     OPENROUTER_DEFAULT_BASE,
     "openrouter.ai",
     NM_REASONING_ECHO_OFF,
-    openrouter_chat,
-    openrouter_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
-    openrouter_models,
-    openrouter_models_cached,
-    openrouter_models_begin,
-    openrouter_models_step,
-    openrouter_models_source,
-    openrouter_models_end,
+    nm_openaicompat_models,
+    nm_openaicompat_models_cached,
+    nm_openaicompat_models_begin,
+    nm_openaicompat_models_step,
+    nm_openaicompat_models_source,
+    nm_openaicompat_models_end,
     openrouter_needs_auth,
     openrouter_env_key,
 };

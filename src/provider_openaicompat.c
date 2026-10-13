@@ -44,6 +44,7 @@ static OpenaicompatSlot g_slots[NM_PROVIDER_MAX];
  * not point at these functions. */
 static const NmOpenaiCompat *const g_compat[NM_PROVIDER_MAX] = {
     [NM_PROVIDER_OPENAI] = &nm_openai_compat,
+    [NM_PROVIDER_OPENROUTER] = &nm_openrouter_compat,
 };
 
 static const NmOpenaiCompat *openaicompat_of(const NmProvider *p)
