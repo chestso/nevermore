@@ -1,4 +1,4 @@
-/* nm_file_ledger.h - the per-session file ledger: what this
+/* file_ledger.h - the per-session file ledger: what this
  * conversation has already read, and whether it is still what is on
  * disk.
  *

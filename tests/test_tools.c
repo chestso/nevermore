@@ -616,7 +616,7 @@ static void test_read_file_missing(void)
     nm_toolset_free(ts);
 }
 
-/* The session's file ledger (nm_file_ledger.h) through the tool: a read
+/* The session's file ledger (file_ledger.h) through the tool: a read
  * whose bytes this conversation already holds answers with a POINTER
  * instead of a second copy, a file that is not what the session read
  * says so, and the model's own write is never reported as somebody

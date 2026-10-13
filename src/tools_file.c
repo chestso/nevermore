@@ -24,7 +24,7 @@
  * truncation seam in tools.c (nm_truncate_tail / nm_clamp_output), so
  * the rendered transcript and the session history see the same bytes.
  *
- * read_file also consults the SESSION's file ledger (nm_file_ledger.h,
+ * read_file also consults the SESSION's file ledger (file_ledger.h,
  * reached through the call context): a read whose bytes this
  * conversation already holds — same path, same window, same hash, and
  * that result still in context — answers with a pointer instead of a
@@ -50,7 +50,7 @@
 #endif
 
 #include "json.h"
-#include "nm_file_ledger.h"
+#include "file_ledger.h"
 #include "nm_image_bytes.h"
 #include "nm_size.h"
 #include "tools.h"
@@ -1133,7 +1133,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
                                .read_state = NM_READ_STATE_PAST_EOF };
     }
 
-    /* The session's file ledger (nm_file_ledger.h): this read against
+    /* The session's file ledger (file_ledger.h): this read against
      * what the conversation already read. A REPEAT means the SAME bytes
      * are already above — the hash of what we just read is the proof —
      * and that result is still in context, so returning them again
@@ -1449,7 +1449,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     }
     free(out);
 
-    /* The model's own write (nm_file_ledger.h): what the session knew
+    /* The model's own write (file_ledger.h): what the session knew
      * about this file's content is stale now, and the newest copy is
      * the model's own. Without this, a read after the model's own edit
      * would be reported as a change somebody else made. */
@@ -1588,7 +1588,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
     }
 
-    /* The model's own write (nm_file_ledger.h): the file is no longer
+    /* The model's own write (file_ledger.h): the file is no longer
      * what the session read, and the model is the one who changed it —
      * the ledger must not later report that as somebody else's edit. */
     if (ctx && ctx->ledger)

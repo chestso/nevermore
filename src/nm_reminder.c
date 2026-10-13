@@ -369,7 +369,7 @@ static int text_web_untrusted(const NmReminderFacts *f, char *out, size_t cap)
 /* --- the read was skipped (the file is already in context) -------- */
 
 /* A per-result rule: the result IS the event. The fact comes from the
- * session's file ledger (nm_file_ledger.h) — the tool did NOT return
+ * session's file ledger (file_ledger.h) — the tool did NOT return
  * the content, because an identical read (same path, same window, same
  * bytes) is already in this conversation and still in context. The
  * body says what happened; this says what to do about it. */

@@ -20,7 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "nm_file_ledger.h"
+#include "file_ledger.h"
 #include "test_helpers.h"
 
 /* ASSERT_EQ re-evaluates its arguments for the failure message, and

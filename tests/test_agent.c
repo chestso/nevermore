@@ -5238,7 +5238,7 @@ static int count_occurrences(const char *hay, const char *needle)
     return n;
 }
 
-/* The session's file ledger (nm_file_ledger.h) end to end: the model
+/* The session's file ledger (file_ledger.h) end to end: the model
  * reads the same file twice with identical args, and the second read
  * answers with a POINTER — the bytes are already in the conversation —
  * with the `file-already-read` note riding that result. */

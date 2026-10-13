@@ -1,4 +1,4 @@
-/* nm_file_ledger.c - the per-session file ledger (see the header).
+/* file_ledger.c - the per-session file ledger (see the header).
  *
  * House rules observed here: no allocation on the lookup path (the
  * table is fixed and lives in the struct), exact string keys (never a
@@ -6,7 +6,7 @@
  * turn into a wrong skip), and one pass over the table per question.
  */
 
-#include "nm_file_ledger.h"
+#include "file_ledger.h"
 
 #include <stdlib.h>
 #include <string.h>

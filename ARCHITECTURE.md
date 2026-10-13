@@ -542,7 +542,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   the user-channel ones itself, the tool-channel ones are already in
   the panel body, styled by `NM_SGR_REMINDER`), and
   `nm_agent_on_warning` when untrusted output tried to forge a tag.
-- **The file ledger** (`src/nm_file_ledger.{h,c}`, ONE PER SESSION) —
+- **The file ledger** (`src/file_ledger.{h,c}`, ONE PER SESSION) —
   what this conversation has already read, and whether the file is
   still what it read. The tool observes (it is the thing that opened
   the file) and hands the facts in; the ledger answers; it does NO I/O

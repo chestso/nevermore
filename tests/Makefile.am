@@ -249,7 +249,7 @@ endif
 # spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
-    ../src/nm_file_ledger.c ../src/xxh3.c \
+    ../src/file_ledger.c ../src/xxh3.c \
     ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/conf.c \
@@ -264,7 +264,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # reachability cache and its timeout.
 test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/nm_file_ledger.c ../src/xxh3.c \
+    ../src/file_ledger.c ../src/xxh3.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/conf.c \
@@ -285,7 +285,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/nm_image_bytes.c ../src/nm_size.c \
     ../src/context.c ../src/nm_reminder.c \
-    ../src/nm_file_ledger.c \
+    ../src/file_ledger.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
@@ -350,7 +350,7 @@ test_reminder_CFLAGS = $(TEST_CFLAGS)
 # File ledger: the per-session read memory behind `file-already-read` /
 # `file-changed` — pure C (no I/O, no boba, no config store: the tool
 # hands the facts in).
-test_file_ledger_SOURCES = test_file_ledger.c ../src/nm_file_ledger.c
+test_file_ledger_SOURCES = test_file_ledger.c ../src/file_ledger.c
 test_file_ledger_CFLAGS = $(TEST_CFLAGS)
 
 # Fence token highlighter: pure C (no boba, no I/O) — the resumable
@@ -368,7 +368,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/nm_highlight.c \
-    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/nm_file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/nm_image.c ../src/nm_image_bytes.c ../src/nm_image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \

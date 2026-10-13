@@ -45,7 +45,7 @@
  * winsock2.h must come first (house rule). */
 #include "clock.h"
 
-#include "nm_file_ledger.h"
+#include "file_ledger.h"
 #include "nm_reminder.h"
 
 #include "provider_internal.h"
@@ -107,7 +107,7 @@ struct NmAgent
      * needs no latch at all. */
     unsigned turn;
     int reminder_latch[NM_REMINDER_MAX_RULES];
-    /* This session's file ledger (nm_file_ledger.h): what the
+    /* This session's file ledger (file_ledger.h): what the
      * conversation has already read, so a re-read of an unchanged file
      * is a pointer instead of a duplicate copy, and a file that changed
      * on disk is reported as such. Per SESSION by construction — it
@@ -404,7 +404,7 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
          * section is simply absent. */
     }
     nm_conversation_id_new(a->conversation_id);
-    /* The session's file ledger (nm_file_ledger.h). A ledger allocation
+    /* The session's file ledger (file_ledger.h). A ledger allocation
      * failure is not an agent failure: every read simply reads, which
      * is exactly the behavior without one. */
     a->file_ledger = nm_file_ledger_new();

@@ -200,7 +200,7 @@ typedef struct NmReminderFacts
     int read_past_eof;
 
     /* The session's file ledger's verdict about the file this result
-     * read (nm_file_ledger.h): the read was skipped because the same
+     * read (file_ledger.h): the read was skipped because the same
      * bytes are already in this conversation and still in context
      * (`file-already-read`), or the path is not what the session last
      * read (`file-changed`). Both are per-result facts: the result IS

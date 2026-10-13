@@ -12,8 +12,8 @@
 
 #include <stddef.h>
 
-#include "nm_file_ledger.h" /* NmFileVerdict: the file ledger's answer */
-#include "transport.h"      /* NmSource: what an async tool waits on */
+#include "file_ledger.h" /* NmFileVerdict: the file ledger's answer */
+#include "transport.h"   /* NmSource: what an async tool waits on */
 
 #ifdef __cplusplus
 extern "C" {
@@ -24,7 +24,7 @@ typedef struct NmTool NmTool;
 
 /* The per-call context a tool receives: the working directory relative
  * paths resolve against, and the SESSION's file ledger
- * (nm_file_ledger.h) — the memory that turns a re-read of an unchanged
+ * (file_ledger.h) — the memory that turns a re-read of an unchanged
  * file into a pointer instead of a duplicate copy.
  *
  * NULL means "no context": paths resolve against the process cwd and
@@ -109,7 +109,7 @@ typedef struct NmToolResult
      * reminder framework reads it (`empty-file` / `offset-past-eof`);
      * NM_READ_STATE_NONE is the zero value. */
     int read_state;
-    /* What the session's file ledger (nm_file_ledger.h) made of the
+    /* What the session's file ledger (file_ledger.h) made of the
      * file this result read — an NmFileVerdict. REPEAT means the tool
      * did NOT return the content: an identical read of the same file is
      * already in this conversation and still in context, so the body
