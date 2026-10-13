@@ -218,6 +218,19 @@ static long long wall_ms(void)
 #endif
 }
 
+/* Sleep a millisecond on either platform. A drive that has no wait
+ * target (the job retired its handle at EOF, the exit not yet reaped)
+ * must not step in a tight loop — the cap it would blow is not a bound
+ * (see drive_until_done and test_run_command_async's drives). */
+static void idle_ms(void)
+{
+#ifdef _WIN32
+    Sleep(1);
+#else
+    usleep(1000);
+#endif
+}
+
 /* Has the step's live source something to read? Waits up to `ms` of REAL
  * time. The kind is the tool's to declare — a POSIX child's pipe is a
  * descriptor, a Windows job's readiness object is a waitable HANDLE — so
@@ -295,14 +308,11 @@ static int drive_virtual(const NmTool *t, NmToolExec *e, NmToolResult *out,
 
 /* Drive to DONE on REAL readiness alone, with the clock frozen: the call
  * ends when the child speaks or exits, never because a window closed.
- * This is the shape for a result that IS the child's exit (closing its
- * stdin and reading the flush) — nothing may cut it short.
- *
- * Windows-only, with exec_virtual_done below: their one caller is the
- * Windows job round-trip (the POSIX lifecycle test ends on the job
- * going away, not on a flush), and a static helper that only one
- * platform's test uses is an unused-function warning on the other. */
-#ifdef _WIN32
+ * This is the shape for a result that IS the child's exit — closing its
+ * stdin and reading the flush (Windows job round-trip), or a poll that
+ * must catch the exit (`test_write_stdin_reads_progress`) — nothing may
+ * cut it short. The wall-clock budget is the only bound, so a child that
+ * never exits fails the test loudly instead of hanging it. */
 static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
                             int budget_ms)
 {
@@ -313,12 +323,14 @@ static int drive_until_done(const NmTool *t, NmToolExec *e, NmToolResult *out,
         NmSource src = { -1, NM_INTEREST_READ, NM_SRC_FD };
         if (t->source)
             t->source(e, &src);
-        source_ready(&src, 50);
+        if (src.handle >= 0)
+            source_ready(&src, 50);
+        else
+            idle_ms(); /* retired handle: no wait target, do not spin */
         if (wall_ms() - t0 > (long long)budget_ms)
             return -1;
     }
 }
-#endif /* _WIN32 */
 
 /* nm_toolset_execute's synchronous pump (the `execute` vtable entry)
  * waits a yield window out on the REAL clock, so a live child would hang
@@ -349,7 +361,6 @@ static NmToolResult exec_virtual(const char *name, const char *args_json,
 
 /* exec_virtual's sibling for a call whose result is the child's EXIT
  * (nothing may close its window first) — see drive_until_done. */
-#ifdef _WIN32
 static NmToolResult exec_virtual_done(const char *name, const char *args_json)
 {
     NmToolset *ts = nm_toolset_new_defaults();
@@ -369,7 +380,6 @@ static NmToolResult exec_virtual_done(const char *name, const char *args_json)
     nm_toolset_free(ts);
     return r;
 }
-#endif /* _WIN32 */
 
 /* ---------------------------------------------------------------- */
 /* Registry                                                          */
@@ -2830,7 +2840,7 @@ static void test_run_command_async(void)
             FD_SET(fd, &fds);
             select(fd + 1, &fds, NULL, NULL, &tv);
         } else {
-            usleep(1000);
+            idle_ms(); /* retired handle: no wait target, do not spin */
         }
         ASSERT_TRUE(wall_ms() - drive_t0 < 10000);
     }
@@ -4193,12 +4203,18 @@ static void test_write_stdin_reads_progress(void)
     ASSERT_NOT_NULL(strstr(r.output, "first"));
     nm_tool_result_free(&r);
 
-    /* Poll with no input: the second line arrives, and with it the exit. */
+    /* Poll with no input: the second line arrives, and with it the exit.
+     * The assertion IS the exit, so the drive is the frozen-clock one
+     * (exec_virtual_done, real readiness only): this binary's clock is
+     * the fake one, so a virtual-time drive closes the poll's window on
+     * the first quiet pass after the child speaks — and a loaded box can
+     * lose the exit to that window (the 2026-10-13 flake). Nothing may
+     * cut this call short but the child itself. */
     NmJson *jp = nm_json_new_object();
     nm_json_set(jp, "job_id", nm_json_new_number(sid));
     nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
     args = args_dump(jp);
-    r = exec_virtual("write_stdin", args, 1);
+    r = exec_virtual_done("write_stdin", args);
     free(args);
     ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
@@ -4489,7 +4505,7 @@ static void test_run_command_async_on_windows(void)
         if (t->source(e, &s) && s.handle >= 0)
             WaitForSingleObject((HANDLE)s.handle, 50);
         else
-            Sleep(10);
+            idle_ms(); /* retired handle: no wait target, do not spin */
         ASSERT_TRUE(wall_ms() - drive_t0 < 10000);
     }
     t->end(e);
