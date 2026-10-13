@@ -371,6 +371,17 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   minutes-long image-generation gap count) resets the agent's
   `last_activity` exactly like a delta does, so a live-but-eventless
   stream is never cut (the counter-proof: silence still times out).
+- **A step drains every byte available, or its tail is stranded**
+  (`openai_client.c`'s `stream_one_step` loops `nm_read_body` until
+  would-block, so `NM_CHAT_PENDING` means exactly "no more input is
+  immediately available"): callers step on _socket_ readiness, and
+  nevermore's own buffers — TLS plaintext, chunk-decoder scratch, SSE
+  staging — are not a wakeup source, so bytes a step leaves behind wait
+  for a wakeup that may never come. Windows makes that permanent at the
+  end of a turn (the peer's FD_CLOSE is consumed once by
+  `WSAEnumNetworkEvents`); POSIX's level-triggered poll masks the same
+  bug rather than preventing it. Pinned by
+  `test_chat_step_drains_everything_available`.
 - **User images are shown ONCE, where they are attached**: `/image
 <path>` posts the `![alt](data_url)` block to the content stream
   itself, right below the line that names it, when the terminal renders
@@ -566,6 +577,50 @@ save [path]` writes session.c's markdown). Const on purpose: the
   file ledger. Every `execute`/`begin` takes `const NmToolCtx *`, and
   NULL means "no workdir (the process cwd), no ledger (every read is a
   fresh read)" — what a direct caller and a test want.
+- **`web_search`** (`src/tools_websearch.c`) — a local SearXNG
+  instance over the transport's async phase machine, and the first tool
+  needing **WRITE** interest (connect/send) as well as read:
+  `NmTool.source` fills the whole `NmSource` (handle + interest bits +
+  kind) and the agent hands it straight to the event loop's wait set.
+  It caches instance reachability for the session, and the latch is
+  **transport-level only — an HTTP status is an ANSWER, so it never
+  latches** (latching on a 4xx is how one long query turned every later
+  call into "SearXNG is unreachable (cached for this session)"). The
+  config key is `searxng` / `$NEVERMORE_SEARXNG_URL` (default
+  `http://127.0.0.1:8888`), and the per-request deadline rides
+  `NmTool.deadline_ms`. The remaining deferral is the TLS handshake,
+  which blocks AFTER writability — bounded by `handshake_timeout`
+  (10 s default), so it is a budget rather than the OS's own timeout.
+- **The write seam is `write_atomic`** (`src/tools_file.c`) — the ONE
+  path behind `write_file` and `edit_file`, and it carries the target's
+  metadata because a rename replaces the inode: it resolves the path to
+  the file it MEANS (a symlink chain, dangling links included, because
+  `read_file` follows links — a rename onto the link destroys it),
+  copies the target's permission bits onto the tmp with `fchmod` BEFORE
+  the first byte (`open`'s mode argument is umask-masked, and the order
+  keeps a private file's new content out of a world-readable tmp),
+  restores the owner best-effort, and carries the Windows attributes.
+  Deliberately NOT preserved: setuid/setgid/sticky (the kernel clears
+  them on a content change and a rename bypasses that — carrying them
+  would keep a trust bit on model-written bytes), hard links (the
+  rename IS the atomicity), xattrs/ACLs. It REFUSES what a rename would
+  do silently: a read-only target, a directory, a special file, and —
+  Windows — an unresolvable reparse point; one `WriteOutcome` +
+  `write_refusal_message` is the only refusal wording, because a bare
+  EACCES cannot tell a read-only file from a read-only directory.
+- **Read paths never `fopen` what may not be a regular file** — a fifo
+  blocks until a writer arrives, and no deadline rescues a synchronous
+  tool call. `probe_file_size` is a `stat`; `read_file_bytes` checks
+  `ferror` after `fread` (a directory opens fine and reads wrong) and
+  refuses a non-regular path before `fopen`; a failed read FAILS with
+  the cause, never reads as empty.
+- **Tool output clamps are per family**: the file tools and
+  `run_command` use `nm_clamp_output` (head-only; `read_file`'s carries
+  a resumable offset), while the job tools use `nm_clamp_job_output`
+  (70/30 head/tail — a build log's failures live at the TAIL, so a
+  head-only cut drops the part being asked for). Both flow through the
+  one shaper `nm_tool_result_body`, so the rendered shape stays
+  identical; the status prefix is the only slack on top of the budget.
 - **chat_app** (`src/chat_app.c`) — the boba Elm component:
   textinput + popups + spinner + a boba `TuiTranscript` driven by
   nevermore's markdown grammar (`nm_markdown.c` /
@@ -853,6 +908,65 @@ such file or directory`) instead of a bare 127 that a legitimate
   self-referential dev-harness task, which is not enough to reverse the
   split — it stays the escalation if a real task ever shows the
   foreground-server hang.
+- **The job-pair gotcha (`src/tools_exec.c`)** — `exec_command` /
+  `write_stdin` / `kill_job` are a PAIR, and the job outlives the call
+  that made it: `exec_command` reports either the exit or, once the
+  yield window closes, a job id the model echoes into `write_stdin`.
+  Three invariants are not visible from the code. (1) The exec handle
+  holds the job **id, never an `NmProc *`** — `kill_job` and teardown
+  free jobs, so a stale pointer would be a use-after-free; `step`
+  re-resolves with `nm_proc_find` every time, and `end` must NOT close
+  the job (it frees this call's state only). (2) `nm_proc_take_output`
+  is a **delta** since the last take, so no report re-echoes what the
+  model already read; a job whose exit was reported is closed, one that
+  outlived its window stays registered. (3) The yield window is
+  `NmTool.deadline_ms`, not a poll: without it a silent child (`sleep
+30`) would never be re-stepped, because the wait set only wakes on fd
+  activity. A job's readiness handle joins the loop's wait set for as
+  long as it is registered, and `nm_proc_close_all` is on the teardown
+  path.
+- **The Windows-jobs gotcha (`src/nm_process_win.c`)** — a Windows job
+  is pipes + a Job Object + a reader thread, and the traps:
+  `CREATE_UNICODE_ENVIRONMENT` is required whenever a custom
+  `lpEnvironment` block is passed (else `ERROR_INVALID_PARAMETER` (87),
+  no reason given); inheritance is per handle — the child's ends ride
+  `STARTF_USESTDHANDLES` + `PROC_THREAD_ATTRIBUTE_HANDLE_LIST` while
+  the parent's ends are cleared with `SetHandleInformation` (a parent
+  write end left inheritable means the child holds its own stdin open
+  forever, so EOF can never be signalled); and
+  **`PROC_THREAD_ATTRIBUTE_HANDLE_LIST` holds a POINTER to the
+  caller's array, not a copy** — the array must outlive
+  `CreateProcessW` (declare it in the spawn function's scope, not the
+  attribute block; it fails with the SAME error 87 as the env flag, and
+  Wine copies the value, so only Windows CI catches it). The reader
+  thread is stopped by killing the child (the last write end closes,
+  `ReadFile` returns EOF, `nm_proc_os_free` joins it;
+  `CancelSynchronousIo` covers a surviving grandchild's pipe), and a
+  join that times out LEAKS the state — freeing under a live reader
+  would be a use-after-free of the job buffer the thread feeds. stdin
+  EOF is a closed handle, never a marker: a pipe has no line discipline
+  (POSIX does the C-d dance instead — the tool layer never spells
+  `\x04`), and `WriteFile` on a pipe has no non-blocking form, so the
+  stdin pipe is created 64 KiB large and a write is a bounded deferral.
+- **Never block the loop on a child's reap — a macOS PTY job
+  deadlocks**: XNU finishes a pty session leader's exit only after its
+  terminal output queue drains, and the parent is the only reader of
+  that master, so a blocking `waitpid` and the child wait on each other
+  (the child sits in `?NEs` until the parent is killed).
+  `nm_proc_os_reap()` is therefore `WNOHANG`/`WaitForSingleObject(…, 0)`
+  by construction; `nm_proc_close` kills, **drains**
+  (`nm_proc_os_gather`, which is what lets the child finish exiting),
+  reaps only if the OS agrees the child is gone, and otherwise hands
+  the whole `NmProcOs` to an orphan list that a later close/teardown
+  sweeps — never a blocking wait. The trigger is an undrained job;
+  `run_command` is unaffected (pipes, no controlling tty).
+- **A spawned child's stdin is EOF, never an inherited pipe**: POSIX
+  opens it on `/dev/null`
+  (`posix_spawn_file_actions_addopen(STDIN_FILENO, …)`); Windows closes
+  the job's stdin pipe right after the spawn (or passes a `NUL` handle
+  on the synchronous path). A backgrounded child reading the terminal
+  gets SIGTTIN, and one reading any open pipe (the TUI's, a test
+  harness's) blocks forever — inheriting is never right.
 
 ## Naming
 
@@ -915,6 +1029,31 @@ stream messages; boba is the only caller of
   deliberate exception to "boba never styles" — the app owns the
   value, boba only maps it, because boba is already those rows'
   writer.
+- **Tool blocks are ONE call** (a user call): the plan (name + EVERY
+  argument, `nm_tool_plan`) prints before the tool runs, then the full
+  output body (the `╰─` elbow, not a one-line slug), then one blank
+  line — so consecutive calls are separated and the answer never glues
+  to the last result. The agent announces each call (START) the moment
+  it is about to run and executes one per step, so a round's parallel
+  tool calls (one assistant message, several `tool_calls`) read
+  plan → result, call after call, never all the plans up front.
+  chat_app emits the blank on the tool END event; a block left open
+  (cancel/fatal before its END) is closed on the IDLE/ERROR
+  transition. The elbow is its own color role (`NM_SGR_TOOL_ELBOW`,
+  Zinc `#10B1AE` — `⎿` is missing from most mono faces); continuation
+  rows indent by its 5 display columns.
+- **Committed bytes carry NO width break; the LIVE frame is the
+  exception.** A logical line reaches the scrollback as one byte run
+  (`\r\n` only at its real end): the terminal owns soft-wrapping, so
+  committed history reflows on resize, and a baked width break is a
+  hard break — unfixable on reflow. The live region wraps explicitly
+  instead: boba's inline frame counts rows by newlines in the frame
+  buffer and positions the cursor with relative moves, so a
+  soft-wrapped live row breaks the cursor math; the row sink wraps at
+  the sink width for `SINK_FRAME`/`SINK_COUNT` only, and the live plan
+  emits EL before each row (column shrink leaves stale glyphs
+  otherwise). The live region re-renders every flush, so its wrap is
+  transient and never reaches the scrollback.
 - **Images render once, at commit, never live**: a
   standalone `![alt](src)` line at a block boundary is a
   block-granular IMAGE block; while it streams (model-authored text

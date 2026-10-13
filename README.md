@@ -531,6 +531,14 @@ most `NM_PROC_MAX_JOBS` (31: the pool less the agent's own source)
 run at once — one past that fails loudly rather than starting a child
 nothing would read. They die with nevermore.
 
+## Smoke testing without a provider
+
+The test suite never needs a network. For a manual/visual pass,
+`tools/fake-ollama/fake_ollama.py` is a stdlib fake provider (pair it
+with `-p ollama:local`; `--scenario table-fence` exercises reasoning +
+table + fence + prose in one turn), and `tools/wire-replay` replays a
+captured wire dump byte-exact — each tool's README has the recipe.
+
 ## Layout
 
 ```
