@@ -43,6 +43,7 @@ static OpenaicompatSlot g_slots[NM_PROVIDER_MAX];
  * the vtables. An unregistered id means that provider's vtable does
  * not point at these functions. */
 static const NmOpenaiCompat *const g_compat[NM_PROVIDER_MAX] = {
+    [NM_PROVIDER_HYPER] = &nm_hyper_compat,
     [NM_PROVIDER_OPENAI] = &nm_openai_compat,
     [NM_PROVIDER_OPENROUTER] = &nm_openrouter_compat,
 };

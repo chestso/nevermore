@@ -36,7 +36,11 @@
  *
  * Catalog: GET /v1/models answers the standard {"object": "list",
  * "data": [...]} shape WITHOUT a token (HYPER-API.md §5), so the
- * catalog works offline-key; the static fallback covers offline.
+ * catalog works offline-key; the static fallback covers offline. The
+ * endpoint pair and the catalog machinery are the shared surface
+ * (provider_openaicompat.h) — the affinity headers, the Prism hook and
+ * the entry dialect below are this file's own wire truth.
+ *
  * OAuth device flow: out of scope here (not part of the vtable);
  * the $HYPER_API_KEY token is the only auth path nevermore uses.
  */
@@ -51,8 +55,9 @@
 #include <unistd.h> /* gethostname */
 #endif
 
-#include "provider_internal.h"
 #include "openai_client.h"
+#include "provider_internal.h" /* nm_conversation_id_new (affinity fallback) */
+#include "provider_openaicompat.h"
 #include "json.h"
 #include "xxh3.h"
 
@@ -74,13 +79,6 @@ static const NmModel hyper_static_models[] = {
     { "gpt-oss-120b", "GPT OSS 120b", 0, 0, 131072, 1 },
     { 0 }
 };
-
-static const char *hyper_base(const char *base_url)
-{
-    if (base_url && *base_url)
-        return base_url;
-    return HYPER_DEFAULT_BASE;
-}
 
 /* ---------------------------------------------------------------- */
 /* Cache affinity (HYPER-API.md §3.1)                                */
@@ -146,7 +144,7 @@ static const char *hyper_fallback_conversation(void)
  * at the process-static slots (or the request's borrowed id hashed
  * into one), so they outlive the queue call. Returns the count. */
 static size_t hyper_affinity_headers(const NmChatRequest *req,
-                                     NmExtraHeader out[3])
+                                     NmExtraHeader out[NM_EXTRA_HEADERS_MAX])
 {
     size_t n = 0;
 
@@ -207,20 +205,16 @@ static void hyper_read_response_meta(const NmConnection *conn,
                  "%s", v);
 }
 
-/* One place where the hyper endpoint is assembled: base + auth + the
- * affinity extras, so chat and chat_begin cannot drift. */
-static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
-                           const char *api_key, NmExtraHeader hdrs[3],
-                           NmOpenaiEndpoint *ep)
+/* The chat endpoint: base + auth + the affinity extras + the Prism
+ * hook, so the blocking and event-driven drives cannot drift. */
+static void hyper_chat_endpoint(const NmProvider *p, const NmChatRequest *req,
+                                const char *api_key,
+                                NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                NmOpenaiEndpoint *ep)
 {
-    /* Zero first: built field-by-field, so any field this builder does
-     * not name stays NULL rather than garbage (the client copies
-     * read_response_meta and would call through a wild pointer). */
-    memset(ep, 0, sizeof(*ep));
-    ep->base_url = hyper_base(base_url);
+    (void)p;
     ep->auth_header = "Bearer %s";
     ep->api_key = api_key;
-    ep->user_agent = NM_USER_AGENT;
     ep->extra_headers = hdrs;
     ep->n_extra_headers = hyper_affinity_headers(req, hdrs);
     /* Ask for a streaming usage chunk (context gauge). Verified live: with
@@ -231,149 +225,50 @@ static void hyper_endpoint(const NmChatRequest *req, const char *base_url,
     ep->read_response_meta = hyper_read_response_meta;
 }
 
-static NmChatResult hyper_chat(const NmProvider *p, const NmChatRequest *req,
-                               const char *base_url, const char *api_key)
-{
-    (void)p;
-    NmExtraHeader hdrs[3];
-    NmOpenaiEndpoint ep;
-    hyper_endpoint(req, base_url, api_key, hdrs, &ep);
-    return nm_openai_chat(&ep, req);
-}
-
-static NmChatStream *hyper_chat_begin(const NmProvider *p,
-                                      const NmChatRequest *req,
-                                      const char *base_url,
-                                      const char *api_key, NmChatResult *err)
-{
-    (void)p;
-    NmExtraHeader hdrs[3];
-    NmOpenaiEndpoint ep;
-    hyper_endpoint(req, base_url, api_key, hdrs, &ep);
-    return nm_openai_chat_begin(&ep, req, err);
-}
-
-/* Live catalog cache: provider-owned, process lifetime. */
-static NmModel *hyper_live_models;
-static size_t hyper_live_n;
-
-/* The in-flight catalog fetch (one at a time — the async seam's state). */
-static NmCatalogFetch hyper_fetch;
-
-/* Build the cache from a fetched document; 1 when it committed one. */
-static int hyper_parse_catalog(const NmJson *doc, void *ud)
-{
-    (void)ud;
-    NmJson *data = nm_json_get(doc, "data");
-    size_t count = nm_json_len(data);
-    if (count == 0)
-        return 0;
-    NmModel *models = calloc(count + 1, sizeof(NmModel));
-    if (!models)
-        return 0;
-    size_t out = 0;
-    for (size_t i = 0; i < count; i++) {
-        NmJson *e = nm_json_at(data, i);
-        const char *id = nm_json_str(nm_json_get(e, "id"));
-        if (!id)
-            continue;
-        /* Strings are owned by the parsed document — freed by the
-         * caller — so copy into the cache. One-time per process. */
-        models[out].id = strdup(id);
-        const char *display = nm_json_str(nm_json_get(e, "display_name"));
-        models[out].label = strdup(display ? display : id);
-        models[out].vision = nm_json_bool(nm_json_get(
-            nm_json_get(e, "capabilities"), "vision"));
-        double ctx = nm_json_num(nm_json_get(e, "context_window"));
-        models[out].context_length = ctx > 0 ? (long)ctx : -1;
-        /* The provider-level rule (see hyper_static_models): the wire
-         * carries no tool-use claim, and every model takes tools. */
-        models[out].tools = 1;
-        if (!models[out].id || !models[out].label) {
-            free((void *)models[out].id);
-            free((void *)models[out].label);
-            continue;
-        }
-        out++;
-    }
-    if (out == 0) {
-        free(models);
-        return 0;
-    }
-    hyper_live_models = models;
-    hyper_live_n = out;
-    return 1;
-}
-
-/* The async seam: begin/step/source/end over the shared catalog fetch
- * (the /model popup's non-blocking drive). */
-static int hyper_models_begin(const NmProvider *p, const char *base_url,
-                              const char *api_key)
+/* The catalog endpoint: tokenless, and the only extra header is
+ * x-crush-id (Crush sends it on every request). The session-affinity
+ * pair is for chat traffic, where the route to the prefix cache
+ * matters. */
+static void hyper_catalog_endpoint(const NmProvider *p, const char *api_key,
+                                   NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                   NmOpenaiEndpoint *ep)
 {
     (void)p;
     (void)api_key; /* catalog is tokenless (HYPER-API.md §5) */
-    if (hyper_live_models || hyper_fetch.f)
-        return 0; /* cached, or already in flight */
-    if (!base_url && !nm_live_catalog_enabled())
-        return 0;
-    /* x-crush-id rides the catalog too (Crush sends it on every
-     * request); the session-affinity pair is for chat traffic, where
-     * the route to the prefix cache matters. */
     if (!hyper_crush_id_ready)
         hyper_derive_crush_id();
-    NmExtraHeader crush = { "x-crush-id", hyper_crush_id, 0 };
-    NmOpenaiEndpoint ep = { hyper_base(base_url), NULL, NULL,
-                            NM_USER_AGENT, &crush, 1,
-                            0, /* include_usage: a catalog GET has no stream */
-                            NULL /* read_response_meta: no Prism on a GET */ };
-    return nm_catalog_fetch_begin(&hyper_fetch, &ep, hyper_parse_catalog,
-                                  NULL);
+    hdrs[0].name = "x-crush-id";
+    hdrs[0].value = hyper_crush_id;
+    hdrs[0].secret = 0;
+    ep->extra_headers = hdrs;
+    ep->n_extra_headers = 1;
+    ep->include_usage = 0; /* a catalog GET has no stream */
 }
 
-static NmCatalogStatus hyper_models_step(const NmProvider *p)
+/* One /v1/models entry -> one row: label is display_name, context is
+ * context_window, vision is capabilities.vision — and the tools rule
+ * above applies to every row the wire yields. */
+static const char *hyper_row(NmJson *entry, NmModel *out, void *ud)
 {
-    (void)p;
-    return nm_catalog_fetch_step(&hyper_fetch);
+    (void)ud;
+    out->vision = nm_json_bool(
+        nm_json_get(nm_json_get(entry, "capabilities"), "vision"));
+    double ctx = nm_json_num(nm_json_get(entry, "context_window"));
+    out->context_length = ctx > 0 ? (long)ctx : -1;
+    /* The provider-level rule (see hyper_static_models): the wire
+     * carries no tool-use claim, and every model takes tools. */
+    out->tools = 1;
+    /* No display_name on the wire: the merge loop falls back to the id. */
+    return nm_json_str(nm_json_get(entry, "display_name"));
 }
 
-static NmSource hyper_models_source(const NmProvider *p)
-{
-    (void)p;
-    return nm_catalog_fetch_source(&hyper_fetch);
-}
-
-static void hyper_models_end(const NmProvider *p)
-{
-    (void)p;
-    nm_catalog_fetch_end(&hyper_fetch);
-}
-
-static const NmModel *hyper_models_cached(const NmProvider *p, size_t *n_out)
-{
-    (void)p;
-    if (hyper_live_models) {
-        if (n_out)
-            *n_out = hyper_live_n;
-        return hyper_live_models;
-    }
-    if (n_out) {
-        size_t n = 0;
-        while (hyper_static_models[n].id)
-            n++;
-        *n_out = n;
-    }
-    return hyper_static_models;
-}
-
-static const NmModel *hyper_models(const NmProvider *p, const char *base_url,
-                                   const char *api_key, size_t *n_out)
-{
-    /* The BLOCKING drive of the async seam: one implementation, two
-     * drives (the event loop uses begin/step/fd directly). */
-    if (hyper_models_begin(p, base_url, api_key))
-        nm_catalog_run(p);
-    return hyper_models_cached(p, n_out);
-}
+const NmOpenaiCompat nm_hyper_compat = {
+    hyper_chat_endpoint,
+    hyper_catalog_endpoint,
+    hyper_static_models,
+    hyper_row,
+    NULL, /* one tier: the row needs no context */
+};
 
 static int hyper_needs_auth(const NmProvider *p, const char *base_url)
 {
@@ -395,19 +290,19 @@ const struct NmProvider nm_hyper_provider = {
     "hyper.charm.land",
     NM_REASONING_ECHO_OFF, /* probed: hyper does NOT require the echo
                             * (docs/HYPER-API.md §3.5) */
-    hyper_chat,
-    hyper_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
     nm_openai_chat_end,
-    hyper_models,
-    hyper_models_cached,
-    hyper_models_begin,
-    hyper_models_step,
-    hyper_models_source,
-    hyper_models_end,
+    nm_openaicompat_models,
+    nm_openaicompat_models_cached,
+    nm_openaicompat_models_begin,
+    nm_openaicompat_models_step,
+    nm_openaicompat_models_source,
+    nm_openaicompat_models_end,
     hyper_needs_auth,
     hyper_env_key,
 };
