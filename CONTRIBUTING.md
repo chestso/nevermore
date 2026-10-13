@@ -44,6 +44,11 @@ needs config.status; the target lives in the top-level `Makefile.am`).
 
 ## Standards (apply to every change)
 
+- **Names**: a file name is the module word, unprefixed (`conf.h`,
+  `proc_w32.c`), and our Windows token is `w32`, never `win`
+  (`ARCHITECTURE.md` §Naming spells both out). The guards:
+  `ls src/nm_*` prints nothing, and a new header is checked against
+  `ls src/*.h` and the platform's include dir before it is added.
 - **Warnings: fix the smell, accept the noise.** A warning that names a
   real hole is fixed at its root — a composing buffer sized for the
   worst case its type can produce, never for the values seen in
