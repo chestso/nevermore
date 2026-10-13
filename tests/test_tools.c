@@ -2814,18 +2814,25 @@ static void test_run_command_async(void)
     ASSERT_TRUE(t->source(e, &src));
     ASSERT_TRUE(src.handle >= 0);
 
-    /* Drain until DONE, waiting on the source like the event loop does. */
-    int steps = 0;
+    /* Drain until DONE, waiting on the source like the event loop does —
+     * and pacing it like exec_pump: a retired handle is no wait target,
+     * so sleep instead of stepping in a tight loop. The bound is the
+     * real clock (at EOF a POSIX pipe stays readable, so a step count is
+     * not a bound — its Windows twin below was the one CI caught). */
+    long long drive_t0 = wall_ms();
     while (t->step(e, &r) == NM_TOOL_RUNNING) {
-        ASSERT_TRUE(++steps < 100000);
-        if (t->source(e, &src) && src.handle >= 0) {
+        NmSource s = { -1, 0, NM_SRC_FD };
+        if (t->source(e, &s) && s.handle >= 0) {
             fd_set fds;
             struct timeval tv = { 0, 200 * 1000 };
-            int fd = (int)src.handle;
+            int fd = (int)s.handle;
             FD_ZERO(&fds);
             FD_SET(fd, &fds);
             select(fd + 1, &fds, NULL, NULL, &tv);
+        } else {
+            usleep(1000);
         }
+        ASSERT_TRUE(wall_ms() - drive_t0 < 10000);
     }
     t->end(e);
 
@@ -4467,12 +4474,23 @@ static void test_run_command_async_on_windows(void)
     NmToolResult r = { 0 };
     ASSERT_EQ(t->step(e, &r), NM_TOOL_RUNNING);
 
-    /* Drive it the way the loop does: wait the event, step, repeat. */
-    int steps = 0;
+    /* Drive it the way the loop does — and the way exec_pump paces it:
+     * wait the source while the job has one, and SLEEP when it has
+     * retired it (nm_proc_os_handle answers -1 once the reader saw EOF,
+     * while the exit is still unreaped) instead of stepping in a tight
+     * loop. The bound is the real clock, not a step count: `steps <
+     * 20000` was exhausted before this ~1 s child exited on the MSYS2
+     * runner (2026-10-13), which a step count cannot express. 10 s is
+     * generous for the child and sits inside the tool's own 10 s Windows
+     * yield floor. */
+    long long drive_t0 = wall_ms();
     while (t->step(e, &r) == NM_TOOL_RUNNING) {
-        ASSERT_TRUE(++steps < 20000);
-        if (t->source(e, &src) && src.handle >= 0)
-            WaitForSingleObject((HANDLE)src.handle, 50);
+        NmSource s = { -1, 0, NM_SRC_FD };
+        if (t->source(e, &s) && s.handle >= 0)
+            WaitForSingleObject((HANDLE)s.handle, 50);
+        else
+            Sleep(10);
+        ASSERT_TRUE(wall_ms() - drive_t0 < 10000);
     }
     t->end(e);
 
