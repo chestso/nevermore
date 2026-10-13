@@ -17,6 +17,19 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
+    env:
+      # Pinned boba ref — single source for both the checkout and the
+      # boba-install cache key in this file. Bump alongside the nevermore
+      # commit that consumes a new boba API; the same SHA lives in
+      # linux.yml / macos.yml (bump all three together). The boba commit
+      # must be PUSHED before nevermore, or CI cannot fetch it.
+      BOBA_REF: 25ddead1b10b1c39af746cca88cc5a85223ac53f
+      # Install prefix shared by boba and nevermore. Pinned to a Windows
+      # home path (NOT $HOME) so actions/cache — which runs on the host,
+      # not inside the MSYS2 shell, where $HOME resolves to
+      # /home/runneradmin inside the MSYS2 root — sees the same directory
+      # the msys2 steps write. Forward slashes stay escape-free in both.
+      LOCAL_PREFIX: C:/Users/runneradmin/.local
 
     steps:
       - name: Checkout nevermore
@@ -79,7 +92,7 @@ jobs:
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 25ddead1b10b1c39af746cca88cc5a85223ac53f
+          ref: ${{ env.BOBA_REF }}
           path: boba
           fetch-depth: 0
 
@@ -97,12 +110,23 @@ jobs:
             mingw-w64-ucrt-x86_64-toolchain
             pkg-config
 
+      - name: Cache boba install
+        id: boba-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.LOCAL_PREFIX }}
+          # Keyed on the boba ref + the MSYS2 environment: a pin bump or
+          # a different msystem rebuilds; otherwise the install (built
+          # once) is restored in seconds instead of recompiled.
+          key: boba-install-ucrt64-${{ env.BOBA_REF }}
+
       - name: Build and install boba
+        if: steps.boba-cache.outputs.cache-hit != 'true'
         run: |
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$LOCAL_PREFIX"
           make -j && make install
 
       - name: Build (Schannel TLS — native, no deps)
@@ -110,12 +134,20 @@ jobs:
           # setup-msys2 does not pass PKG_CONFIG_PATH through to the
           # MSYS2 environment (msys2/setup-msys2#98), and /etc/profile
           # overwrites it on every login shell; export it here so
-          # pkgconf finds the boba.pc we just installed.
-          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+          # pkgconf finds the boba.pc we just installed (from the cache
+          # or the fresh build above).
+          export PKG_CONFIG_PATH="$LOCAL_PREFIX/lib/pkgconfig:$PKG_CONFIG_PATH"
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$LOCAL_PREFIX"
           make -j
+          # Pre-build the test binaries in parallel HERE, so `make check`
+          # below does not compile ~28 of them SERIALly inside the timed
+          # test step — the same lesson macos.yml already applies. The
+          # measured cost was ~3.5 min of serial CC passes; this folds
+          # them into the parallel build. (check_PROGRAMS is a tests/
+          # subdir target — the root `make -j` above does not descend.)
+          make -j"$(nproc)" -C tests check-programs
 
       - name: Run tests
         # Backstop: the per-test watchdog fires first; this bounds
