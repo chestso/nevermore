@@ -96,8 +96,10 @@ struct NmOpenaiCompat
 
 /* One descriptor per provider, defined in that provider's file. */
 extern const NmOpenaiCompat nm_hyper_compat;
+/* One descriptor for both ollama tiers (base URL and authinfo machine
+ * are vtable data), and the chat half only — the native /api catalog
+ * is provider_ollama.c's own machine. */
 extern const NmOpenaiCompat nm_ollama_compat;
-extern const NmOpenaiCompat nm_ollama_local_compat;
 extern const NmOpenaiCompat nm_openai_compat;
 extern const NmOpenaiCompat nm_openrouter_compat;
 extern const NmOpenaiCompat nm_opencode_compat;

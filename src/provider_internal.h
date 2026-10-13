@@ -32,12 +32,6 @@ int nm_opencode_needs_auth(const NmProvider *p, const char *base_url);
  * endpoint default differs, so the implementation lives in one file
  * and is parameterized by the provider's id. (The chat half itself is
  * the shared OpenAI-compatible surface — provider_openaicompat.h.) */
-NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
-                            const char *base_url, const char *api_key);
-NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
-                                   const NmChatRequest *req,
-                                   const char *base_url, const char *api_key,
-                                   NmChatResult *err);
 const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,
                                 const char *api_key, size_t *n_out);
 const NmModel *nm_ollama_models_cached(const NmProvider *p, size_t *n_out);

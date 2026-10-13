@@ -21,8 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "provider_internal.h"
 #include "openai_client.h"
+#include "provider_internal.h" /* nm_live_catalog_enabled */
+#include "provider_openaicompat.h"
 #include "json.h"
 
 #define OLLAMA_LOCAL_DEFAULT "http://localhost:11434/v1"
@@ -56,6 +57,20 @@ static void ollama_api_root(const char *chat_base, char *out, size_t cap)
     out[len] = '\0';
 }
 
+/* The chat half is the shared OpenAI-compatible surface
+ * (provider_openaicompat.h): both tiers use the plain bearer builder
+ * (a NULL key means no auth header at all, which is the local daemon's
+ * case), and the base URL is the tier's own vtable default. The
+ * catalog half is NOT wired there — the native /api machine below is
+ * ollama's own. */
+const NmOpenaiCompat nm_ollama_compat = {
+    nm_openaicompat_bearer_chat_endpoint,
+    NULL,
+    NULL,
+    NULL,
+    NULL,
+};
+
 /* The provider fixed the cloud-vs-local choice when the user named
  * it; an explicit base URL still overrides (tests, proxies). */
 static const char *ollama_base(const NmProvider *p, const char *base_url,
@@ -67,39 +82,6 @@ static const char *ollama_base(const NmProvider *p, const char *base_url,
     if (p->id == NM_PROVIDER_OLLAMA_LOCAL)
         return OLLAMA_LOCAL_DEFAULT;
     return OLLAMA_CLOUD_DEFAULT;
-}
-
-NmChatResult nm_ollama_chat(const NmProvider *p, const NmChatRequest *req,
-                            const char *base_url, const char *api_key)
-{
-    NmOpenaiEndpoint ep = {
-        ollama_base(p, base_url, api_key),
-        "Bearer %s", /* ignored for local: no key, no header */
-        api_key,
-        NM_USER_AGENT,
-        NULL, 0,
-        1,   /* include_usage: ask for the streaming usage chunk */
-        NULL /* read_response_meta: no provider metadata */
-    };
-    return nm_openai_chat(&ep, req);
-}
-
-/* Event-driven split (phase 4): same endpoint shape, step API. */
-NmChatStream *nm_ollama_chat_begin(const NmProvider *p,
-                                   const NmChatRequest *req,
-                                   const char *base_url, const char *api_key,
-                                   NmChatResult *err)
-{
-    NmOpenaiEndpoint ep = {
-        ollama_base(p, base_url, api_key),
-        "Bearer %s", /* ignored for local: no key, no header */
-        api_key,
-        NM_USER_AGENT,
-        NULL, 0,
-        1,   /* include_usage */
-        NULL /* read_response_meta: no provider metadata */
-    };
-    return nm_openai_chat_begin(&ep, req, err);
 }
 
 /* ---------------------------------------------------------------- */
@@ -422,8 +404,8 @@ const struct NmProvider nm_ollama_provider = {
     OLLAMA_CLOUD_DEFAULT,
     "ollama.com",
     NM_REASONING_ECHO_OFF,
-    nm_ollama_chat,
-    nm_ollama_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,

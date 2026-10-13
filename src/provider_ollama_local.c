@@ -5,11 +5,14 @@
  * is only the vtable that pins the endpoint default and the
  * authinfo-less, env-key-less key story (the cloud's OLLAMA_API_KEY
  * is still honored if set, but absent here the daemon needs none).
+ * The chat half is the shared OpenAI-compatible surface; the catalog
+ * slots are the native /api machine the cloud file owns.
  */
 
 #include "provider_internal.h"
 
 #include "openai_client.h"
+#include "provider_openaicompat.h"
 
 static const char *ollama_local_env_key(const NmProvider *p)
 {
@@ -23,8 +26,8 @@ const struct NmProvider nm_ollama_local_provider = {
     "http://localhost:11434/v1",
     NULL, /* no authinfo machine: the daemon is keyless */
     NM_REASONING_ECHO_OFF,
-    nm_ollama_chat,
-    nm_ollama_chat_begin,
+    nm_openaicompat_chat,
+    nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,
     nm_openai_stream_interest,
