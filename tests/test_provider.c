@@ -462,7 +462,10 @@ static void *hyper_models_server_thread(void *arg)
         "\"capabilities\":{\"vision\":false}},"
         "{\"id\":\"vision-test\",\"display_name\":\"Vision Test\","
         "\"context_window\":8192,"
-        "\"capabilities\":{\"vision\":true}}"
+        "\"capabilities\":{\"vision\":true}},"
+        /* No display_name: the label falls back to the id. */
+        "{\"id\":\"no-name-model\",\"context_window\":4096,"
+        "\"capabilities\":{\"vision\":false}}"
         "]}";
     char head[256];
     snprintf(head, sizeof(head),
@@ -791,18 +794,31 @@ static void test_hyper_models_fetch(void)
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 2);
+    ASSERT_EQ(n, 3);
+    /* EVERY NmModel field a live row carries is pinned here: the merge
+     * loop must copy the whole row, not just the fields a caller
+     * happens to read today. */
     ASSERT_STR_EQ(models[0].id, "gpt-oss-120b");
     ASSERT_STR_EQ(models[0].label, "GPT OSS 120b");
     ASSERT_EQ(models[0].context_length, 131072);
     ASSERT_EQ(models[0].vision, 0);
+    ASSERT_EQ(models[0].image_gen, 0);
     /* The live scanner applies the same provider-level tools rule: the
      * catalog's `capabilities` object carries only `vision`, so tools
      * is never read from the wire (see hyper_static_models). */
     ASSERT_EQ(models[0].tools, 1);
     ASSERT_STR_EQ(models[1].id, "vision-test");
+    ASSERT_STR_EQ(models[1].label, "Vision Test");
+    ASSERT_EQ(models[1].context_length, 8192);
     ASSERT_EQ(models[1].vision, 1);
+    ASSERT_EQ(models[1].image_gen, 0);
     ASSERT_EQ(models[1].tools, 1);
+    /* No display_name on the wire: the label falls back to the id. */
+    ASSERT_STR_EQ(models[2].id, "no-name-model");
+    ASSERT_STR_EQ(models[2].label, "no-name-model");
+    ASSERT_EQ(models[2].context_length, 4096);
+    ASSERT_EQ(models[2].vision, 0);
+    ASSERT_EQ(models[2].tools, 1);
     pthread_join(th, NULL);
 
     /* GET /v1/models, and tokenless (no Authorization header —
@@ -997,12 +1013,21 @@ static void test_ollama_models_tags_and_show(void)
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
     ASSERT_EQ(n, 2);
+    /* /api/tags supplies id and label (the same string); the rest is
+     * the /api/show metadata. Every field the merge writes is pinned:
+     * the ids-only round must not blank what the show round found. */
     ASSERT_STR_EQ(models[0].id, "gpt-oss:20b");
+    ASSERT_STR_EQ(models[0].label, "gpt-oss:20b");
     ASSERT_EQ(models[0].vision, 0);              /* no "vision" capability */
+    ASSERT_EQ(models[0].image_gen, 0);           /* never claimed by ollama */
     ASSERT_EQ(models[0].context_length, 131072); /* gptoss.context_length */
+    ASSERT_EQ(models[0].tools, 0);               /* the wire says nothing */
     ASSERT_STR_EQ(models[1].id, "gemma4:31b");
-    ASSERT_EQ(models[1].vision, 1);              /* capabilities has "vision" */
+    ASSERT_STR_EQ(models[1].label, "gemma4:31b");
+    ASSERT_EQ(models[1].vision, 1); /* capabilities has "vision" */
+    ASSERT_EQ(models[1].image_gen, 0);
     ASSERT_EQ(models[1].context_length, 262144); /* gemma4.context_length */
+    ASSERT_EQ(models[1].tools, 0);
 
     pthread_join(th, NULL);
     close(lfd);
@@ -1131,8 +1156,11 @@ static void *openrouter_models_server_thread(void *arg)
         " Image\",\"context_length\":65536,"
         "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
         "\"output_modalities\":[\"image\"]},"
-        "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]}"
-        "],\"total_count\":3}";
+        "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]},"
+        /* No "name": the label falls back to the id. */
+        "{\"id\":\"vendor/unnamed\",\"context_length\":4096,"
+        "\"architecture\":{\"input_modalities\":[\"text\"]}}"
+        "],\"total_count\":4}";
     char head[256];
     snprintf(head, sizeof(head),
              "HTTP/1.1 200 OK\r\n"
@@ -1223,7 +1251,7 @@ static void test_openrouter_models_fetch(void)
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 3);
+    ASSERT_EQ(n, 4);
     ASSERT_STR_EQ(models[0].id, "~openai/gpt-astra-latest");
     ASSERT_STR_EQ(models[0].label, "GPT Astra");  /* "name", not display_name */
     ASSERT_EQ(models[0].vision, 1);               /* input_modalities has "image" */
@@ -1245,6 +1273,13 @@ static void test_openrouter_models_fetch(void)
     ASSERT_STR_EQ(models[2].id, "google/gemini-3.1-flash-lite-image");
     ASSERT_EQ(models[2].vision, 1);
     ASSERT_EQ(models[2].image_gen, 1);
+    /* No "name" on the wire: the label falls back to the id. */
+    ASSERT_STR_EQ(models[3].id, "vendor/unnamed");
+    ASSERT_STR_EQ(models[3].label, "vendor/unnamed");
+    ASSERT_EQ(models[3].vision, 0);
+    ASSERT_EQ(models[3].image_gen, 0);
+    ASSERT_EQ(models[3].context_length, 4096);
+    ASSERT_EQ(models[3].tools, 0); /* no supported_parameters: says nothing */
     pthread_join(th, NULL);
 
     /* Tokenless catalog (public — OPENROUTER-API.md §1). */
@@ -1542,6 +1577,75 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
 }
 
+/* Zen's ids-only catalog round (the per-tier isolation test below): a
+ * DIFFERENT id set than Go's, so the two slots cannot be confused. */
+static void *opencode_zen_models_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request(cfd);
+
+    const char body[] =
+        "{\"object\":\"list\",\"data\":["
+        "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+        "]}";
+    char head[256];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             sizeof(body) - 1);
+    send(cfd, head, strlen(head), 0);
+    send(cfd, body, sizeof(body) - 1, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+/* The live catalogs are PER TIER: each provider keeps its own cache
+ * (the two talk to different endpoints, and one process may exercise
+ * both). The Go slot is already committed by the fetch test above, so
+ * a Zen fetch must land in Zen's slot and leave Go's rows untouched. */
+static void test_opencode_live_catalogs_are_per_tier(void)
+{
+    const NmProvider *zen = nm_provider_by_name("opencode:zen");
+    const NmProvider *go = nm_provider_by_name("opencode:go");
+    ASSERT_NOT_NULL(zen);
+    ASSERT_NOT_NULL(go);
+
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, opencode_zen_models_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    size_t zn = 0;
+    const NmModel *z = zen->models(zen, base, NULL, &zn);
+    ASSERT_NOT_NULL(z);
+    ASSERT_EQ(zn, 1);
+    ASSERT_STR_EQ(z[0].id, "big-pickle");
+    ASSERT_STR_EQ(z[0].label, "Big Pickle"); /* from Zen's own table */
+    ASSERT_EQ(z[0].context_length, 200000);
+    ASSERT_EQ(z[0].tools, 1);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    /* Go's committed slot is still Go's (id set, and the label from
+     * the GO table — the fetch test's row, not Zen's). */
+    size_t gn = 0;
+    const NmModel *g = go->models(go, NULL, NULL, &gn);
+    ASSERT_NOT_NULL(g);
+    ASSERT_EQ(gn, 2);
+    ASSERT_STR_EQ(g[0].id, "glm-5.3");
+    ASSERT_STR_EQ(g[0].label, "GLM-5.3");
+    ASSERT_EQ(g[0].context_length, 1000000);
+}
+
 /* OpenAI catalog: the live /v1/models wire is ids-only (no
  * capabilities, no context window), so a live fetch takes membership
  * from the wire and METADATA from the curated static table by id —
@@ -1597,6 +1701,7 @@ static void test_openai_models_fetch_keeps_curated_capabilities(void)
     ASSERT_STR_EQ(models[0].id, "gpt-4o");
     ASSERT_STR_EQ(models[0].label, "GPT-4o");
     ASSERT_EQ(models[0].vision, 1);
+    ASSERT_EQ(models[0].image_gen, 0); /* curated table's claim, copied */
     ASSERT_EQ(models[0].context_length, 128000);
     /* The curated table makes no tool-use claim (0 = "says nothing" —
      * OpenAI's wire has no such field and the table does not assert
@@ -1606,6 +1711,7 @@ static void test_openai_models_fetch_keeps_curated_capabilities(void)
     ASSERT_STR_EQ(models[1].id, "future-model-9");
     ASSERT_STR_EQ(models[1].label, "future-model-9");
     ASSERT_EQ(models[1].vision, 0);
+    ASSERT_EQ(models[1].image_gen, 0);
     ASSERT_EQ(models[1].context_length, -1);
     ASSERT_EQ(models[1].tools, 0);
     pthread_join(th, NULL);
@@ -1711,6 +1817,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
     RUN_TEST(test_opencode_models_fetch_maps_ids);
+    RUN_TEST(test_opencode_live_catalogs_are_per_tier);
     RUN_TEST(test_openai_models_fetch_keeps_curated_capabilities);
     TEST_SUMMARY();
 }
