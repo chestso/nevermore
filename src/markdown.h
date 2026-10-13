@@ -1,4 +1,4 @@
-/* nm_markdown.h - nevermore's markdown line classifier for boba's
+/* markdown.h - nevermore's markdown line classifier for boba's
  * streaming transcript.
  *
  * boba's transcript asks one question per completed line (see

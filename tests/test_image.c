@@ -25,7 +25,7 @@
 #include "colors.h"
 #include "image.h"
 #include "image_codec.h"
-#include "nm_markdown.h"
+#include "markdown.h"
 #include "nm_markdown_render.h"
 
 /* ---------------------------------------------------------------- */
@@ -186,7 +186,7 @@ static size_t make_jpeg_far(unsigned char *buf, size_t cap)
 }
 
 /* ---------------------------------------------------------------- */
-/* Image-ref parsing (nm_markdown's scanner, pure)                   */
+/* Image-ref parsing (markdown's scanner, pure)                   */
 /* ---------------------------------------------------------------- */
 
 /* strlen-driven (a hand-counted literal length is how the boba

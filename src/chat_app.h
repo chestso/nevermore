@@ -18,7 +18,7 @@
  *   and never touches framing or cursor bytes — boba is the only
  *   caller of the seam.
  *
- *   nevermore supplies the grammar: nm_markdown.c classifies each line
+ *   nevermore supplies the grammar: markdown.c classifies each line
  *   and nm_markdown_render.c draws the committed rows; only bytes whose
  *   rendering can no longer change reach the scrollback. The live
  *   region (streaming tail / provisional table) is drawn by view().

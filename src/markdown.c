@@ -1,13 +1,13 @@
-/* nm_markdown.c - nevermore's markdown line classifier.
+/* markdown.c - nevermore's markdown line classifier.
  *
  * Character-level scans only (no regex, no allocation on the line
- * path). See nm_markdown.h for the dialect rules; boba/stream.h for
+ * path). See markdown.h for the dialect rules; boba/stream.h for
  * the verdict semantics. The one non-obvious grammar point: a table is
  * only recognized when the delimiter row (or the header) carries a
  * `|`, so `text` + `---` stays a setext heading and never a
  * single-column table. */
 
-#include "nm_markdown.h"
+#include "markdown.h"
 
 #include <string.h>
 

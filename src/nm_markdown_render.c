@@ -35,7 +35,7 @@
 
 #include "colors.h"
 #include "image.h"
-#include "nm_markdown.h"
+#include "markdown.h"
 #include "nm_size.h"
 
 #define MAX_COLS      16

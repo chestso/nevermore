@@ -623,7 +623,7 @@ save [path]` writes session.c's markdown). Const on purpose: the
   identical; the status prefix is the only slack on top of the budget.
 - **chat_app** (`src/chat_app.c`) — the boba Elm component:
   textinput + popups + spinner + a boba `TuiTranscript` driven by
-  nevermore's markdown grammar (`nm_markdown.c` /
+  nevermore's markdown grammar (`markdown.c` /
   `nm_markdown_render.c`). See "The chat transcript protocol" below —
   the one design that is NOT obvious from the code.
 - **The keyboard tier** (`src/chat_app.c`'s `kbd_declaration`) — the
@@ -1019,7 +1019,7 @@ stream messages; boba is the only caller of
   transcript_write lands inside the agent's per-SSE-batch callback.
   Submit is the one deliberate exception: submit → flush →
   `finish_inline`.
-- **The markdown grammar is nevermore's**: `nm_markdown.c` classifies
+- **The markdown grammar is nevermore's**: `markdown.c` classifies
   each completed line (fence / table / heading / list / quote);
   `nm_markdown_render.c` draws committed rows and owns all styling
   (reasoning dim, line-scoped inline spans, per-kind roles from

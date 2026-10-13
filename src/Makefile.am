@@ -58,7 +58,7 @@ EXTRA_DIST = \
     image.h \
     image_bytes.h \
     image_codec.h \
-    nm_markdown.h \
+    markdown.h \
     nm_markdown_render.h \
     proc.h \
     proc_internal.h \
@@ -157,8 +157,8 @@ nevermore_SOURCES = \
     proc.c \
     $(PROCESS_SOURCE) \
     session.c \
-    nm_markdown.h \
-    nm_markdown.c \
+    markdown.h \
+    markdown.c \
     nm_markdown_render.h \
     nm_markdown_render.c \
     image.h \

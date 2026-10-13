@@ -318,7 +318,7 @@ test_history_LDADD = $(BOBA_LIBS)
 # Links boba because the renderer writes through a TuiRowSink; the
 # renderer's fence path calls the highlighter, so highlight.c links
 # too.
-test_markdown_SOURCES = test_markdown.c ../src/nm_markdown.c \
+test_markdown_SOURCES = test_markdown.c ../src/markdown.c \
     ../src/nm_markdown_render.c ../src/highlight.c ../src/image.c \
     ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c
 test_markdown_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
@@ -327,10 +327,10 @@ test_markdown_LDADD = $(BOBA_LIBS)
 # Image tier: the policy half (src/image.c) + integration through
 # boba's transcript with the real renderer pair. Links boba (the
 # TuiRowSink/transport path) and the markdown grammar (the image line
-# is classified + parsed by nm_markdown).
+# is classified + parsed by markdown).
 test_image_SOURCES = test_image.c ../src/image.c \
     ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c \
-    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c
+    ../src/markdown.c ../src/nm_markdown_render.c ../src/highlight.c
 test_image_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_image_LDADD = $(BOBA_LIBS)
 
@@ -367,7 +367,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
-    ../src/nm_markdown.c ../src/nm_markdown_render.c ../src/highlight.c \
+    ../src/markdown.c ../src/nm_markdown_render.c ../src/highlight.c \
     ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/nm_size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/nm_reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \

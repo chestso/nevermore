@@ -23,7 +23,7 @@
 #include <boba/stream.h>
 #include <boba/unicode.h>
 
-#include "nm_markdown.h"
+#include "markdown.h"
 #include "nm_markdown_render.h"
 #include "test_helpers.h"
 

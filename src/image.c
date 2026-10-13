@@ -14,7 +14,7 @@
 
 #include "image_bytes.h"
 #include "image_codec.h"
-#include "nm_markdown.h"
+#include "markdown.h"
 #include "nm_markdown_render.h"
 
 /* Local-path copy bound: sources are borrowed ranges into the

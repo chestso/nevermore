@@ -19,7 +19,7 @@
  *   and never touches cursor/framing bytes — boba is the only caller
  *   of the seam.
  *
- *   nevermore supplies the grammar: src/nm_markdown.c classifies each
+ *   nevermore supplies the grammar: src/markdown.c classifies each
  *   line (fence / table / heading / list / quote) and
  *   src/nm_markdown_render.c draws the committed rows. The scrollback
  *   receives only bytes whose rendering can no longer change; the
@@ -56,7 +56,7 @@
 #include "conf.h"
 #include "nm_reminder.h"
 #include "colors.h"
-#include "nm_markdown.h"
+#include "markdown.h"
 #include "nm_markdown_render.h"
 #include "image.h"
 #include "nm_size.h"
