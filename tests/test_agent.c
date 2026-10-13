@@ -497,7 +497,7 @@ static void test_agent_conversation_id_shape_and_uniqueness(void)
 }
 
 /* Both entropy paths run in make check (POSIX /dev/urandom here, the
- * Win32 fallback under Wine): every call is still well-formed and
+ * Windows fallback under Wine): every call is still well-formed and
  * distinct. A loop is the cheapest way to notice a constant id. */
 static void test_agent_conversation_id_many_distinct(void)
 {

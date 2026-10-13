@@ -184,7 +184,7 @@ locally — minutes here vs 4-minute round-trips.
   `src/*.c` for aarch64-macos). Its hand-kept `-I` list must MIRROR
   configure's `nevermore_CPPFLAGS` — a new include dir in configure.ac
   belongs in the script too.
-- **Windows**: `scripts/win-wine-check.sh` (MinGW cross-compile, run
+- **Windows**: `scripts/w32-wine-check.sh` (MinGW cross-compile, run
   under Wine, compile + version-grep `src/nevermore.rc`). Wine is not
   the MSYS2 UCRT64 runtime — pre-flight, not guarantee. boba-linking
   binaries SKIP there (no MinGW boba locally); MSYS2 CI builds boba and

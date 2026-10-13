@@ -684,7 +684,7 @@ int nm_socket_source_kind(void)
 /* select() over the socket sources of `set`: 0 = ready, 1 = timed out
  * (or interrupted, which the caller re-loops), -1 = error / nothing to
  * wait on. */
-static int wait_sockets_win(const NmSource *const *set, size_t n,
+static int wait_sockets_w32(const NmSource *const *set, size_t n,
                             int timeout_ms)
 {
     fd_set r, w;
@@ -755,7 +755,7 @@ int nm_source_wait_any(const NmSource *set, size_t n, int timeout_ms)
     if (nh == 0 && ns == 0)
         return -1;
     if (nh == 0)
-        return wait_sockets_win(socks, ns, timeout_ms);
+        return wait_sockets_w32(socks, ns, timeout_ms);
     if (ns == 0) {
         DWORD w = WaitForMultipleObjects((DWORD)nh, hs, FALSE,
                                          (DWORD)timeout_ms);
@@ -766,7 +766,7 @@ int nm_source_wait_any(const NmSource *set, size_t n, int timeout_ms)
     int left = timeout_ms;
     for (;;) {
         int slice = left < NM_SRC_MIXED_SLICE_MS ? left : NM_SRC_MIXED_SLICE_MS;
-        int rc = wait_sockets_win(socks, ns, slice);
+        int rc = wait_sockets_w32(socks, ns, slice);
         if (rc == 0)
             return 0;
         if (rc < 0)

@@ -47,9 +47,9 @@ if [ -z "${MSYSTEM:-}" ] || [ "${MSYSTEM:-}" != "UCRT64" ]; then
 		echo "ERROR: msys2_shell.cmd not found at $MSYS2_SHELL" >&2
 		exit 1
 	fi
-	REPO_WIN="$(cygpath -w "$(pwd)" 2>/dev/null || echo "$(pwd)")"
+	REPO_W32="$(cygpath -w "$(pwd)" 2>/dev/null || echo "$(pwd)")"
 	exec cmd.exe //c "$MSYS2_SHELL" -ucrt64 -defterm -no-start -here \
-		-c "cd '$REPO_WIN' && ./scripts/build-ucrt64.sh $*"
+		-c "cd '$REPO_W32' && ./scripts/build-ucrt64.sh $*"
 fi
 
 echo "==> MSYS2 UCRT64 shell (MSYSTEM=$MSYSTEM)"

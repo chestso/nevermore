@@ -18,7 +18,7 @@
 #include "session.h"
 
 #ifdef _WIN32
-/* os_compat_win.c: put the console into UTF-8 mode (both
+/* os_compat_w32.c: put the console into UTF-8 mode (both
  * directions) for the process's life, restoring it at exit. Call
  * once, before any output. */
 void nm_os_console_init(void);

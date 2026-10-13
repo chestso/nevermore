@@ -14,7 +14,7 @@
 #define NM_TOOL_BODY_SLACK 1024
 
 /* Implemented once per OS: tools_spawn_posix.c (posix_spawn + pipe)
- * and tools_spawn_win.c (CreateProcessW + anonymous pipe). */
+ * and tools_spawn_w32.c (CreateProcessW + anonymous pipe). */
 int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code);
 
 /* tools.c: shared truncation, applied where a tool result is born so
@@ -78,7 +78,7 @@ extern const NmTool nm_tool_edit_file;
 extern const NmTool nm_tool_list_dir;
 extern const NmTool nm_tool_search_dir;
 
-/* tools_spawn_posix.c / tools_spawn_win.c: run_command tool. */
+/* tools_spawn_posix.c / tools_spawn_w32.c: run_command tool. */
 extern const NmTool nm_tool_run_command;
 
 /* tools_exec.c: process-job tools (exec_command, write_stdin,

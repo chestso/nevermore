@@ -64,7 +64,7 @@
 #define NM_EXEC_WRITE_YIELD_DEFAULT_MS 1000
 #define NM_EXEC_YIELD_MIN_MS           250
 #define NM_EXEC_YIELD_MAX_MS           30000
-#define NM_EXEC_WIN_EXEC_FLOOR_MS      10000 /* Windows: Codex's 10 s floor */
+#define NM_EXEC_W32_EXEC_FLOOR_MS      10000 /* Windows: Codex's 10 s floor */
 /* Codex's MIN_EMPTY_YIELD_TIME_MS. */
 #define NM_EXEC_EMPTY_POLL_MIN_MS 5000
 
@@ -481,7 +481,7 @@ static NmToolExec *exec_command_begin(const NmTool *tool,
     long req = requested_yield_ms(args, NM_EXEC_YIELD_DEFAULT_MS, &provided);
     int lo = NM_EXEC_YIELD_MIN_MS;
 #ifdef _WIN32
-    lo = NM_EXEC_WIN_EXEC_FLOOR_MS; /* Codex's Windows floor */
+    lo = NM_EXEC_W32_EXEC_FLOOR_MS; /* Codex's Windows floor */
 #endif
     int yield_ms = clamp_ms(req, lo, NM_EXEC_YIELD_MAX_MS);
 

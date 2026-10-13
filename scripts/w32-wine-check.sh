@@ -1,5 +1,5 @@
 #!/bin/sh
-# scripts/win-wine-check.sh - build + run the Windows test binaries
+# scripts/w32-wine-check.sh - build + run the Windows test binaries
 # under local Wine before pushing (MSYS2 CI does the real run).
 #
 # Prereqs: x86_64-w64-mingw32-gcc (cross toolchain), wine, and a
@@ -116,13 +116,13 @@ run_build test_context tests/test_context.c src/context.c src/nm_reminder.c
 
 run_build test_file_ledger tests/test_file_ledger.c src/nm_file_ledger.c
 
-run_build test_process tests/test_process.c src/nm_process.c src/nm_process_win.c
+run_build test_process tests/test_process.c src/nm_process.c src/nm_process_w32.c
 
 run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/tools.c src/tools_file.c \
 	src/nm_file_ledger.c src/xxh3.c \
-	src/tools_websearch.c src/tools_exec.c src/nm_process.c src/nm_process_win.c \
-	src/tools_spawn_win.c src/os_compat_win.c \
+	src/tools_websearch.c src/tools_exec.c src/nm_process.c src/nm_process_w32.c \
+	src/tools_spawn_w32.c src/os_compat_w32.c \
 	src/json.c src/transport.c src/transport_socket.c \
 	src/nm_config.c src/wire_recorder.c src/nm_image_bytes.c src/nm_size.c \
 	$TLS_SRC -lws2_32 -lpthread
@@ -130,8 +130,8 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 run_build test_web_search src/nm_clock.c tests/test_web_search.c src/tools.c \
 	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/nm_process.c \
 	src/nm_file_ledger.c src/xxh3.c \
-	src/nm_process_win.c src/tools_spawn_win.c \
-	src/os_compat_win.c src/json.c src/transport.c \
+	src/nm_process_w32.c src/tools_spawn_w32.c \
+	src/os_compat_w32.c src/json.c src/transport.c \
 	src/transport_socket.c src/nm_config.c src/wire_recorder.c \
 	src/nm_image_bytes.c src/nm_size.c $TLS_SRC \
 	-lws2_32 -lpthread
@@ -187,8 +187,8 @@ run_build test_openai_client src/nm_clock.c tests/test_openai_client.c src/opena
 
 run_build test_agent src/nm_clock.c tests/test_agent.c src/agent.c src/session.c src/nm_image_bytes.c src/nm_size.c \
 	src/context.c src/nm_reminder.c src/nm_file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
-	src/tools_exec.c src/nm_process.c src/nm_process_win.c src/tools_spawn_win.c \
-	src/os_compat_win.c src/json.c src/sse.c \
+	src/tools_exec.c src/nm_process.c src/nm_process_w32.c src/tools_spawn_w32.c \
+	src/os_compat_w32.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
 	src/transport_socket.c src/nm_config.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \

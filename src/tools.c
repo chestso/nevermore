@@ -265,7 +265,7 @@ char *nm_tool_result_body(const char *status, const char *clamped)
  * deadline), the built-in default when unset, and the default again
  * when no store is installed (headless/test). Lives here, not in a
  * platform spawn file, because tools_spawn_posix.c and
- * tools_spawn_win.c are mutually exclusive — this TU is the one both
+ * tools_spawn_w32.c are mutually exclusive — this TU is the one both
  * link. */
 int nm_tool_run_command_timeout_ms(void)
 {
@@ -457,6 +457,6 @@ char *nm_tool_plan(const char *name, const char *args_json)
 
 int nm_spawn_capture(const char *const *argv, char **output, int *exit_code)
 {
-    /* Implemented per-OS: tools_spawn_posix.c / tools_spawn_win.c. */
+    /* Implemented per-OS: tools_spawn_posix.c / tools_spawn_w32.c. */
     return nm_spawn_capture_os(argv, output, exit_code);
 }

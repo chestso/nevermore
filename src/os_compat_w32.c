@@ -1,6 +1,6 @@
-/* os_compat_win.c - Windows-only platform glue
+/* os_compat_w32.c - Windows-only platform glue
  *
- * Console setup for the CLI. A Win32 console starts on the OEM
+ * Console setup for the CLI. A Windows console starts on the OEM
  * codepage (437 on a US box) while everything nevermore writes is
  * UTF-8 — sources, banner, transcript, the elbow, the live frame —
  * so an unswitched console renders the banner as "nevermore

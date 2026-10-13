@@ -81,8 +81,8 @@ EXTRA_DIST = \
 
 # Portable process spawn: one file per OS.
 if HOST_WINDOWS
-TOOLS_SPAWN_SOURCE = tools_spawn_win.c os_compat_win.c
-PROCESS_SOURCE = nm_process_win.c
+TOOLS_SPAWN_SOURCE = tools_spawn_w32.c os_compat_w32.c
+PROCESS_SOURCE = nm_process_w32.c
 else
 TOOLS_SPAWN_SOURCE = tools_spawn_posix.c
 PROCESS_SOURCE = nm_process_posix.c

@@ -82,7 +82,7 @@ architecture "the right way"**: fix a design flaw at its root
   `provider_internal.h` extern, `provider_labels[]` in `source.c`, the
   shared `TEST_PROVIDER_SOURCES` variable in `tests/Makefile.am`
   (one place, referenced bare — see the automake note there) **and**
-  `scripts/win-wine-check.sh`, `test_source.c`'s provider-count
+  `scripts/w32-wine-check.sh`, `test_source.c`'s provider-count
   assertion, and main.c's usage + README when it is user-visible.
   `grep -rn provider_ollama_local` enumerates every spot from any one
   existing provider; the `NM_PROVIDER_MAX`-bounded stack arrays
@@ -925,7 +925,7 @@ such file or directory`) instead of a bare 127 that a legitimate
   activity. A job's readiness handle joins the loop's wait set for as
   long as it is registered, and `nm_proc_close_all` is on the teardown
   path.
-- **The Windows-jobs gotcha (`src/nm_process_win.c`)** — a Windows job
+- **The Windows-jobs gotcha (`src/nm_process_w32.c`)** — a Windows job
   is pipes + a Job Object + a reader thread, and the traps:
   `CREATE_UNICODE_ENVIRONMENT` is required whenever a custom
   `lpEnvironment` block is passed (else `ERROR_INVALID_PARAMETER` (87),

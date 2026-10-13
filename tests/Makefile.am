@@ -238,8 +238,8 @@ test_context_CFLAGS = $(TEST_CFLAGS)
 # Tools: registry + schemas + file tools + spawn (canned temp files).
 # Same spawn split as src/Makefile.am — one file per OS.
 if HOST_WINDOWS
-TOOLS_SPAWN_SOURCE = ../src/tools_spawn_win.c ../src/os_compat_win.c
-PROCESS_SOURCE = ../src/nm_process_win.c
+TOOLS_SPAWN_SOURCE = ../src/tools_spawn_w32.c ../src/os_compat_w32.c
+PROCESS_SOURCE = ../src/nm_process_w32.c
 else
 TOOLS_SPAWN_SOURCE = ../src/tools_spawn_posix.c
 PROCESS_SOURCE = ../src/nm_process_posix.c

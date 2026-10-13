@@ -1,4 +1,4 @@
-/* nm_process_win.c - process jobs on Windows (pipes + Job Object + reader)
+/* nm_process_w32.c - process jobs on Windows (pipes + Job Object + reader)
  *
  * The OS half of the process layer on Windows.  A job is a shell
  * (`cmd.exe /d /c` unless the caller names another — see NmProcShell)

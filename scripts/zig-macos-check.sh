@@ -223,7 +223,7 @@ fail=0
 # The compiler writes to the FILE, never into a `| head`: head exits
 # after its line count and SIGPIPEs the compiler, so a TU that emits
 # more than the shown number of errors could be killed mid-write and
-# report fewer problems than it has (the same trap win-wine-check.sh
+# report fewer problems than it has (the same trap w32-wine-check.sh
 # hit, where a warning-flooded TU "failed" with its error unprinted).
 #
 # The -I list mirrors configure's nevermore_CPPFLAGS: the build dirs,
@@ -240,7 +240,7 @@ for f in src/*.c; do
 		echo "SKIP $f (backend not selected on macOS CI)"
 		continue
 		;;
-	src/*_win.c)
+	src/*_w32.c)
 		echo "SKIP $f (windows-only TU)"
 		continue
 		;;

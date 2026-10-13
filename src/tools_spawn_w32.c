@@ -1,4 +1,4 @@
-/* tools_spawn_win.c - portable process spawn (Windows)
+/* tools_spawn_w32.c - portable process spawn (Windows)
  *
  * CreateProcessW + anonymous pipe; captures the child's combined
  * output (stdout+stderr to one pipe) and reports the exit status.
@@ -12,7 +12,7 @@
  * half rides the process layer (src/nm_process.c), because on Windows a
  * one-shot command and a long-lived job are the *same* mechanism — a
  * child on anonymous pipes, read by a per-job thread whose auto-reset
- * event is the loop's wait handle (see nm_process_win.c).
+ * event is the loop's wait handle (see nm_process_w32.c).
  */
 
 #include <stdio.h>

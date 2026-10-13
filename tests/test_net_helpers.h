@@ -2,7 +2,7 @@
  * (the tests talk raw sockets directly, not through transport.c),
  * a scratch-dir resolver that works on both platforms, small MinGW
  * shims, and the offline-catalog pin every app/provider test needs.
- * POSIX/Win32 dual. */
+ * POSIX/Windows dual. */
 
 #ifndef TEST_NET_HELPERS_H
 #define TEST_NET_HELPERS_H

@@ -1645,7 +1645,7 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
 #include <windows.h>
 
 /* UTF-8 -> UTF-16 for the W find APIs (heap via LocalAlloc, caller
- * LocalFrees — same convention as tools_spawn_win.c). */
+ * LocalFrees — same convention as tools_spawn_w32.c). */
 static wchar_t *utf8_to_wide_path(const char *s)
 {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
@@ -1685,7 +1685,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
 #ifdef _WIN32
     /* FindFirstFileW is the only find API on MinGW that sees UTF-8
      * paths correctly; convert (LocalFree pattern from
-     * tools_spawn_win.c). */
+     * tools_spawn_w32.c). */
     wchar_t *wpath = utf8_to_wide_path(path);
     if (!wpath) {
         free(body);

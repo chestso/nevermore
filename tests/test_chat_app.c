@@ -5319,7 +5319,7 @@ static void test_family_skip_notice_prints_once(void)
 /* ---------------------------------------------------------------- */
 /* P3: the multi-fd wait set + job teardown                      */
 /*                                                                    */
-/* Jobs cannot be started on Windows yet (nm_process_win.c stub,   */
+/* Jobs cannot be started on Windows yet (nm_process_w32.c stub,   */
 /* P5), so the tests that need a live job are POSIX-only; the     */
 /* fd-budget arithmetic below is checked on every platform.           */
 /* ---------------------------------------------------------------- */

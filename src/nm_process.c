@@ -4,7 +4,7 @@
  * the bounded per-job output buffer with its omission counter, the
  * report/delta bookkeeping, and the dumb-terminal renderer.  The OS
  * half (spawn/read/write/kill/reap) is nm_process_posix.c /
- * nm_process_win.c.
+ * nm_process_w32.c.
  *
  * Memory-reuse: one raw buffer and one report buffer per job, both
  * grown geometrically and reused across drains and takes (the report is
