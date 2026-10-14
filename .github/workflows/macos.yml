@@ -92,6 +92,34 @@ jobs:
           ../configure --prefix="$HOME/.local"
           make -j"$(sysctl -n hw.ncpu)" && make install
 
+      - name: Checkout coffer (cfr-debug, the E2E PTY inspector)
+        uses: actions/checkout@v5
+        with:
+          repository: chestso/coffer
+          # Pinned: tests/e2e_portty drives the BUILT binary through
+          # coffer's cfr-debug, so a coffer change to the script
+          # vocabulary or the grid/scrollback queries can break this
+          # repo's e2e. The vocabulary the harness needs (wait-for,
+          # await-exit/assert-exit, the unified-buffer search) landed in
+          # this commit. The same SHA lives in linux.yml; Windows does
+          # not build coffer yet (its e2e reports SKIP). The coffer
+          # commit must be PUSHED before nevermore, or CI cannot fetch
+          # it.
+          ref: 31dfa4904fa49780feda7e340a32e64340157ff2
+          path: coffer
+          fetch-depth: 0
+
+      - name: Build and install coffer (cfr-debug)
+        run: |
+          cd coffer
+          ./autogen.sh
+          mkdir build && cd build
+          # --enable-release: cfr-debug is the harness, not the subject
+          # under test; coffer's default ASan+UBSan build would only add
+          # startup cost and sanitizer noise to the e2e.
+          ../configure --prefix="$HOME/.local" --enable-release
+          make -j"$(sysctl -n hw.ncpu)" && make install
+
       - name: Build (Secure Transport TLS — native, no deps)
         run: |
           export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
@@ -106,6 +134,10 @@ jobs:
           # (check_PROGRAMS is a tests/ subdir target — no such
           # rule at the build root.)
           make -j"$(sysctl -n hw.ncpu)" -C tests check-programs
+          # src too: the E2E harness drives the built BINARY, and
+          # check-programs never builds it. Still outside the timed
+          # step, still parallel.
+          make -j"$(sysctl -n hw.ncpu)" -C src
 
       - name: Run tests
         # Hard cap: one hung step can never again burn the 4h job
@@ -118,6 +150,9 @@ jobs:
           # Cores where the watchdog's kill can drop them (macOS:
           # /cores is the writable core dir on the runner).
           ulimit -c unlimited 2>/dev/null || true
+          # cfr-debug, installed above, is what tests/e2e_portty
+          # drives; without it on PATH that test SKIPs (77).
+          export PATH="$HOME/.local/bin:$PATH"
           make -C build check
 
       - name: Upload test logs
