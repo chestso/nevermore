@@ -31,7 +31,7 @@ tools/fake-ollama/fake_ollama.py --scenario prose --port 11434
 | Flag          | Meaning                                                      |
 | ------------- | ------------------------------------------------------------ |
 | `--pace S`    | delay before each SSE event after the first (0 = full speed) |
-| `--port PORT` | bind port; default 11434 (nevermore's local-Ollama default)  |
+| `--port PORT` | bind port; default 11434 (nevermore's local-Ollama default). `0` binds an ephemeral port — the startup line reports the real one(s) |
 | `--host HOST` | bind address; default 127.0.0.1                              |
 | `--both`      | bind 127.0.0.1 **and** ::1 in one process                    |
 | `--scenario`  | `table-fence` (default), `prose`, `image`, or `imagegen`         |

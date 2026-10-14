@@ -442,12 +442,15 @@ def main():
             if not bound:
                 return 1
             continue
-        bound.append(srv)
+        bound.append((host, srv))
         serve(srv)
 
-    where = ", ".join(h for h, _ in launchers)
+    # Report the ports the OS actually bound: with --port 0 each stack gets
+    # its own ephemeral port, so printing args.port would be a lie (and a
+    # driver parsing it would poll the wrong one).
+    where = ", ".join(f"{host}:{srv.server_address[1]}" for host, srv in bound)
     print(
-        f"fake-ollama: {where} port {args.port}, "
+        f"fake-ollama: {where}, "
         f"scenario={args.scenario}, pace={args.pace}s"
         + (f", fixture={SMOKE_FILE}" if args.scenario == "tool-loop" else ""),
         flush=True,
