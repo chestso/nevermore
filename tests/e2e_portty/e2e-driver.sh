@@ -93,15 +93,19 @@ server_pid=$!
 
 port=
 i=0
-while [ "$i" -lt 100 ]; do
+while [ "$i" -lt 150 ]; do
 	port=$(sed -n 's/^fake-ollama: 127\.0\.0\.1:\([0-9][0-9]*\),.*/\1/p' \
 		"$tmp/server.log" 2>/dev/null | head -1)
 	[ -n "$port" ] && break
 	kill -0 "$server_pid" 2>/dev/null || break
-	sleep 0.05
+	sleep 0.1
 	i=$((i + 1))
 done
-[ -n "$port" ] || fail "fake-ollama never reported a port (see $tmp/server.log)"
+if [ -z "$port" ]; then
+	echo "--- fake-ollama output ---" >&2
+	cat "$tmp/server.log" >&2 2>/dev/null
+	fail "fake-ollama never reported a port"
+fi
 
 # Readiness: the port is bound, but be sure the server answers before
 # the app's first request. Real-clock bounded.
@@ -134,6 +138,12 @@ rc=$?
 if [ "$rc" -ne 0 ]; then
 	echo "--- server log ---" >&2
 	cat "$tmp/server.log" >&2
+	# The last of the terminal's own bytes, escapes made visible: when
+	# a scenario fails, what the app actually wrote is the first thing
+	# worth seeing (the grid render died with the child).
+	echo "--- raw PTY capture (tail, escapes visible) ---" >&2
+	tail -c 4000 "$raw" 2>/dev/null | cat -v >&2
+	echo >&2
 	fail "$scenario: cfr-debug exited $rc"
 fi
 

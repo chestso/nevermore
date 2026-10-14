@@ -162,6 +162,7 @@ jobs:
           name: test-logs-windows
           path: |
             build/tests/*.log
+            build/tests/*/*.log
             build/tests/test-progress.log
             build/tests/core*
             core*

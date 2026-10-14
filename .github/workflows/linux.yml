@@ -161,6 +161,7 @@ jobs:
           name: test-logs-linux-${{ matrix.backend }}
           path: |
             build/tests/*.log
+            build/tests/*/*.log
             build/tests/test-progress.log
             build/tests/core*
             core*
