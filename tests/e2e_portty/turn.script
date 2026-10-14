@@ -1,0 +1,39 @@
+# Scenario 1 — boot, one turn, quit (see ../e2e-driver.sh).
+#
+# Budgets are explicit and their sum stays well under the watchdog's
+# 60 s: 10 + 5 + 5 + 15 + 1 + 8 + slack.
+
+# Startup: the banner's identity halves, then the prompt glyph itself
+# (the UTF-8 needle path in cfr-debug, dogfooded).
+wait-for "ollama:local" 10
+wait-for "fake:1b" 5
+wait-for "❯" 5
+
+# One turn, end to end. CR submits; a lone \n would be a newline in the
+# input (the trap fake-ollama's README documents for portty's sendln).
+send "show me the regions and a loader\r"
+
+# The scenario streams reasoning, a table, a fence, then this prose — so
+# the sentinel can only appear once the table and fence have committed.
+wait-for "And the loader:" 15
+assert-contains "Region"
+
+# The no-model label never appeared: the pinned model resolved against
+# the served catalog.
+assert-not-contains "(no model)"
+
+# Quit. Enter is a silent no-op while a turn is in flight (the app's
+# type-ahead rule: the typed text STAYS in the input), and the last
+# visible delta can land before the stream's [DONE] — so the sentinel
+# above does not prove the turn is over. Type the command first, give
+# the stream a beat to end, then Enter; the extra Enter is a no-op on
+# an empty input if the first one already submitted.
+send "/quit"
+wait 1
+send "\r"
+wait 1
+send "\r"
+await-exit 8
+assert-exit 0
+
+render

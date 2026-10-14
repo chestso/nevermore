@@ -381,6 +381,16 @@ test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
 
+# End-to-end PTY scenarios (Phase 7): the BUILT binary driven through
+# coffer's cfr-debug PTY inspector with tools/fake-ollama as the canned
+# provider. They exit 77 (the automake skip) when python3, cfr-debug or
+# the built binary is absent — CI without a coffer checkout reports
+# SKIP, never red. The driver resolves the scenario files through its
+# own $0, so the srcdir/builddir duality is its business, not
+# automake's; the binary comes from NM_E2E_NEVERMORE (the build tree,
+# never PATH).
+TESTS += e2e_portty/e2e_turn.sh
+
 # Build the test binaries WITHOUT running them. CI uses this in the
 # parallel Build step (make -j ... check-programs) so the timed Run
 # tests step is pure execution — `make check` in the serial harness
@@ -410,11 +420,15 @@ check-programs: $(check_PROGRAMS)
 # Nothing is exported here on purpose: the pin is per-test state, not
 # an environment variable, so a test cannot forget to export it and a
 # suite cannot silently inherit one.
-TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1
+TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1 \
+    NM_E2E_NEVERMORE='$(abs_top_builddir)/src/nevermore$(EXEEXT)' \
+    NM_E2E_TOOLS='$(abs_top_srcdir)/tools'
 
 EXTRA_DIST = test_helpers.h test_net_helpers.h fake_clock.h \
     tls/test-cert.pem tls/test-key.pem \
-    tls/README.md
+    tls/README.md \
+    e2e_portty/README.md e2e_portty/e2e-driver.sh \
+    e2e_portty/e2e_turn.sh e2e_portty/turn.script
 
 # The watchdog appends START/END pairs to test-progress.log by default
 # (a hang is diagnosable from CI artifacts). It is a generated file;

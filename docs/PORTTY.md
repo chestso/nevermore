@@ -13,7 +13,11 @@ in any terminal (boba's runtime handles capability detection).
 
 ## E2E testing
 
-`tests/e2e_portty/` (phase 6) drives the built binary through coffer's
-`cfr-debug` PTY inspector with scripted `assert-contains` assertions —
-same harness style as coffer's CI. Skipped with exit 77 when cfr-debug
-is not installed (automake skip convention).
+`tests/e2e_portty/` (Phase 7) drives the built binary through coffer's
+`cfr-debug` PTY inspector with scripted `wait-for`/`assert-contains`
+assertions, against `tools/fake-ollama` on an ephemeral port — the
+binary's startup, a turn end to end, the transcript's bytes, and its
+exit status, all through a real terminal. Skipped with exit 77 when
+`cfr-debug` (a coffer tool), `python3` or the built binary is absent
+(the automake skip convention). See that directory's README for the
+skip matrix and the scenario rules.
