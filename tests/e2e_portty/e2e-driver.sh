@@ -87,8 +87,12 @@ export HOME XDG_CONFIG_HOME XDG_STATE_HOME NEVERMORE_AUTHINFO
 
 # --- the canned provider on an ephemeral port ------------------------
 tools=${NM_E2E_TOOLS:-$dir/../../tools}
+# `</dev/null`: a background job that inherits the harness's stdin can
+# be STOPPED by SIGTTIN the moment anything reads it (observed on the
+# macOS runner: a silent, live python3 that never printed its startup
+# line). A server has no business reading stdin.
 python3 "$tools/fake-ollama/fake_ollama.py" --host 127.0.0.1 --port 0 \
-	--scenario "$fake_scenario" >"$tmp/server.log" 2>&1 &
+	--scenario "$fake_scenario" >"$tmp/server.log" 2>&1 </dev/null &
 server_pid=$!
 
 port=
@@ -102,8 +106,13 @@ while [ "$i" -lt 150 ]; do
 	i=$((i + 1))
 done
 if [ -z "$port" ]; then
+	echo "--- fake-ollama: pid $server_pid, $(kill -0 "$server_pid" 2>/dev/null && echo alive || echo dead)" >&2
+	ps -o pid=,stat=,command= -p "$server_pid" >&2 2>/dev/null
+	echo "--- python3: $(command -v python3)" >&2
+	echo "--- python3 probe: $(python3 -c 'print(1+1)' 2>&1 | head -3)" >&2
+	ls -la "$tmp" >&2
 	echo "--- fake-ollama output ---" >&2
-	cat "$tmp/server.log" >&2 2>/dev/null
+	cat "$tmp/server.log" >&2
 	fail "fake-ollama never reported a port"
 fi
 
