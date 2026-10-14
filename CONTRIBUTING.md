@@ -171,6 +171,22 @@ test_x`, or `make check`. Stale-binary tell: a FAIL line number
 - **automake harness wiring**: suffix-less test binaries go through
   `LOG_COMPILER`, NOT `TEST_LOG_COMPILER` (`.test` scripts only) —
   wiring the latter does nothing.
+- **The E2E harness drives the BINARY**: `tests/e2e_portty/` (see its
+  README) runs the built `src/nevermore` through coffer's `cfr-debug`
+  with `tools/fake-ollama`. It is part of `make check` and SKIPs (77)
+  when python3, cfr-debug or the built binary is absent — so a
+  tests-only build (`make -C tests check-programs`) skips it, and CI
+  builds coffer (linux, macOS) or skips (Windows). Two traps that cost
+  a CI round trip each:
+  - **A helper process a test backgrounds must not inherit the
+    harness's stdin**: a job that reads it can be STOPPED by SIGTTIN —
+    silent, and `kill -0` still says "alive", so it looks like a slow
+    start. Give it `</dev/null` (the fake-ollama launch does).
+  - **A canned python server must skip `socket.getfqdn`**:
+    `http.server.HTTPServer.server_bind` does a reverse lookup that
+    stalls for tens of seconds where the resolver has no rDNS answer
+    (GitHub's macOS runners). `fake_ollama.py`'s `NoFqdnServer` exists
+    for exactly that.
 
 ## Local pre-flight (before pushing)
 
@@ -179,12 +195,13 @@ locally — minutes here vs 4-minute round-trips.
 
 - **Linux** is the dev box: a clean-tree `make check` is the gate; build
   from scratch when touching configure/Makefile.am (stale build dirs
-  mask missing sources). **The macOS job builds only `tests/`** (`make
--j -C tests check-programs` from a FRESH dir — src is never built
-  there), which is why tests/Makefile.am carries the recursive rule for
-  the generated `nevermore_version.h`. Reproduce that step after
-  touching anything a test pulls out of src's build dir — zig-macos
-  compiles `src/*.c` and misses test-binary link failures.
+  mask missing sources). **The macOS job builds `tests/` and `src/`**
+  separately (`make -j -C tests check-programs` + `make -j -C src`
+  from a FRESH dir), which is why tests/Makefile.am carries the
+  recursive rule for the generated `nevermore_version.h` and why the
+  E2E harness needs src built. Reproduce that step after touching
+  anything a test pulls out of src's build dir — zig-macos compiles
+  `src/*.c` and misses test-binary link failures.
 - **macOS**: `scripts/zig-macos-check.sh` (compile-only, every
   `src/*.c` for aarch64-macos). Its hand-kept `-I` list must MIRROR
   configure's `nevermore_CPPFLAGS` — a new include dir in configure.ac
