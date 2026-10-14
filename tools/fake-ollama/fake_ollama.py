@@ -29,6 +29,7 @@ import base64
 import json
 import os
 import socket
+import socketserver
 import struct
 import sys
 import threading
@@ -394,7 +395,25 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
 
-class V6Server(ThreadingHTTPServer):
+class NoFqdnServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer without the reverse-DNS lookup.
+
+    http.server.HTTPServer.server_bind() calls socket.getfqdn(host) — a
+    REVERSE lookup that stalls for tens of seconds when the resolver has
+    no rDNS answer. GitHub's macOS runners did exactly that: the server
+    bound its port, then sat silent past a 15 s handshake (the harness
+    saw an empty log and a live process). server_name is cosmetic here
+    (nothing reads it), so skip the lookup.
+    """
+
+    def server_bind(self):
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+class V6Server(NoFqdnServer):
     address_family = socket.AF_INET6
 
 
@@ -430,9 +449,9 @@ def main():
 
     bound = []
     if args.both:
-        launchers = [("127.0.0.1", ThreadingHTTPServer), ("::1", V6Server)]
+        launchers = [("127.0.0.1", NoFqdnServer), ("::1", V6Server)]
     else:
-        launchers = [(args.host, V6Server if ":" in args.host else ThreadingHTTPServer)]
+        launchers = [(args.host, V6Server if ":" in args.host else NoFqdnServer)]
 
     for host, cls in launchers:
         try:
