@@ -226,8 +226,9 @@ test_tls_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Session: transcript + context window (pure C, links session.c +
 # the image byte half, which the attach path shares with the display
-# path — image_bytes.c is boba-free precisely so this stays so).
-test_session_SOURCES = test_session.c ../src/session.c ../src/image_bytes.c ../src/size.c
+# path — image_bytes.c is boba-free precisely so this stays so; the
+# save's meta line is JSON, so json.c rides along).
+test_session_SOURCES = test_session.c ../src/session.c ../src/image_bytes.c ../src/size.c ../src/json.c
 test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,

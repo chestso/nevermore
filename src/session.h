@@ -214,16 +214,26 @@ const NmSessionMessage *nm_session_append_assistant_images(
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
 
-/* Persistence: load/save as markdown transcript with metadata header.
+/* Persistence: load/save as markdown transcript with a metadata header.
  * The saved document's structure is the transcript's: `user`/`assistant`
- * bodies are prose (a person's or a model's own markdown) and are
- * emitted live, while the assembled `system` prompt and every `tool`
- * result are relayed bytes and ride a length-adaptive fence, so a diff,
- * a file dump or an unbalanced code fence cannot become the document.
- * Attached images are NOT written (a data URL is megabytes and the save
- * is an inspection surface); session persistence including images is a
- * post-1.0 item, where images are blobs in the save format and never
- * re-read paths. */
+ * bodies — the answer AND the round's reasoning trace, a model's own
+ * markdown either way — are prose and are emitted live, while the
+ * assembled `system` prompt and every `tool` result are relayed bytes
+ * and ride a length-adaptive fence, so a diff, a file dump or an
+ * unbalanced code fence cannot become the document.
+ *
+ * The file is ALSO the loadable transcript, and one rule keeps the two
+ * jobs compatible: no delimiter a BODY can contain may decide the
+ * structure. So a `<!-- meta: ... -->` line per message carries the
+ * machine truth — role, tool facts, and every body's exact byte count —
+ * and a reader consumes that many bytes instead of scanning. The
+ * `### reasoning` / `### content` labels are for the reader; a loader
+ * uses the counts. A message's images are DECLARED in meta, never
+ * written (a data URL is megabytes and the save is an inspection
+ * surface); session persistence including image bytes is a post-1.0
+ * item, where images are blobs in the save format and never re-read
+ * paths, and until then a loader must refuse a save that declares them
+ * rather than rebuild a different transcript. */
 int nm_session_save(const NmSession *s, const char *path);
 NmSession *nm_session_load(const char *path);
 

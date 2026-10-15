@@ -422,11 +422,19 @@ save [path]` writes session.c's markdown). Const on purpose: the
   still the post-1.0 stub: save is an inspection surface.
   **The save is a markdown document whose structure is the
   transcript's**: `user`/`assistant` bodies are prose (a person's or a
-  model's own markdown) and are written live, while the assembled
-  prompt and every tool result are relayed bytes and ride a fence one
-  backtick longer than the body's longest run — so an edit diff cannot
-  render as bullets and a file dump cannot join the outline, without
-  rewriting a byte of the transcript.
+  model's own markdown — the round's reasoning trace included, which is
+  why it is written live under its own `### reasoning` label rather
+  than fenced) and are written live, while the assembled prompt and
+  every tool result are relayed bytes and ride a fence one backtick
+  longer than the body's longest run — so an edit diff cannot render as
+  bullets and a file dump cannot join the outline, without rewriting a
+  byte of the transcript. **The file is also the loadable transcript**:
+  a body is arbitrary bytes, so the boundary is never a delimiter a body
+  could contain — a `<!-- meta: … -->` line per message carries the
+  role, the tool facts and every body's exact byte count, and the labels
+  are for the reader only. The images a message held are declared there
+  and not carried, so a loader refuses such a file instead of rebuilding
+  a transcript whose request prefix differs from the chat's.
 - **Context** (`src/context.c`) — system-prompt assembly: the base
   prompt + the `<env>` block + the `<project_context>` block
   (AGENTS.md discovery: root→cwd walk to the nearest `.git`, nearest

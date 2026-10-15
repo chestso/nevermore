@@ -10,6 +10,7 @@
 #include <string.h>
 
 #include "image_bytes.h"
+#include "json.h"
 #include "session.h"
 
 struct NmSession
@@ -570,7 +571,11 @@ static const char *role_tag(NmRole r)
  *
  *   - `user` and `assistant` bodies are prose — a person typed it or a
  *     model wrote it, and both mean markdown — so they are emitted
- *     live and render as the speaker's own markdown.
+ *     live and render as the speaker's own markdown. That includes the
+ *     round's REASONING trace: a model's CoT is markdown from the same
+ *     producer (the transcript renders it as markdown too, dimmed —
+ *     markdown.h gives every stream its own classifier, so a trace's
+ *     fence state and the answer's never mix).
  *   - the `system` prompt and every `tool` result are bytes we
  *     assembled (`<env>`, `<project_context>`) or relayed verbatim (a
  *     file's contents, a diff, a command's output). They are not
@@ -583,7 +588,21 @@ static const char *role_tag(NmRole r)
  *
  * The fence is length-adaptive (a body can only close a fence as long
  * as its own longest backtick run), which is what makes the block
- * opaque without escaping a single byte of the transcript. */
+ * opaque without escaping a single byte of the transcript.
+ *
+ * THE FILE IS ALSO A TRANSCRIPT THAT READS BACK, and that is the other
+ * half of the design. Prose bodies cannot be fenced — a trace rendered
+ * as a code block is not a trace — so they carry the other unforgeable
+ * device instead: a DECLARED BYTE COUNT, in the `<!-- meta: ... -->`
+ * line that follows every heading. A body is arbitrary bytes, so no
+ * delimiter it can contain (`## user`, `### content`, `-->`, an
+ * unbalanced fence) may decide the structure; with the count, a reader
+ * consumes an exact number of bytes and never scans inside a body. The
+ * `### reasoning` / `### content` labels are for the READER alone: what
+ * tells a human where the trace ended and the answer began. The
+ * machine facts the meta line carries are in meta_json() below, and the
+ * NULL/empty distinctions a request cannot see in the first place are
+ * in message_part(). */
 
 static size_t fence_len(const char *body)
 {
@@ -633,22 +652,104 @@ static void comment_write(FILE *f, const char *json)
     }
 }
 
-/* A section's body; leaves the file at the start of a line, with no
- * trailing blank line (the next section's leading newline is the
- * separator). */
-static void section_body_write(FILE *f, NmRole role, const char *content)
+/* The parts a message writes, in SPEECH order: the round's trace, then
+ * the answer (reasoning streams first — the transcript's own commit
+ * order). ONE source of truth: the meta line's counts and the bodies
+ * themselves both come from here, so they cannot drift.
+ *
+ * A part exists iff its body is non-empty. NULL and "" are the same
+ * bytes in a request — the client serializes content with
+ * nm_json_new_string(NULL) → "" and skips empty tool ids/calls with an
+ * `&& *s` test — so the save records what a request can see and never a
+ * distinction it cannot use (which is why no part ever has a count of
+ * zero). */
+static int message_part(const NmSessionMessage *m, int idx, const char **name,
+                        const char **body)
 {
-    if (role == NM_ROLE_SYSTEM || role == NM_ROLE_TOOL) {
+    if (idx == 0 && m->reasoning && *m->reasoning) {
+        *name = "reasoning";
+        *body = m->reasoning;
+        return 1;
+    }
+    if (idx == 1 && m->content && *m->content) {
+        *name = "content";
+        *body = m->content;
+        return 1;
+    }
+    return 0;
+}
+
+/* The machine half of one message, as JSON: its role, the tool facts
+ * (a heading cannot carry them safely — a tool name holding `)` would
+ * make it ambiguous), the ordered parts with their exact byte counts,
+ * and the images the message carried. The images are DECLARED, never
+ * carried: a data URL is megabytes, and a load that silently dropped
+ * the parts would rebuild a request prefix the chat never had. Built
+ * with the JSON writer, escaped by comment_write like tool_calls, so no
+ * payload can end the comment early. Returns a malloc'd string, NULL on
+ * OOM (the caller turns that into a failed save, never a file with no
+ * meta). */
+static char *meta_json(const NmSession *s, const NmSessionMessage *m)
+{
+    NmJson *o = nm_json_new_object();
+    if (!o)
+        return NULL;
+    nm_json_set(o, "role", nm_json_new_string(role_tag(m->role)));
+    if (m->tool_name && *m->tool_name)
+        nm_json_set(o, "tool_name", nm_json_new_string(m->tool_name));
+    if (m->tool_call_id && *m->tool_call_id)
+        nm_json_set(o, "tool_call_id", nm_json_new_string(m->tool_call_id));
+    NmJson *parts = nm_json_new_array();
+    for (int k = 0; k < 2; k++) {
+        const char *name, *body;
+        if (!message_part(m, k, &name, &body))
+            continue;
+        NmJson *pair = nm_json_new_array();
+        nm_json_push(pair, nm_json_new_string(name));
+        nm_json_push(pair, nm_json_new_number((double)strlen(body)));
+        nm_json_push(parts, pair);
+    }
+    nm_json_set(o, "parts", parts);
+    if (m->n_images) {
+        /* The alts, in the order the message holds them: enough for a
+         * reader to see what the chat had, and enough for a loader to
+         * refuse the file rather than load a different transcript. */
+        NmJson *imgs = nm_json_new_array();
+        for (size_t k = 0; k < m->n_images; k++) {
+            const NmImage *img = nm_session_image(s, m->images[k]);
+            if (img)
+                nm_json_push(imgs, nm_json_new_string(img->alt));
+        }
+        nm_json_set(o, "images", imgs);
+    }
+    char *js = nm_json_dump(o);
+    nm_json_free(o);
+    return js;
+}
+
+/* One body of a message: the optional label line, then the bytes.
+ * The label is the READER's marker — a loader uses meta's counts,
+ * because a body may contain a line that looks exactly like this one.
+ * The body goes out verbatim, and one LF follows it only when it does
+ * not already end with one, so the count is what tells the body's own
+ * trailing newline from the syntactic one. Relayed roles ride the
+ * fence (see the producer note above). */
+static void part_write(FILE *f, const char *label, NmRole role,
+                       const char *body)
+{
+    if (!body || !*body)
+        return; /* a part exists iff it has bytes */
+    if (label)
+        fprintf(f, "\n### %s\n\n", label);
+    else
         fputc('\n', f);
-        fenced_write(f, content);
+    if (role == NM_ROLE_SYSTEM || role == NM_ROLE_TOOL) {
+        fenced_write(f, body);
         return;
     }
-    if (content && *content) {
+    fputs(body, f);
+    if (body[strlen(body) - 1] != '\n')
         fputc('\n', f);
-        fputs(content, f);
-        if (content[strlen(content) - 1] != '\n')
-            fputc('\n', f);
-    }
 }
 
 int nm_session_save(const NmSession *s, const char *path)
@@ -664,9 +765,11 @@ int nm_session_save(const NmSession *s, const char *path)
         return -1;
     fprintf(f, "<!-- nevermore session: %zu messages -->\n", s->n);
     /* The body rule above is format 2 (format 1 emitted every body raw);
-     * `nm_session_load` is the half that is still missing, and this is
-     * the comment it will read. */
-    fputs("<!-- nevermore session-format: 2 -->\n", f);
+     * 3 adds the per-message meta line and the trace's labelled passage.
+     * `nm_session_load` is the half that is still missing; this is the
+     * comment it will read, and every body's bytes are counted in meta
+     * so that reading it back needs no delimiter at all. */
+    fputs("<!-- nevermore session-format: 3 -->\n", f);
     for (size_t i = 0; i < s->n; i++) {
         const NmSessionMessage *m = &s->msgs[i];
         fprintf(f, "\n## %s", role_tag(m->role));
@@ -675,8 +778,31 @@ int nm_session_save(const NmSession *s, const char *path)
         if (m->tool_call_id)
             fprintf(f, " id=%s", m->tool_call_id);
         fputc('\n', f);
-        section_body_write(f, m->role, m->content);
-        if (m->tool_calls_json) {
+        char *meta = meta_json(s, m);
+        if (!meta) {
+            /* A message without its meta is a lie about its own
+             * structure: no file at all beats a file that cannot be
+             * read back. */
+            fclose(f);
+            remove(path);
+            return -1;
+        }
+        fputs("<!-- meta: ", f);
+        comment_write(f, meta);
+        fputs(" -->\n", f);
+        free(meta);
+        /* A message carrying a trace labels EVERY part — that is what
+         * tells a reader where the trace ended and the answer began.
+         * Without a trace the section keeps format 2's shape: one
+         * unlabelled body. */
+        int labeled = m->reasoning && *m->reasoning;
+        for (int k = 0; k < 2; k++) {
+            const char *name, *body;
+            if (!message_part(m, k, &name, &body))
+                continue;
+            part_write(f, labeled ? name : NULL, m->role, body);
+        }
+        if (m->tool_calls_json && *m->tool_calls_json) {
             fputs("\n<!-- tool_calls: ", f);
             comment_write(f, m->tool_calls_json);
             fputs(" -->\n", f);
@@ -688,8 +814,11 @@ int nm_session_save(const NmSession *s, const char *path)
 
 NmSession *nm_session_load(const char *path)
 {
-    /* Markdown round-trip is a post-1.0 idea (deferred); save is the
-     * debugging/inspection surface today. */
+    /* The load half, not built yet: read each meta line, consume exactly
+     * the counted bodies, refuse on any mismatch, on a format it does not
+     * know, or on a message declaring images (the bytes are not in the
+     * file). test_session.c's reader is its prototype; save is the
+     * inspection surface today. */
     (void)path;
     return NULL;
 }

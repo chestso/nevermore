@@ -6792,7 +6792,12 @@ static void test_session_inspects_and_saves(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
+    /* The round streams a reasoning trace before its answer, so the
+     * save's trace passage is pinned through the WHOLE path: the canned
+     * wire -> the agent -> the session -> session.c's writer. */
     sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"let me "
+        "think\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"hi there\"}}]}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
@@ -6832,6 +6837,9 @@ static void test_session_inspects_and_saves(void)
     ASSERT_TRUE(strstr(out, "  #1   user") != NULL);
     ASSERT_TRUE(strstr(out, "  #2   assistant") != NULL);
     ASSERT_TRUE(strstr(out, "11 B") != NULL); /* "hello agent" */
+    /* The note the listing shows for a message the save now carries a
+     * trace for: the two halves agree about what is in the transcript. */
+    ASSERT_TRUE(strstr(out, "reasoning") != NULL);
 
     /* The save: an explicit path is taken verbatim (spaces included). */
     char path[300];
@@ -6851,13 +6859,28 @@ static void test_session_inspects_and_saves(void)
     const char *md = (const char *)got;
     /* The metadata header, then one `## <role>` section per message —
      * the transcript the agent replays, roles and text intact. Prose
-     * (user/assistant) is live markdown; the system prompt is ours, so
-     * it rides a fence. */
+     * (user/assistant) is live markdown, the trace included; the system
+     * prompt is ours, so it rides a fence. Each message carries the meta
+     * line the loader reads. */
     ASSERT_TRUE(strstr(md, "<!-- nevermore session: 3 messages -->") != NULL);
-    ASSERT_TRUE(strstr(md, "<!-- nevermore session-format: 2 -->") != NULL);
-    ASSERT_TRUE(strstr(md, "## system\n\n```text\n") != NULL);
-    ASSERT_TRUE(strstr(md, "## user\n\nhello agent") != NULL);
-    ASSERT_TRUE(strstr(md, "## assistant\n\nhi there") != NULL);
+    ASSERT_TRUE(strstr(md, "<!-- nevermore session-format: 3 -->") != NULL);
+    ASSERT_TRUE(strstr(md, "## system\n<!-- meta: {\"role\":\"system\","
+                           "\"parts\":[[\"content\",") != NULL);
+    ASSERT_TRUE(strstr(md, "## system\n<!-- meta:") != NULL);
+    ASSERT_TRUE(strstr(md, "```text\n") != NULL);
+    ASSERT_TRUE(strstr(md, "## user\n<!-- meta: {\"role\":\"user\","
+                           "\"parts\":[[\"content\",11]]} -->\n"
+                           "\nhello agent") != NULL);
+    /* The round's trace, persisted: the labelled passage and the answer
+     * after it, both live markdown ("let me think" is 12 bytes, "hi
+     * there" 8). */
+    ASSERT_TRUE(strstr(md, "## assistant\n<!-- meta: {\"role\":\"assistant\","
+                           "\"parts\":[[\"reasoning\",12],[\"content\",8]]}"
+                           " -->\n"
+                           "\n### reasoning\n"
+                           "\nlet me think\n"
+                           "\n### content\n"
+                           "\nhi there\n") != NULL);
     remove(path);
 
     /* Bare: the deterministic name, the shape /image save's default

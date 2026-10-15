@@ -459,28 +459,43 @@ transcript order and adds the facts a size cannot show (`tool_calls`,
 scrolling: find the message, then ask the model about it. `/session
 save` writes the same transcript as markdown — a
 `<!-- nevermore session: N messages -->` header (plus a
-`session-format` version) and one `## <role>` section per message, tool
-results under `## tool (<name>)`. An explicit path is taken verbatim
-(spaces included); bare, the deterministic `nevermore-session.md` lands
-in the cwd. Saving an empty transcript is refused, never an empty file.
+`session-format` version), then one `## <role>` section per message
+carrying a `<!-- meta: … -->` line and its bodies, tool results under
+`## tool (<name>)`. An explicit path is taken verbatim (spaces
+included); bare, the deterministic `nevermore-session.md` lands in the
+cwd. Saving an empty transcript is refused, never an empty file.
 
 The saved document's structure is the transcript's, never the
 content's. Prose — `user` and `assistant` bodies, what a person typed
 or a model wrote — is markdown, and it is written live, so its
-headings, lists and emphasis render as its author meant them. The
-`system` prompt and every `tool` result are the other kind of body:
-bytes we assembled (`<env>`, `<project_context>`) or relayed verbatim
-(a file's contents, a diff, a command's output). They are not markdown,
-and written live they would _become_ the document — a `#` joins the
-outline, a diff's `- `/`+ ` lines render as bullets, an unbalanced
-code fence swallows everything after it, a `<env>` opens an HTML block.
-So each rides a fenced block whose fence is one backtick longer than
-the longest backtick run in the body: opaque by construction, byte-exact
-(unlike escaping, which would rewrite the transcript), and still one
-screen of markdown. Tool arguments in the `<!-- tool_calls -->` comment
-get the same treatment (`-->` is escaped as `--\u003e`, the same JSON
-value), so an edit whose new text contains one cannot end the comment
-early.
+headings, lists and emphasis render as its author meant them. That
+includes the round's **reasoning trace**, which a message carries as
+its own labelled passage: `### reasoning`, then `### content` for the
+answer, so the two never run together. The `system` prompt and every
+`tool` result are the other kind of body: bytes we assembled (`<env>`,
+`<project_context>`) or relayed verbatim (a file's contents, a diff, a
+command's output). They are not markdown, and written live they would
+_become_ the document — a `#` joins the outline, a diff's `- `/`+ `
+lines render as bullets, an unbalanced code fence swallows everything
+after it, a `<env>` opens an HTML block. So each rides a fenced block
+whose fence is one backtick longer than the longest backtick run in the
+body: opaque by construction, byte-exact (unlike escaping, which would
+rewrite the transcript), and still one screen of markdown. Tool
+arguments in the `<!-- tool_calls -->` comment get the same treatment
+(`-->` is escaped as `--\u003e`, the same JSON value), so an edit whose
+new text contains one cannot end the comment early.
+
+The file is also **readable back**, so the labels are for the reader
+and the `meta` line is for the program. A body is arbitrary bytes, so
+no delimiter it contains may decide the structure: a trace that mentions
+`### content`, a command's output with a `## user` line in it, an
+unbalanced fence. Each body's exact byte count rides in `meta`, and a
+reader consumes that many bytes without ever scanning inside a body —
+the count is the boundary, and the labels cannot move it. `meta` also
+carries the role, the tool facts, and the images the message held. The
+images themselves are still not written (a data URL is megabytes), so a
+loader must refuse a file that declares them rather than hand back a
+transcript whose request prefix differs from the chat's.
 
 Images are **not** in the markdown: a data URL is megabytes, and the
 save is an inspection surface, not a backup format. `/image save <n>`
