@@ -515,7 +515,10 @@ asked for minutes is never left guessing why it was bounced early.
 non-interactive command, one result — no job, no terminal, no stdin.
 A one-shot `ls`, `grep` or `make` is a `run_command`; anything that
 might still be running, or that expects a terminal, is an
-`exec_command`.
+`exec_command`. Its result opens with the command's exit status
+(`Process exited with code 3`), then the combined capture under
+`Output:` — the same report shape `exec_command` prints, so a failing
+command is visible without reading the body.
 
 `exec_command` takes a `shell` and a `login` argument. `shell` names
 the interpreter (a path or a bare name — `bash`, `/usr/bin/zsh`,

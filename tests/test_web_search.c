@@ -292,6 +292,12 @@ static void test_web_search_happy_path(void)
 
     ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
+    /* The one result shape (tools_internal.h): the status line, then the
+     * rendered hits under "Output:". Every tool reports this way, so the
+     * model reads a status first and a fenced body after — never a bare
+     * body whose provenance it has to guess. */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\nOutput:\n",
+                        35) == 0);
     /* Request line: encoded query, format=json. */
     ASSERT_NOT_NULL(strstr(s.req, "GET /search?q=hello%20world&format=json"));
     /* Sorted, higher score first. */

@@ -78,7 +78,20 @@ typedef struct NmToolResult
                           * finished (that value is the step machine's) */
     char *output;        /* text the model sees; heap-owned, ALWAYS set — a
                           * failure names its reason (the always-set contract,
-                          * as NmChatResult.message) */
+                          * as NmChatResult.message).
+                          *
+                          * One shape, all ten tools: a one-line STATUS
+                          * (how the call ended — `Process exited with
+                          * code 3`, `Process running with job ID 7`,
+                          * `Job 7 killed`, or the refusal's own
+                          * sentence), then the tool's product under
+                          * `Output:` when the call produced one, or the
+                          * structural `Output: (empty)` marker when it
+                          * ran and produced nothing. Assembled in one
+                          * place (tools_internal.h) so no tool can
+                          * invent a third spelling: the model reads a
+                          * status, then a fenced body — never a shape
+                          * it has to guess at. */
     /* An image the tool captured, or NULL (the common case: every
      * textual tool). One slot, not a list — read_file reads one file,
      * and a round with several image-producing calls is aggregated by
@@ -217,9 +230,14 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
  * next nm_toolset_add or nm_toolset_free. */
 const char *nm_toolset_to_json(const NmToolset *ts);
 
-/* Error / success result constructors (heap-owned output). */
+/* The refusal constructor (heap-owned output): the message IS the
+ * status line, and the result carries no body — the call produced
+ * nothing because it never ran, so there is no "Output:" section to
+ * dress up with an empty marker (a tool that ran and produced nothing
+ * says `Output: (empty)` instead, see nm_tool_result_head). Every
+ * refusal in every tool comes from here, so a failure reads the same
+ * wherever it came from. */
 NmToolResult nm_tool_result_error(const char *message);
-NmToolResult nm_tool_result_text(const char *text);
 
 void nm_tool_result_free(NmToolResult *r);
 

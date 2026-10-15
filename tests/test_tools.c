@@ -892,9 +892,12 @@ static void test_read_file_image_branch(void)
     ASSERT_EQ(r.image_len, sizeof(T_IMG_PNG));
     ASSERT_TRUE(memcmp(r.image, T_IMG_PNG, sizeof(T_IMG_PNG)) == 0);
     ASSERT_STR_EQ(r.image_alt, "shot.png");
-    /* the text path's envelope is NOT here: the image branch's output is
-     * the summary line alone */
-    ASSERT_TRUE(strstr(r.output, "Output:") == NULL);
+    /* The result carries the one shape like every other read: the
+     * status line, then the summary as the body (it used to be a bare
+     * body with no status line, the one read_file path that skipped the
+     * convention). */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\nOutput:\n",
+                        35) == 0);
 
     nm_tool_result_free(&r);
     ASSERT_NULL(r.image); /* freed with the result */
@@ -2653,24 +2656,17 @@ static void test_clamp_output_head_only(void)
 static void test_run_command_exit_zero(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
-#ifdef _WIN32
     /* cmd.exe: "echo hi" prints "hi"; no `>&2` on the stderr case. */
     NmToolResult r =
         nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
     ASSERT_EQ(r.status, NM_TOOL_OK);
     ASSERT_NOT_NULL(r.output);
-    ASSERT_TRUE(strstr(r.output, "hi") != NULL);
+    /* The one shape: the exit status IS the first line, then the body
+     * under "Output:" — the same report exec_command prints. */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\n", 27) == 0);
+    ASSERT_TRUE(strstr(r.output, "Output:\nhi") != NULL);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
-#else
-    NmToolResult r =
-        nm_toolset_execute(ts, "run_command", "{\"cmd\":\"echo hi\"}", NULL);
-    ASSERT_EQ(r.status, NM_TOOL_OK);
-    ASSERT_NOT_NULL(r.output);
-    ASSERT_TRUE(strstr(r.output, "hi") != NULL);
-    nm_tool_result_free(&r);
-    nm_toolset_free(ts);
-#endif
 }
 
 static void test_run_command_exit_nonzero(void)
@@ -2686,8 +2682,11 @@ static void test_run_command_exit_nonzero(void)
 #endif
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
-    /* Combined capture: stderr text rides the same output. */
-    ASSERT_TRUE(strstr(r.output, "err") != NULL);
+    /* The failure is visible without a parser: the exit code is the
+     * status line (the tool's own description promises it), and the
+     * combined capture follows — stderr text rides the same output. */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 3\n", 27) == 0);
+    ASSERT_TRUE(strstr(r.output, "Output:\nerr") != NULL);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
@@ -2849,6 +2848,9 @@ static void test_run_command_async(void)
     ASSERT_EQ(r.status, NM_TOOL_ERR); /* exit 3 is a failure */
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "hello async") != NULL);
+    /* The async path reports the same shape as the synchronous one:
+     * the exit status is the status line. */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 3\n", 27) == 0);
     nm_tool_result_free(&r);
     nm_toolset_free(ts);
 }
@@ -3372,6 +3374,11 @@ static void test_run_command_silent_child_is_stopped(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
     ASSERT_TRUE(strstr(r.output, "never") == NULL); /* the child never got there */
+    /* The stop's note IS the status line: the kill is the TOOL's doing,
+     * so a `Process exited with code 137` line would report the tool's
+     * SIGKILL as the command's own exit status. */
+    ASSERT_TRUE(strncmp(r.output, "Command timed out after ", 24) == 0);
+    ASSERT_TRUE(strstr(r.output, "Process exited with code") == NULL);
     nm_tool_result_free(&r);
 }
 
@@ -3391,6 +3398,8 @@ static void test_run_command_output_resets_the_deadline(void)
     ASSERT_NOT_NULL(r.output);
     ASSERT_TRUE(strstr(r.output, "tick") != NULL);
     ASSERT_TRUE(strstr(r.output, "timed out") == NULL);
+    /* Its own exit status, in the status line. */
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\n", 27) == 0);
     nm_tool_result_free(&r);
 }
 
@@ -4568,11 +4577,263 @@ static void test_run_command_silent_child_times_out_on_windows(void)
     ASSERT_EQ(r.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(r.output);
     ASSERT_NOT_NULL(strstr(r.output, "timed out"));
+    ASSERT_TRUE(strncmp(r.output, "Command timed out after ", 24) == 0);
     nm_tool_result_free(&r);
     ASSERT_EQ(nm_proc_count(), 0); /* the timeout closed the job itself */
     nm_toolset_free(ts);
 }
 #endif /* _WIN32 */
+
+/* ---------------------------------------------------------------- */
+/* The one result shape, across the toolset                          */
+/* ---------------------------------------------------------------- */
+
+/* Every tool's result is a one-line status, then its body under
+ * "Output:" (tools_internal.h) — never a bare body with no status line,
+ * which is how run_command used to hand back an exit code nobody could
+ * read (the transcript's `error:` prefix was the only signal that a
+ * command had failed). A refusal is its status line ALONE: the call
+ * produced no output, so there is no section to mistake for one. */
+static void shape_assert_status_then_body(const NmToolResult *r)
+{
+    ASSERT_NOT_NULL(r->output);
+    const char *nl = strchr(r->output, '\n');
+    ASSERT_NOT_NULL(nl); /* the status line, and the section after it */
+    ASSERT_TRUE(strncmp(nl + 1, "Output:", 7) == 0);
+}
+
+static void shape_assert_refusal(const NmToolResult *r)
+{
+    ASSERT_EQ(r->status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r->output);
+    ASSERT_TRUE(strchr(r->output, '\n') == NULL); /* status line only */
+}
+
+/* This test runs on BOTH platforms, while the shared arg builders above
+ * (args_dump / exec_args / reported_job_id / stdin_args) live in the
+ * POSIX-only block: these three are its own. */
+static char *shape_dump(NmJson *j)
+{
+    char *s = nm_json_dump(j);
+    nm_json_free(j);
+    return s;
+}
+
+static char *shape_cmd_args(const char *cmd, long yield_ms)
+{
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd", nm_json_new_string(cmd));
+    if (yield_ms > 0)
+        nm_json_set(j, "yield_time_ms", nm_json_new_number(yield_ms));
+    return shape_dump(j);
+}
+
+/* The job id out of a "... job ID N ..." status line. */
+static int shape_job_id(const char *output)
+{
+    const char *p = output ? strstr(output, "job ID ") : NULL;
+    return p ? atoi(p + 7) : -1;
+}
+
+static void test_every_tool_result_has_one_shape(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    char *file = scratch_path("shape.txt");
+    char *missing = scratch_path("shape-missing.txt");
+    char *dir = strdup(scratch_dir());
+    FILE *f = file ? fopen(file, "wb") : NULL;
+    if (f) {
+        fputs("shape\n", f);
+        fclose(f);
+    }
+    ASSERT_NOT_NULL(file);
+    ASSERT_NOT_NULL(missing);
+    ASSERT_NOT_NULL(dir);
+    remove(missing); /* the refusal case below must not find it */
+
+    NmJson *j;
+    char *args;
+    NmToolResult r;
+
+    /* The file tools: a path in, a body under the status line out. */
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(file));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(file));
+    nm_json_set(j, "content", nm_json_new_string("shape\n"));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "write_file", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(file));
+    nm_json_set(j, "old_string", nm_json_new_string("shape"));
+    nm_json_set(j, "new_string", nm_json_new_string("shaped"));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(dir));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "list_dir", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(dir));
+    nm_json_set(j, "needle", nm_json_new_string("shaped"));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "search_dir", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    /* run_command: the exit status IS the status line. */
+    args = shape_cmd_args("echo shape", 5000);
+    r = nm_toolset_execute(ts, "run_command", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\n", 27) == 0);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    /* exec_command, its exit path... */
+#ifdef _WIN32
+    args = shape_cmd_args("echo shape", 10000);
+#else
+    args = shape_cmd_args("printf 'shape\\n'; exit 0", 5000);
+#endif
+    r = nm_toolset_execute(ts, "exec_command", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_TRUE(strncmp(r.output, "Process exited with code 0\n", 27) == 0);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    /* ...its still-running path: a job id, and nothing captured yet.
+     * Driven on the async seam the way the exec tests drive a live
+     * child: the synchronous pump would pay the yield window on the real
+     * clock. (`cat` on POSIX; on Windows the MSYS `cat` — and the
+     * `printf` above — are not what a job inherits, so findstr reads its
+     * own stdin, exactly as the Windows exec test does.) */
+#ifdef _WIN32
+    args = shape_cmd_args("findstr /r \".*\"", 10000);
+#else
+    args = shape_cmd_args("cat", 300);
+#endif
+    r = exec_virtual("exec_command", args, 0);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    int job = shape_job_id(r.output);
+    ASSERT_TRUE(job > 0);
+    nm_tool_result_free(&r);
+
+    /* ...write_stdin feeding that job: a real write, so the 5 s
+     * empty-poll floor is not paid, and the window closes on a job that
+     * is still running... */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+#ifdef _WIN32
+    nm_json_set(j, "input", nm_json_new_string("\r\n"));
+#else
+    nm_json_set(j, "input", nm_json_new_string("shape\n"));
+#endif
+    nm_json_set(j, "yield_time_ms", nm_json_new_number(300));
+    args = shape_dump(j);
+    r = exec_virtual("write_stdin", args, 0);
+    free(args);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    ASSERT_TRUE(strstr(r.output, "Process running with job ID") != NULL);
+    nm_tool_result_free(&r);
+
+    /* ...and kill_job on it. */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "kill_job", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    shape_assert_status_then_body(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    /* The refusals: one status line, no section (the call produced no
+     * output because it never ran). */
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(missing));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "read_file", args, NULL);
+    shape_assert_refusal(&r);
+    ASSERT_TRUE(strstr(r.output, "cannot read") != NULL);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "path", nm_json_new_string(missing));
+    nm_json_set(j, "content", nm_json_new_string("x\n"));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "edit_file", args, NULL);
+    shape_assert_refusal(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    args = shape_cmd_args("", 5000);
+    r = nm_toolset_execute(ts, "run_command", args, NULL);
+    shape_assert_refusal(&r);
+    ASSERT_TRUE(strstr(r.output, "missing or empty cmd") != NULL);
+    nm_tool_result_free(&r);
+    free(args);
+
+    r = nm_toolset_execute(ts, "exec_command", "{}", NULL);
+    shape_assert_refusal(&r);
+    nm_tool_result_free(&r);
+
+    /* The job above is gone: both job tools refuse it by name. */
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+    nm_json_set(j, "input", nm_json_new_string("x\n"));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "write_stdin", args, NULL);
+    shape_assert_refusal(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    j = nm_json_new_object();
+    nm_json_set(j, "job_id", nm_json_new_number(job));
+    args = shape_dump(j);
+    r = nm_toolset_execute(ts, "kill_job", args, NULL);
+    shape_assert_refusal(&r);
+    nm_tool_result_free(&r);
+    free(args);
+
+    /* An unknown tool: the same refusal shape, from the toolset itself. */
+    r = nm_toolset_execute(ts, "bogus_tool", "{}", NULL);
+    shape_assert_refusal(&r);
+    nm_tool_result_free(&r);
+
+    free(file);
+    free(missing);
+    free(dir);
+    nm_toolset_free(ts);
+}
 
 int main(void)
 {
@@ -4642,6 +4903,7 @@ int main(void)
     RUN_TEST(test_clamp_output_head_only);
     RUN_TEST(test_run_command_exit_zero);
     RUN_TEST(test_run_command_exit_nonzero);
+    RUN_TEST(test_every_tool_result_has_one_shape);
     RUN_TEST(test_spawn_capture_api);
     RUN_TEST(test_tool_plan_lists_args_in_order);
     RUN_TEST(test_tool_plan_escapes_newlines);

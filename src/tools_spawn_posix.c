@@ -176,40 +176,15 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code)
 /* run_command tool                                                  */
 /* ---------------------------------------------------------------- */
 
-/* quoth's format-result convention: the captured body + exit status.
- * `note` (optional) is a status line prepended before the Output:
- * section — the timeout path's explanation. */
-static NmToolResult run_command_result(const char *output, size_t len,
-                                       int code, const char *note)
-{
-    size_t note_len = note ? strlen(note) : 0;
-    size_t cap = note_len + len + 64;
-    char *raw = malloc(cap);
-    if (!raw)
-        return nm_tool_result_error("out of memory");
-    size_t off = 0;
-    if (note_len) {
-        memcpy(raw, note, note_len);
-        raw[note_len] = '\n';
-        off = note_len + 1;
-    }
-    if (len)
-        snprintf(raw + off, cap - off, "Output:\n%s", output);
-    else
-        snprintf(raw + off, cap - off, "Output: (empty)\n");
-    /* Shared head-only clamp: the captured body rides the same budget
-     * as every other tool result (rendered + session history alike). */
-    size_t omitted = 0;
-    char *body = nm_clamp_output(raw, &omitted);
-    free(raw);
-    if (!body)
-        return nm_tool_result_error("out of memory");
-    NmToolResult r = { .status = (code == 0 && note == NULL) ? NM_TOOL_OK
-                                                             : NM_TOOL_ERR,
-                       .output = body,
-                       .truncated = omitted > 0 ? 1 : 0 };
-    return r;
-}
+/* run_command's report is the shared one-shot shape (nm_tool_result_run,
+ * tools_internal.h): "Process exited with code N" over the captured
+ * body — or the inactivity stop's note as the status line, because that
+ * path SIGKILLs and the wait status would then read 128+SIGKILL, the
+ * TOOL's kill rather than the command's own exit. The tool's own
+ * description promises "its combined output and exit status"; before
+ * this, a bare "Output:" left a model — and the user reading the
+ * transcript — with the TUI's `error:` prefix as the only signal that a
+ * command had failed, and the code nowhere. */
 
 /* Parse the args and build the /bin/sh -c argv. Returns the heap cmd
  * (caller frees) via *cmd_out, or NULL on bad args (caller then runs
@@ -224,8 +199,13 @@ static const char *run_command_argv(const char *args_json, char **cmd_out)
     const char *cmd_raw = nm_json_str(nm_json_get(args, "cmd"));
     char *cmd = cmd_raw ? strdup(cmd_raw) : NULL;
     nm_json_free(args);
-    if (!cmd || !*cmd) {
-        free(cmd);
+    if (!cmd)
+        return NULL; /* malformed args, no cmd key, or OOM */
+    if (!*cmd) {
+        /* An EMPTY cmd is not a malformed argument object: hand it back
+         * so the caller refuses by name (the Windows twin already
+         * does). */
+        *cmd_out = cmd;
         return NULL;
     }
     *cmd_out = cmd;
@@ -239,9 +219,12 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     (void)ctx;
     char *cmd = NULL;
     const char *prog = run_command_argv(args_json, &cmd);
-    if (!prog)
-        return nm_tool_result_error(cmd ? "missing or empty cmd"
-                                        : "arguments are not a JSON object");
+    if (!prog) {
+        NmToolResult r = nm_tool_result_error(
+            cmd ? "missing or empty cmd" : "arguments are not a JSON object");
+        free(cmd);
+        return r;
+    }
 
     /* Shell semantics: /bin/sh -c cmd, combined capture. */
     const char *argv[] = { prog, "-c", cmd, NULL };
@@ -253,8 +236,7 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
     }
     free(cmd); /* argv[] borrowed it only until the spawn consumed it */
 
-    NmToolResult r = run_command_result(output, output ? strlen(output) : 0,
-                                        code, NULL);
+    NmToolResult r = nm_tool_result_run(code, NULL, output);
     free(output);
     return r;
 }
@@ -367,8 +349,10 @@ static NmToolExec *run_command_begin(const NmTool *tool,
     (void)ctx;
     char *cmd = NULL;
     const char *prog = run_command_argv(args_json, &cmd);
-    if (!prog)
-        return NULL; /* bad args: the synchronous execute reports it */
+    if (!prog) {
+        free(cmd); /* bad args: the synchronous execute reports it */
+        return NULL;
+    }
     const char *argv[] = { prog, "-c", cmd, NULL };
     NmToolExec *e = spawn_begin(argv);
     free(cmd); /* posix_spawn copied argv before returning */
@@ -497,8 +481,7 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         kill_child(e);
         reap_child(e);
     }
-    *out = run_command_result(e->buf ? e->buf : "", e->len, e->code,
-                              timeout_note);
+    *out = nm_tool_result_run(e->code, timeout_note, e->buf);
     return out->status;
 }
 

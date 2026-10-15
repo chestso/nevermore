@@ -246,7 +246,9 @@ static NmToolResult read_failed_result(const char *path)
         else
             snprintf(msg, need, "cannot read %s", path);
     }
-    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+    NmToolResult r = nm_tool_result_error(msg);
+    free(msg); /* the constructor copies the text */
+    return r;
 }
 
 /* UTF-8 validity scan (port of quoth's utf8-valid-p): accepts 1-4
@@ -781,10 +783,13 @@ static NmToolResult image_result_from_probe(const char *path, NmImageProbe *p)
     snprintf(body, need,
              "[image] %s — %s — attached; the image follows as a user message",
              alt, desc);
-    NmToolResult r = { .status = NM_TOOL_OK,
-                       .output = body,
-                       .image = p->bytes,
-                       .image_len = p->len };
+    /* The same shape every other read_file result has (the marker line
+     * is the tool's output; the image rides the result's own slot, not
+     * the text). */
+    NmToolResult r = nm_tool_format_result(body, 0);
+    free(body); /* the shaper copies the text */
+    r.image = p->bytes;
+    r.image_len = p->len;
     snprintf(r.image_alt, sizeof(r.image_alt), "%s", alt);
     p->bytes = NULL; /* ownership moved into the result */
     p->len = 0;
@@ -820,7 +825,9 @@ static NmToolResult unreadable_image_result(const char *path,
     if (!msg)
         return nm_tool_result_error("out of memory");
     snprintf(msg, need, "%s — %s — %s", alt, desc, why);
-    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+    NmToolResult r = nm_tool_result_error(msg);
+    free(msg); /* the constructor copies the text */
+    return r;
 }
 
 /* Over the wire cap: refuse, naming both sizes. The probe stats the
@@ -838,7 +845,9 @@ static NmToolResult oversize_result(const char *path, const NmImageProbe *p)
     snprintf(msg, need,
              "image too large to attach: %s — %s over the %s wire cap", alt,
              big, cap);
-    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+    NmToolResult r = nm_tool_result_error(msg);
+    free(msg); /* the constructor copies the text */
+    return r;
 }
 
 /* Common non-text containers, named for the refusal line below. A tiny
@@ -911,7 +920,9 @@ static NmToolResult not_text_result(const char *path, const char *text,
         snprintf(msg, cap, "binary file (not UTF-8 text): %s", path);
     else
         snprintf(msg, cap, "file is not valid UTF-8: %s", path);
-    return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+    NmToolResult r = nm_tool_result_error(msg);
+    free(msg); /* the constructor copies the text */
+    return r;
 }
 
 /* read_file's image branch: a two-step
@@ -1074,7 +1085,9 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     if (jlim && limit < 1) {
         char *msg = malloc(64);
@@ -1084,7 +1097,9 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
 
     /* Line table walk: advance to the start of line `offset',
@@ -1127,10 +1142,11 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
         nm_json_free(args);
         /* The fact behind the message: the file is SHORTER than the
          * offset, not missing and not unreadable (reminder.h's
-         * offset-past-eof). */
-        return (NmToolResult){ .status = NM_TOOL_ERR,
-                               .output = msg,
-                               .read_state = NM_READ_STATE_PAST_EOF };
+         * offset-past-eof). The message is the refusal's status line. */
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        r.read_state = NM_READ_STATE_PAST_EOF;
+        return r;
     }
 
     /* The session's file ledger (file_ledger.h): this read against
@@ -1374,7 +1390,9 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     if (nhits > 1 && !replace_all) {
         /* Name the match lines so the model can disambiguate. */
@@ -1404,7 +1422,9 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
 
     /* Splice: one pass writes the new text into a single output
@@ -1445,7 +1465,9 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         free(text);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     free(out);
 
@@ -1571,7 +1593,9 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         free(parent);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     free(parent);
 
@@ -1585,7 +1609,9 @@ static NmToolResult write_file_exec(const NmTool *tool, const char *args_json,
         char *msg = write_refusal_message(path, wout, werr, wmode);
         free(path);
         nm_json_free(args);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
 
     /* The model's own write (file_ledger.h): the file is no longer
@@ -1704,7 +1730,9 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     do {
         char name[256];
@@ -1729,7 +1757,9 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
         if (msg)
             snprintf(msg, strlen(path) + 64, "cannot list %s", path);
         free(path);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     struct dirent *ent;
     char full[4096];
@@ -1983,7 +2013,9 @@ static NmToolResult search_dir_exec(const NmTool *tool, const char *args_json,
             snprintf(msg, need, "cannot search %s: %s", path, why);
         free(path);
         free(needle);
-        return (NmToolResult){ .status = NM_TOOL_ERR, .output = msg };
+        NmToolResult r = nm_tool_result_error(msg);
+        free(msg); /* the constructor copies the text */
+        return r;
     }
     free(path);
     free(needle);

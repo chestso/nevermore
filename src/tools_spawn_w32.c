@@ -270,27 +270,11 @@ static NmToolResult run_command_exec(const NmTool *tool, const char *args_json,
 
     buf[len] = '\0';
 
-    size_t raw_len = len + 64;
-    char *raw = malloc(raw_len);
-    if (!raw) {
-        free(buf);
-        return nm_tool_result_error("out of memory");
-    }
-    if (len)
-        snprintf(raw, raw_len, "Output:\n%s", buf);
-    else
-        snprintf(raw, raw_len, "Output: (empty)\n");
+    /* The shared one-shot report (nm_tool_result_run, tools_internal.h):
+     * the exit status AS the status line, then the captured body — the
+     * same bytes the POSIX twin and the async path below produce. */
+    NmToolResult r = nm_tool_result_run((int)st, NULL, buf);
     free(buf);
-    /* Shared head-only clamp: the captured body rides the same budget
-     * as every other tool result (rendered + session history alike). */
-    size_t omitted = 0;
-    char *body = nm_clamp_output(raw, &omitted);
-    free(raw);
-    if (!body)
-        return nm_tool_result_error("out of memory");
-    NmToolResult r = { .status = ((int)st == 0) ? NM_TOOL_OK : NM_TOOL_ERR,
-                       .output = body,
-                       .truncated = omitted > 0 ? 1 : 0 };
     return r;
 }
 
@@ -409,9 +393,12 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
     }
 
     /* Terminal: either the child exited, or the inactivity deadline
-     * stopped it. Report the exit status and the captured body with an
-     * explanatory note on the timeout, then close the job (nothing is
-     * left to poll, and the model never saw an id). */
+     * stopped it. The report is the shared one-shot shape
+     * (nm_tool_result_run): the exit status as the status line — or the
+     * timeout note as the status line, since a stopped child has no exit
+     * status of its own to print (Windows has only a synthetic -1, which
+     * is a fact the model cannot use). The job closes here: nothing is
+     * left to poll, and the model never saw an id. */
     char note[128];
     const char *timeout_note = NULL;
     if (timed_out) {
@@ -421,42 +408,12 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
                  e->budget_ms);
         timeout_note = note;
     }
-    int code = timed_out ? -1 : nm_proc_exit(p);
     const char *body = nm_proc_take_output(p);
-    size_t n = body ? strlen(body) : 0;
-    size_t note_len = timeout_note ? strlen(timeout_note) : 0;
-    size_t cap = note_len + n + 64;
-    char *raw = malloc(cap);
-    if (!raw) {
-        nm_proc_close(p);
-        e->job_id = -1;
-        e->result = nm_tool_result_error("out of memory");
-        e->done = 1;
-        return take(e, out);
-    }
-    size_t off = 0;
-    if (note_len) {
-        memcpy(raw, timeout_note, note_len);
-        raw[note_len] = '\n';
-        off = note_len + 1;
-    }
-    if (n)
-        snprintf(raw + off, cap - off, "Output:\n%s", body);
-    else
-        snprintf(raw + off, cap - off, "Output: (empty)\n");
-    size_t omitted = 0;
-    char *clamped = nm_clamp_output(raw, &omitted);
-    free(raw);
+    /* The note supersedes the code when there is one. */
+    int code = timed_out ? 0 : nm_proc_exit(p);
+    e->result = nm_tool_result_run(code, timeout_note, body);
     nm_proc_close(p);
     e->job_id = -1;
-    if (!clamped)
-        e->result = nm_tool_result_error("out of memory");
-    else
-        e->result = (NmToolResult){
-            .status = (code == 0 && !timed_out) ? NM_TOOL_OK : NM_TOOL_ERR,
-            .output = clamped,
-            .truncated = omitted > 0 ? 1 : 0
-        };
     e->done = 1;
     return take(e, out);
 }

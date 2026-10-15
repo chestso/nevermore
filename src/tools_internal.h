@@ -63,12 +63,49 @@ char *nm_tool_result_body(const char *status, const char *clamped);
  * multi-byte character is never split into invalid UTF-8. */
 size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
 
-/* The one result shaper every textual tool rides (quoth's
- * format-result convention): the "Process exited with code N" status
- * line + an "Output:" section carrying the clamped body. `body` NULL
- * yields the structural "(empty)" marker, never fake text. Heap text
- * (caller frees); shared by tools_file.c and tools_websearch.c so the
- * rendered transcript and the session history see identical bytes. */
+/* The one result shaper every tool rides (quoth's format-result
+ * convention): a one-line STATUS, then the tool's product under
+ * "Output:" — or the structural "(empty)" marker when the call ran and
+ * produced nothing (`body` NULL, never fake text a reader could
+ * mistake for output). Assembled HERE, in one place, so the rendered
+ * transcript and the session history see identical bytes for every one
+ * of the ten tools and the shape is the model's constant.
+ *
+ * Two families, one shape — the per-family clamp is the only
+ * difference, and `ok` is the caller's own read of the status line it
+ * just wrote (an exit code is the caller's business; the shaper never
+ * parses it back out):
+ *
+ *   nm_tool_result_head  one-shot tools (the file tools, web_search,
+ *                        run_command): nm_clamp_output, head-only.
+ *   nm_tool_result_job   process jobs (exec_command, write_stdin,
+ *                        kill_job): nm_clamp_job_output, 70/30, because
+ *                        a job's failures live at the TAIL.
+ *
+ * A refusal is NOT one of these: a call that produced no output because
+ * it never ran is nm_tool_result_error() (tools.h) — its status line
+ * alone, with no empty section to mistake for a result. A tool result
+ * therefore always opens with its status, and contains "Output:" iff
+ * the call actually produced (or was asked to produce) a body. */
+NmToolResult nm_tool_result_head(const char *status, int ok, const char *body);
+NmToolResult nm_tool_result_job(const char *status, int ok, const char *body);
+
+/* A one-shot process's report (run_command, both platforms): "Process
+ * exited with code N" over the captured body — or, when the tool stopped
+ * the child itself for inactivity, `note` AS the status line. That path
+ * SIGKILLs, so the child's own wait status (128+SIGKILL on POSIX,
+ * Windows' synthetic -1) would read as the COMMAND's exit status when it
+ * is really the tool's: the note names what happened instead. `body` is
+ * the captured text ("" and NULL both mean "nothing was captured", the
+ * structural `(empty)` marker); the clamp is head-only, the one-shot
+ * family's (a short command's failures are not a build log's tail). */
+NmToolResult nm_tool_result_run(int code, const char *note, const char *body);
+
+/* The file tools' and web_search's status line: they spawn nothing, so
+ * their status is the stage's own exit (`Process exited with code 0`),
+ * which is the convention every non-process tool keeps — the same
+ * sentence a run_command that ran clean prints. `body` NULL yields the
+ * structural "(empty)" marker. */
 NmToolResult nm_tool_format_result(const char *body, int exit_code);
 
 /* tools_file.c: built-in file tools (read/write/edit/list/search). */

@@ -629,12 +629,26 @@ save [path]` writes session.c's markdown). Const on purpose: the
   `ferror` after `fread` (a directory opens fine and reads wrong) and
   refuses a non-regular path before `fopen`; a failed read FAILS with
   the cause, never reads as empty.
-- **Tool output clamps are per family**: the file tools and
-  `run_command` use `nm_clamp_output` (head-only; `read_file`'s carries
+- **Every tool result has one shape**: a one-line STATUS, then the
+  tool's product under `Output:` — or the structural `Output: (empty)`
+  marker when the call ran and produced nothing. The assembly lives in
+  ONE place (`nm_tool_result_head` / `nm_tool_result_job` /
+  `nm_tool_result_run` in tools.c) and no tool writes `.output` itself,
+  so all ten tools read the same way: how the call ended, then what it
+  produced. The status line is the tool's own honest fact — `Process
+exited with code 3` for `run_command` and the job tools, `Process
+running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
+  (that path SIGKILLs, so the child's own wait status would report the
+  TOOL's kill as the command's exit status). A REFUSAL — a call that
+  never ran, so it produced no output — is `nm_tool_result_error()`: its
+  status line alone, with no empty section to mistake for a result.
+- **Tool output clamps are per family** — the one difference between the
+  two assembled shapes: the one-shot tools (the file tools, web_search,
+  `run_command`) use `nm_clamp_output` (head-only; `read_file`'s carries
   a resumable offset), while the job tools use `nm_clamp_job_output`
   (70/30 head/tail — a build log's failures live at the TAIL, so a
   head-only cut drops the part being asked for). Both flow through the
-  one shaper `nm_tool_result_body`, so the rendered shape stays
+  one assembler `nm_tool_result_body`, so the rendered shape stays
   identical; the status prefix is the only slack on top of the budget.
 - **chat_app** (`src/chat_app.c`) — the boba Elm component:
   textinput + popups + spinner + a boba `TuiTranscript` driven by

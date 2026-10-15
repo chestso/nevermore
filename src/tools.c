@@ -75,36 +75,26 @@ const NmTool *nm_toolset_find(const NmToolset *ts, const char *name)
 NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                                 const char *args_json, const NmToolCtx *ctx)
 {
-    NmToolResult r = { 0 };
     (void)args_json;
     const NmTool *t = nm_toolset_find(ts, name);
     if (!t) {
-        /* An error result the model can adapt to (same convention as
+        /* A refusal, in the one refusal shape (same convention as
          * quoth's unknown-tool result), never a silent no-op. */
-        r.status = NM_TOOL_ERR;
-        size_t need = 64 + (name ? strlen(name) : 0);
-        r.output = malloc(need);
-        if (r.output)
-            snprintf(r.output, need, "unknown tool: %s",
-                     name ? name : "(null)");
-        return r;
+        char msg[64 + 128];
+        snprintf(msg, sizeof(msg), "unknown tool: %s", name ? name : "(null)");
+        return nm_tool_result_error(msg);
     }
     return t->execute(t, args_json, ctx);
 }
 
+/* The refusal shape (tools.h): the message IS the status line, and
+ * there is no body — a call that never ran has no output to section
+ * off. Every failure in every tool is born here. */
 NmToolResult nm_tool_result_error(const char *message)
 {
     NmToolResult r = { 0 };
     r.status = NM_TOOL_ERR;
     r.output = strdup(message ? message : "error");
-    return r;
-}
-
-NmToolResult nm_tool_result_text(const char *text)
-{
-    NmToolResult r = { 0 };
-    r.status = NM_TOOL_OK;
-    r.output = strdup(text ? text : "");
     return r;
 }
 
@@ -294,22 +284,62 @@ NmToolset *nm_toolset_new_defaults(void)
     return ts;
 }
 
-/* The shared result shaper (tools_internal.h): status line + Output
- * section. Lives here, beside the truncation seam it rides, so the
- * file tools and web_search format identically. */
-NmToolResult nm_tool_format_result(const char *body, int exit_code)
+/* The two assembled shapes (tools_internal.h): the caller's status
+ * line, then the body under "Output:" — clamped by the family's own
+ * rule — or the structural "(empty)" marker. `ok` is the caller's read
+ * of the status line it just wrote. OOM yields the refusal instead of a
+ * result with a NULL body (the always-set output contract). */
+NmToolResult nm_tool_result_head(const char *status, int ok, const char *body)
 {
     size_t omitted = 0;
     char *clamped = body ? nm_clamp_output(body, &omitted) : NULL;
-    char status[64];
-    snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
     char *out = nm_tool_result_body(status, clamped);
     free(clamped);
-    NmToolResult r = { .status = (out && exit_code == 0) ? NM_TOOL_OK
-                                                         : NM_TOOL_ERR,
+    if (!out)
+        return nm_tool_result_error("out of memory");
+    NmToolResult r = { .status = ok ? NM_TOOL_OK : NM_TOOL_ERR,
                        .output = out,
                        .truncated = omitted > 0 ? 1 : 0 };
     return r;
+}
+
+NmToolResult nm_tool_result_job(const char *status, int ok, const char *body)
+{
+    size_t omitted = 0;
+    char *clamped = body ? nm_clamp_job_output(body, &omitted) : NULL;
+    char *out = nm_tool_result_body(status, clamped);
+    free(clamped);
+    if (!out)
+        return nm_tool_result_error("out of memory");
+    NmToolResult r = { .status = ok ? NM_TOOL_OK : NM_TOOL_ERR,
+                       .output = out,
+                       .truncated = omitted > 0 ? 1 : 0 };
+    return r;
+}
+
+/* A one-shot process's report (tools_internal.h). `note` non-empty is
+ * the tool's own doing (the inactivity stop) and becomes the status
+ * line, because then the exit status is the tool's kill, not the
+ * command's own. */
+NmToolResult nm_tool_result_run(int code, const char *note, const char *body)
+{
+    char status[192];
+    if (note && *note)
+        snprintf(status, sizeof(status), "%s", note);
+    else
+        snprintf(status, sizeof(status), "Process exited with code %d", code);
+    return nm_tool_result_head(status, code == 0 && !(note && *note),
+                               (body && *body) ? body : NULL);
+}
+
+/* The shared result shaper (tools_internal.h): the "Process exited with
+ * code N" status line — the convention for a tool that spawns nothing —
+ * over the head-clamped body. */
+NmToolResult nm_tool_format_result(const char *body, int exit_code)
+{
+    char status[64];
+    snprintf(status, sizeof(status), "Process exited with code %d", exit_code);
+    return nm_tool_result_head(status, exit_code == 0, body);
 }
 
 const char *nm_toolset_to_json(const NmToolset *ts)

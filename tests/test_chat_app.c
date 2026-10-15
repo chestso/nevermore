@@ -3251,10 +3251,12 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     char *clean = strip_frames(harness_read(h));
     ASSERT_NOT_NULL(clean);
     ASSERT_TRUE(strstr(clean, "hi-cmd") != NULL);
-    /* Every row's text starts in the same column: the label row opens
-     * with `  ╰─ ` (5 display columns), later rows indent by exactly
-     * that much. */
-    ASSERT_TRUE(strstr(clean, "  ╰─ Output:") != NULL);
+    /* Every row's text starts in the same column: the result's first row
+     * opens with `  ╰─ ` (5 display columns) and carries the status line
+     * — the command's exit status, which the transcript used to leave
+     * out — then the body indents by exactly that much under "Output:". */
+    ASSERT_TRUE(strstr(clean, "  ╰─ Process exited with code 0") != NULL);
+    ASSERT_TRUE(strstr(clean, "     Output:") != NULL);
     ASSERT_TRUE(strstr(clean, "     hi-cmd") != NULL);
     free(clean);
 

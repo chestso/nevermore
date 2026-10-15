@@ -34,7 +34,10 @@
  *   ...
  *
  * Output rides the job clamp (70/30 head/tail, tools.c): the tail
- * of a build log is where the errors are.
+ * of a build log is where the errors are. The assembly is the shared
+ * seam now (nm_tool_result_job, tools_internal.h), so a job report and
+ * a run_command report are the same shape with the same status line
+ * convention.
  */
 
 #include <stdarg.h>
@@ -347,29 +350,13 @@ static NmToolExec *fail_exec(NmToolResult r)
     return e;
 }
 
-/* "STATUS" + the Output: section, with the body on the job clamp
- * (70/30 head/tail — the tail of a log is where the failures are). */
-static NmToolResult job_result(const char *status, const char *body)
-{
-    size_t omitted = 0;
-    char *clamped = body ? nm_clamp_job_output(body, &omitted) : NULL;
-    char *out = nm_tool_result_body(status, clamped);
-    free(clamped);
-    NmToolResult r = { .status = out ? NM_TOOL_OK : NM_TOOL_ERR,
-                       .output = out,
-                       .truncated = omitted > 0 ? 1 : 0 };
-    return r;
-}
-
-/* A finished process's report: the exit status is the outcome. */
+/* A finished process's report: the exit status is the outcome — and the
+ * status line the model reads. */
 static NmToolResult exited_result(int code, const char *body)
 {
     char status[64];
     snprintf(status, sizeof(status), "Process exited with code %d", code);
-    NmToolResult r = job_result(status, body);
-    if (r.output)
-        r.status = (code == 0) ? NM_TOOL_OK : NM_TOOL_ERR;
-    return r;
+    return nm_tool_result_job(status, code == 0, body);
 }
 
 /* A still-running job's report: the id is the handle the model
@@ -391,7 +378,7 @@ static NmToolResult running_result(const NmToolExec *e, const char *body)
     else
         snprintf(status, sizeof(status), "Process running with job ID %d",
                  e->job_id);
-    return job_result(status, body);
+    return nm_tool_result_job(status, 1, body);
 }
 
 /* The shared yield deadline as "ms until the agent should step again".
@@ -813,7 +800,7 @@ static NmToolResult kill_job_exec(const NmTool *tool,
     const char *body = nm_proc_take_output(p);
     char status[64];
     snprintf(status, sizeof(status), "Job %ld killed", id);
-    NmToolResult r = job_result(status, body);
+    NmToolResult r = nm_tool_result_job(status, 1, body);
     nm_json_free(args);
     nm_proc_close(p);
     return r;
