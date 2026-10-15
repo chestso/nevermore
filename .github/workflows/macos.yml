@@ -78,11 +78,16 @@ jobs:
           # fence line commits BEFORE the fence instead of after it and
           # never takes the fence's bytes into its own cells, which is
           # what lets nevermore keep the model's blank lines inside a
-          # block and still end the block where the next one starts).
+          # block and still end the block where the next one starts —
+          # and, at this pin, the verdict contract STATES what CONTINUES
+          # extends: a kind that owns one line (an ATX heading, a
+          # standalone image) has to be ended from the classifier side,
+          # which is nevermore's one-line rule, and the explicit image
+          # route gets the same boundary by resetting `prev`).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 45843dd681e8467ee8a0a94e00c784320c0c039d
+          ref: 7d0101b882646df66af7e0d2976f869832d3cc27
           path: boba
           fetch-depth: 0
 

@@ -43,6 +43,18 @@
  *     it stays inline (GFM: a lone image is a paragraph), and inside
  *     quotes/lists it stays prose — only the clean standalone case
  *     opens the block.
+ *   - a ONE-LINE kind ends at its own line: an ATX heading and a
+ *     standalone image block cannot own the next line, so a following
+ *     non-blank line starts a NEW block (a paragraph). That is GFM's
+ *     reading (a heading ends at its line's end; the image was
+ *     standalone only at a boundary) and the only one that keeps an
+ *     IMAGE block's text parseable — boba's CONTINUES EXTENDS the live
+ *     block, so the line would otherwise ride inside the image's bytes
+ *     (its measure then fails: the picture degrades to its marker and
+ *     the line never renders) or render as part of the heading. The
+ *     classifier remembers the one-line block it just opened, the way
+ *     it remembers a list item or a quote marker; a blank already ends
+ *     such a block, so the bit is not carried across one.
  */
 
 #ifndef NM_MARKDOWN_H
@@ -65,6 +77,16 @@ typedef struct NmMarkdown
      * line CONTINUES instead of finalizing (GFM loose-list rule). */
     int last_list;
     int last_quote;
+
+    /* previous line opened a ONE-LINE block: an ATX heading or a
+     * standalone image. A following plain line starts a NEW block — a
+     * kind that owns one line cannot be continued, and boba's
+     * CONTINUES EXTENDS the live block, so answering it here would grow
+     * an image block's text past what its measure can parse (the
+     * picture degrades to its marker and the line is lost) or restyle
+     * prose as a heading. NOT carried across a blank, unlike the two
+     * bits above: a blank already ends such a block. */
+    int last_one_line;
 
     /* potential table header carried from the previous line: the next
      * line is a delimiter row IFF its cell count matches. */

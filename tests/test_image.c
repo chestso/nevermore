@@ -810,6 +810,37 @@ static void test_integration_kitty_commits_apc(void)
     ih_free(h);
 }
 
+/* A model-authored image line followed IMMEDIATELY by a non-blank line
+ * (no blank between): the image block owns one line, so the classifier
+ * ends it there and the picture still renders — the APC is committed,
+ * and the model's sentence is a row of its own below the image's rows.
+ * The swallowed version committed no APC at all (the block's text held
+ * two lines, so the measure failed: marker + the sentence lost). */
+static void test_integration_image_then_text_still_renders(void)
+{
+    IH *h = ih_new(1);
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line),
+             "![pic](%s)\nthe sentence the model wrote\n", FIX_PNG_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_flush(h);
+    ih_end(h);
+
+    const char *out = ih_read(h);
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100");
+    ASSERT_NOT_NULL(apc);
+    /* no marker row (U+259A): the picture rendered, it did not degrade */
+    ASSERT_TRUE(strstr(out, "\xe2\x96\x92") == NULL);
+    /* and the sentence follows the image's rows */
+    const char *sentence = strstr(out, "the sentence the model wrote\r\n");
+    ASSERT_NOT_NULL(sentence);
+    ASSERT_TRUE(sentence > apc);
+
+    ih_free(h);
+}
+
 /* A JPEG on a kitty-only terminal commits as a kitty APC whose payload
  * is a DERIVED PNG — never the source JPEG bytes, and never a marker.
  * The transcode is display-local; the wire bytes are untouched. */
@@ -1441,6 +1472,7 @@ int main(void)
     RUN_TEST(test_bytes_file_probe);
     RUN_TEST(test_bytes_ext_and_write);
     RUN_TEST(test_integration_kitty_commits_apc);
+    RUN_TEST(test_integration_image_then_text_still_renders);
     RUN_TEST(test_integration_kitty_transcodes_jpeg);
     RUN_TEST(test_integration_iterm2_carries_jpeg_source);
     RUN_TEST(test_integration_sixel_commits_dcs);

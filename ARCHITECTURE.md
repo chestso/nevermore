@@ -1063,9 +1063,10 @@ stream messages; boba is the only caller of
   and base/span attrs compose by OR-ing into ONE SGR run — never
   nested SGR. Only bytes whose rendering can no longer change reach
   the scrollback; the live region (tail / provisional table) renders
-  in `view()` via `tui_transcript_view`. Tables are the only
-  block-granular kind (their cells stay span-free: the width math
-  counts SGR bytes as glyphs). **A blank line the model wrote is
+  in `view()` via `tui_transcript_view`. Tables and standalone image
+  lines are the block-granular kinds (a table's cells stay span-free:
+  the width math counts SGR bytes as glyphs; an image's block text is
+  one `![alt](src)` line). **A blank line the model wrote is
   content**: boba draws no row for a `BLANK` verdict, so the first
   blank of a run CONTINUES its block and the renderer draws the empty
   row — a paragraph break must survive to the scrollback, or two
@@ -1073,7 +1074,15 @@ stream messages; boba is the only caller of
   separator again). For a block-granular table that is the table
   renderer reading the trailing blank out of the block's bytes, and for
   an image it is one extra reserved row, so the box and the picture are
-  each followed by the blank the model wrote.
+  each followed by the blank the model wrote. **A kind that owns ONE
+  line ends at it**: an ATX heading and a standalone image block cannot
+  own the next line, so a following non-blank line opens its own block.
+  boba's `CONTINUES` EXTENDS whatever is live, and the classifier is
+  the only side that knows the grammar: a second line inside an image's
+  bytes fails its measure (the picture degrades to its marker and the
+  line never renders), and a heading's continuation line is labelled
+  with the heading's kind and styled as part of it. A table row is the
+  deliberate exception (GFM: a line after rows is a one-cell row).
 - **Submit is the one place the frame persists**: the rendered input
   line becomes the user's entry via `tui_runtime_finish_inline`
   (ditty's pattern). `tui_msg_transcript_submit` finalizes LIVE
@@ -1139,7 +1148,11 @@ stream messages; boba is the only caller of
   the echo is the same block, the same deferral, the same marker
   ladder — one image pipeline, and the data URL (never the file path)
   is what shows. The markdown classifier path (a standalone
-  `![alt](src)` line) remains for MODEL-authored image lines only.
+  `![alt](src)` line) remains for MODEL-authored image lines only, and
+  that block owns exactly ONE line: a following line the classifier
+  said CONTINUES would ride inside its bytes and fail the measure, so a
+  non-blank line after an image line opens its own block (the explicit
+  route gets the same boundary by resetting `prev`).
 - The banner stays a plain `printf` before the first flush —
   outside the seam's jurisdiction.
 

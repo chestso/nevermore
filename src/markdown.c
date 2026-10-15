@@ -224,6 +224,7 @@ static void md_reset(void *state)
     m->fence_labeled = 0;
     m->last_list = 0;
     m->last_quote = 0;
+    m->last_one_line = 0;
     m->header_cells = 0;
     m->header_valid = 0;
 }
@@ -256,11 +257,13 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
     NmMarkdown *m = state;
     int was_list = m->last_list;
     int was_quote = m->last_quote;
+    int was_one_line = m->last_one_line;
     int prev_blank = (!prev || line_is_blank(prev, prev_len));
     size_t i;
 
     m->last_list = 0;
     m->last_quote = 0;
+    m->last_one_line = 0;
 
     /* Inside a fence: only the matching close ends it; every other
      * line (blank included) continues the container verbatim. */
@@ -335,7 +338,8 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
     }
     m->header_valid = 0;
 
-    /* ATX heading: 1-6 `#`, then a space or EOL. */
+    /* ATX heading: 1-6 `#`, then a space or EOL. One line owns itself:
+     * a following plain line is a NEW block (see the dialect note). */
     i = block_indent(line, len);
     if (i < len && line[i] == '#') {
         size_t h = i;
@@ -343,6 +347,7 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
             h++;
         if (h - i <= 6 && (h >= len || is_space(line[h]))) {
             *out_kind = TUI_BLOCK_HEADING;
+            m->last_one_line = 1;
             return TUI_LINE_BLOCK_START;
         }
     }
@@ -399,11 +404,15 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
     /* Standalone image line at a block boundary: an IMAGE block
      * (block-granular — see the header's dialect note). After a
      * non-blank line the same bytes stay inline (the paragraph path
-     * below), which is the GFM rule; not a table-header candidate. */
+     * below), which is the GFM rule; not a table-header candidate.
+     * The block owns ONE line, so the next line must not continue it
+     * (last_one_line), or the image's text would carry a second line
+     * its measure cannot parse. */
     if (prev_blank && !was_list && !was_quote) {
         NmImageRef ref;
         if (nm_markdown_image_ref(line, len, &ref)) {
             *out_kind = TUI_BLOCK_IMAGE;
+            m->last_one_line = 1;
             return TUI_LINE_BLOCK_START;
         }
     }
@@ -418,7 +427,11 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
         m->header_cells = n;
         m->header_valid = 1;
     }
-    if (!prev_blank && !was_list && !was_quote)
+    /* Only a block that can be continued is continued: a paragraph, or
+     * a table row (GFM: a line after rows is a one-cell row). A
+     * one-line kind is over (was_one_line) and a list/quote line ends
+     * its block here (D14 — a paragraph never rides inside it). */
+    if (!prev_blank && !was_list && !was_quote && !was_one_line)
         return TUI_LINE_CONTINUES;
     *out_kind = TUI_BLOCK_PARAGRAPH;
     return TUI_LINE_BLOCK_START;

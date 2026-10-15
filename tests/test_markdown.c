@@ -383,6 +383,73 @@ static void test_image_line_inside_paragraph_stays_inline(void)
     ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_CONTINUES);
 }
 
+/* A kind that owns ONE line ends at it: an ATX heading and a standalone
+ * IMAGE block cannot own the next line, so a following non-blank line
+ * starts a NEW block. boba's CONTINUES EXTENDS the live block (see its
+ * stream.h), so the old answer — a plain line continues whatever
+ * preceded it — rode that line inside the image block's bytes: the
+ * block's measure then failed, the picture degraded to its marker and
+ * the line never rendered at all. The heading half is the same rule:
+ * the continuation line was labelled with the heading's kind and
+ * rendered bold+pink.
+ *
+ * GFM reads both the same way (a heading ends at its line's end; a lone
+ * image is standalone only at a boundary), and the bit is NOT carried
+ * across a blank — a blank already ends such a block. The table stays
+ * the deliberate exception: a line after rows is a one-cell row. */
+static void test_one_line_kind_ends_at_its_line(void)
+{
+    Cls c;
+    TuiBlockKind k = TUI_BLOCK_PARAGRAPH;
+
+    /* image line, then a plain line: the image block is over, so the
+     * line opens its own paragraph */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "![alt](x.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+    ASSERT_EQ(cls_feed(&c, "the sentence after it", &k),
+              TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+
+    /* a second image line right after the first takes the same path: an
+     * inline image in a paragraph (the dialect's "an image never
+     * interrupts" — it is standalone only at a boundary) */
+    cls_init(&c);
+    cls_feed(&c, "![a](x.png)", &k);
+    ASSERT_EQ(cls_feed(&c, "![b](y.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+
+    /* an ATX heading owns its line too */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "# head", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_HEADING);
+    ASSERT_EQ(cls_feed(&c, "the prose under it", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_PARAGRAPH);
+
+    /* not carried across a blank: the blank ends the block (it rides
+     * the image's text as its own row), and the next image line is a
+     * fresh IMAGE block again */
+    cls_init(&c);
+    cls_feed(&c, "![a](x.png)", &k);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "![b](y.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+
+    /* the table is the deliberate exception (GFM one-cell row) */
+    cls_init(&c);
+    cls_feed(&c, "| a |", &k);
+    ASSERT_EQ(cls_feed(&c, "| - |", &k), TUI_LINE_RECLASSIFY_PREV);
+    ASSERT_EQ(cls_feed(&c, "| c |", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "a one-cell row", &k), TUI_LINE_CONTINUES);
+
+    /* a setext pair is one unit already (it was emitted at the
+     * reclassify), so the line after it still continues the paragraph */
+    cls_init(&c);
+    cls_feed(&c, "Underlined", &k);
+    ASSERT_EQ(cls_feed(&c, "=====", &k), TUI_LINE_RECLASSIFY_PREV);
+    ASSERT_EQ(cls_feed(&c, "the prose under it", &k), TUI_LINE_CONTINUES);
+}
+
 static void test_image_ref_scanner_edges(void)
 {
     NmImageRef r;
@@ -909,6 +976,41 @@ static void test_image_marker_carries_its_blank_row(void)
     ASSERT_TRUE(row_end[2] == '\r' && row_end[3] == '\n');
     /* … and the paragraph follows it */
     ASSERT_TRUE(strstr(out, "after the image\r\n") != NULL);
+
+    h_free(h);
+}
+
+/* The line after a standalone image, with NO blank between: the picture
+ * still renders (the marker names its alt, so the block text parsed as
+ * one image) and the model's sentence is committed on a row of its own
+ * — the swallowed version showed an empty-alt marker and the sentence
+ * nowhere at all. */
+static void test_image_then_text_keeps_the_line(void)
+{
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+
+    const char *text =
+        "![pic](shot.png)\n"
+        "the sentence the model wrote\n";
+    h_send(h, tui_msg_stream_delta(0, text, strlen(text)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    /* the LAST marker row (the live placeholder carries one too) names
+     * the alt: an image block whose text parsed */
+    const char *marker = NULL;
+    for (const char *q = out; (q = strstr(q, "\xe2\x96\x92")) != NULL; q++)
+        marker = q;
+    ASSERT_NOT_NULL(marker);
+    ASSERT_TRUE(strncmp(marker, "\xe2\x96\x92 pic",
+                        strlen("\xe2\x96\x92 pic")) == 0);
+    /* the sentence is committed as its own row, after the marker */
+    const char *sentence = strstr(out, "the sentence the model wrote\r\n");
+    ASSERT_NOT_NULL(sentence);
+    ASSERT_TRUE(sentence > marker);
 
     h_free(h);
 }
@@ -1598,6 +1700,7 @@ int main(void)
     RUN_TEST(test_reset_clears_fence_state);
     RUN_TEST(test_standalone_image_line_opens_image_block);
     RUN_TEST(test_image_line_inside_paragraph_stays_inline);
+    RUN_TEST(test_one_line_kind_ends_at_its_line);
     RUN_TEST(test_image_ref_scanner_edges);
     RUN_TEST(test_trailing_blank_scanner);
     RUN_TEST(test_reclassify_fires_inside_lookahead);
@@ -1611,6 +1714,7 @@ int main(void)
     RUN_TEST(test_table_reaches_scrollback_aligned);
     RUN_TEST(test_render_block_emits_content_not_framing);
     RUN_TEST(test_image_marker_carries_its_blank_row);
+    RUN_TEST(test_image_then_text_keeps_the_line);
     RUN_TEST(test_table_width_grows_then_final_box_aligned);
     RUN_TEST(test_table_cell_width_is_cluster_based);
     RUN_TEST(test_reasoning_stream_is_dim);
