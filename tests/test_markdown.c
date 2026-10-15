@@ -216,14 +216,94 @@ static void test_blank_line_inside_loose_list_continues(void)
     ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
 }
 
-static void test_blank_line_ends_paragraph(void)
+/* The break the model wrote is CONTENT: boba renders no row for a BLANK
+ * verdict, so a blank the reader must see continues its block (the row
+ * is drawn by the renderer). A run of blanks collapses to that one row
+ * and a leading blank separates nothing. */
+static void test_blank_line_keeps_its_row(void)
 {
     Cls c;
     TuiBlockKind k = TUI_BLOCK_PARAGRAPH;
     cls_init(&c);
     cls_feed(&c, "one line", &k);
     ASSERT_EQ(cls_feed(&c, "two line", &k), TUI_LINE_CONTINUES);
+    /* the paragraph break: the block carries the blank line */
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+    /* a run collapses — the second blank is a separator again ... */
     ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+    /* ... and the run ended the block: the next line opens a fresh one */
+    ASSERT_EQ(cls_feed(&c, "after the break", &k), TUI_LINE_BLOCK_START);
+
+    /* a leading blank separates nothing (prev == NULL) */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+
+    /* the same for every line-granular kind */
+    cls_init(&c);
+    cls_feed(&c, "# heading", &k);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+
+    cls_init(&c);
+    cls_feed(&c, "- item", &k);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+
+    cls_init(&c);
+    cls_feed(&c, "> quoted", &k);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+
+    /* after a fence's close line the next block is a paragraph's */
+    cls_init(&c);
+    cls_feed(&c, "```", &k);
+    ASSERT_EQ(cls_feed(&c, "code", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "```", &k), TUI_LINE_CONTAINER_CLOSE);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+
+    /* a run inside a loose list collapses the same way */
+    cls_init(&c);
+    cls_feed(&c, "- item one", &k);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+}
+
+/* A blank line joins a block-granular block too: the block carries the
+ * line and its own renderer draws the row (the table's box is followed
+ * by one empty row, the image's marker by one). The table/image are the
+ * kinds whose text is parsed as a unit, so the blank has to ride inside
+ * them for the row to exist at all. */
+static void test_blank_line_joins_block_granular_blocks(void)
+{
+    Cls c;
+    TuiBlockKind k = TUI_BLOCK_PARAGRAPH;
+
+    /* table: the header/delimiter pair, one body row, then the blank */
+    cls_init(&c);
+    cls_feed(&c, "| a | b |", &k);
+    ASSERT_EQ(cls_feed(&c, "| - | - |", &k), TUI_LINE_RECLASSIFY_PREV);
+    ASSERT_EQ(k, TUI_BLOCK_TABLE);
+    ASSERT_EQ(cls_feed(&c, "| c | d |", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+    /* a run still collapses, and the table is over after it */
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+    ASSERT_EQ(cls_feed(&c, "after the table", &k), TUI_LINE_BLOCK_START);
+
+    /* image line, then the blank the model writes after it */
+    cls_init(&c);
+    ASSERT_EQ(cls_feed(&c, "![a](b.png)", &k), TUI_LINE_BLOCK_START);
+    ASSERT_EQ(k, TUI_BLOCK_IMAGE);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_BLANK);
+
+    /* a fence opened while a table block is live is a boundary: boba
+     * finalizes the block there, so the blank after the fence's close
+     * is the paragraph's own row again */
+    cls_init(&c);
+    cls_feed(&c, "| a | b |", &k);
+    ASSERT_EQ(cls_feed(&c, "| - | - |", &k), TUI_LINE_RECLASSIFY_PREV);
+    ASSERT_EQ(cls_feed(&c, "| c | d |", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "```", &k), TUI_LINE_CONTAINER_OPEN);
+    ASSERT_EQ(cls_feed(&c, "code", &k), TUI_LINE_CONTINUES);
+    ASSERT_EQ(cls_feed(&c, "```", &k), TUI_LINE_CONTAINER_CLOSE);
+    ASSERT_EQ(cls_feed(&c, "", &k), TUI_LINE_CONTINUES);
 }
 
 static void test_unterminated_inline_span_is_literal(void)
@@ -311,9 +391,40 @@ static void test_image_ref_scanner_edges(void)
     ASSERT_TRUE(nm_markdown_image_ref("![a](b)\n", 8, &r));
     ASSERT_EQ(r.src_len, 1u);
 
+    /* … and the blank line the classifier kept in the block when the
+     * model wrote one after the image */
+    {
+        const char *one = "![a](b)\n\n";
+        const char *blank_spaces = "![a](b)\n   \n";
+        ASSERT_TRUE(nm_markdown_image_ref(one, strlen(one), &r));
+        ASSERT_EQ(r.src_len, 1u);
+        ASSERT_TRUE(nm_markdown_image_ref(blank_spaces, strlen(blank_spaces),
+                                          &r));
+        ASSERT_EQ(r.src_len, 1u);
+    }
+
     /* src with parens: the LAST ')' closes */
     ASSERT_TRUE(nm_markdown_image_ref("![a](u_(v).png)", 15, &r));
     ASSERT_EQ(r.src_len, 9u);
+}
+
+/* The trailing-blank scanner both block-granular renderers use: it sees
+ * the separator the classifier left inside a block's bytes. */
+static void test_trailing_blank_scanner(void)
+{
+    const char *plain = "para\n";
+    const char *blank = "para\n\n";
+    const char *spaces = "| a |\n   \n";
+    const char *row = "| a |\n| b |\n";
+    ASSERT_FALSE(nm_markdown_trailing_blank(plain, strlen(plain)));
+    ASSERT_TRUE(nm_markdown_trailing_blank(blank, strlen(blank)));
+    ASSERT_TRUE(nm_markdown_trailing_blank(spaces, strlen(spaces)));
+    ASSERT_FALSE(nm_markdown_trailing_blank(row, strlen(row)));
+    ASSERT_FALSE(nm_markdown_trailing_blank("", 0));
+    /* a text that is only a terminator ends blank by the same rule (no
+     * block ever carries one — a block starts with content — so this is
+     * the uniform answer, not a case that needs its own) */
+    ASSERT_TRUE(nm_markdown_trailing_blank("\n", 1));
 }
 
 static void test_reset_clears_fence_state(void)
@@ -470,6 +581,27 @@ static void h_send(H *h, TuiMsg msg)
 
 static void h_flush(H *h) { tui_runtime_flush(h->rt); }
 
+/* The COMMITTED rows, in order, with the live-frame bytes skipped: the
+ * harness's renderer marks every committed row "R|", so the marker is
+ * the row's start and the frame's own rows (the pending line, painted
+ * by boba) never carry it. Rows are joined with "|", so the empty row a
+ * blank line commits is visible as "||". */
+static void committed_rows(const char *out, char *dst, size_t cap)
+{
+    size_t o = 0;
+    for (const char *p = out; (p = strstr(p, "R|")) != NULL; p += 2) {
+        const char *e = strstr(p, "\r\n");
+        if (!e)
+            break;
+        for (const char *q = p + 2; q < e && o + 1 < cap; q++)
+            dst[o++] = *q;
+        if (o + 1 < cap)
+            dst[o++] = '|';
+        p = e;
+    }
+    dst[o] = '\0';
+}
+
 static void test_reclassify_fires_inside_lookahead(void)
 {
     H *h = h_new();
@@ -512,6 +644,55 @@ static void test_line_lookahead_commits(void)
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
     ASSERT_TRUE(strstr(h_read(h), "R|line one\r\n") != NULL);
     ASSERT_TRUE(strstr(h_read(h), "R|line two") == NULL); /* lookahead */
+
+    h_free(h);
+}
+
+/* The reader sees the break: the blank line between two paragraphs
+ * commits as its own (empty) row. boba draws no row for a BLANK
+ * verdict, which is exactly why the classifier continues the block. */
+static void test_blank_line_commits_an_empty_row(void)
+{
+    H *h = h_new();
+    ASSERT_NOT_NULL(h);
+
+    const char *para_one = "para one\n\n";
+    const char *para_two = "para two\n";
+    h_send(h, tui_msg_stream_delta(0, para_one, strlen(para_one)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_delta(0, para_two, strlen(para_two)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    char rows[OUT_CAP];
+    committed_rows(out, rows, sizeof(rows));
+    /* the empty row between the two paragraph rows IS the break */
+    ASSERT_STR_EQ(rows, "para one||para two|");
+
+    h_free(h);
+}
+
+/* A run of blank lines collapses to that one row: the second blank is
+ * a separator again (BLANK), so no stack of empty rows reaches the
+ * scrollback. */
+static void test_blank_line_run_collapses_to_one_row(void)
+{
+    H *h = h_new();
+    ASSERT_NOT_NULL(h);
+
+    const char *run = "para one\n\n\n\npara two\n";
+    h_send(h, tui_msg_stream_delta(0, run, strlen(run)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    char rows[OUT_CAP];
+    committed_rows(out, rows, sizeof(rows));
+    /* one empty row for the whole run of blanks — never two */
+    ASSERT_STR_EQ(rows, "para one||para two|");
 
     h_free(h);
 }
@@ -658,8 +839,10 @@ static void test_table_reaches_scrollback_aligned(void)
     H *h = h_new_render();
     ASSERT_NOT_NULL(h);
 
-    /* Stream a table header + delimiter + body, then finalize. Nothing
-     * commits until the table finalizes (block granularity). */
+    /* Stream a table header + delimiter + body rows, then the blank
+     * line the model wrote. Nothing commits until the table finalizes
+     * (block granularity), and the blank line rides the block (so its
+     * row is drawn) rather than committing as a separator. */
     const char *table =
         "| Region | 2025 |\n"
         "| ------ | ---: |\n"
@@ -667,6 +850,10 @@ static void test_table_reaches_scrollback_aligned(void)
         "| South  |   56 |\n"
         "\n";
     h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 0u); /* still live */
+
+    h_send(h, tui_msg_stream_end(0));
     h_flush(h);
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
 
@@ -678,9 +865,50 @@ static void test_table_reaches_scrollback_aligned(void)
     /* Top-left corner and bottom-left corner (U+250C / U+2514). */
     ASSERT_TRUE(strstr(out, "\xe2\x94\x8c") != NULL);
     ASSERT_TRUE(strstr(out, "\xe2\x94\x94") != NULL);
+    /* The blank line the block carried is its own row: after the LAST
+     * box's bottom-right corner (U+2518; the live region may have
+     * painted a box of its own earlier), the next row is empty. */
+    const char *last_corner = NULL;
+    for (const char *q = out; (q = strstr(q, "\xe2\x94\x98")) != NULL; q++)
+        last_corner = q;
+    ASSERT_NOT_NULL(last_corner);
+    const char *row_end = strstr(last_corner, "\r\n");
+    ASSERT_NOT_NULL(row_end);
+    ASSERT_TRUE(row_end[2] == '\r' && row_end[3] == '\n');
     /* No bare LF (the transcript is CRLF-framed). */
     for (const char *p = out; *p; p++)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
+
+    h_free(h);
+}
+
+/* The IMAGE block's own blank line is a row too: with no measure
+ * callback installed the block degrades to its marker, and the marker
+ * row is followed by the empty row the block carried. */
+static void test_image_marker_carries_its_blank_row(void)
+{
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+
+    const char *text =
+        "![pic](shot.png)\n"
+        "\n"
+        "after the image\n";
+    h_send(h, tui_msg_stream_delta(0, text, strlen(text)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+
+    const char *out = h_read(h);
+    /* the marker (U+259A) and its alt */
+    const char *marker = strstr(out, "\xe2\x96\x92 pic");
+    ASSERT_NOT_NULL(marker);
+    /* the marker's own row ends, and the very next row is empty */
+    const char *row_end = strstr(marker, "\r\n");
+    ASSERT_NOT_NULL(row_end);
+    ASSERT_TRUE(row_end[2] == '\r' && row_end[3] == '\n');
+    /* … and the paragraph follows it */
+    ASSERT_TRUE(strstr(out, "after the image\r\n") != NULL);
 
     h_free(h);
 }
@@ -728,15 +956,22 @@ static void test_table_width_grows_then_final_box_aligned(void)
     ASSERT_EQ(tui_transcript_commit_count(h->t), 0u);
     h_send(h, tui_msg_stream_delta(0, "\n", 1));
     h_flush(h);
+    /* the blank line rides the block (it is the row after the box), so
+     * the table is still live; stream end finalizes it */
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 0u);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
 
     /* Every committed box row has the same DISPLAY width. Border rows
      * use 3-byte glyphs where content rows use spaces, so byte length
      * is not the measure; SGR is zero-width. The capture also holds
      * live-path re-renders; the finalized table is the LAST top-corner
-     * onward. Strip SGR before measuring so the attr bytes do not
-     * count as glyphs (the width math itself is attr-free by design:
-     * attrs are emitted around, never inside, the cell fields). */
+     * onward, and it ends at the bottom border (the block's own blank
+     * row follows it). Strip SGR before measuring so the attr bytes do
+     * not count as glyphs (the width math itself is attr-free by
+     * design: attrs are emitted around, never inside, the cell
+     * fields). */
     const char *out = h_read(h);
     const char *top = NULL;
     for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
@@ -767,6 +1002,9 @@ static void test_table_width_grows_then_final_box_aligned(void)
         row[o] = '\0';
         widths[nrows++] = (int)tui_utf8_display_width_ansi(row, strlen(row));
         p = e + 2;
+        /* the bottom border (U+2514) is the box's last row */
+        if (strncmp(row, "\xe2\x94\x94", 3) == 0)
+            break;
     }
     ASSERT_TRUE(nrows >= 5); /* top, header, sep, body, bottom */
     for (int r = 1; r < nrows; r++)
@@ -817,6 +1055,8 @@ static int one_col_box_width(const char *header, const char *body)
     if (!h)
         return -1;
     h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
     h_flush(h);
     int w = -1;
     if (tui_transcript_commit_count(h->t) == 1u)
@@ -1352,20 +1592,25 @@ int main(void)
     RUN_TEST(test_table_delimiter_requires_matching_cell_count);
     RUN_TEST(test_list_and_quote_block_starts);
     RUN_TEST(test_blank_line_inside_loose_list_continues);
-    RUN_TEST(test_blank_line_ends_paragraph);
+    RUN_TEST(test_blank_line_keeps_its_row);
+    RUN_TEST(test_blank_line_joins_block_granular_blocks);
     RUN_TEST(test_unterminated_inline_span_is_literal);
     RUN_TEST(test_reset_clears_fence_state);
     RUN_TEST(test_standalone_image_line_opens_image_block);
     RUN_TEST(test_image_line_inside_paragraph_stays_inline);
     RUN_TEST(test_image_ref_scanner_edges);
+    RUN_TEST(test_trailing_blank_scanner);
     RUN_TEST(test_reclassify_fires_inside_lookahead);
     RUN_TEST(test_line_lookahead_commits);
+    RUN_TEST(test_blank_line_commits_an_empty_row);
+    RUN_TEST(test_blank_line_run_collapses_to_one_row);
     RUN_TEST(test_fence_line_commits_immediately);
     RUN_TEST(test_fence_plain_streams_verbatim_bytes);
     RUN_TEST(test_once_lookahead_never_reparses_committed);
     RUN_TEST(test_reasoning_stream_is_independent);
     RUN_TEST(test_table_reaches_scrollback_aligned);
     RUN_TEST(test_render_block_emits_content_not_framing);
+    RUN_TEST(test_image_marker_carries_its_blank_row);
     RUN_TEST(test_table_width_grows_then_final_box_aligned);
     RUN_TEST(test_table_cell_width_is_cluster_based);
     RUN_TEST(test_reasoning_stream_is_dim);

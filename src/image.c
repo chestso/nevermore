@@ -485,16 +485,21 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
         return 0; /* the reason transcode set is the marker's */
     }
 
-    if (out_rows)
-        *out_rows = s->disp_rows;
+    if (out_rows) {
+        /* the rows the committed unit occupies: the picture's (sixel
+         * lands the cursor on its last row, so boba reserves ONE break
+         * for it) plus the block's own trailing blank line, when the
+         * model wrote one — the render call emits exactly this many */
+        int rows = s->transport == (int)TUI_IMAGE_SIXEL ? 1 : s->disp_rows;
+        *out_rows = rows + (nm_markdown_trailing_blank(text, len) ? 1 : 0);
+    }
     return 1;
 }
 
 void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
                      int col_span, int rows, TuiRowSink *sink, void *user_data)
 {
-    (void)text;
-    (void)len;
+    (void)rows; /* the picture's own cell count comes from measure's slot */
     NmMarkdownRenderState *rs = user_data;
     if (!rs || !sink || !blk)
         return;
@@ -517,8 +522,8 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
     TuiImageSpec spec;
     tui_image_spec_init(&spec, (TuiImageTransport)s->transport,
                         to_tui_format(s->render_format), payload, payload_len,
-                        src_w, src_h, s->disp_cols,
-                        rows > 0 ? rows : s->disp_rows, blk->image_id);
+                        src_w, src_h, s->disp_cols, s->disp_rows,
+                        blk->image_id);
     if (s->ncolors > 0) {
         spec.palette = s->palette;
         spec.ncolors = s->ncolors;
@@ -526,4 +531,9 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
     (void)col_span; /* the display size was fixed at measure time */
     tui_row_image(sink, &spec);
     tui_row_end(sink);
+    /* the blank line the block carries after the picture: measure
+     * counted this row, and without it the next block glues to the
+     * image's last row */
+    if (nm_markdown_trailing_blank(text, len))
+        tui_row_end(sink);
 }

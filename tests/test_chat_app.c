@@ -3172,6 +3172,54 @@ static int has_blank_row(const char *from, const char *to)
     return 0;
 }
 
+/* A blank line the MODEL wrote INSIDE a run is part of that run's
+ * markdown: the paragraph break reaches the scrollback as an empty row.
+ * (boba draws no row for a separator, so the classifier continues the
+ * block instead of reporting the break as BLANK.) Both agent streams are
+ * covered: the reasoning trace's paragraphs and the answer's. */
+static void test_blank_line_inside_a_run_renders(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"weighing options\\n\\nand another\\n\"}}]}"
+        "\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"one paragraph\\n\\ntwo paragraph\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "think");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    /* The rows a user sees: the empty row between the two reasoning
+     * paragraphs is the trace's OWN break, one row before the run
+     * separator's. */
+    char *seen = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(seen);
+    ASSERT_TRUE(strstr(seen, "weighing options\n\nand another\n") != NULL);
+    ASSERT_TRUE(strstr(seen, "one paragraph\n\ntwo paragraph\n") != NULL);
+    free(seen);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
 #ifndef _WIN32
 /* A run_command tool round runs asynchronously: while the child runs the
  * agent sits in RUNNING_TOOL with the child's output pipe as its fd, so
@@ -4335,6 +4383,167 @@ static void test_reasoning_and_content_commit_in_order(void)
     ASSERT_NOT_NULL(r);
     ASSERT_NOT_NULL(c);
     ASSERT_TRUE(r < c);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+/* End-to-end: the blank line the model wrote after a table reaches the
+ * scrollback as its own row — the block carries the line and the box
+ * renderer draws it (the separator is content, not a dropped verdict). */
+static void test_table_blank_line_renders(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"| Region | 2025 |\\n| ------ | ---: |\\n| North | 1234 |\\n\\n"
+        "After the table.\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "table please");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    char *seen = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(seen);
+    const char *corner = NULL;
+    for (const char *q = seen; (q = strstr(q, "\xe2\x94\x98")) != NULL; q++)
+        corner = q; /* the box's bottom-right corner */
+    ASSERT_NOT_NULL(corner);
+    const char *after = strstr(seen, "After the table.");
+    ASSERT_NOT_NULL(after);
+    ASSERT_TRUE(corner < after);
+    ASSERT_TRUE(has_blank_row(corner, after)); /* the box's own blank */
+    free(seen);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+/* End-to-end: a standalone image line followed by a BLANK line and more
+ * prose (the blank reaches the classifier — it is interior, only a
+ * run's trailing newlines are held back). The blank rides the image
+ * block (so it is a row) and the reference still parses out of the
+ * block's whole text: the marker keeps its dims, never "no source". */
+static void test_image_followed_by_a_blank_still_parses(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"Before it.\\n\\n"
+        "![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
+        "\\n\\nAfter it.\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "draw something");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    h->rt->probe_state = 3;
+    h->rt->profile.resolved = 1;
+    tui_runtime_flush(h->rt);
+
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "Before it.") != NULL);
+    ASSERT_TRUE(strstr(out, "After it.") != NULL);
+    /* the reference parsed: the marker names the alt, the format and
+     * the size (had the block's blank line confused the parse, the
+     * marker would read "no source") */
+    ASSERT_TRUE(strstr(out, "pic") != NULL);
+    ASSERT_TRUE(strstr(out, "PNG 64x32") != NULL);
+    ASSERT_TRUE(strstr(out, "no source") == NULL);
+    ASSERT_TRUE(strstr(out, "iVBORw0KGgo") == NULL);
+    /* and the block's own blank line is a row: the marker's row is
+     * followed by an empty one (strip_frames drops the escapes and the
+     * live frames, so a blank row is two consecutive newlines) */
+    char *seen = strip_frames(out);
+    ASSERT_NOT_NULL(seen);
+    const char *marker = strstr(seen, "pic");
+    ASSERT_NOT_NULL(marker);
+    const char *eol = strchr(marker, '\n');
+    ASSERT_NOT_NULL(eol);
+    ASSERT_TRUE(eol[1] == '\n');
+    free(seen);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(rr.fd);
+}
+
+/* End-to-end: a table row immediately followed by a fence line (no blank
+ * between — legal markdown). The container's open verdict is a block
+ * boundary, so the box commits BEFORE the fence's lines: the scrollback
+ * order is the wire's order. (This pins the boba revision too: an older
+ * boba froze only the pending line there, and the fence landed first.) */
+static void test_table_then_fence_keeps_wire_order(void)
+{
+    struct RawResponse rr = {
+        0, 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Connection: close\r\n\r\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":"
+        "\"| a | b |\\n| - | - |\\n| c | d |\\n```c\\ncode here\\n```\\n\\n"
+        "after the fence\\n\\n\"}}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    rr.fd = server_bind(&rr.port);
+    ASSERT_TRUE(rr.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, raw_responder_thread, &rr);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "table then code");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    char *seen = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(seen);
+    const char *box = strstr(seen, "\xe2\x94\x98"); /* the box's corner */
+    const char *fence = strstr(seen, "```c");
+    const char *after = strstr(seen, "after the fence");
+    ASSERT_NOT_NULL(box);
+    ASSERT_NOT_NULL(fence);
+    ASSERT_NOT_NULL(after);
+    /* the table's box, then the fence, then the prose — never inverted,
+     * and the fence's lines are not table cells */
+    ASSERT_TRUE(box < fence);
+    ASSERT_TRUE(fence < after);
+    free(seen);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -7687,6 +7896,7 @@ int main(void)
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_separator_blank_line_after_answer);
     RUN_TEST(test_separator_collapses_trailing_blank_lines);
+    RUN_TEST(test_blank_line_inside_a_run_renders);
     RUN_TEST(test_context_reports_the_prism_routed_model);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
@@ -7781,6 +7991,9 @@ int main(void)
     RUN_TEST(test_reasoning_and_content_commit_in_order);
     RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
     RUN_TEST(test_image_data_uri_degrades_to_marker);
+    RUN_TEST(test_image_followed_by_a_blank_still_parses);
+    RUN_TEST(test_table_blank_line_renders);
+    RUN_TEST(test_table_then_fence_keeps_wire_order);
     RUN_TEST(test_image_command_attaches_lists_and_drops);
     RUN_TEST(test_image_command_refusals);
     RUN_TEST(test_image_subcommands_are_whole_words);

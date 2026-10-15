@@ -20,9 +20,18 @@
  *   - an unlabeled fence (no info string) is byte-granular: boba
  *     streams it verbatim, nothing is retained. A labeled fence is
  *     line-granular so a future highlighter can run per line.
- *   - finality is classifier-driven: a blank line inside a loose list
- *     or block quote returns CONTINUES (GFM-legal), keeping the block
- *     open.
+ *   - finality is classifier-driven, and a BLANK verdict costs the
+ *     reader the line: boba renders no row for a separator. So a blank
+ *     line the reader must SEE continues its block instead — the first
+ *     blank of a run returns CONTINUES, and the renderer draws its
+ *     empty row (the paragraph break the model wrote; a block-granular
+ *     block gets it from its own renderer, which reads the trailing
+ *     blank out of the block's bytes). A run of blanks collapses to
+ *     that one row (a second blank is BLANK), and a leading blank
+ *     separates nothing.
+ *   - a blank line inside a loose list or block quote keeps the
+ *     container open the same way (GFM-legal): the blank is part of
+ *     the block either way.
  *   - a quote line's own marker is the renderer's gutter: one `>`
  *     level (and the one space after it) is dropped per quoted line
  *     and the `│ ` gutter drawn in its place, so a quoted line never
@@ -77,11 +86,19 @@ typedef struct NmImageRef
 } NmImageRef;
 
 /* Parse one line as a standalone image reference: optional block
- * indent (<= 3 spaces), `!`, `[alt]`, `(src)`, one optional trailing
- * newline, trailing spaces only. Returns 1 and fills `ref`; 0 when
- * the line is anything else (including a partial image while it
- * streams — the live placeholder parses the same way). */
+ * indent (<= 3 spaces), `!`, `[alt]`, `(src)`, trailing spaces only.
+ * Returns 1 and fills `ref`; 0 when the line is anything else
+ * (including a partial image while it streams — the live placeholder
+ * parses the same way). Trailing newlines are skipped too: an IMAGE
+ * block's text carries the blank line that ended the block. */
 int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref);
+
+/* 1 when a block's text ends with a blank line (empty, or spaces/tabs
+ * only) — the separator the classifier left inside the block's bytes,
+ * so a block-granular renderer can draw its row. The block's last line
+ * terminator always ends the text, so the line tested is the one
+ * before it. */
+int nm_markdown_trailing_blank(const char *text, size_t len);
 
 /* Reset a fresh instance. */
 void nm_markdown_init(NmMarkdown *m);

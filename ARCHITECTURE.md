@@ -1058,7 +1058,15 @@ stream messages; boba is the only caller of
   the scrollback; the live region (tail / provisional table) renders
   in `view()` via `tui_transcript_view`. Tables are the only
   block-granular kind (their cells stay span-free: the width math
-  counts SGR bytes as glyphs).
+  counts SGR bytes as glyphs). **A blank line the model wrote is
+  content**: boba draws no row for a `BLANK` verdict, so the first
+  blank of a run CONTINUES its block and the renderer draws the empty
+  row — a paragraph break must survive to the scrollback, or two
+  paragraphs glue together. A run collapses (the second blank is a
+  separator again). For a block-granular table that is the table
+  renderer reading the trailing blank out of the block's bytes, and for
+  an image it is one extra reserved row, so the box and the picture are
+  each followed by the blank the model wrote.
 - **Submit is the one place the frame persists**: the rendered input
   line becomes the user's entry via `tui_runtime_finish_inline`
   (ditty's pattern). `tui_msg_transcript_submit` finalizes LIVE

@@ -19,7 +19,7 @@
 
 static int is_space(char c) { return c == ' ' || c == '\t'; }
 
-/* Blank = empty or only spaces/tabs. */
+/* 1 when the line is blank (empty, or spaces/tabs only). */
 static int line_is_blank(const char *s, size_t len)
 {
     for (size_t i = 0; i < len; i++) {
@@ -150,8 +150,10 @@ int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref)
 {
     if (!line || !ref)
         return 0;
-    /* one optional trailing newline (block text carries it) */
-    if (len > 0 && line[len - 1] == '\n')
+    /* trailing blanks: a block text ends with its line terminator, and
+     * carries the blank line the classifier kept in the block when the
+     * model wrote one after the image */
+    while (len > 0 && (line[len - 1] == '\n' || is_space(line[len - 1])))
         len--;
     size_t i = block_indent(line, len);
     if (i + 1 >= len || line[i] != '!' || line[i + 1] != '[')
@@ -178,7 +180,8 @@ int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref)
     close--;      /* the ')' itself */
     if (close == src)
         return 0; /* `![]()`: empty source */
-    /* only spaces may follow the closing paren */
+    /* nothing but blanks may follow the closing paren (the trailing
+     * blanks were stripped above, so this is the belt to that brace) */
     for (size_t t = close + 1; t < len; t++) {
         if (!is_space(line[t]))
             return 0;
@@ -187,6 +190,24 @@ int nm_markdown_image_ref(const char *line, size_t len, NmImageRef *ref)
     ref->alt_len = alt_end - alt;
     ref->src_off = src;
     ref->src_len = close - src;
+    return 1;
+}
+
+/* 1 when a block's text ends with a blank line (see the header). */
+int nm_markdown_trailing_blank(const char *text, size_t len)
+{
+    if (!text || len == 0)
+        return 0;
+    size_t end = len;
+    if (text[end - 1] == '\n')
+        end--; /* the last line's own terminator */
+    size_t start = end;
+    while (start > 0 && text[start - 1] != '\n')
+        start--;
+    for (size_t i = start; i < end; i++) {
+        if (!is_space(text[i]))
+            return 0;
+    }
     return 1;
 }
 
@@ -255,12 +276,16 @@ static TuiLineClass md_classify(void *state, const char *line, size_t len,
         return TUI_LINE_CONTINUES;
     }
 
-    /* Blank line: a separator, unless it sits inside a loose list /
-     * block quote (GFM) where it continues the block. */
+    /* Blank line. BLANK costs the reader the line (boba renders no row
+     * for a separator), so the verdict decides whether the break the
+     * model wrote is SEEN: the FIRST blank of a run continues its
+     * block, which carries the line and lets the block's renderer draw
+     * the empty row — for a loose list or a block quote that is the
+     * GFM-legal keep-open as well. A run collapses (the second blank is
+     * a separator again) and a leading blank separates nothing. */
     if (line_is_blank(line, len)) {
         m->header_valid = 0;
-        if (was_list || was_quote) {
-            /* keep the container open across the blank */
+        if (!prev_blank) {
             m->last_list = was_list;
             m->last_quote = was_quote;
             return TUI_LINE_CONTINUES;

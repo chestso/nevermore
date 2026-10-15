@@ -772,6 +772,15 @@ static void ih_send(IH *h, TuiMsg msg)
 
 static void ih_flush(IH *h) { tui_runtime_flush(h->rt); }
 
+/* End the stream: a block-granular unit that carried the model's blank
+ * line finalizes here (the blank rides the block, it no longer ends
+ * it). */
+static void ih_end(IH *h)
+{
+    ih_send(h, tui_msg_stream_end(0));
+    ih_flush(h);
+}
+
 static void test_integration_kitty_commits_apc(void)
 {
     IH *h = ih_new(1);
@@ -813,6 +822,7 @@ static void test_integration_kitty_transcodes_jpeg(void)
     snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_JPEG_REAL_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
+    ih_end(h);
 
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
     const char *out = ih_read(h);
@@ -851,11 +861,13 @@ static void test_integration_sixel_commits_dcs(void)
     ASSERT_TRUE(strstr(out, "\x1bP0;1;0q\"1;1;20;18") != NULL);
     /* a palette definition in the spec's 0-100 range */
     ASSERT_TRUE(strstr(out, ";2;") != NULL);
-    /* the ST, then exactly one row terminator, then the next unit */
+    /* the ST, then the image's ONE row terminator (the spec lands the
+     * cursor on the image's last row, so disp_rows breaks would leave a
+     * gap) and the blank row the block carried — never a third */
     const char *st = strstr(out, "\x1b\\");
     ASSERT_NOT_NULL(st);
-    ASSERT_TRUE(strncmp(st + 2, "\r\n", 2) == 0);
-    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n", 4) != 0);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n", 4) == 0);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n\r\n", 6) != 0);
     const char *after = strstr(out, "after");
     ASSERT_TRUE(after && after > st);
     /* never the source payload, never a marker */
@@ -876,6 +888,7 @@ static void test_integration_iterm2_carries_jpeg_source(void)
     snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_JPEG_REAL_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
+    ih_end(h);
 
     const char *out = ih_read(h);
     ASSERT_TRUE(strstr(out, "1337;File=inline=1") != NULL);
@@ -894,6 +907,7 @@ static void test_integration_dumb_terminal_gets_marker(void)
     snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_PNG_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
+    ih_end(h);
 
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
     const char *out = ih_read(h);
@@ -915,6 +929,7 @@ static void test_integration_remote_url_marker(void)
 
     ih_send(h, tui_msg_stream_delta(0, "![cat](https://x/y.png)\n\n", 26));
     ih_flush(h);
+    ih_end(h);
     const char *out = ih_read(h);
     ASSERT_TRUE(strstr(out, "cat") != NULL);
     ASSERT_TRUE(strstr(out, "remote - not fetched") != NULL);
@@ -949,6 +964,7 @@ static void test_integration_marker_size_is_the_source_size(void)
     snprintf(line, sizeof(line), "![big](%s)\n\n", path);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
+    ih_end(h);
 
     const char *out = ih_read(h);
     ASSERT_TRUE(strstr(out, "big") != NULL);
@@ -980,9 +996,11 @@ static void test_integration_live_placeholder_not_payload(void)
     ASSERT_TRUE(strstr(v, "so far") != NULL);
     ASSERT_TRUE(strstr(v, FIX_PNG_B64) == NULL);
 
-    /* finalize: the image commits (the profile is kitty) */
+    /* the blank line arrives — the block carries it and stays live —
+     * and stream end commits the image (the profile is kitty) */
     ih_send(h, tui_msg_stream_delta(0, "\n", 1));
     ih_flush(h);
+    ih_end(h);
     ASSERT_TRUE(strstr(ih_read(h), "\x1b_Ga=T,f=100") != NULL);
 
     ih_free(h);

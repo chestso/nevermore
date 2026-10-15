@@ -141,6 +141,17 @@ static void end_row(TuiRowSink *sink, TuiAttr base)
 
 static int is_space(char c) { return c == ' ' || c == '\t'; }
 
+/* A blank line: empty, or spaces/tabs only (the classifier's own
+ * test, repeated here because the renderer reads block BYTES). */
+static int line_is_blank_line(const char *s, size_t len)
+{
+    for (size_t i = 0; i < len; i++) {
+        if (!is_space(s[i]))
+            return 0;
+    }
+    return 1;
+}
+
 /* Display width of a byte range, counting whole grapheme clusters. */
 static int display_width(const char *s, size_t len)
 {
@@ -652,6 +663,8 @@ typedef struct
     int nrows;
     int ncols;
     int align[MAX_COLS]; /* 0 left, 1 center, 2 right */
+    int trailing_blank;  /* the block carries the blank line that ended
+                          * it: render one empty row after the box */
 } Table;
 
 /* Split a `|`-separated table row into trimmed cells. Returns the cell
@@ -733,10 +746,14 @@ static int is_delim_row(const char *s, size_t len)
     return 1;
 }
 
-/* Parse the block's text into rows; the delimiter row sets alignment. */
+/* Parse the block's text into rows; the delimiter row sets alignment.
+ * A blank line (empty or spaces only) never becomes a row: at the end
+ * of the text it is the separator the block carries, and a renderer
+ * that skipped it would swallow the blank the model wrote. */
 static int table_parse(const char *text, size_t len, Table *t)
 {
     memset(t, 0, sizeof(*t));
+    t->trailing_blank = nm_markdown_trailing_blank(text, len);
     int header_seen = 0;
     int delim_seen = 0;
     size_t start = 0;
@@ -746,7 +763,7 @@ static int table_parse(const char *text, size_t len, Table *t)
         const char *line = text + start;
         size_t llen = i - start;
         start = i + 1;
-        if (llen == 0)
+        if (llen == 0 || line_is_blank_line(line, llen))
             continue;
         TableRow *r = &t->rows[t->nrows];
         int pipe = 0;
@@ -874,15 +891,25 @@ static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,
     end_row(sink, base);
 }
 
-/* Total rendered row count: top + header + separator + body + bottom. */
+/* Total rendered row count: top + header + separator + body + bottom
+ * (+ the trailing blank line's own row). */
 static int table_total_rows(const Table *t)
 {
     return 1 + 1 + (t->nrows > 0 ? 1 : 0) + (t->nrows > 0 ? t->nrows - 1 : 0) +
-           1;
+           1 + (t->trailing_blank ? 1 : 0);
+}
+
+/* One empty row under `base` — the separator a block carried. */
+static void emit_empty_row(TuiRowSink *sink, TuiAttr base)
+{
+    begin_row(sink, base);
+    end_row(sink, base);
 }
 
 /* Render the table, optionally emitting only the last `rows_cap` rows
- * (render_live). `rows_cap <= 0` means all rows. */
+ * (render_live). `rows_cap <= 0` means all rows. A block that carries
+ * the blank line that ended it renders that blank as its own row, so
+ * the separator the model wrote survives into the scrollback. */
 static void table_render(const Table *t, int width, int rows_cap,
                          TuiRowSink *sink, TuiAttr base)
 {
@@ -908,9 +935,11 @@ static void table_render(const Table *t, int width, int rows_cap,
         if (idx >= skip)
             emit_table_row(sink, t, w, &t->rows[r], 0, base);
     }
-    if (idx >= skip)
+    if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x94", "\xe2\x94\xb4",
                     "\xe2\x94\x98", base); /* └ ┴ ┘ */
+    if (t->trailing_blank && idx >= skip)
+        emit_empty_row(sink, base);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1007,6 +1036,10 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
         snprintf(line + n, sizeof(line) - (size_t)n, " \xe2\x80\x94 %s",
                  reason);
     emit_lines(line, strlen(line), sink, nm_attr_image_marker(), 0);
+    /* the block carries the blank line that ended it: draw that row
+     * too, or the next block glues to the marker */
+    if (nm_markdown_trailing_blank(text, len))
+        emit_empty_row(sink, stream_base_attr(blk));
 }
 
 /* The IMAGE block's live representation: exactly one dim row (the

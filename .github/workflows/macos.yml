@@ -72,11 +72,17 @@ jobs:
           # truecolor hint (TuiTerminalProfile::truecolor, readable
           # before the probe resolves: COLORTERM and the
           # direct-color TERM variants), which the spinner's color
-          # tier reads).
+          # tier reads — and, at this pin, the container-boundary fix:
+          # a container's OPEN/CLOSE verdict finalizes a live
+          # block-granular block, so a table or an image followed by a
+          # fence line commits BEFORE the fence instead of after it and
+          # never takes the fence's bytes into its own cells, which is
+          # what lets nevermore keep the model's blank lines inside a
+          # block and still end the block where the next one starts).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this SHA must be PUSHED to the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 0322e54c26d21ed6f84d3fe9477289c21a314933
+          ref: 45843dd681e8467ee8a0a94e00c784320c0c039d
           path: boba
           fetch-depth: 0
 
