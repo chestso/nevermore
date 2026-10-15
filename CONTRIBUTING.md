@@ -208,9 +208,15 @@ locally — minutes here vs 4-minute round-trips.
   belongs in the script too.
 - **Windows**: `scripts/w32-wine-check.sh` (MinGW cross-compile, run
   under Wine, compile + version-grep `src/nevermore.rc`). Wine is not
-  the MSYS2 UCRT64 runtime — pre-flight, not guarantee. boba-linking
-  binaries SKIP there (no MinGW boba locally); MSYS2 CI builds boba and
-  covers them.
+  the MSYS2 UCRT64 runtime — pre-flight, not guarantee. The four
+  boba-linking binaries (test_history, test_markdown, test_chat_app,
+  test_image) build against a Windows `libboba.a` the script
+  cross-builds itself (boba's own `configure --host=x86_64-w64-mingw32`,
+  out of tree in `build/tests-wine/boba-w32`) from the boba source tree
+  it finds — `$BOBA_SRC`, else `./boba`, else `../boba`; with no boba
+  source tree they SKIP, as they always did. The run names the boba SHA
+  it verified and notes when that is not the pinned one, so a green
+  pre-flight is never mistaken for the pinned pair.
 - Run the scripts **from the repo ROOT** (0 results from a build dir);
   never zig cc `-fsyntax-only` (`error: FileNotFound`) — use `-c -o
 /tmp/x.o`.

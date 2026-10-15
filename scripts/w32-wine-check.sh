@@ -4,7 +4,11 @@
 #
 # Prereqs: x86_64-w64-mingw32-gcc (cross toolchain), wine, and a
 # configured build/ (../configure has run for the host build so
-# nevermore_version.h + config.h exist).
+# nevermore_version.h + config.h exist). A boba source tree is needed
+# for the four boba-dependent tests ($BOBA_SRC, else ./boba, else
+# ../boba): the script cross-builds boba's library itself, so the
+# Windows half of a transcript/markdown change is verified HERE instead
+# of waiting for MSYS2 CI. Without one, those four SKIP.
 #
 # Exit: 0 = every binary built and passed under wine; 1 = a build or a
 # run failed; 77 = a prereq is missing (no cross toolchain / no wine) —
@@ -72,6 +76,82 @@ run_build() {
 	# This run's roster (the wine loop below runs exactly these, never a
 	# stale .exe an earlier checkout left behind).
 	BUILT="$BUILT $name"
+}
+
+# ---------------------------------------------------------------------
+# boba for Windows
+# ---------------------------------------------------------------------
+# Four tests link boba (test_history, test_markdown, test_chat_app,
+# test_image). They used to be a bare SKIP here — "MSYS2 CI covers it" —
+# which left the Windows half of every transcript/markdown change
+# unverified on this box until CI ran. boba is a plain static library
+# and its own configure cross-compiles, so build it out of tree with
+# THIS script's toolchain and link those tests against it.
+#
+# Source tree: $BOBA_SRC, else ./boba (the layout CI checks out), else
+# ../boba (the sibling on this box). No source tree => the four SKIP,
+# exactly as they did before.
+BOBA_SRC="${BOBA_SRC:-}"
+if [ -z "$BOBA_SRC" ]; then
+	for d in ./boba ../boba; do
+		if [ -f "$d/src/Makefile.am" ]; then
+			BOBA_SRC="$d"
+			break
+		fi
+	done
+fi
+BOBA_LIB=""
+BOBA_SRC_ABS=""
+if [ -n "$BOBA_SRC" ] && [ -f "$BOBA_SRC/src/Makefile.am" ]; then
+	BOBA_SRC_ABS="$(cd "$BOBA_SRC" && pwd)"
+	BOBA_W32="$OUT/boba-w32"
+	# boba's `configure` is autogen.sh's output (gitignored): generate it
+	# when this checkout has never been configured.
+	if [ ! -x "$BOBA_SRC_ABS/configure" ]; then
+		echo "==> boba: ./autogen.sh (no configure in $BOBA_SRC)"
+		(cd "$BOBA_SRC_ABS" && ./autogen.sh) \
+			>"$OUT/boba-autogen.log" 2>&1 ||
+			echo "WARN: boba autogen.sh failed (see $OUT/boba-autogen.log)"
+	fi
+	if [ -x "$BOBA_SRC_ABS/configure" ]; then
+		mkdir -p "$BOBA_W32"
+		# Out of tree, so boba's own working tree stays clean (its
+		# .gitignore covers the generated files anyway). The logs are
+		# evidence, like every other build here.
+		if (cd "$BOBA_W32" &&
+			"$BOBA_SRC_ABS/configure" --host=x86_64-w64-mingw32) \
+			>"$OUT/boba-configure.log" 2>&1 &&
+			make -C "$BOBA_W32/src" -j"$(nproc)" \
+				>"$OUT/boba-make.log" 2>&1 &&
+			[ -f "$BOBA_W32/src/libboba.a" ]; then
+			BOBA_LIB="$BOBA_W32/src/libboba.a"
+			# Which boba this run verified: the pinned SHA is what CI
+			# uses, so say when they differ (an uncommitted boba change
+			# is the one case this pre-flight is MOST wanted for).
+			bo_sha="$(git -C "$BOBA_SRC_ABS" rev-parse --short HEAD \
+				2>/dev/null || echo unknown)"
+			pin_sha="$(sed -n 's/^ *BOBA_REF: *\([0-9a-f]*\)$/\1/p' \
+				.github/workflows/windows.yml)"
+			pin_short="$(printf '%s' "$pin_sha" | cut -c1-7)"
+			echo "PASS: libboba.a (Windows, $BOBA_SRC @ $bo_sha)"
+			if [ -n "$pin_short" ] && [ "$bo_sha" != "$pin_short" ]; then
+				echo "NOTE: boba HEAD $bo_sha is not the pinned $pin_short"
+				echo "      (the run verifies the tree on disk, not the pin)"
+			fi
+		else
+			echo "WARN: boba Windows build failed (see $OUT/boba-configure.log,"
+			echo "      $OUT/boba-make.log); the four boba tests will SKIP"
+		fi
+	fi
+fi
+
+# A boba-linking test: the Windows libboba.a from above, plus the
+# socket library boba's runtime selects on (its own LDADD).
+run_build_boba() {
+	name=$1
+	shift
+	run_build "$name" "$@" -I"$BOBA_SRC_ABS/include" -L"$BOBA_W32/src" \
+		-lboba -lws2_32
 }
 BUILT=""
 
@@ -218,16 +298,43 @@ run_build test_highlight tests/test_highlight.c src/highlight.c
 run_build test_image_codec tests/test_image_codec.c src/image_codec.c \
 	src/image_bytes.c src/size.c
 
-# test_history needs boba's textinput. No MinGW-built boba exists on
-# this box (boba has no Windows CI of its own; nevermore's MSYS2
-# workflow builds it natively at CI time). Wine can't link the Linux
-# ELF boba, so this binary is CI-verified, not wine-verified —
-# plain-model parts of history (escape/unescape) are exercised by
-# test_history under Linux + macOS pre-flights.
-echo "SKIP: test_history.exe (needs MinGW boba; MSYS2 CI covers it)"
-echo "SKIP: test_markdown.exe (needs MinGW boba; MSYS2 CI covers it)"
-echo "SKIP: test_chat_app.exe (needs MinGW boba; MSYS2 CI covers it)"
-echo "SKIP: test_image.exe (needs MinGW boba; MSYS2 CI covers it)"
+# The four boba-dependent tests: linked against the Windows libboba.a
+# the section above cross-built. test_chat_app is the whole app path
+# (agent, providers, tools, session, chat_app) driven over a canned
+# server, so it is the widest Windows pin this script can buy; the
+# source lists mirror tests/Makefile.am's SOURCES for each binary.
+if [ -n "$BOBA_LIB" ]; then
+	run_build_boba test_history tests/test_history.c src/history.c
+	run_build_boba test_markdown tests/test_markdown.c src/markdown.c \
+		src/markdown_render.c src/highlight.c src/image.c \
+		src/image_bytes.c src/image_codec.c src/size.c
+	run_build_boba test_image tests/test_image.c src/image.c \
+		src/image_bytes.c src/image_codec.c src/size.c src/markdown.c \
+		src/markdown_render.c src/highlight.c
+	run_build_boba test_chat_app tests/test_chat_app.c tests/fake_clock.c \
+		src/chat_app.c src/conf.c src/spinner.c \
+		src/markdown.c src/markdown_render.c src/highlight.c \
+		src/image.c src/image_bytes.c src/image_codec.c src/size.c \
+		src/agent.c src/conversation_id.c src/xxh3.c src/session.c \
+		src/context.c src/reminder.c src/file_ledger.c src/tools.c \
+		src/tools_file.c src/tools_websearch.c src/tools_exec.c \
+		src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
+		src/os_compat_w32.c src/json.c src/sse.c src/openai_client.c \
+		src/transport.c src/transport_socket.c $TLS_SRC \
+		src/nevermore.c src/authinfo.c src/source.c \
+		src/provider_openaicompat.c src/provider_hyper.c \
+		src/provider_ollama.c src/provider_ollama_local.c \
+		src/provider_openai.c src/provider_openrouter.c \
+		src/provider_opencode.c src/provider_opencode_zen.c \
+		src/provider_test.c \
+		-lpthread
+else
+	BOBA_SKIP="needs a Windows boba (set BOBA_SRC, or check out ./boba or ../boba)"
+	echo "SKIP: test_history.exe ($BOBA_SKIP)"
+	echo "SKIP: test_markdown.exe ($BOBA_SKIP)"
+	echo "SKIP: test_chat_app.exe ($BOBA_SKIP)"
+	echo "SKIP: test_image.exe ($BOBA_SKIP)"
+fi
 
 echo "=== running under wine ==="
 fail=0
