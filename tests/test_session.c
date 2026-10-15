@@ -108,10 +108,98 @@ static void test_session_save(void)
     buf[n] = '\0';
     fclose(f);
     remove(path);
+    ASSERT_TRUE(strstr(buf, "<!-- nevermore session-format: 2 -->") != NULL);
     ASSERT_TRUE(strstr(buf, "## user") != NULL);
     ASSERT_TRUE(strstr(buf, "hello there") != NULL);
     ASSERT_TRUE(strstr(buf, "## tool (read_file) id=c1") != NULL);
     ASSERT_TRUE(strstr(buf, "content here") != NULL);
+    /* Prose is markdown and is emitted live: the section body follows
+     * the heading unquoted. A tool result is relayed bytes, so it rides
+     * a fence and renders as itself whatever it holds. */
+    ASSERT_TRUE(strstr(buf, "## user\n\nhello there\n") != NULL);
+    ASSERT_TRUE(strstr(buf, "## tool (read_file) id=c1\n\n```text\n"
+                            "content here\n```\n") != NULL);
+    nm_session_free(s);
+}
+
+/* The document's structure is the transcript's, never the content's.
+ * A relayed body (the assembled system prompt, a tool result) cannot
+ * join the outline, cannot become a bullet list, and cannot close its
+ * own block early — the fence is longer than the body's longest run of
+ * backticks, which is what makes it opaque without escaping a byte. */
+static void test_session_save_fences_relayed_bodies(void)
+{
+    /* A diff's `- `/`+ ` lines, a heading, an unbalanced fence and a
+     * four-backtick run: every markdown hazard in one result. */
+    const char *body = "## Build Commands\n"
+                       "\n"
+                       "-old line\n"
+                       "+  new line\n"
+                       "```\n"
+                       "````\n"
+                       "unbalanced ``` below\n"
+                       "<env>\n"
+                       "trailing text with no newline";
+    /* The tool arguments carry `-->`: an HTML comment ends at the first
+     * one, so it must be escaped or the arguments spill into the file. */
+    NmSession *s = nm_session_new("<env>\n## env\n</env>");
+    nm_session_append(s, NM_ROLE_USER, "## my own heading\n- a bullet");
+    nm_session_append_tool_call(s, "{\"id\":\"c9\",\"args\":\"-->\"}", NULL);
+    nm_session_append_tool_result(s, "c9", "edit_file", body);
+
+#ifdef _WIN32
+    const char *path = "C:\\Users\\Public\\nm-session-fenced.md";
+#else
+    const char *path = "/tmp/nm-session-fenced.md";
+#endif
+    ASSERT_EQ(nm_session_save(s, path), 0);
+    FILE *f = fopen(path, "r");
+    ASSERT_NOT_NULL(f);
+    static char buf[8192];
+    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    buf[n] = '\0';
+    fclose(f);
+    remove(path);
+
+    /* The file, byte for byte: the system body and the tool result in
+     * five-backtick blocks (the body's longest backtick run is four),
+     * prose live, and the tool arguments' `-->` escaped to `\u003e` so
+     * the comment cannot end early. */
+    static const char want[] =
+        "<!-- nevermore session: 4 messages -->\n"
+        "<!-- nevermore session-format: 2 -->\n"
+        "\n"
+        "## system\n"
+        "\n"
+        "```text\n"
+        "<env>\n"
+        "## env\n"
+        "</env>\n"
+        "```\n"
+        "\n"
+        "## user\n"
+        "\n"
+        "## my own heading\n"
+        "- a bullet\n"
+        "\n"
+        "## assistant\n"
+        "\n"
+        "<!-- tool_calls: {\"id\":\"c9\",\"args\":\"--\\u003e\"} -->\n"
+        "\n"
+        "## tool (edit_file) id=c9\n"
+        "\n"
+        "`````text\n"
+        "## Build Commands\n"
+        "\n"
+        "-old line\n"
+        "+  new line\n"
+        "```\n"
+        "````\n"
+        "unbalanced ``` below\n"
+        "<env>\n"
+        "trailing text with no newline\n"
+        "`````\n";
+    ASSERT_STR_EQ(buf, want);
     nm_session_free(s);
 }
 
@@ -567,6 +655,7 @@ int main(void)
     RUN_TEST(test_session_tool_roundtrip);
     RUN_TEST(test_session_reasoning_roundtrip);
     RUN_TEST(test_session_save);
+    RUN_TEST(test_session_save_fences_relayed_bodies);
     RUN_TEST(test_session_attach_image);
     RUN_TEST(test_session_attach_refusals);
     RUN_TEST(test_session_attach_image_bytes);

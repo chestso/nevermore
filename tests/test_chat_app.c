@@ -6850,11 +6850,14 @@ static void test_session_inspects_and_saves(void)
     got[n] = '\0';
     const char *md = (const char *)got;
     /* The metadata header, then one `## <role>` section per message —
-     * the transcript the agent replays, roles and text intact. */
+     * the transcript the agent replays, roles and text intact. Prose
+     * (user/assistant) is live markdown; the system prompt is ours, so
+     * it rides a fence. */
     ASSERT_TRUE(strstr(md, "<!-- nevermore session: 3 messages -->") != NULL);
-    ASSERT_TRUE(strstr(md, "## system") != NULL);
-    ASSERT_TRUE(strstr(md, "## user\nhello agent") != NULL);
-    ASSERT_TRUE(strstr(md, "## assistant\nhi there") != NULL);
+    ASSERT_TRUE(strstr(md, "<!-- nevermore session-format: 2 -->") != NULL);
+    ASSERT_TRUE(strstr(md, "## system\n\n```text\n") != NULL);
+    ASSERT_TRUE(strstr(md, "## user\n\nhello agent") != NULL);
+    ASSERT_TRUE(strstr(md, "## assistant\n\nhi there") != NULL);
     remove(path);
 
     /* Bare: the deterministic name, the shape /image save's default

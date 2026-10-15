@@ -215,6 +215,11 @@ size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
 
 /* Persistence: load/save as markdown transcript with metadata header.
+ * The saved document's structure is the transcript's: `user`/`assistant`
+ * bodies are prose (a person's or a model's own markdown) and are
+ * emitted live, while the assembled `system` prompt and every `tool`
+ * result are relayed bytes and ride a length-adaptive fence, so a diff,
+ * a file dump or an unbalanced code fence cannot become the document.
  * Attached images are NOT written (a data URL is megabytes and the save
  * is an inspection surface); session persistence including images is a
  * post-1.0 item, where images are blobs in the save format and never

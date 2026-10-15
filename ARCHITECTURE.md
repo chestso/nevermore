@@ -420,6 +420,13 @@ save [path]` writes session.c's markdown). Const on purpose: the
   file is the transcript as of the last completed round. The save
   writes NO images (a data URL is megabytes) and `nm_session_load` is
   still the post-1.0 stub: save is an inspection surface.
+  **The save is a markdown document whose structure is the
+  transcript's**: `user`/`assistant` bodies are prose (a person's or a
+  model's own markdown) and are written live, while the assembled
+  prompt and every tool result are relayed bytes and ride a fence one
+  backtick longer than the body's longest run — so an edit diff cannot
+  render as bullets and a file dump cannot join the outline, without
+  rewriting a byte of the transcript.
 - **Context** (`src/context.c`) — system-prompt assembly: the base
   prompt + the `<env>` block + the `<project_context>` block
   (AGENTS.md discovery: root→cwd walk to the nearest `.git`, nearest

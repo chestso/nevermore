@@ -563,6 +563,94 @@ static const char *role_tag(NmRole r)
     return "?";
 }
 
+/* The save is BOTH a transcript and a markdown document, and the two
+ * jobs only coexist if the document's structure is the transcript's,
+ * never the content's. Which body is markdown is a question about its
+ * PRODUCER, not about how it looks:
+ *
+ *   - `user` and `assistant` bodies are prose — a person typed it or a
+ *     model wrote it, and both mean markdown — so they are emitted
+ *     live and render as the speaker's own markdown.
+ *   - the `system` prompt and every `tool` result are bytes we
+ *     assembled (`<env>`, `<project_context>`) or relayed verbatim (a
+ *     file's contents, a diff, a command's output). They are not
+ *     markdown, and emitting them live hands the document to them: a
+ *     `#` joins the outline, a diff's `- `/`+ ` lines become bullets,
+ *     an unbalanced ``` swallows everything after it, and a `<env>`
+ *     opens an HTML block that ends at the next blank line, releasing
+ *     the markdown inside it. So they ride a fenced block — opaque,
+ *     byte-exact, and still one screen of markdown.
+ *
+ * The fence is length-adaptive (a body can only close a fence as long
+ * as its own longest backtick run), which is what makes the block
+ * opaque without escaping a single byte of the transcript. */
+
+static size_t fence_len(const char *body)
+{
+    size_t best = 0;
+    size_t run = 0;
+    for (const char *p = body ? body : ""; *p; p++) {
+        run = (*p == '`') ? run + 1 : 0;
+        if (run > best)
+            best = run;
+    }
+    return best < 3 ? 3 : best + 1;
+}
+
+/* One fenced block, opening fence on the line the caller left us on,
+ * closing fence ending the last line (no blank line either side). */
+static void fenced_write(FILE *f, const char *body)
+{
+    const char *text = body ? body : "";
+    size_t n = fence_len(text);
+    for (size_t i = 0; i < n; i++)
+        fputc('`', f);
+    /* Info string `text`: honest, and highlighting that guesses a
+     * language would lie about a diff or a file dump. */
+    fputs("text\n", f);
+    fputs(text, f);
+    if (*text && text[strlen(text) - 1] != '\n')
+        fputc('\n', f);
+    for (size_t i = 0; i < n; i++)
+        fputc('`', f);
+    fputc('\n', f);
+}
+
+/* A comment ends at the first `-->`, and this JSON holds tool
+ * arguments — an edit whose new text contains `-->` would end the
+ * comment early and spill its arguments into the document as prose.
+ * JSON has no structural `>`, so `--\u003e` is the same value: the
+ * escape keeps the metadata inert and the JSON valid. */
+static void comment_write(FILE *f, const char *json)
+{
+    for (const char *p = json; p && *p; p++) {
+        if (p[0] == '-' && p[1] == '-' && p[2] == '>') {
+            fputs("--\\u003e", f);
+            p += 2;
+        } else {
+            fputc(*p, f);
+        }
+    }
+}
+
+/* A section's body; leaves the file at the start of a line, with no
+ * trailing blank line (the next section's leading newline is the
+ * separator). */
+static void section_body_write(FILE *f, NmRole role, const char *content)
+{
+    if (role == NM_ROLE_SYSTEM || role == NM_ROLE_TOOL) {
+        fputc('\n', f);
+        fenced_write(f, content);
+        return;
+    }
+    if (content && *content) {
+        fputc('\n', f);
+        fputs(content, f);
+        if (content[strlen(content) - 1] != '\n')
+            fputc('\n', f);
+    }
+}
+
 int nm_session_save(const NmSession *s, const char *path)
 {
     if (!s || !path)
@@ -575,6 +663,10 @@ int nm_session_save(const NmSession *s, const char *path)
     if (!f)
         return -1;
     fprintf(f, "<!-- nevermore session: %zu messages -->\n", s->n);
+    /* The body rule above is format 2 (format 1 emitted every body raw);
+     * `nm_session_load` is the half that is still missing, and this is
+     * the comment it will read. */
+    fputs("<!-- nevermore session-format: 2 -->\n", f);
     for (size_t i = 0; i < s->n; i++) {
         const NmSessionMessage *m = &s->msgs[i];
         fprintf(f, "\n## %s", role_tag(m->role));
@@ -583,11 +675,12 @@ int nm_session_save(const NmSession *s, const char *path)
         if (m->tool_call_id)
             fprintf(f, " id=%s", m->tool_call_id);
         fputc('\n', f);
-        if (m->content)
-            fputs(m->content, f);
-        if (m->tool_calls_json)
-            fprintf(f, "\n<!-- tool_calls: %s -->", m->tool_calls_json);
-        fputc('\n', f);
+        section_body_write(f, m->role, m->content);
+        if (m->tool_calls_json) {
+            fputs("\n<!-- tool_calls: ", f);
+            comment_write(f, m->tool_calls_json);
+            fputs(" -->\n", f);
+        }
     }
     fclose(f);
     return 0;
