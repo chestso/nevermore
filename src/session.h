@@ -228,7 +228,12 @@ const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
  * machine truth — role, tool facts, and every body's exact byte count —
  * and a reader consumes that many bytes instead of scanning. The
  * `### reasoning` / `### content` labels are for the reader; a loader
- * uses the counts. A message's images are DECLARED in meta, never
+ * uses the counts. That guarantee covers BODIES only: the heading line
+ * is the format's one uncounted channel, so `tool_name` / `tool_call_id`
+ * have their control bytes escaped there (a `\n` in one would split the
+ * heading and fabricate a meta line), and a reader takes the tool facts
+ * from meta and requires the meta comment to be the first line after the
+ * heading. A message's images are DECLARED in meta, never
  * written (a data URL is megabytes and the save is an inspection
  * surface); session persistence including image bytes is a post-1.0
  * item, where images are blobs in the save format and never re-read

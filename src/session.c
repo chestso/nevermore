@@ -602,7 +602,20 @@ static const char *role_tag(NmRole r)
  * tells a human where the trace ended and the answer began. The
  * machine facts the meta line carries are in meta_json() below, and the
  * NULL/empty distinctions a request cannot see in the first place are
- * in message_part(). */
+ * in message_part().
+ *
+ * THAT GUARANTEE IS ABOUT BODIES, AND ONLY BODIES. The heading line
+ * (`## tool (name) id=…`) is the format's one uncounted channel: its
+ * tool name and call id are WIRE strings, and a `\n` in one would split
+ * the heading and put a `<!-- meta: … -->` line exactly where a reader
+ * looks for the real one — the writer's own device turned against the
+ * writer, invisible in a rendered document. So the heading escapes
+ * control bytes to visible `\xNN` (heading_field below). Nothing is
+ * lost: the truth is in meta, the heading is display-only, and the
+ * escape is a pure function of the same fields, so a re-save derives
+ * the same bytes. The reader's half of the rule: the meta comment is
+ * the FIRST line after the heading LF (anything between them is a
+ * structural error), and the tool facts come from meta, never here. */
 
 static size_t fence_len(const char *body)
 {
@@ -752,6 +765,26 @@ static void part_write(FILE *f, const char *label, NmRole role,
         fputc('\n', f);
 }
 
+/* One heading field — a tool name or a call id — with control bytes
+ * escaped to visible `\xNN`. The heading is the file's ONE uncounted
+ * line (see the producer note above): every other channel is defended
+ * by a count or by the `--\u003e` escape, and this one was printed raw,
+ * so a `\n` in a wire string split it and fabricated a line a reader
+ * takes as the message's own. Escaping costs no fidelity — the truth is
+ * in meta and the heading is display-only — and it is deterministic, so
+ * the round trip stays byte-identical. `\` is deliberately NOT escaped:
+ * the heading is a display, not a channel, and a Windows path in an id
+ * is commoner than a name spelling out `\x0a`. */
+static void heading_field(FILE *f, const char *s)
+{
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        if (*p < 0x20 || *p == 0x7f)
+            fprintf(f, "\\x%02x", *p);
+        else
+            fputc(*p, f);
+    }
+}
+
 int nm_session_save(const NmSession *s, const char *path)
 {
     if (!s || !path)
@@ -773,10 +806,15 @@ int nm_session_save(const NmSession *s, const char *path)
     for (size_t i = 0; i < s->n; i++) {
         const NmSessionMessage *m = &s->msgs[i];
         fprintf(f, "\n## %s", role_tag(m->role));
-        if (m->tool_name)
-            fprintf(f, " (%s)", m->tool_name);
-        if (m->tool_call_id)
-            fprintf(f, " id=%s", m->tool_call_id);
+        if (m->tool_name) {
+            fputs(" (", f);
+            heading_field(f, m->tool_name);
+            fputc(')', f);
+        }
+        if (m->tool_call_id) {
+            fputs(" id=", f);
+            heading_field(f, m->tool_call_id);
+        }
         fputc('\n', f);
         char *meta = meta_json(s, m);
         if (!meta) {
@@ -817,8 +855,12 @@ NmSession *nm_session_load(const char *path)
     /* The load half, not built yet: read each meta line, consume exactly
      * the counted bodies, refuse on any mismatch, on a format it does not
      * know, or on a message declaring images (the bytes are not in the
-     * file). test_session.c's reader is its prototype; save is the
-     * inspection surface today. */
+     * file). Two obligations it must keep from the format's own rules:
+     * the meta comment is the FIRST line after the heading LF (anything
+     * between them is a structural error — that is what the heading's
+     * escape makes checkable), and every tool fact comes from meta, never
+     * from the heading, which is display-only. test_session.c's reader is
+     * its prototype; save is the inspection surface today. */
     (void)path;
     return NULL;
 }

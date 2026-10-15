@@ -432,7 +432,14 @@ save [path]` writes session.c's markdown). Const on purpose: the
   a body is arbitrary bytes, so the boundary is never a delimiter a body
   could contain — a `<!-- meta: … -->` line per message carries the
   role, the tool facts and every body's exact byte count, and the labels
-  are for the reader only. The images a message held are declared there
+  are for the reader only. **That guarantee is about BODIES, and only
+  bodies**: the `## <role> (tool) id=…` heading is the format's one
+  uncounted channel, and its tool name and call id are wire strings, so
+  the heading escapes control bytes to visible `\xNN` (a `\n` in one
+  would split the heading and fabricate a meta line exactly where a
+  reader looks). The heading is display-only either way — a reader takes
+  the tool facts from meta and requires the meta comment to be the first
+  line after the heading LF. The images a message held are declared there
   and not carried, so a loader refuses such a file instead of rebuilding
   a transcript whose request prefix differs from the chat's.
 - **Context** (`src/context.c`) — system-prompt assembly: the base

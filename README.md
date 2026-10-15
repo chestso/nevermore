@@ -497,6 +497,14 @@ images themselves are still not written (a data URL is megabytes), so a
 loader must refuse a file that declares them rather than hand back a
 transcript whose request prefix differs from the chat's.
 
+That boundary rule is about bodies, and only bodies: the `## tool
+(<name>) id=…` heading is the file's one uncounted line, and its name
+and id are strings a provider sent, so the heading escapes their control
+bytes as visible `\xNN` (a `\n` in an id would otherwise split the
+heading and put a forged `<!-- meta: … -->` line exactly where a reader
+looks for the real one). Nothing is lost — the heading is for a human,
+and the tool facts are in `meta`.
+
 Images are **not** in the markdown: a data URL is megabytes, and the
 save is an inspection surface, not a backup format. `/image save <n>`
 writes one image's own bytes. Loading a saved transcript back is a post-1.0
