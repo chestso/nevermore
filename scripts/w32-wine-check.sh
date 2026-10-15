@@ -69,7 +69,11 @@ run_build() {
 	}
 	# Warnings still surface (the first few), now safely off a file.
 	head -5 "$buildlog"
+	# This run's roster (the wine loop below runs exactly these, never a
+	# stale .exe an earlier checkout left behind).
+	BUILT="$BUILT $name"
 }
+BUILT=""
 
 # The Windows resource script (the .exe's icon + version metadata) is
 # compiled only by MSYS2 CI, so compile it here too: a broken include
@@ -111,7 +115,8 @@ run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_config tests/test_config.c src/conf.c
 run_build test_args tests/test_args.c src/args.c
-run_build test_session tests/test_session.c src/session.c src/image_bytes.c src/size.c
+run_build test_session tests/test_session.c src/session.c src/image_bytes.c src/size.c \
+	src/json.c
 run_build test_context tests/test_context.c src/context.c src/reminder.c
 
 run_build test_file_ledger tests/test_file_ledger.c src/file_ledger.c
@@ -226,12 +231,16 @@ echo "SKIP: test_image.exe (needs MinGW boba; MSYS2 CI covers it)"
 
 echo "=== running under wine ==="
 fail=0
-for exe in "$OUT"/*.exe; do
-	name=$(basename "$exe")
+# Only what THIS run built: a stale .exe from an earlier checkout (a
+# renamed test) or from a build that failed before its link must not read
+# as a pass — the hazard run_build's `rm -f` already guards at the build
+# step, here at the run step.
+for name in $BUILT; do
+	exe="$OUT/$name.exe"
 	if WINEDEBUG=-all wine "$exe" >"$OUT/$name.log" 2>&1; then
-		echo "PASS: $name"
+		echo "PASS: $name.exe"
 	else
-		echo "FAIL: $name (log: $OUT/$name.log)"
+		echo "FAIL: $name.exe (log: $OUT/$name.log)"
 		fail=1
 		cat "$OUT/$name.log"
 	fi
