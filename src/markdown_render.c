@@ -492,7 +492,29 @@ static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
     end_row(sink, base);
 }
 
-/* Quote body lines get a `│ ` gutter (Comment) and Foreground text. */
+/* Start of a quote line's body: the marker (`>` after the block
+ * indent) and its one separating space are the GUTTER's bytes now, so
+ * the renderer must not draw them twice — `> quoted` renders as
+ * `│ quoted`, not `│ > quoted`. Only the one marker level the
+ * classifier matched comes off; a nesting marker after it (`> > x`)
+ * stays visible as text, and a lazy continuation line (no marker at
+ * all) is returned whole. */
+static size_t quote_body_start(const char *s, size_t len)
+{
+    size_t i = 0;
+    while (i < len && i < 4 && s[i] == ' ')
+        i++;
+    if (i >= len || s[i] != '>')
+        return 0;
+    i++;
+    if (i < len && is_space(s[i]))
+        i++;
+    return i;
+}
+
+/* Quote body lines get a `│ ` gutter (Comment) and Foreground text.
+ * The source's own marker is dropped per line (quote_body_start): the
+ * gutter replaces it. */
 static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
                              TuiAttr base)
 {
@@ -501,10 +523,11 @@ static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
     size_t start = 0;
     for (size_t i = 0; i <= len; i++) {
         if (i == len || text[i] == '\n') {
+            size_t b = start + quote_body_start(text + start, i - start);
             begin_row(sink, body);
             emit_styled(sink, "\xe2\x94\x82 ", 4, gutter, body);
-            if (i > start)
-                emit_inline_runs(sink, text + start, i - start, body);
+            if (i > b)
+                emit_inline_runs(sink, text + b, i - b, body);
             end_row(sink, base);
             start = i + 1;
         }

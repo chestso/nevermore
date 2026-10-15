@@ -1094,11 +1094,53 @@ static void test_quote_and_list_styling(void)
      * the gutter run restores Foreground after its Comment) */
     const char *q = commit_one(0, "> quoted text\n");
     ASSERT_TRUE(strstr(q, "\x1b[0;38;2;98;114;164m\xe2\x94\x82 ") != NULL);
-    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;248;248;242m> quoted text") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;248;248;242mquoted text") != NULL);
 
     /* list bullet pink (with its separating space), text plain */
     const char *l = commit_one(0, "- item text\n");
     ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;121;198m- \x1b[0mitem text") !=
+                NULL);
+}
+
+/* The gutter REPLACES the source's marker: the `>` and its one
+ * separating space never reach the scrollback (they would otherwise
+ * double up as `│ > quoted`). One level comes off per line; a nested
+ * marker, a marker with no space, an indented marker and a lazy
+ * continuation line all keep their bytes except that one level. */
+static void test_quote_marker_is_stripped(void)
+{
+    static char out[OUT_CAP];
+    H *h = h_new_render_streams(1);
+    ASSERT_NOT_NULL(h);
+    const char *block = "> quoted\n"
+                        ">no space\n"
+                        "> > nested\n"
+                        ">   indented body\n"
+                        "lazy continuation\n"
+                        ">\n";
+    h_send(h, tui_msg_stream_delta(0, block, strlen(block)));
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    snprintf(out, sizeof(out), "%s", h_read(h));
+    h_free(h);
+
+    const char *gutter = "\xe2\x94\x82 "; /* U+2502 + space */
+    ASSERT_NOT_NULL(strstr(out, gutter));
+    ASSERT_TRUE(strstr(out, "> quoted") == NULL);
+    /* the marker run and exactly ONE following space go together */
+    ASSERT_TRUE(strstr(out, "quoted\r\n") != NULL);
+    ASSERT_TRUE(strstr(out, ">no space") == NULL);
+    ASSERT_TRUE(strstr(out, "no space\r\n") != NULL);
+    /* one level only: the nesting marker stays visible */
+    ASSERT_TRUE(strstr(out, "> nested\r\n") != NULL);
+    /* the indent rides the marker: only the marker's own space is
+     * consumed, so the item's further spaces stay in the body */
+    ASSERT_TRUE(strstr(out, "  indented body\r\n") != NULL);
+    /* a lazy continuation carries no marker and is emitted whole */
+    ASSERT_TRUE(strstr(out, "lazy continuation\r\n") != NULL);
+    /* a bare marker leaves the gutter and an empty body: the row is the
+     * gutter run, the body attr restored, then the row break */
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x82 \x1b[0;38;2;248;248;242m\r\n") !=
                 NULL);
 }
 
@@ -1335,6 +1377,7 @@ int main(void)
     RUN_TEST(test_span_inside_heading_restores_heading_attr);
     RUN_TEST(test_fence_lines_are_styled);
     RUN_TEST(test_quote_and_list_styling);
+    RUN_TEST(test_quote_marker_is_stripped);
     RUN_TEST(test_list_marker_keeps_separating_space);
     RUN_TEST(test_nested_inline_spans_compose);
     RUN_TEST(test_live_table_on_reasoning_carries_dim);

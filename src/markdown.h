@@ -23,6 +23,10 @@
  *   - finality is classifier-driven: a blank line inside a loose list
  *     or block quote returns CONTINUES (GFM-legal), keeping the block
  *     open.
+ *   - a quote line's own marker is the renderer's gutter: one `>`
+ *     level (and the one space after it) is dropped per quoted line
+ *     and the `│ ` gutter drawn in its place, so a quoted line never
+ *     reads `│ > …`.
  *   - a STANDALONE image line (`![alt](src)`, nothing else) at a block
  *     boundary opens an IMAGE block (block-granular: the payload
  *     streams into a one-row placeholder and renders once, at commit,
