@@ -727,6 +727,13 @@ static int dir_iter_next(DirIter *it)
         it->valid = 1;
         return 1;
     }
+    /* Exhaustion CLOSES, the Windows iterator's own contract: an
+     * empty directory reaches here on the very first call — from
+     * dir_iter_start's prime — and a caller that returns on that 0 must
+     * not have to know the handle is still open (this is the leak
+     * ASan named: an empty user-tier directory leaked its DIR*). */
+    closedir(it->d);
+    it->d = NULL;
     return 0;
 }
 
