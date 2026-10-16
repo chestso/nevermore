@@ -23,10 +23,14 @@ The [releases](https://github.com/chestso/nevermore/releases) page carries a
 portable ZIP for macOS (Apple Silicon) and one for Windows (x86_64): extract
 the folder wherever you like and run `nevermore` / `nevermore.exe` from any
 terminal. No installer, no MSYS2, no Homebrew — each ZIP is the binary plus
-the runtime libraries its own OS does not ship (Windows needs one MinGW DLL
-for the process layer's reader threads; macOS needs nothing, because boba
-links statically and TLS is the system's Secure Transport), plus a
-`README-PORTABLE.txt` that says where the two files it writes live.
+whatever its own import table names that its OS does not ship. On Windows
+that is the MinGW runtime when the toolchain links it dynamically
+(`libwinpthread-1.dll`, which boba's static archive needs for its mutexes,
+`pthread_once` and thread keys); the MSYS2 UCRT64 build links it in
+statically, so its ZIP carries the executable and the docs alone. macOS
+needs nothing at all, because boba links statically and TLS is the system's
+Secure Transport. Every ZIP also carries a `README-PORTABLE.txt` that says
+where the two files it writes live.
 
 GNU/Linux gets the source tarball and nothing else: the platform has the
 toolchain and the packages (OpenSSL or mbedTLS) already, so building it is

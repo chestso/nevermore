@@ -137,8 +137,12 @@ done
 # cross), walked recursively, and every import that is not something Windows
 # itself provides is resolved from the toolchain's bin dir and copied next to
 # the exe: boba is a static archive and TLS is Schannel, so what is left is
-# the MinGW runtime - today one DLL, libwinpthread-1.dll, which nevermore's
-# pipe-reader threads need and no Windows machine has.
+# the MinGW runtime, and only when the toolchain links it dynamically -
+# Fedora's mingw64 gcc does, and the .exe then names libwinpthread-1.dll
+# (boba's archive calls pthread_once, the mutexes and thread keys), while
+# MSYS2's UCRT64 gcc links the same references in statically and the ZIP
+# carries nothing but the exe. The walk is the contract either way: what
+# ships is what the import table says, never a guess.
 #
 # The filter is a case-insensitive PREFIX match, so CRYPT32.dll and
 # cryptbase.dll share one word. Everything it names ships with Windows, and
@@ -270,9 +274,12 @@ Files nevermore writes:
   %LOCALAPPDATA%\nevermore\                 the chat's own settings, history
 To uninstall: delete this folder, and those two if you want them gone.
 
-The .exe needs the Windows TLS stack (Schannel), the socket stack (Winsock)
-and one MinGW runtime DLL, which is bundled here - Windows looks in the
-executable's own folder before anywhere else. Do not move that DLL out.
+The .exe needs only what Windows itself ships: the TLS stack (Schannel), the
+socket stack (Winsock), the UCRT and the Win32 files it calls. If a MinGW
+runtime DLL sits beside it (libwinpthread-1.dll), that is the one library the
+build could not resolve from Windows - Windows looks in the executable's own
+folder before anywhere else, so leave it where it is. A build whose toolchain
+links that runtime in statically ships without it.
 README
 else
 	cat >"$STAGE_DIR/README-PORTABLE.txt" <<'README'
