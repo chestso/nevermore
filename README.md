@@ -146,7 +146,8 @@ Settings resolve once, lowest to highest:
    `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
-   `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`
+   `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`,
+   `NEVERMORE_SKILLS`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -180,6 +181,7 @@ reminders        = on
 kbd              = auto
 spinner_ramp     = on
 prism_notice     = on
+skills           = on
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -364,6 +366,55 @@ one line per routed round, because each tool round is its own request and
 is routed on its own. Turn the key `off` for silence; the capture is not
 gated with it, so `/context` still answers "which model answered the last
 round" either way.
+
+## Skills
+
+A **skill** is a folder of instructions for one kind of task, in the open
+[Agent Skills](https://agentskills.io) format: a directory holding a
+`SKILL.md` whose YAML frontmatter declares a `name` and a `description`,
+with the instructions in the markdown body and any bundled files
+(`references/`, `scripts/`, `assets/`) beside it. The format is not
+nevermore's own — several agents read the same folders — and neither are
+the locations: nevermore scans the cross-client convention the format's
+own client guide names, and no vendor directory.
+
+```
+~/.agents/skills/<skill-name>/SKILL.md          yours, every project
+<dir>/.agents/skills/<skill-name>/SKILL.md      the project's, from the
+                                                repo root down to the
+                                                working directory
+```
+
+A project skill overrides a user skill of the same name, and within a
+project the directory nearest the working directory wins — the same
+precedence `AGENTS.md` already has. A `.claude/skills/` directory is not
+read: to use a collection that lives there, move or link it into
+`~/.agents/skills/`.
+
+Discovery loads only the metadata. The system prompt gains a `<skills>`
+block — one line per skill, name and description, capped at 8 KiB with
+the truncation announced in the block — and nothing else: no body rides
+the prompt, so the cached prefix is not churned. When a task matches a
+description, the model calls `load_skill` with that exact name; the
+result is the `SKILL.md` body (frontmatter stripped) and the skill's
+directory, which is what the instructions' relative file references
+resolve against. The body arrives as an ordinary tool result, so it shows
+in the transcript like any other tool output, and nevermore runs nothing
+on a skill's behalf: a skill that says "run `scripts/x.py`" reaches the
+machine through `run_command` and its existing gates.
+
+`/skills` lists what was found, the tier each came from, its path, and
+every validation finding — a name that breaks the spec's grammar, a
+description clamped to the spec's 1024-character bound, a skill that
+overrode another. Entries the format refuses outright (no description,
+frontmatter that does not parse) are named there too: a skill you cannot
+see is a skill that seems to not exist.
+
+If nothing was discovered the prompt carries no `<skills>` block and the
+`load_skill` tool is not offered at all. `skills` (a bool, default `on`,
+env `NEVERMORE_SKILLS`) turns discovery off entirely; the setting is read
+when an agent is built, so a change lands on the next chat or
+`/provider` switch.
 
 ## Images (vision models)
 
@@ -611,7 +662,7 @@ captured wire dump byte-exact — each tool's README has the recipe.
 ```
 src/                the nevermore binary: entry point, config, providers,
                     wire client, transport, SSE, JSON, agent loop, tools,
-                    session, TUI (headers live alongside sources —
+                    skills, session, TUI (headers live alongside sources —
                     CLI app, no library)
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
 tools/wire-replay/  replay server for captured wire dumps (Python)

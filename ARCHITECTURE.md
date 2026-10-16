@@ -544,6 +544,56 @@ save [path]` writes session.c's markdown). Const on purpose: the
   provider strips the part; the `image-not-seen` reminder says why it
   sees nothing). The capability half — "You can see images" — is the
   catalog's answer and is resolved separately (see the catalog section).
+- **Skills** (`src/skills.{c,h}`) — Agent Skills discovery, in the
+  OPEN format at the OPEN locations: a skill is a directory holding a
+  `SKILL.md` (YAML frontmatter `name` + `description`, markdown body,
+  optional bundled files) per the Agent Skills specification, and the
+  directories are the ones its own client-implementation guide names as
+  the cross-client convention — `~/.agents/skills/` for the user tier and
+  every `<dir>/.agents/skills/` from the repo root DOWN to the working
+  directory for the project tier. **No vendor directory is read**
+  (`.claude/skills` is another product's trust domain) and **no
+  nevermore-namespaced one either**: a third location for the same tier
+  would be a third place a skill hides, and the interop the format
+  exists for comes from using the shared path. Precedence follows the
+  guide's universal rule — project overrides user — and within a project
+  the NEAREST directory wins a name clash, which is the AGENTS.md
+  chain's own rule applied to the same directory walk.
+  **Progressive disclosure is the whole design.** Discovery reads
+  metadata only, and the prompt gains a `<skills>` menu (one line per
+  skill, 8 KiB capped, whole entries, truncation announced in-band) that
+  is assembled ONCE at agent construction and appended after
+  `</project_context>` — so it moves neither the `<env>` git splice nor
+  the vision clause's slot, and a menu that changed mid-chat could not
+  keep the provider's cached prefix. A body is loaded only when the model
+  asks: `load_skill(name)` returns that `SKILL.md` with its frontmatter
+  stripped plus the skill's directory (the instructions' relative file
+  references resolve from there). That is a TOOL RESULT, so the
+  transcript shows the body like any other tool output — the transparency
+  principle holds with no new injection channel and no new reminder
+  class. nevermore executes nothing for a skill: a body that says "run
+  `scripts/x.py`" reaches the machine through `run_command` and its
+  existing gates, and `allowed-tools` (the spec's experimental
+  permission field) is ignored because there is no approval system to
+  pre-approve into.
+  **Nothing is refused silently.** The guide's lenient rule is implemented
+  literally — a broken `name` grammar, a name that disagrees with its
+  directory, an over-long description: kept and NOTED; no `description`
+  or unparseable frontmatter: refused and NAMED — and both lists, plus
+  what the registry and menu caps held back, print in `/skills`. The
+  frontmatter scan is a character-level line walk (no regex, no YAML
+  dependency) that understands the two fields consumed, in the two forms
+  real skills use (a plain or quoted scalar, a `>`/`|` block scalar), and
+  takes the rest of the line as the value — which is what makes
+  `description: Use when: X`, the invalid YAML the guide calls the most
+  common in the wild, parse. The registry is OWNED BY THE AGENT (built at
+  `nm_agent_new`, freed with it), not process-global: a `/provider` switch
+  rebuilds the agent and its prompt, which is exactly when a re-set
+  `skills` key should be seen, and a borrowed pointer into a table a later
+  refresh frees is a hole the owned shape does not have. No entries (or
+  the key off) means no menu AND no tool — the toolset is gated on the
+  same table (`nm_toolset_add_skills`), so the model is never offered a
+  loader with nothing to load.
 - **Reminders** (`src/reminder.{h,c}` + the agent's firing points) —
   the harness's own speech in the conversation, the `<system-reminder>`
   convention. **One module, one tag vocabulary, one trust boundary, one
