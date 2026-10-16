@@ -42,7 +42,14 @@ static const uint8_t pulse_curve[16] = { 0, 10, 37, 79, 128, 176,
  * exists to avoid). */
 typedef struct
 {
-    int tick_ms;
+    int tick_ms;             /* the cadence: one tick is one animation step, and
+                                the app's wakeup while an animation runs — so
+                                this is the one dial that scales every channel
+                                together (the ramp's 4-tick step, the blink's
+                                10, the pulse's 16) and the size motion stays in
+                                phase with the color at any speed. 100 ms: the
+                                dot breathes over 1.6 s, half the rate it first
+                                shipped at. */
     const char *const *ramp; /* NULL: a fixed glyph, no size ramp */
     int n_ramp;
     const char *fixed;
@@ -73,7 +80,7 @@ typedef struct
  * rather than as the background. */
 static const NmSpinnerStyle styles[] = {
     [NM_SPINNER_PULSE_DOT] = {
-        .tick_ms = 50,
+        .tick_ms = 100,
         .ramp = dot_ramp,
         .n_ramp = (int)DOT_RAMP_N,
         .ramp_every = 4,
@@ -86,7 +93,7 @@ static const NmSpinnerStyle styles[] = {
         .ansi16 = 10, /* bright green */
     },
     [NM_SPINNER_PULSE_DOT_FIXED] = {
-        .tick_ms = 50,
+        .tick_ms = 100,
         .fixed = "●",
         .pulses = 1,
         .blinks = 1,

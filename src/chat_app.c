@@ -1772,8 +1772,8 @@ int nm_chat_app_tick_ms(NmChatApp *app)
          * The spinner is the turn's, so no cadence otherwise. */
         return app->catalog_src ? 100 : -1;
     }
-    /* The animation's own cadence (the dot's 50 ms pulse, the stars'
-     * 100 ms rotation), shortened to the nearest agent deadline so a
+    /* The animation's own cadence (100 ms: the dot's breath, the stars'
+     * rotation), shortened to the nearest agent deadline so a
      * stalled stream / a due tool fires promptly. The step that results
      * clears the deadline (tool done, new round, or the turn errors),
      * so this cannot spin. */

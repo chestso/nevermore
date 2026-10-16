@@ -1100,7 +1100,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
 /* The dot on a TRUECOLOR terminal: the glyph's color is the pulse's,
  * frame by frame — it starts at the trough (the terminal background,
  * so the dot fades out of the background) and reaches the peak (Dracula
- * Green) one cycle's midpoint later, at the 50 ms cadence. The tier
+ * Green) one cycle's midpoint later, at the 100 ms cadence. The tier
  * comes from the terminal profile's env-derived hint, which is what
  * harness_new_rgb pins. */
 static void test_dot_pulses_on_a_truecolor_terminal(void)
@@ -1149,9 +1149,9 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     ASSERT_TRUE(strstr(frame, peak) != NULL);
     free(peak);
 
-    /* The cadence is the style's: the pulse wants the finer clock, and
-     * the agent's own deadline is the only thing that may shorten it. */
-    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 50);
+    /* The cadence is the style's, and the agent's own deadline is the
+     * only thing that may shorten it. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 100);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -1219,7 +1219,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
 
     /* The 16-color tier still ticks at the dot's cadence (the pulse and
      * the blink share the style's clock). */
-    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 50);
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 100);
 
     harness_free(h);
     pthread_join(th, NULL);

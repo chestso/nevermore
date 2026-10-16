@@ -271,8 +271,9 @@ static void test_two_objects_do_not_share_state(void)
     nm_spinner_free(stars);
 }
 
-/* The cadence is the style's: the dot ticks at 50 ms (its pulse wants
- * the finer clock), the stars at 100 ms. A stopped spinner reports -1. */
+/* The cadence is the style's data (100 ms for the dot — its breath — and
+ * for the stars), and the clock runs only while the animation does: a
+ * stopped spinner reports -1. */
 static void test_tick_cadence_follows_the_style(void)
 {
     NmSpinner *s = nm_spinner_new(NM_SPINNER_PULSE_DOT);
@@ -281,9 +282,9 @@ static void test_tick_cadence_follows_the_style(void)
     ASSERT_EQ(nm_spinner_tick_ms(NULL), -1);
 
     nm_spinner_set_running(s, 1);
-    ASSERT_EQ(nm_spinner_tick_ms(s), 50);
+    ASSERT_EQ(nm_spinner_tick_ms(s), 100);
     nm_spinner_set_style(s, NM_SPINNER_PULSE_DOT_FIXED);
-    ASSERT_EQ(nm_spinner_tick_ms(s), 50);
+    ASSERT_EQ(nm_spinner_tick_ms(s), 100);
     nm_spinner_set_style(s, NM_SPINNER_STARS);
     ASSERT_EQ(nm_spinner_tick_ms(s), 100);
     nm_spinner_set_running(s, 0);
