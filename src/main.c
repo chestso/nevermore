@@ -39,6 +39,7 @@
 #include "chat_app.h"
 #include "conf.h"
 #include "args.h"
+#include "sysout.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
 #include "nevermore_version.h"
@@ -110,6 +111,22 @@ static void usage(FILE *out)
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
  * renders as a compact status line (the -P pipeline shape). */
+
+/* ask mode's system-line carrier (sysout.h): a line on STDERR, LF
+ * terminated, with no live run to close — stderr streams nothing, so
+ * close_run stays NULL and nm_sysout_notice just prints the line and
+ * the blank row that ends it. The chat TUI's sink is the same shape over
+ * boba's system stream; this one is why the notice's text and its
+ * spacing cannot differ between the two entry paths. */
+static void sysout_stderr_emit(void *userdata, const char *bytes, size_t len)
+{
+    (void)userdata;
+    if (len)
+        fwrite(bytes, 1, len, stderr);
+    fputc('\n', stderr);
+}
+
+static NmSysOut g_ask_out = { sysout_stderr_emit, NULL, NULL };
 
 /* Images received in ask mode: no transcript exists,
  * so the image lands as a FILE — nevermore-image-N.<ext> in the cwd
@@ -228,7 +245,9 @@ static void ask_on_state(NmAgentState state, void *userdata)
  * prints on its system stream, dimmed to STDERR — the answer on stdout
  * stays pipe-clean, exactly like the reasoning trace. Gated by the
  * `prism_notice` key (resolved from the process store, which main.c
- * installs before any turn runs). */
+ * installs before any turn runs). The text is one spelling with the
+ * TUI's (nm_agent_round_meta_text) and so is the block: a notice closes
+ * itself with a blank row on either carrier (nm_sysout_notice). */
 static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
 {
     (void)userdata;
@@ -238,10 +257,7 @@ static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
     char line[512];
     if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
         return;
-    /* One blank line closes the notice, as the tool block's does: two
-     * blocks on one row read as one garbled line, and the next thing on
-     * stderr — a `[tool]` plan or another notice — starts fresh. */
-    fprintf(stderr, "\033[2m%s\033[0m\n\n", line);
+    nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);
 }
 
 /* The registry check config.c validates provider names through (it

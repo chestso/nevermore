@@ -61,6 +61,7 @@
 #include "image.h"
 #include "size.h"
 #include "source.h"
+#include "sysout.h"
 #include "proc.h"
 #include "spinner.h"
 #include "provider_internal.h" /* nm_live_catalog_enabled (the warm's gate) */
@@ -91,11 +92,10 @@ static const TuiAttr NM_DIM = { .dim = 1 };
  * so nothing about the chrome can move this column. */
 #define CONTINUATION_PROMPT "  "
 
-/* One system-stream line: 1 KiB (the config store's value cap) plus the
- * "key = value" framing. Both sys_line and the /config reply buffer a
- * whole value here, so a long setting clips only if its full line does
- * — never mid-value for want of a smaller local buffer. */
-#define SYS_LINE_BUF 1088
+/* One system-stream line: the cap is the carrier's (sysout.h), so the
+ * local buffers that hold a whole value (the /config reply, the notice
+ * text) can never be smaller than what a writer will actually emit. */
+#define SYS_LINE_BUF NM_SYSOUT_LINE_MAX
 
 /* Popup flavors. */
 typedef enum
@@ -179,6 +179,13 @@ struct NmChatApp
     /* Reused across tool results: the styled multi-line result body
      * (one system message, memory-reuse principle). */
     DynamicBuffer *tool_body;
+
+    /* The system-stream carrier (sysout.h): this app's sink posts one
+     * finalized RAW unit per line to boba's system stream, and closes
+     * the agent's live runs before a notice lands among them. Wired at
+     * construction; the sys_line/sys_text/sys_blank wrappers below are
+     * its thin front. */
+    NmSysOut sysout;
 
     TuiRuntime *rt; /* weak; set via nm_chat_app_set_runtime */
 
@@ -314,48 +321,84 @@ static void send_msg(NmChatApp *app, TuiMsg msg)
     tui_msg_free(&msg);
 }
 
-/* System-stream line writer: ONE CRLF-terminated line, normalized.
- * boba normalizes LF->CRLF and drops framing bytes itself, so this is
- * the single seam the old pend_str invariant now lives behind. One
- * message per line (one RAW unit, finalized immediately). */
+/* The transcript carrier (the app's NmSysOut sink). One finalized line
+ * is ONE RAW unit, CRLF framed INSIDE the payload because boba's raw
+ * mode wants the terminator in the bytes (it normalizes LF->CRLF and
+ * drops framing bytes itself, so this is where the old pend_str
+ * invariant now lives). The message copies the payload, so a stack
+ * buffer is safe to post; the one memcpy is the price of sharing the
+ * composition policy with ask mode's stderr, and it is per LINE —
+ * streamed deltas never come through here (they go via stream_text).
+ *
+ * A payload too long for that buffer is not a line, it is a BODY
+ * (sys_text: /help, an error's text — kilobytes). Framing a copy of it
+ * would CLIP the help screen to the line cap, so the body rides as it
+ * came (boba normalizes LF->CRLF inside it) and only its terminator is
+ * framed, as its own message — which is exactly the two posts the
+ * pre-sink sys_text made. */
+static void stream_end_all(NmChatApp *app); /* defined with the streams */
+
+static void sysout_transcript_emit(void *userdata, const char *bytes,
+                                   size_t len)
+{
+    NmChatApp *app = userdata;
+    /* MAX payload bytes + CRLF + NUL: the bound below matches the
+     * buffer, so the framing writes can never touch a byte they do not
+     * own (UBSan reads the arithmetic even when no caller emits that
+     * much). */
+    char buf[NM_SYSOUT_LINE_MAX + 3];
+    if (len <= sizeof(buf) - 3) {
+        if (len)
+            memcpy(buf, bytes, len);
+        buf[len] = '\r';
+        buf[len + 1] = '\n';
+        buf[len + 2] = '\0';
+        send_msg(app, tui_msg_stream_text(-1, buf, len + 2));
+        return;
+    }
+    send_msg(app, tui_msg_stream_text(-1, bytes, len));
+    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
+}
+
+/* A notice must not post into a live region (it would land in the middle
+ * of the answer it annotates), so the carrier's "close the run" is the
+ * app's own stream-end. */
+static void sysout_transcript_close(void *userdata)
+{
+    stream_end_all((NmChatApp *)userdata);
+}
+
+/* System-stream writers: thin wrappers over the app's carrier, so the
+ * cap, the empty-line rule and the notice's ordering live in ONE place
+ * (sysout.h) and both entry paths get the same policy. Routing through
+ * the v-forms is deliberate: a va_list may not be passed to a variadic
+ * function. */
 static void sys_line(NmChatApp *app, const char *fmt, ...)
 {
     if (!app)
         return;
-    char buf[SYS_LINE_BUF];
     va_list ap;
     va_start(ap, fmt);
-    int n = vsnprintf(buf, sizeof(buf) - 2, fmt, ap);
+    nm_sysout_vline(&app->sysout, fmt, ap);
     va_end(ap);
-    if (n <= 0)
-        return;
-    size_t len = (size_t)n >= sizeof(buf) - 2 ? sizeof(buf) - 3 : (size_t)n;
-    buf[len] = '\r';
-    buf[len + 1] = '\n';
-    buf[len + 2] = '\0';
-    send_msg(app, tui_msg_stream_text(-1, buf, len + 2));
 }
 
-/* System-stream multi-line body (error text, help). boba normalizes
- * LF->CRLF inside the body; one trailing terminator is framed here. */
+/* System-stream multi-line body (error text, help): the body as written,
+ * then the terminator that starts the next writer on a fresh line. */
 static void sys_text(NmChatApp *app, const char *s)
 {
-    if (!app || !s || !*s)
+    if (!app)
         return;
-    size_t len = strlen(s);
-    send_msg(app, tui_msg_stream_text(-1, s, len));
-    /* Final terminator so the next writer starts on a fresh line. */
-    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
+    nm_sysout_text(&app->sysout, s);
 }
 
 /* One blank transcript row: the separator that follows content/reasoning
- * streaming (the "blank line following" invariant). Emitted on the
- * system stream, so boba frames the terminator (raw mode needs CRLF). */
+ * streaming (the "blank line following" invariant). */
 static void sys_blank(NmChatApp *app)
 {
     if (!app)
         return;
-    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
+    nm_sysout_blank(&app->sysout);
 }
 
 /* The one line that says there is no model for this provider and how to
@@ -1331,6 +1374,13 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         return NULL;
     app->base.type = NM_CHAT_APP_TYPE_ID;
 
+    /* The system-stream carrier (see the writers above): every notice,
+     * command reply and error line this app prints goes through it, so
+     * the line policy is one implementation shared with ask mode. */
+    app->sysout.emit = sysout_transcript_emit;
+    app->sysout.close_run = sysout_transcript_close;
+    app->sysout.userdata = app;
+
     /* The model is the CALLER's resolved value (main.c resolves it from
      * the store, provider-scoped). No catalog-first-entry fallback: a
      * model id belongs to ONE provider, so guessing from a different
@@ -1600,11 +1650,16 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
  * capture: `/context` still reports routing with the key off.
  *
  * Called from inside nm_agent_step at the round's finish, which is
- * BEFORE the round's own text is committed — so close the agent streams
- * first (stream_end_all, idempotent, the same thing on_tool's START
- * does before it draws a panel). A RAW line posted into a live region
- * lands in the middle of the answer it is supposed to sit under. Then
- * the step's flush commits it with the rest of that step's units. */
+ * BEFORE the round's own text is committed — so the notice closes the
+ * agent's streams first (what nm_sysout_notice's close_run is,
+ * idempotent, the same thing on_tool's START does before it draws a
+ * panel): a RAW line posted into a live region lands in the middle of
+ * the answer it is supposed to sit under. And it closes ITSELF with a
+ * blank row, because a tool round's own panel is flushed right after
+ * the notice, in the same step — glued to it, the panel header reads as
+ * part of the notice. Both halves are the notice's contract, not this
+ * call site's memory (sysout.h). The step's flush then commits the lot
+ * with the rest of that step's units. */
 void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
 {
     (void)userdata;
@@ -1617,15 +1672,7 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
     char line[SYS_LINE_BUF];
     if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
         return;
-    stream_end_all(app);
-    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, line);
-    /* One blank line CLOSES the notice (principle 4), like every other
-     * block on the system stream. A notice sharing its last row with
-     * what follows is not a note, it is a garbled line — and a tool
-     * round makes that the normal case: the round's own panel is
-     * flushed right after the notice, in this same step, so without the
-     * blank the `🚀 run_command` header starts on the notice's heels. */
-    sys_blank(app);
+    nm_sysout_notice(&app->sysout, NM_SGR_TOOL "%s" NM_SGR_RESET, line);
     tui_runtime_wakeup(app->rt);
 }
 

@@ -152,6 +152,8 @@ nevermore_SOURCES = \
     skills.c \
     source.h \
     source.c \
+    sysout.h \
+    sysout.c \
     tools_internal.h \
     tools.c \
     tools_file.c \

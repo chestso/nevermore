@@ -31,6 +31,7 @@ check_PROGRAMS = \
     test_image_codec \
     test_reminder \
     test_file_ledger \
+    test_sysout \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -371,6 +372,15 @@ test_reminder_CFLAGS = $(TEST_CFLAGS)
 test_file_ledger_SOURCES = test_file_ledger.c ../src/file_ledger.c
 test_file_ledger_CFLAGS = $(TEST_CFLAGS)
 
+# System line: the carrier seam both entry paths share (the TUI's
+# transcript post and ask mode's stderr). Pure C — the sink IS the
+# injection point, so the test's sink is a memory buffer and no boba, no
+# terminal and no pipe is involved. Pins the composition cap, the
+# empty-line rule, the terminator policy living in the sink, and the
+# notice's order: close the run, print, close the block.
+test_sysout_SOURCES = test_sysout.c ../src/sysout.c
+test_sysout_CFLAGS = $(TEST_CFLAGS)
+
 # Fence token highlighter: pure C (no boba, no I/O) — the resumable
 # per-line tokenizer behind the labeled-fence body styling (IR step
 # 4b). Unit-tests every language's token classes, cross-line block
@@ -391,6 +401,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
+    ../src/sysout.c \
     $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)

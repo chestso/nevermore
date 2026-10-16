@@ -421,7 +421,11 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   requests and each is routed on its own. The notice line's text is one
   spelling for both entry paths (`nm_agent_round_meta_text`: the TUI's
   system-stream line, ask mode's dim stderr line) — the same reason the
-  no-model hint has one — and it rounds a savings figure for reading
+  no-model hint has one — and so is its BLOCK: both print it through
+  `nm_sysout_notice` (`src/sysout.h`), which closes the carrier's live
+  run first and the notice itself with a blank row, so a routed round's
+  tool panel can never start on the notice's heels on one carrier and
+  not the other. And it rounds a savings figure for reading
   while `/context` and the wire dump keep the header verbatim.
   **The `prism_notice` key gates the LINE, not the capture**: the hook,
   the round's meta and `/context` ignore it, because the setting is the
@@ -1156,8 +1160,15 @@ stream messages; boba is the only caller of
   stays a wire concept.
 - **One seam**: `sys_line` / `sys_text` write the system stream;
   `stream_delta` writes content/reasoning. Nothing else calls
-  `tui_msg_stream_text` — grep the file; it should appear only inside
-  those helpers. boba normalizes LF→CRLF and drops framing bytes.
+  `tui_msg_stream_text` — grep the file; it appears only inside those
+  helpers (and `sys_tool_result`, which posts a reused multi-line buffer
+  whole). The three helpers are thin wrappers over the app's `NmSysOut`
+  carrier (`src/sysout.{h,c}` — pure C, `test_sysout`), whose sink
+  posts one RAW unit per line CRLF-framed; ask mode's stderr is a sink
+  of the same shape (`main.c`), which is why the composition cap, the
+  empty-line rule, a notice's close-run/print/close-the-block ordering
+  and the blank row are ONE implementation for both entry paths. boba
+  normalizes LF→CRLF and drops framing bytes.
 - **When it prints**: the commit pass runs at the top of every
   `tui_runtime_flush` and coalesces every unit finalized since the
   last flush into ONE `transcript_write`. Flushing stays at the app's
