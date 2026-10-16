@@ -22,6 +22,7 @@
 #include "context.h"
 
 #include "reminder.h"
+#include "skills.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -912,6 +913,33 @@ NmContext *nm_context_new(const char *dir, int vision)
 
     free(cand);
     return c;
+}
+
+/* The Agent Skills menu: appended at the END of the assembled prompt
+ * (after </project_context>), which is what makes it free to add — the
+ * <env> block's git splice offset and the vision clause's slot both sit
+ * before it, so nothing moves. One shot: a menu that changed mid-chat
+ * would be a new prefix, and the prefix is the provider's cache (see
+ * context.h). The block comes from skills.c already, formatted and
+ * capped; this is the placement, not a second formatter. */
+int nm_context_set_skills(NmContext *c, const struct NmSkills *skills)
+{
+    if (!c)
+        return -1;
+    char *menu = nm_skills_menu((const NmSkills *)skills);
+    if (!menu)
+        return 0; /* nothing discovered: no block at all */
+    /* The same trust boundary the project block passes through: the
+     * descriptions in this block came out of files, and only the harness
+     * writes a reminder, so a SKILL.md that documents the tag arrives
+     * escaped. */
+    NmReminderBuf safe;
+    nm_reminder_buf_init(&safe);
+    nm_reminder_sanitize(menu, strlen(menu), &safe);
+    int rc = append_str(c, safe.data ? safe.data : menu);
+    nm_reminder_buf_free(&safe);
+    free(menu);
+    return rc;
 }
 
 void nm_context_free(NmContext *c)

@@ -29,6 +29,7 @@
 #endif
 
 #include "context.h"
+#include "skills.h"
 #include "test_helpers.h"
 
 /* ---------------------------------------------------------------- */
@@ -814,6 +815,115 @@ static void test_env_git_garbled_output_is_gitless(void)
     nm_context_free(c);
 }
 
+/* ---------------------------------------------------------------- */
+/* The Agent Skills menu                                             */
+/* ---------------------------------------------------------------- */
+
+/* A scratch registry: one skill under the project tier, and the user
+ * tier pointed at a directory this run never creates (setup_tree's own
+ * global dir is for AGENTS.md; skills have their own seam). */
+static NmSkills *make_skills(const char *proj, const char *name,
+                             const char *desc)
+{
+    char none[700];
+    snprintf(none, sizeof(none), "%s/no-user-skills", proj);
+    nm_skills_set_global_dir(none);
+
+    char dir[900], md[1000];
+    snprintf(dir, sizeof(dir), "%s/.agents/skills/%s", proj, name);
+    mkdir_p(dir);
+    snprintf(md, sizeof(md), "%s/SKILL.md", dir);
+    char body[2048];
+    snprintf(body, sizeof(body), "---\nname: %s\ndescription: %s\n---\n\n"
+                                 "Do the thing.\n",
+             name, desc);
+    write_file_at(md, body);
+    return nm_skills_new(proj);
+}
+
+/* The block rides the prompt, AFTER the project context, and a NULL or
+ * empty registry adds nothing at all (no empty tag to confuse the
+ * model). */
+static void test_skills_menu_lands_after_project_block(void)
+{
+    char proj[600];
+    setup_tree("skills-none", proj, sizeof(proj));
+
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_context_set_skills(c, NULL), 0);
+    ASSERT_NULL(strstr(nm_context_system_prompt(c), "<skills>"));
+
+    NmSkills *s = make_skills(proj, "pdf", "Extract PDF text.");
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(nm_context_set_skills(c, s), 0);
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp, "<skills>"));
+    ASSERT_NOT_NULL(strstr(sp, "- pdf: Extract PDF text."));
+    ASSERT_NOT_NULL(strstr(sp, "load_skill"));
+    /* The placement: the menu is the prompt's LAST block, after
+     * </project_context>, which is what keeps the git section's splice
+     * offset (inside <env>) untouched by it. */
+    ASSERT_TRUE(strstr(sp, "</project_context>") < strstr(sp, "<skills>"));
+    nm_skills_free(s);
+    nm_context_free(c);
+}
+
+/* A description that documents a reminder tag arrives escaped, exactly
+ * like a context file's body: only the harness writes a reminder. The
+ * check is BOUNDED TO THE BLOCK — the base prompt's own reminder clause
+ * names the tag in both spellings, so a whole-prompt search says
+ * nothing either way. */
+static void test_skills_menu_goes_through_the_escape(void)
+{
+    char proj[600];
+    setup_tree("skills-escape", proj, sizeof(proj));
+    NmSkills *s = make_skills(proj, "tagger",
+                              "Explains <system-reminder> tags.");
+    ASSERT_NOT_NULL(s);
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_EQ(nm_context_set_skills(c, s), 0);
+    const char *sp = nm_context_system_prompt(c);
+    const char *block = strstr(sp, "<skills>");
+    ASSERT_NOT_NULL(block);
+    const char *end = strstr(block, "</skills>");
+    ASSERT_NOT_NULL(end);
+    size_t n = (size_t)(end - block);
+    char *region = malloc(n + 1);
+    ASSERT_NOT_NULL(region);
+    memcpy(region, block, n);
+    region[n] = '\0';
+    ASSERT_NOT_NULL(strstr(region, "&lt;system-reminder>"));
+    ASSERT_NULL(strstr(region, "<system-reminder>"));
+    free(region);
+    nm_skills_free(s);
+    nm_context_free(c);
+}
+
+/* The env block's git section still splices correctly with a menu
+ * appended after it (the two positions must not fight over the
+ * buffer). */
+static void test_skills_menu_and_git_section_coexist(void)
+{
+    char proj[600];
+    setup_tree("skills-git", proj, sizeof(proj));
+    NmSkills *s = make_skills(proj, "pdf", "Extract PDF text.");
+    NmContext *c = nm_context_new(proj, 0);
+    ASSERT_EQ(nm_context_set_skills(c, s), 0);
+    ASSERT_EQ(nm_context_env_apply_git(
+                  c, "NM_BRANCH_MARKER\nmain\nNM_STATUS_MARKER\n"
+                     "NM_COMMITS_MARKER\nabc123 thing\n"),
+              0);
+    const char *sp = nm_context_system_prompt(c);
+    ASSERT_NOT_NULL(strstr(sp, "Current branch: main"));
+    ASSERT_NOT_NULL(strstr(sp, "<skills>"));
+    /* The git section sits inside <env>, the menu outside it. */
+    ASSERT_TRUE(strstr(sp, "Current branch: main") < strstr(sp, "</env>"));
+    ASSERT_TRUE(strstr(sp, "</env>") < strstr(sp, "<skills>"));
+    nm_skills_free(s);
+    nm_context_free(c);
+}
+
 int main(void)
 {
     printf("test_context:\n");
@@ -844,5 +954,8 @@ int main(void)
     RUN_TEST(test_env_git_clean_status);
     RUN_TEST(test_env_git_status_is_capped);
     RUN_TEST(test_env_git_garbled_output_is_gitless);
+    RUN_TEST(test_skills_menu_lands_after_project_block);
+    RUN_TEST(test_skills_menu_goes_through_the_escape);
+    RUN_TEST(test_skills_menu_and_git_section_coexist);
     TEST_SUMMARY();
 }

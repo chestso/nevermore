@@ -145,6 +145,17 @@ const char *nm_context_env_git_command(void);
  * calls it once. Returns 0, or -1 on OOM. */
 int nm_context_env_apply_git(NmContext *c, const char *output);
 
+/* Set the Agent Skills menu: append the <skills> block to the assembled
+ * prompt. `skills` may be NULL or empty, which appends nothing (the
+ * guide's rule: no catalog and no instructions when nothing was found).
+ * The block sits at the END of the prompt — after </project_context> —
+ * so it moves no recorded splice offset, and it is decided once at
+ * construction: a menu that changed mid-chat would throw the provider's
+ * cached prefix away, which is why there is no setter beyond this one.
+ * Returns 0, or -1 on allocation failure. */
+struct NmSkills;
+int nm_context_set_skills(NmContext *c, const struct NmSkills *skills);
+
 /* The base prompt with no context files (exposed for the tests and
  * for callers that want the plain text). */
 const char *nm_context_base_system_prompt(void);
