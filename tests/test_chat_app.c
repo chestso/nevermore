@@ -8075,6 +8075,106 @@ static void test_prism_notice_off_silences_only_the_line(void)
     close(lfd);
 }
 
+/* The Agent Skills round trip on the real transcript: the menu is what
+ * the model read, load_skill's body is what it got, and BOTH are
+ * visible — the menu in the request the wire carried, the instructions
+ * in the transcript the human watched. This is the transparency claim
+ * pinned end to end: a skill's instructions arrive as a TOOL RESULT, so
+ * they show like any other tool output, and the skill's own directory
+ * rides the same result (the body's relative file references resolve
+ * from there). The request side pins the other half of progressive
+ * disclosure: the menu names the description and never carries a body. */
+static void test_load_skill_round_shows_the_body(void)
+{
+    char fixture[512];
+    snprintf(fixture, sizeof(fixture), "%s/skills-roundtrip",
+             test_scratch_dir());
+    char skill[700], md[800];
+    snprintf(skill, sizeof(skill), "%s/reader", fixture);
+    chat_mkdir(fixture);
+    chat_mkdir(skill);
+    snprintf(md, sizeof(md), "%s/SKILL.md", skill);
+    FILE *f = fopen(md, "wb");
+    ASSERT_NOT_NULL(f);
+    if (f) {
+        fputs("---\nname: reader\ndescription: Reads the fixture.\n---\n\n"
+              "# Reader\n\nOpen the fixture file.\n",
+              f);
+        fclose(f);
+    }
+    nm_skills_set_global_dir(fixture);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"load_skill\",\"arguments\":"
+        "\"{\\\"name\\\":\\\"reader\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "use the reader skill");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    /* The plan row, then the result in the one shape every tool uses. */
+    ASSERT_TRUE(strstr(clean, "load_skill") != NULL);
+    ASSERT_TRUE(strstr(clean, "Loaded skill 'reader'") != NULL);
+    ASSERT_TRUE(strstr(clean, "Open the fixture file.") != NULL);
+    ASSERT_TRUE(strstr(clean, "Skill directory:") != NULL);
+    /* The frontmatter was stripped: the model reads instructions, and
+     * the description it already saw in the menu is not repeated. */
+    ASSERT_NULL(strstr(clean, "description: Reads the fixture."));
+    ASSERT_TRUE(strstr(clean, "all done") != NULL);
+    free(clean);
+
+    /* Progressive disclosure, pinned where it lives: the MENU carries
+     * metadata only — a body never rides the prompt — while the body
+     * rides the CONVERSATION from the round that loaded it (round 2's
+     * request is what the canned server captured, and it holds the tool
+     * result). */
+    const char *menu = strstr(g_request, "<skills>");
+    ASSERT_NOT_NULL(menu);
+    const char *menu_end = strstr(menu, "</skills>");
+    ASSERT_NOT_NULL(menu_end);
+    size_t mlen = (size_t)(menu_end - menu);
+    char *block = malloc(mlen + 1);
+    ASSERT_NOT_NULL(block);
+    memcpy(block, menu, mlen);
+    block[mlen] = '\0';
+    ASSERT_NOT_NULL(strstr(block, "reader"));
+    ASSERT_NULL(strstr(block, "Open the fixture file."));
+    free(block);
+    ASSERT_NOT_NULL(strstr(g_request, "Open the fixture file."));
+    ASSERT_NOT_NULL(strstr(g_request, "\"load_skill\""));
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(md);
+    {
+        char none[512];
+        snprintf(none, sizeof(none), "%s/no-skills", test_scratch_dir());
+        nm_skills_set_global_dir(none);
+    }
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -8259,6 +8359,7 @@ int main(void)
     RUN_TEST(test_ps_without_jobs);
     RUN_TEST(test_skills_reports_none_found);
     RUN_TEST(test_skills_lists_found_skills);
+    RUN_TEST(test_load_skill_round_shows_the_body);
 #ifdef _WIN32
     RUN_TEST(test_windows_job_source_kind);
 #else
