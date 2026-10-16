@@ -116,9 +116,13 @@ struct ServerScript
     int n_rounds;
     int port;
     int fd;
-    int delay_us;     /* between events of each round (0 = none) */
-    int stall_at_end; /* keep the last round's connection open (no
-                       * terminating chunk) until the peer closes */
+    int delay_us;           /* between events of each round (0 = none) */
+    int stall_at_end;       /* keep the last round's connection open (no
+                             * terminating chunk) until the peer closes */
+    const char *prism_head; /* extra response-head lines, in wire form
+                             * (CRLF-terminated) — a routed round's
+                             * `X-Prism-*` headers. NULL = the direct
+                             * case. */
 
     /* Rendezvous pacing — the deterministic replacement for delay_us
      * for tests that need ONE event per client step. With `paced` set,
@@ -228,11 +232,13 @@ static void *chat_server_thread(void *arg)
             continue;
         }
 
-        char head[128];
+        char head[256];
         int hl = snprintf(head, sizeof(head),
                           "HTTP/1.1 200 OK\r\n"
                           "Content-Type: text/event-stream\r\n"
-                          "Transfer-Encoding: chunked\r\n\r\n");
+                          "%s"
+                          "Transfer-Encoding: chunked\r\n\r\n",
+                          sc->prism_head ? sc->prism_head : "");
         send(cfd, head, (size_t)hl, 0);
         size_t bl = strlen(body);
         size_t off = 0;
@@ -8031,6 +8037,77 @@ static void test_prism_notice_prints_under_a_routed_round(void)
     close(lfd);
 }
 
+/* The notice is a BLOCK, not a prefix: one blank line closes it, the
+ * same separator every other system-stream block ends with. A routed
+ * TOOL round is the shape that shows the difference — the round streams
+ * its text, the notice lands at the round's finish, and that SAME
+ * round's tool panel is flushed right after it, inside one step. With no
+ * closing blank the panel header starts on the notice's heels and reads
+ * as part of it. Both canned rounds carry the routing headers in the
+ * response head (the streaming case, docs/HYPER-API.md §3.5.2). */
+static void test_prism_notice_closes_its_own_block(void)
+{
+    FILE *f = fopen(FIXTURE_PATH, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("the quick brown fox\n", f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.prism_head = "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                    "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"let me edit\","
+        "\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
+        "\"type\":\"function\",\"function\":{\"name\":\"edit_file\","
+        "\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE_PATH
+        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
+        "\\\"slow red\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"edited the file\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "change quick to slow");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    const char *answer = strstr(clean, "let me edit");
+    const char *notice =
+        strstr(clean, "prism: routed to glm-5.3-flash (GLM 5.3 Flash)");
+    const char *plan = strstr(clean, "edit_file");
+    ASSERT_NOT_NULL(answer);
+    ASSERT_NOT_NULL(notice);
+    ASSERT_NOT_NULL(plan);
+    /* The round's own bookends: the notice sits UNDER the text the round
+     * streamed and ABOVE the tool call that same round made — it
+     * describes the round that just answered, never the next one. */
+    ASSERT_TRUE(answer < notice);
+    ASSERT_TRUE(notice < plan);
+    /* And it stands alone at both ends: no neighbour shares its rows. */
+    ASSERT_TRUE(has_blank_row(answer, notice));
+    ASSERT_TRUE(has_blank_row(notice, plan));
+    free(clean);
+
+    remove(FIXTURE_PATH);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The gate: `prism_notice off` silences the LINE and nothing else —
  * /context still reports the routing, because the key owns the notice,
  * not the capture (conf.h). */
@@ -8226,6 +8303,7 @@ int main(void)
     RUN_TEST(test_blank_line_inside_a_run_renders);
     RUN_TEST(test_context_reports_the_prism_routed_model);
     RUN_TEST(test_prism_notice_prints_under_a_routed_round);
+    RUN_TEST(test_prism_notice_closes_its_own_block);
     RUN_TEST(test_prism_notice_off_silences_only_the_line);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);

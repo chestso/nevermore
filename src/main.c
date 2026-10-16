@@ -238,7 +238,10 @@ static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
     char line[512];
     if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
         return;
-    fprintf(stderr, "\033[2m%s\033[0m\n", line);
+    /* One blank line closes the notice, as the tool block's does: two
+     * blocks on one row read as one garbled line, and the next thing on
+     * stderr — a `[tool]` plan or another notice — starts fresh. */
+    fprintf(stderr, "\033[2m%s\033[0m\n\n", line);
 }
 
 /* The registry check config.c validates provider names through (it

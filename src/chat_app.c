@@ -1619,6 +1619,13 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
         return;
     stream_end_all(app);
     sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, line);
+    /* One blank line CLOSES the notice (principle 4), like every other
+     * block on the system stream. A notice sharing its last row with
+     * what follows is not a note, it is a garbled line — and a tool
+     * round makes that the normal case: the round's own panel is
+     * flushed right after the notice, in this same step, so without the
+     * blank the `🚀 run_command` header starts on the notice's heels. */
+    sys_blank(app);
     tui_runtime_wakeup(app->rt);
 }
 
