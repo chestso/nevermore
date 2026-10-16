@@ -1619,6 +1619,16 @@ static void report_family_skips(NmChatApp *app)
     app->skipped_families = now;
     if (!fresh)
         return;
+    /* Deliberately a bare sys_line, NOT nm_sysout_notice: this reporter
+     * runs after every step (a latch can land from any connect in the
+     * process — the catalog fetch's walk, a web_search retry), and a
+     * step is what streams the answer. The notice's close_run would then
+     * end the content stream mid-run and split one paragraph into two
+     * blocks (the ARCHITECTURE warning about a stream_end on a live
+     * run), and the closing blank row would post into that live region
+     * too. The walk's OWN notice (nm_chat_app_on_notice, agent.c at
+     * connect time, before any byte of the round streams) has no such
+     * hazard and is a notice. */
     sys_line(app,
              NM_SGR_TOOL
              "connect: %s did not answer — skipping it for this session "
@@ -1627,17 +1637,21 @@ static void report_family_skips(NmChatApp *app)
 }
 
 /* The agent's connect-walk notice (nm_agent_on_notice): the seam that
- * turns an abandoned address into a system-stream line. Called from
- * inside nm_agent_step; the step's flush commits it with the rest of
- * the step's units. The skip LATCH is reported by nm_chat_app_step
- * (it lands later, when a connect completes). */
+ * turns an abandoned address into a system-stream LINE — a notice, so it
+ * closes the run above it and itself with a blank row below. It fires at
+ * connect time, before any byte of the round streams (which is what
+ * makes the close safe here; the LATCH reporter, which runs after every
+ * step, is not — see report_family_skips). Called from inside
+ * nm_agent_step; the step's flush commits it with the rest of the step's
+ * units. The skip LATCH is reported by nm_chat_app_step (it lands later,
+ * when a connect completes). */
 void nm_chat_app_on_notice(const char *msg, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
     if (!app || !msg || !*msg)
         return;
-    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    nm_sysout_notice(&app->sysout, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1681,7 +1695,10 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
  * text the model received. The TOOL channel is already on screen (it
  * rides the result's body, styled by sys_tool_result), so only the
  * USER channel needs a line of its own; printing it twice would be its
- * own kind of lie. */
+ * own kind of lie. A line of its OWN in the block sense too: it fires
+ * while the next round's request is being built, so the next thing on
+ * screen is that round's answer (or a tool panel) — glued, the harness's
+ * speech reads as the first line of what it introduces. */
 void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
                              void *userdata)
 {
@@ -1691,21 +1708,25 @@ void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
         return;
     if (channel != NM_REMINDER_CHANNEL_USER)
         return;
-    sys_line(app, NM_SGR_REMINDER "reminder (%s): %s" NM_SGR_RESET,
-             name ? name : "?", text);
+    nm_sysout_notice(&app->sysout, NM_SGR_REMINDER "reminder (%s): %s" NM_SGR_RESET,
+                     name ? name : "?", text);
     tui_runtime_wakeup(app->rt);
 }
 
 /* A warning for the USER (the model is not told): today, untrusted
  * output tried to forge a reminder tag and the trust boundary
- * neutralized it. Red, and its own line — this is not progress news. */
+ * neutralized it. Red, and its OWN block — this is not progress news,
+ * and it is not a panel row either: it fires between a tool's plan rows
+ * and its result body (agent.c sanitizes before on_tool's END), so with
+ * no closing row it reads as one more argument line of the very output
+ * it is warning about. The body keeps its elbow. */
 void nm_chat_app_on_warning(const char *msg, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
     if (!app || !msg || !*msg)
         return;
-    sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, msg);
+    nm_sysout_notice(&app->sysout, NM_SGR_ERROR "%s" NM_SGR_RESET, msg);
     tui_runtime_wakeup(app->rt);
 }
 

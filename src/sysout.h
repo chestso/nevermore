@@ -60,8 +60,9 @@ typedef struct NmSysOut
 /* Compose the line (printf grammar, capped at NM_SYSOUT_LINE_MAX) and
  * emit it. A line that composes to zero bytes emits nothing — a
  * half-line is not a line, and an empty emit would be a phantom blank
- * row. */
-void nm_sysout_line(NmSysOut *out, const char *fmt, ...);
+ * row. (No variadic form: a va_list may not be passed to a variadic
+ * function, so every carrier that wants printf-style calls owns its own
+ * va_start/va_end wrapper — chat_app's sys_line is the model.) */
 void nm_sysout_vline(NmSysOut *out, const char *fmt, va_list ap);
 
 /* A multi-line body (an error's text, /help): the bytes as written,

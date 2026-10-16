@@ -253,7 +253,7 @@ static void ask_on_notice(const char *msg, void *userdata)
     (void)userdata;
     if (!msg || !*msg)
         return;
-    nm_sysout_line(&g_ask_out, "\033[2m%s\033[0m", msg);
+    nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", msg);
 }
 
 /* A reminder the harness injected (nm_agent_on_reminder). TRANSPARENCY:
@@ -270,8 +270,8 @@ static void ask_on_reminder(const char *name, const char *text, int channel,
         return;
     if (channel != NM_REMINDER_CHANNEL_USER)
         return;
-    nm_sysout_line(&g_ask_out, "\033[2mreminder (%s): %s\033[0m",
-                   name ? name : "?", text);
+    nm_sysout_notice(&g_ask_out, "\033[2mreminder (%s): %s\033[0m",
+                     name ? name : "?", text);
 }
 
 /* A warning for the USER — the model is not told (nm_agent_on_warning):
@@ -285,7 +285,7 @@ static void ask_on_warning(const char *msg, void *userdata)
     (void)userdata;
     if (!msg || !*msg)
         return;
-    nm_sysout_line(&g_ask_out, "\033[2m%s\033[0m", msg);
+    nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", msg);
 }
 
 /* A round Hyper's Prism model router answered: the same notice the TUI

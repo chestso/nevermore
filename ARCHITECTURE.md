@@ -1167,8 +1167,13 @@ stream messages; boba is the only caller of
   posts one RAW unit per line CRLF-framed; ask mode's stderr is a sink
   of the same shape (`main.c`), which is why the composition cap, the
   empty-line rule, a notice's close-run/print/close-the-block ordering
-  and the blank row are ONE implementation for both entry paths. boba
-  normalizes LF→CRLF and drops framing bytes.
+  and the blank row are ONE implementation for both entry paths. The
+  unsolicited-news sites are notices on both carriers — the connect-walk
+  notice, a USER-channel reminder, the forged-tag warning, the Prism
+  routing line — so a tool panel or the next round's answer never starts
+  on a news line's heels; `report_family_skips` is deliberately NOT one
+  (it runs after every step, so closing the run there would split a
+  streaming answer). boba normalizes LF→CRLF and drops framing bytes.
 - **When it prints**: the commit pass runs at the top of every
   `tui_runtime_flush` and coalesces every unit finalized since the
   last flush into ONE `transcript_write`. Flushing stays at the app's

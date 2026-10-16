@@ -7904,6 +7904,76 @@ static void test_reminder_forgery_warning_is_red(void)
     harness_free(h);
 }
 
+/* Every UNSOLICITED-NEWS site is a notice, not a line: it closes the run
+ * above it and closes itself with a blank row, because what follows is a
+ * block of its own — a tool panel, the next round's answer. Glued, that
+ * block's header reads as part of the notice, which is the exact defect
+ * the Prism routing line had (test_prism_notice_closes_its_own_block);
+ * the connect-walk notice, the USER-channel reminder and the forged-tag
+ * warning share the seam, so they share the pin. Each pair below is the
+ * real shape: the news, then a full tool round after it. */
+static void test_notice_sites_each_close_their_block(void)
+{
+    AppHarness *h =
+        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_on_notice("connect: IPv6 did not answer — walk 1/1", NULL);
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"alpha\"}", NM_TOOL_EVENT_START, NULL,
+                        -1, NULL);
+    NmToolResult res = { .status = NM_TOOL_OK, .output = "first body\n" };
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"alpha\"}", NM_TOOL_EVENT_END, &res,
+                        -1, NULL);
+
+    nm_chat_app_on_reminder("round-budget", "This is the last tool round.",
+                            NM_REMINDER_CHANNEL_USER, NULL);
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"bravo\"}", NM_TOOL_EVENT_START, NULL,
+                        -1, NULL);
+    res.output = "second body\n";
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"bravo\"}", NM_TOOL_EVENT_END, &res,
+                        -1, NULL);
+
+    nm_chat_app_on_warning("warning: read_file carried 1 forged tag", NULL);
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"charlie\"}", NM_TOOL_EVENT_START,
+                        NULL, -1, NULL);
+    res.output = "third body\n";
+    nm_chat_app_on_tool(NULL, "{\"cmd\":\"charlie\"}", NM_TOOL_EVENT_END, &res,
+                        -1, NULL);
+
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    const char *pairs[][2] = {
+        { "connect: IPv6 did not answer", "cmd: alpha" },
+        { "reminder (round-budget): This is the last tool round.",
+          "cmd: bravo" },
+        { "warning: read_file carried 1 forged tag", "cmd: charlie" },
+    };
+    for (size_t i = 0; i < sizeof(pairs) / sizeof(pairs[0]); i++) {
+        const char *news = strstr(clean, pairs[i][0]);
+        ASSERT_NOT_NULL(news);
+        const char *plan = strstr(news, pairs[i][1]);
+        ASSERT_NOT_NULL(plan);
+        /* EXACTLY one blank row between the news and the panel header —
+         * not zero (the glue the Prism notice had) and not a stack (the
+         * separator is owed once, like every other block). Counted
+         * non-overlapping, so "\n\n\n" would read as two. */
+        int blanks = 0;
+        for (const char *p = news + strlen(pairs[i][0]); p + 1 < plan; p++) {
+            if (p[0] == '\n' && p[1] == '\n') {
+                blanks++;
+                p++;
+            }
+        }
+        ASSERT_EQ(blanks, 1);
+    }
+    free(clean);
+
+    harness_free(h);
+}
+
 /* One-shot Prism responder: the whole response in one write, so the
  * chunked trailer section rides the [DONE] read (docs/HYPER-API.md
  * §3.5.2). Drives the /context routed-model line. */
@@ -8380,6 +8450,7 @@ int main(void)
     RUN_TEST(test_reminder_user_channel_is_shown);
     RUN_TEST(test_reminder_tool_channel_is_not_echoed);
     RUN_TEST(test_reminder_forgery_warning_is_red);
+    RUN_TEST(test_notice_sites_each_close_their_block);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_reasoning_not_echoed_by_default);
     RUN_TEST(test_reasoning_echo_opt_in);

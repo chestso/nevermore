@@ -22,12 +22,25 @@
  *   - a multi-line body is the bytes as written, then the row.
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "sysout.h"
 #include "test_helpers.h"
+
+/* The line writer is the v-form, so a printf-style call needs a local
+ * va_start wrapper — exactly what chat_app's sys_line is (a va_list may
+ * not be passed to a variadic function). Building it here is also the
+ * test's own proof that the wrapper shape works. */
+static void line(NmSysOut *o, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    nm_sysout_vline(o, fmt, ap);
+    va_end(ap);
+}
 
 #define SINK_MAX_LINES 16
 #define SINK_LINE_CAP  (NM_SYSOUT_LINE_MAX + 8)
@@ -113,7 +126,7 @@ static void test_line_is_the_composed_bytes(void)
 {
     sink_arm();
     NmSysOut o = sink_out();
-    nm_sysout_line(&o, "prism: routed to %s (Qwen3.8-Flash)", "qwen3.8-flash");
+    line(&o, "prism: routed to %s (Qwen3.8-Flash)", "qwen3.8-flash");
     ASSERT_EQ(g_sink.n, 1);
     ASSERT_EQ(g_sink.dropped, 0);
     ASSERT_STR_EQ(g_sink.line[0],
@@ -131,7 +144,7 @@ static void test_an_empty_line_emits_nothing(void)
 {
     sink_arm();
     NmSysOut o = sink_out();
-    nm_sysout_line(&o, "%s", "");
+    line(&o, "%s", "");
     ASSERT_EQ(g_sink.n, 0);
     /* Not even a row: a half-line is not a line. */
     ASSERT_EQ(g_sink.order_n, 0);
@@ -187,7 +200,7 @@ static void test_the_cap_clips_the_tail(void)
     char fill[NM_SYSOUT_LINE_MAX * 3];
     memset(fill, 'x', sizeof(fill) - 1);
     fill[sizeof(fill) - 1] = '\0';
-    nm_sysout_line(&o, "%s%d", fill, 42);
+    line(&o, "%s%d", fill, 42);
     ASSERT_EQ(g_sink.n, 1);
     ASSERT_EQ(g_sink.len[0], (size_t)NM_SYSOUT_LINE_MAX - 1);
     ASSERT_EQ(g_sink.line[0][0], 'x');
@@ -219,7 +232,7 @@ static void test_a_carrier_that_cannot_print_is_harmless(void)
 {
     sink_arm();
     NmSysOut none = { NULL, NULL, NULL };
-    nm_sysout_line(&none, "%s", "nothing");
+    line(&none, "%s", "nothing");
     nm_sysout_notice(&none, "%s", "nothing");
     nm_sysout_text(&none, "nothing");
     nm_sysout_blank(&none);

@@ -51,14 +51,6 @@ void nm_sysout_vline(NmSysOut *out, const char *fmt, va_list ap)
     out->emit(out->userdata, buf, len);
 }
 
-void nm_sysout_line(NmSysOut *out, const char *fmt, ...)
-{
-    va_list ap;
-    va_start(ap, fmt);
-    nm_sysout_vline(out, fmt, ap);
-    va_end(ap);
-}
-
 void nm_sysout_vnotice(NmSysOut *out, const char *fmt, va_list ap)
 {
     if (!out || !out->emit || !fmt)
