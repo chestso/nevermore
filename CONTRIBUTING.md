@@ -52,7 +52,10 @@ trigger — which calls the three platform workflows through
 `workflow_call` and publishes what they built: the macOS ZIP, the
 Windows ZIP, the source tarball. The release job also checks that the
 tarball's own `version` stamp agrees with the tag, the trap the first
-coffer release hit. Notes go on afterwards with `gh release edit`.
+coffer release hit. Notes go on afterwards with `gh release edit` — write
+them **one line per paragraph and per bullet**: a release body renders
+newlines as HARD breaks, so pre-wrapped prose comes out broken after
+every line.
 
 - **One tag, one run**: the platform workflows carry no `tags:` trigger;
   a tag push must not double-run them through both the push and the
@@ -161,11 +164,14 @@ missing prerequisite.
   Test what the code DOES.
 - NUL-terminate before `ASSERT_STR_EQ` (Wine's stack garbage differs
   from glibc's).
-- **Pin the cwd** for agent-building tests (`test_chdir_to_scratch`):
-  agent construction reads an `AGENTS.md` from the working directory
-  (the product's discovery feature), so a test run inside a source tree
-  that carries one picks it up — its ~20 KiB shifts the captured wire
-  request, and a checkout without it behaves differently.
+- **Pin every discovery surface** for agent-building tests
+  (`test_chdir_to_scratch` + `nm_skills_set_global_dir` at a path that
+  is never created): agent construction reads an `AGENTS.md` from the
+  working directory AND the user-tier skills directory, both product
+  discovery features. A source tree that carries one (or a dev box with
+  a real `~/.agents/skills/`) adds a `<skills>` menu / ~20 KiB to the
+  captured wire request, and a checkout without them behaves
+  differently. A third discovery surface owes the same pin.
 - **Pin the provider catalog offline** (`test_pin_offline_catalog` +
   `TEST_OFFLINE_CATALOG_PIN_CHECK`): a catalog lookup with no endpoint
   override resolves the provider's DEFAULT base — a real request whose
