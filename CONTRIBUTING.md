@@ -17,6 +17,12 @@ conventions, and the traps that are not obvious from any single file.
   tree is part of the gate, not a periodic cleanup; re-run `make check`
   afterwards if formatting touched anything.
 - `make bear` — `compile_commands.json` for clangd.
+- `make regen-icon` — re-render `icons/nevermore.ico` (the six sizes,
+  32bpp) from `icons/nevermore.svg`: `rsvg-convert` per size, then
+  `icotool` to combine, the same recipe portty documents. The SVG is
+  the source of truth and the committed `.ico` is the artifact —
+  `src/nevermore.rc` compiles it, so after changing the SVG run this
+  and commit the result. The per-size PNGs stay in the build tree.
 - `make dist-portable` — macOS/Windows only: a self-contained ZIP (the
   binary, the runtime libraries its OS does not ship, the docs, a
   README-PORTABLE.txt). Run it from a build dir configured
@@ -67,6 +73,17 @@ coffer release hit. Notes go on afterwards with `gh release edit`.
   MSYS2, that run fails. The macOS step makes the same proof through
   `otool` (every load command must be `/usr/lib` or `/System/Library`)
   plus `codesign --verify`.
+- **A tracked file the build regenerates makes the tag dirty, and the
+  release is refused**: the version string is `git describe` plus a
+  `-dirty` when a tracked file differs, and the release job accepts
+  only names and `version` files that match the tag. The first `v0.1.0`
+  run died exactly there — `build-aux/ar-lib` was tracked, `autoreconf
+-fi` (autogen.sh) overwrites it with the HOST automake's copy, and the
+  runner's is older than the one the tree carried, so the tarball came
+  out `nevermore-0.1.0-dirty.tar.gz`. A generated aux file stays
+  untracked (`.gitignore` covers `ar-lib` with `compile`, `depcomp`,
+  `install-sh`, `missing`, `test-driver`, …), which is what every
+  sibling repo does.
 
 ## Dependency traps (beyond README's Build section)
 
@@ -430,6 +447,32 @@ table-fence`). Bind BOTH `127.0.0.1` and `::1` (`--both`) —
 - **Portty's `sendln` is CRLF — the wrong driver for a raw-mode TUI**
   (the CR submits, the LF lands in the NEXT input as a real newline).
   Use `send` + a lone `\r`, or tmux `send-keys "text" Enter`.
+
+### The standing matrix (re-run after any transcript-region change)
+
+Bytes through tmux `capture-pane -e`, pixels through portty's
+`screendump`, against the vehicles above — one pass over the paths the
+suite cannot see:
+
+- reasoning / table / fence rendering, a blank line between paragraphs,
+  and the one-line-kind boundaries (prose after a heading or a lone
+  image line);
+- a resize mid-stream, multiline paste, Ctrl+C mid-stream then
+  resubmit;
+- a `/provider` switch plus the next turn, the history round-trip
+  across restarts, 40-column tail wrap;
+- the spinner during connect and send against a stalling peer (and the
+  inactivity error that follows), in all three color tiers: the
+  truecolor pulse in portty, the blink under `TERM=xterm-256color` with
+  `COLORTERM` unset, and the fixed `●` with `spinner_ramp = off`;
+- the connect walk's notice and budget against a black-holed address,
+  the status row's elision ladder, the live `⚡` rate;
+- the reminder panel's block (bytes AND pixels), the file ledger's four
+  cases, an image attach and a vision round-trip, and the sixel tier
+  (portty answers kitty, so force the tier or emit a pinned DCS through
+  portty's `-S` script: one image, `"source": "sixel"`, the cursor on
+  the image's last row);
+- live turns through hyper, openrouter and `opencode:go`.
 
 ## Submitting changes
 

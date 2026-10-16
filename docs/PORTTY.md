@@ -11,6 +11,18 @@ in any terminal (boba's runtime handles capability detection).
 | Soft-wrap + reflow      | terminal-native        | coffer reflow (per-line, on resize) | committed transcript rows are emitted unwrapped; portty wraps and reflows them                                                    | terminal soft-wrap (same) |
 | Mouse (future)          | SGR mouse              | coffer                              | model/catalog pickers                                                                                                             | numbered lists            |
 
+## Dropped by decision (not deferred — do not re-add)
+
+Both were user calls, and the tracked tree no longer promises either:
+
+- **OSC 52 clipboard** — dropped 2026-10-11.
+- **OSC 5555 Lottie spinner** — dropped 2026-10-12. boba carries no
+  OSC 5555 carrier at all, so the drop was the docs and the three
+  comments in the spinner module and its test that promised the tier.
+  What ships is the frame model (`nm_spinner_tick`): a dot that pulses
+  on a truecolor terminal, blinks on a 16-color one, and is held still
+  with `spinner_ramp = off`.
+
 ## E2E testing
 
 `tests/e2e_portty/` (Phase 7) drives the built binary through coffer's
