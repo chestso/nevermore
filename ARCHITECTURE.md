@@ -309,6 +309,33 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   itself (`NM_FAMILY_*`, alongside the index), so the agent's line
   names IPv4/IPv6 through `nm_family_name` (the one family vocabulary)
   without any walk state of its own.
+  **A name is asked once** (`src/addr_cache.c`): the address list the
+  walk dials comes from a small process-local table of what the name
+  service said, keyed by host and port, consulted BEFORE `getaddrinfo`.
+  The reason is the one the budgets above share — on the async path a
+  blocking call IS the UI thread, and `getaddrinfo` blocks for as long as
+  the machine's resolver takes: measured 200–300 ms for a provider whose
+  A record answers in 4 ms, because `AF_UNSPEC` runs the statistical
+  A+AAAA lookup and waits for the slowest answer (that name has no AAAA),
+  while a network that drops DNS sits out `timeout × attempts` with no
+  deadline anywhere in this program to cut it short. And the ask is
+  repeated: a turn's rounds, a catalog fetch and the retry after a
+  failure all dial the same name, each on a fresh connection. Two rules
+  govern the table, deliberately only two: an answer **EXPIRES**
+  (`NM_ADDR_CACHE_TTL_SECONDS`, a minute) and nothing else invalidates —
+  no judging whether an address was good (a stale dial is bounded by the
+  walk's own budget exactly as a fresh dead one is), no negative caching
+  (a failed resolve stores nothing, so a resolver that comes back is
+  believed at once), no persistence (a misresolution cannot outlive the
+  process). It stores the **resolver's order** and no policy: the family
+  latch re-decides the walk order per walk, so a latch earned after a name
+  was remembered still reorders it — which is also why the table holds
+  MORE addresses than a walk dials (`NM_ADDR_CACHE_MAX_ADDRS`, tied to
+  `NM_CONNECT_MAX_ADDRS` by a build-time check): a list pre-truncated to
+  the walk's cap would take choices away from that ordering. A miss, an
+  expired entry, a name too long for the key, a full table — all mean
+  "ask", which is the behavior without the cache at all. It is the UI
+  thread's state: unlocked, single-writer by the transport's own shape.
   **The TLS handshake has its own budget** (`handshake_timeout`, a
   duration key — positive ms or `off`; default
   `NM_HANDSHAKE_TIMEOUT_MS`, 10 s): the walk bounds the TCP connect,

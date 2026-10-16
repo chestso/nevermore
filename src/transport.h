@@ -260,6 +260,15 @@ NmSource nm_connection_interest(NmConnection *conn);
  * in the step — a bounded deferral: its own `handshake_timeout`, not
  * the OS default. See nm_connection_tls_handshake.)
  *
+ * What IS synchronous here is the name: the address list comes from the
+ * table (addr_cache.h) when the table has it, and from getaddrinfo when
+ * it does not — a call that blocks for as long as the machine's resolver
+ * takes. The table is why that is paid once per host per minute and not
+ * once per request: a turn's rounds, a catalog fetch and a retry all dial
+ * the same name. Nothing else on this path waits, and no deadline bounds
+ * the resolver (there is no portable knob for it) — which is the reason
+ * the second ask must not happen.
+ *
  * Drive contract:
  *   conn = nm_connect_async(host, port, PLAIN, &st)
  *   ... later, when writable (per nm_connection_interest):

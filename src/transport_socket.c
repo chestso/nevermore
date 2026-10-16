@@ -27,6 +27,8 @@
 
 #include "conf.h" /* the store the machinery reads (no proxies) */
 
+#include "addr_cache.h" /* the name service's answers, remembered */
+
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -68,6 +70,13 @@ const char *nm_sock_errstr(void)
  * so pull it in via the shared connection layout. */
 #define NM_TRANSPORT_LAYOUT_HERE
 #include "connection_layout.h"
+
+/* The remembered address list is capped ABOVE the walk's cap on purpose
+ * (a list pre-truncated to the walk's cap would take choices away from
+ * the family ordering — see addr_cache.h), but the walk must still be
+ * able to take its full list out of it. */
+typedef char nm_addr_cache_covers_the_walk
+    [(NM_ADDR_CACHE_MAX_ADDRS >= NM_CONNECT_MAX_ADDRS) ? 1 : -1];
 
 /* Record a failure reason on the connection (always-set contract).
  * printf-shaped, capped at NM_ERR_DETAIL_MAX; the tail truncates
@@ -357,7 +366,7 @@ static int family_skip_allowed(int af)
 }
 
 /* Resolve host:port into conn->conn_addrs (the first
- * NM_CONNECT_MAX_ADDRS of getaddrinfo's order — see the header on why
+ * NM_CONNECT_MAX_ADDRS of the resolver's order — see the header on why
  * the order is the only sane policy). Addresses whose family the walk
  * has been told to skip do NOT disappear: they move to the TAIL, after
  * the un-skipped ones, and are dialled when those fail. That is the
@@ -365,28 +374,65 @@ static int family_skip_allowed(int af)
  * address of some other host going silent) costs a budget, never a
  * host, and a name whose only address is of the latched family (a
  * 127.0.0.1 literal, an IPv6-only service) stays reachable. Returns 0
- * on success, -1 on failure (err_detail stamped). */
+ * on success, -1 on failure (err_detail stamped).
+ *
+ * The list comes from the table when the table has it and from the name
+ * service otherwise (addr_cache.h), and either way it lands in the same
+ * array and passes through the same ordering loop below — a remembered
+ * answer and a fresh one cannot drift apart, and the latch stays the
+ * walk's per-walk decision rather than something a cache froze. */
 int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
 {
-    char portstr[8];
-    snprintf(portstr, sizeof(portstr), "%d", port);
-    struct addrinfo hints, *res = NULL, *ai;
+    /* The resolver's order, before the pass below reorders it. The walk
+     * dials at most NM_CONNECT_MAX_ADDRS of these (the tie is asserted
+     * where the connection layout is pulled in), so one array is enough
+     * for both. */
+    struct sockaddr_storage list[NM_ADDR_CACHE_MAX_ADDRS];
+    unsigned list_lens[NM_ADDR_CACHE_MAX_ADDRS];
+
     /* The walk starts HERE: drop the previous walk's state (the
      * abandoned-family set included — the header's invariant is "in
      * THIS walk", which only the one-walk-per-connection allocation
      * discipline enforced before). */
     conn->conn_abandoned_fams = 0;
     conn->conn_deferred_addrs = 0;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    int grc = getaddrinfo(host, portstr, &hints, &res);
-    if (grc != 0 || !res) {
-        conn_set_err_detail(conn, "DNS: %s: %s", host,
-                            grc != 0 ? gai_strerror(grc) : "no addresses");
-        return -1;
+
+    int n_list =
+        nm_addr_cache_get(host, port, list, list_lens, NM_ADDR_CACHE_MAX_ADDRS);
+    if (n_list == 0) {
+        char portstr[8];
+        snprintf(portstr, sizeof(portstr), "%d", port);
+        struct addrinfo hints, *res = NULL, *ai;
+        memset(&hints, 0, sizeof(hints));
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        hints.ai_protocol = IPPROTO_TCP;
+        int grc = getaddrinfo(host, portstr, &hints, &res);
+        if (grc != 0 || !res) {
+            conn_set_err_detail(conn, "DNS: %s: %s", host,
+                                grc != 0 ? gai_strerror(grc) : "no addresses");
+            return -1;
+        }
+        for (ai = res; ai && n_list < NM_ADDR_CACHE_MAX_ADDRS; ai = ai->ai_next) {
+            if ((size_t)ai->ai_addrlen > sizeof(struct sockaddr_storage))
+                continue;
+            memcpy(&list[n_list], ai->ai_addr, ai->ai_addrlen);
+            list_lens[n_list] = (unsigned)ai->ai_addrlen;
+            n_list++;
+        }
+        freeaddrinfo(res);
+        if (n_list == 0) {
+            conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
+            return -1;
+        }
+        /* Ask once, not once per round: a turn's rounds, its tool rounds,
+         * a catalog fetch and the retry after a failure all dial this same
+         * name, and the walk gets a fresh connection each time. A failed
+         * resolve stores nothing, so a name service that comes back is
+         * believed immediately. */
+        nm_addr_cache_put(host, port, list, list_lens, n_list);
     }
+
     /* Two passes over the resolver's order: the kept addresses first
      * (pass 0), the latched family's addresses as the fallback tail
      * (pass 1). The cap bounds the whole walk, so a name that resolves
@@ -396,20 +442,17 @@ int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port)
     int n = 0;
     int kept = 0;
     for (int deferred = 0; deferred <= 1; deferred++) {
-        for (ai = res; ai && n < NM_CONNECT_MAX_ADDRS; ai = ai->ai_next) {
-            if ((size_t)ai->ai_addrlen > sizeof(struct sockaddr_storage))
-                continue;
-            if (family_skip_allowed(ai->ai_family) != deferred)
+        for (int i = 0; i < n_list && n < NM_CONNECT_MAX_ADDRS; i++) {
+            if (family_skip_allowed(list[i].ss_family) != deferred)
                 continue; /* pass 0 keeps, pass 1 defers */
-            memcpy(&conn->conn_addrs[n], ai->ai_addr, ai->ai_addrlen);
-            conn->conn_addr_lens[n] = (unsigned)ai->ai_addrlen;
+            memcpy(&conn->conn_addrs[n], &list[i], list_lens[i]);
+            conn->conn_addr_lens[n] = list_lens[i];
             n++;
         }
         if (!deferred)
             kept = n;
     }
     conn->conn_deferred_addrs = n - kept;
-    freeaddrinfo(res);
     if (n == 0) {
         conn_set_err_detail(conn, "DNS: %s: no usable addresses", host);
         return -1;

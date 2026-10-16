@@ -192,6 +192,10 @@ fi
 run_build test_sse tests/test_sse.c src/sse.c
 run_build test_json tests/test_json.c src/json.c
 run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
+# The remembered name-service answers: pure table + the fake clock (this
+# binary owns time, so expiry is moved through, never waited out).
+run_build test_addr_cache tests/test_addr_cache.c src/addr_cache.c \
+	tests/fake_clock.c
 run_build test_authinfo tests/test_authinfo.c src/authinfo.c
 run_build test_config tests/test_config.c src/conf.c
 run_build test_args tests/test_args.c src/args.c
@@ -208,7 +212,7 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/file_ledger.c src/xxh3.c \
 	src/tools_websearch.c src/tools_exec.c src/proc.c src/proc_w32.c \
 	src/tools_spawn_w32.c src/os_compat_w32.c \
-	src/json.c src/transport.c src/transport_socket.c \
+	src/json.c src/transport.c src/transport_socket.c src/addr_cache.c \
 	src/conf.c src/wire_recorder.c src/image_bytes.c src/size.c \
 	$TLS_SRC -lws2_32 -lpthread
 
@@ -217,16 +221,16 @@ run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
 	src/file_ledger.c src/xxh3.c \
 	src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/transport.c \
-	src/transport_socket.c src/conf.c src/wire_recorder.c \
+	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c \
 	src/image_bytes.c src/size.c $TLS_SRC \
 	-lws2_32 -lpthread
 
-run_build test_wire src/clock.c tests/test_wire.c src/transport.c src/transport_socket.c \
+run_build test_wire src/clock.c tests/test_wire.c src/transport.c src/transport_socket.c src/addr_cache.c \
 	src/conf.c src/wire_recorder.c src/json.c $TLS_SRC \
 	-lws2_32 -lpthread
 
 run_build test_wire_recorder src/clock.c tests/test_wire_recorder.c src/wire_recorder.c \
-	src/json.c src/transport.c src/transport_socket.c \
+	src/json.c src/transport.c src/transport_socket.c src/addr_cache.c \
 	src/conf.c $TLS_SRC -lws2_32 -lpthread
 
 run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
@@ -238,7 +242,7 @@ run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/conf.c \
+	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
 	src/wire_recorder.c \
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
@@ -252,14 +256,14 @@ run_build test_source src/clock.c tests/test_source.c src/source.c src/nevermore
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/conf.c \
+	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
 	src/wire_recorder.c \
 	$TLS_SRC \
 	-lws2_32 -lsecur32 -lcrypt32
 
 run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_client.c \
 	src/json.c src/sse.c src/transport.c \
-	src/transport_socket.c src/conf.c src/wire_recorder.c $TLS_SRC \
+	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \
@@ -275,7 +279,7 @@ run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c sr
 	src/tools_exec.c src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
-	src/transport_socket.c src/conf.c src/wire_recorder.c $TLS_SRC \
+	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c $TLS_SRC \
 	src/nevermore.c \
 	src/authinfo.c src/conversation_id.c src/xxh3.c \
 	src/provider_openaicompat.c \
@@ -320,7 +324,7 @@ if [ -n "$BOBA_LIB" ]; then
 		src/tools_file.c src/tools_websearch.c src/tools_exec.c \
 		src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 		src/os_compat_w32.c src/json.c src/sse.c src/openai_client.c \
-		src/transport.c src/transport_socket.c $TLS_SRC \
+		src/transport.c src/transport_socket.c src/addr_cache.c $TLS_SRC \
 		src/nevermore.c src/authinfo.c src/source.c \
 		src/provider_openaicompat.c src/provider_hyper.c \
 		src/provider_ollama.c src/provider_ollama_local.c \

@@ -5,6 +5,7 @@ check_PROGRAMS = \
     test_sse \
     test_json \
     test_xxh3 \
+    test_addr_cache \
     test_authinfo \
     test_config \
     test_args \
@@ -113,6 +114,13 @@ test_json_CFLAGS = $(TEST_CFLAGS)
 test_xxh3_SOURCES = test_xxh3.c ../src/xxh3.c
 test_xxh3_CFLAGS = $(TEST_CFLAGS)
 
+# The name service's answers, remembered: a pure table, so the only
+# dependency is the clock — and this binary owns it (fake_clock.c INSTEAD
+# of src/clock.c), which is how expiry is moved through instead of waited
+# out. No resolver, no sockets, no network.
+test_addr_cache_SOURCES = test_addr_cache.c ../src/addr_cache.c fake_clock.c
+test_addr_cache_CFLAGS = $(TEST_CFLAGS)
+
 # authinfo key lookup (pure C: stdio/stdlib/string only, no sockets).
 test_authinfo_SOURCES = test_authinfo.c ../src/authinfo.c
 test_authinfo_CFLAGS = $(TEST_CFLAGS)
@@ -164,7 +172,7 @@ test_provider_SOURCES = test_provider.c ../src/clock.c ../src/conf.c \
     ../src/conversation_id.c ../src/xxh3.c \
     $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
@@ -177,14 +185,14 @@ test_source_SOURCES = test_source.c ../src/clock.c ../src/source.c ../src/conf.c
     ../src/conversation_id.c ../src/xxh3.c \
     $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_source_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_source_LDADD = $(TEST_TLS_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
-test_wire_SOURCES = test_wire.c ../src/clock.c ../src/transport.c ../src/transport_socket.c \
+test_wire_SOURCES = test_wire.c ../src/clock.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     ../src/conf.c \
     ../src/wire_recorder.c ../src/json.c $(TEST_TLS_SOURCE)
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -196,7 +204,7 @@ test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 # trip against a canned loopback server. Direct recorder calls, no
 # real network.
 test_wire_recorder_SOURCES = test_wire_recorder.c ../src/clock.c ../src/wire_recorder.c \
-    ../src/json.c ../src/transport.c ../src/transport_socket.c \
+    ../src/json.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     ../src/conf.c \
     $(TEST_TLS_SOURCE)
 test_wire_recorder_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -207,7 +215,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 # chat/completions SSE server (request validation + delta assembly).
 test_openai_client_SOURCES = test_openai_client.c ../src/clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
-    ../src/transport.c ../src/transport_socket.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
     $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -217,7 +225,7 @@ test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
 # TLS: negative handshake over loopback with the committed self-signed
 # cert (system trust must reject it). Live probe is manual
 # (NM_LIVE_TLS=1), never in make check.
-test_tls_SOURCES = test_tls.c ../src/clock.c ../src/transport.c ../src/transport_socket.c \
+test_tls_SOURCES = test_tls.c ../src/clock.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     ../src/conf.c \
     $(TEST_TLS_SOURCE)
 test_tls_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -253,7 +261,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/file_ledger.c ../src/xxh3.c \
     ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/conf.c \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
     ../src/wire_recorder.c ../src/image_bytes.c ../src/size.c \
     $(TEST_TLS_SOURCE)
 test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -268,7 +276,7 @@ test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/file_ledger.c ../src/xxh3.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
-    ../src/transport.c ../src/transport_socket.c ../src/conf.c \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
     ../src/wire_recorder.c ../src/image_bytes.c ../src/size.c \
     $(TEST_TLS_SOURCE)
 test_web_search_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -291,7 +299,7 @@ test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversat
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) \
     ../src/json.c ../src/sse.c ../src/openai_client.c \
-    ../src/transport.c ../src/transport_socket.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c \
     $(TEST_PROVIDER_SOURCES)
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
@@ -372,7 +380,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
-    ../src/openai_client.c ../src/transport.c ../src/transport_socket.c \
+    ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
     $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)

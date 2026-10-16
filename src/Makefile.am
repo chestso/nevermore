@@ -43,6 +43,7 @@ bin_PROGRAMS = nevermore
 
 # Internal headers (no separate public include/ — CLI app, no library).
 EXTRA_DIST = \
+    addr_cache.h \
     args.h \
     agent.h \
     chat_app.h \
@@ -133,6 +134,8 @@ nevermore_SOURCES = \
     transport.c \
     connection_layout.h \
     transport_socket.c \
+    addr_cache.h \
+    addr_cache.c \
     wire_recorder.h \
     wire_recorder.c \
     sse.c \
