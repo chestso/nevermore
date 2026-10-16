@@ -85,6 +85,14 @@ void nm_spinner_set_running(NmSpinner *s, int running);
  * size ramp, when the style has one, rides BOTH tiers. */
 NmSpinnerFrame nm_spinner_tick(NmSpinner *s, NmColorDepth depth);
 
+/* The frame the animation is ON, without advancing it: the phase's owner
+ * stays the caller's tick. A consumer that must declare "busy" right now
+ * (a submit's handoff paint, before the turn's first tick) reads the
+ * frame instead of ticking, so the animation never loses a beat to a
+ * paint and the two callers cannot disagree about where the phase is.
+ * A stopped animation hands back a NULL glyph, exactly as a tick does. */
+NmSpinnerFrame nm_spinner_frame(const NmSpinner *s, NmColorDepth depth);
+
 /* The active style's tick cadence in ms (the app bounds it by its own
  * deadlines), or -1 for a NULL or stopped spinner. */
 int nm_spinner_tick_ms(const NmSpinner *s);

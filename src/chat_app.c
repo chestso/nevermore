@@ -3585,6 +3585,34 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     app->submitting = 0;
     tui_textinput_clear(app->input);
 
+    /* The handoff frame. Everything between here and the turn's first
+     * tick can block for as long as the machine's name service takes —
+     * starting a turn resolves the provider's host on THIS thread (the
+     * transport's connect walk asks getaddrinfo for the address list
+     * before it arms the non-blocking connect), and a resolver that is
+     * slow costs a few hundred milliseconds in which the composer still
+     * shows the line that was just sent. So the composer's empty row and
+     * the status row's first thinking frame are painted HERE, before the
+     * send does any work: what the user sees at the moment they press
+     * Enter is decided by the paint, not by the network.
+     *
+     * A slash command is excluded: it has no turn to announce, and the
+     * command's own output is the handoff.
+     *
+     * The busy declaration is the app's own policy (spinner_follow_state
+     * is how an agent state becomes an animation) and the frame is READ,
+     * not ticked: the phase's owner stays the event loop's tick, so the
+     * handoff paint cannot steal the animation's first beat — the turn's
+     * first tick hands back the same frame this one painted. The agent's
+     * own on_state(STREAMING) re-asserts the style a moment later, which
+     * the spinner model treats as a no-op; a send that fails before it
+     * opens a stream goes through on_state(ERROR), which stops it. */
+    if (saved[0] != '/') {
+        spinner_follow_state(app, NM_AGENT_STREAMING);
+        app->spinner_frame = nm_spinner_frame(app->spinner, spinner_depth(app));
+    }
+    tui_runtime_flush(app->rt);
+
     if (saved[0] == '/') {
         run_command(app, saved, cmd_out);
     } else {

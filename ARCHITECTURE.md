@@ -1091,6 +1091,16 @@ stream messages; boba is the only caller of
   blocks and does **not** echo; splitting the echo (finish_inline AND
   a committed block) double-prints the user's line. Render the input,
   then finish_inline, then clear the input.
+- **Paint, then work**: nothing that may block runs between a keypress
+  and the flush that shows its result. `submit` therefore paints the
+  **handoff frame** — the emptied composer and the status row's first
+  thinking frame — before `nm_agent_start`, because starting a turn
+  resolves the provider's host on the UI thread and a name service can
+  take a few hundred milliseconds (or seconds) for it. The dot is READ
+  from the animation (`nm_spinner_frame`), not ticked: the event loop's
+  tick owns the phase, so the handoff frame is exactly the frame the
+  turn's first tick would have painted. A slash command has no turn to
+  announce and is excluded — the command's own output is its handoff.
 - **Reasoning is phase-sequential**: content starting finalizes the
   reasoning stream first, so commit order matches speech order. The
   reasoning stream **dims, committed and live**: the renderer reads

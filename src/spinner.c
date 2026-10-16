@@ -14,7 +14,7 @@
 
 /* The dot's size ramp: middle dot, bullet, big dot. The cycle
  * ping-pongs it (· • ● • · …) so the dot breathes rather than jumping
- * back — the arithmetic is in nm_spinner_tick. All three are one
+ * back — the arithmetic is in spinner_frame_at. All three are one
  * display cell (boba's width table: none is in its wide ranges). */
 static const char *const dot_ramp[] = { "·", "•", "●" };
 #define DOT_RAMP_N (sizeof(dot_ramp) / sizeof(dot_ramp[0]))
@@ -161,14 +161,15 @@ static uint8_t blend(uint8_t low, uint8_t peak, unsigned f)
     return (uint8_t)v;
 }
 
-NmSpinnerFrame nm_spinner_tick(NmSpinner *s, NmColorDepth depth)
+/* One frame of the animation, as it stands at tick index `t`. Pure:
+ * whether the index moves is the caller's decision (nm_spinner_tick
+ * advances, nm_spinner_frame reads), so a paint that only needs to
+ * declare busy cannot steal a beat from the event loop's tick. */
+static NmSpinnerFrame spinner_frame_at(const NmSpinner *s, unsigned t,
+                                       NmColorDepth depth)
 {
     NmSpinnerFrame f = { 0 }; /* glyph NULL: not animating */
-    if (!s || !s->running)
-        return f;
-
     const NmSpinnerStyle *st = &styles[s->style];
-    unsigned t = s->ticks++;
 
     /* The glyph. A ping-ponging ramp breathes through ITS OWN length
      * (3 frames become the 4-step cycle · • ● •); a rotating set just
@@ -209,6 +210,20 @@ NmSpinnerFrame nm_spinner_tick(NmSpinner *s, NmColorDepth depth)
     if (st->blinks && depth != NM_COLOR_RGB)
         f.lit = st->blink_every <= 0 || ((t / (unsigned)st->blink_every) % 2) == 0;
     return f;
+}
+
+NmSpinnerFrame nm_spinner_tick(NmSpinner *s, NmColorDepth depth)
+{
+    if (!s || !s->running)
+        return (NmSpinnerFrame){ 0 }; /* glyph NULL: not animating */
+    return spinner_frame_at(s, s->ticks++, depth);
+}
+
+NmSpinnerFrame nm_spinner_frame(const NmSpinner *s, NmColorDepth depth)
+{
+    if (!s || !s->running)
+        return (NmSpinnerFrame){ 0 };
+    return spinner_frame_at(s, s->ticks, depth);
 }
 
 int nm_spinner_tick_ms(const NmSpinner *s)

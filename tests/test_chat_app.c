@@ -5,6 +5,10 @@
  *   - submit -> nm_agent_start; step-driven turn prints the user
  *     echo and the answer into the runtime's output FILE* (captured
  *     via tmpfile), never through view()
+ *   - the submit's own beat paints the handoff: the emptied composer and
+ *     the thinking row, before a step or a tick (starting a turn can
+ *     block on the name service, and the user must not watch their own
+ *     line while it does)
  *   - line-buffered transcript: deltas split across batches continue
  *     on ONE scrollback line; the partial tail renders in the frame
  *     (view) while streaming; complete lines reach the output
@@ -1152,6 +1156,68 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     /* The cadence is the style's, and the agent's own deadline is the
      * only thing that may shorten it. */
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), 100);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The handoff (the Enter -> repaint lag): the beat that submits paints
+ * the EMPTIED composer and the thinking row, before a step and before a
+ * tick. Starting a turn resolves the provider's host on the UI thread
+ * (the transport's connect walk needs the address list before it can arm
+ * a non-blocking connect), so on a slow name service the work between the
+ * keypress and the turn's first frame is hundreds of milliseconds — and
+ * what the user watched for that long was their own line, still sitting
+ * in the composer. The paint must therefore happen before the send does
+ * any work, not after.
+ *
+ * The turn's first tick then hands back the SAME frame the handoff
+ * painted: declaring busy is a read of the animation, not an advance of
+ * its phase, so the paint cannot steal the pulse's first beat. */
+static void test_submit_paints_the_handoff_frame(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = ""; /* stalling: the turn sits in the thinking phase */
+    sc.stall_at_end = 1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new_rgb("openai", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hello");
+    harness_enter(h); /* no step, no tick: the submit's own beat only */
+
+    /* The send did start the turn (this is the beat that does it). */
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    /* The composer is empty: the sent line left the live region — it is
+     * in the scrollback, echoed once by finish_inline. */
+    ASSERT_TRUE(strstr(frame, "hello") == NULL);
+    /* The status row already says thinking, in the pulse's own first
+     * frame: the trough the dot fades in from. */
+    char *trough = span_bytes(tui_color_rgb(40, 42, 54), "\xc2\xb7 ");
+    ASSERT_NOT_NULL(trough);
+    ASSERT_TRUE(strstr(frame, trough) != NULL);
+
+    /* And the animation is where a turn's animation starts: the tick
+     * that follows paints the same frame, because the handoff read it
+     * rather than ticking it. */
+    nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, trough) != NULL);
+    free(trough);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -7905,6 +7971,7 @@ int main(void)
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
     RUN_TEST(test_dot_pulses_on_a_truecolor_terminal);
+    RUN_TEST(test_submit_paints_the_handoff_frame);
     RUN_TEST(test_dot_blinks_and_holds_its_column_on_16_colors);
     RUN_TEST(test_spinner_clears_when_round_completes);
     RUN_TEST(test_spinner_glyphs_are_one_cell);
