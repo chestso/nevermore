@@ -114,9 +114,17 @@ int nm_openai_stream_fd(NmChatStream *h);
 unsigned nm_openai_stream_interest(NmChatStream *h);
 
 /* The stream's deadline seam: milliseconds until it wants a step with
- * no fd ready (a connect attempt's per-address budget), or -1 when it
- * is purely interest-driven. See NmProvider.chat_stream_wait_ms. */
+ * no fd ready (a connect attempt's per-address budget, or the
+ * post-[DONE] framing tail's own budget — the stream owns the round's
+ * end in both), or -1 when it is purely interest-driven. See
+ * NmProvider.chat_stream_wait_ms. */
 int nm_openai_stream_wait_ms(NmChatStream *h);
+
+/* Nonzero once the stream's CONTENT is complete and only the framing
+ * tail remains (the chunked terminator + trailer section, on the tail
+ * budget nm_openai_stream_wait_ms reports). NmProvider
+ * .chat_stream_finishing. */
+int nm_openai_stream_finishing(NmChatStream *h);
 void nm_openai_chat_end(NmChatStream *h);
 /* Split "http(s)://host[:port]" into host/port/mode (shared with the
  * providers' catalog fetches). Writes into caller buffers. 0 on

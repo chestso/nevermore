@@ -39,6 +39,20 @@
  * the "body too long" marker can note what was dropped. */
 #define ERROR_BODY_MAX (NM_CHAT_MSG_MAX + 32)
 
+/* The framing-tail budget, in milliseconds: how long a stream that has
+ * seen [DONE] keeps waiting for the chunked terminator and trailer
+ * section (where a streamed Prism savings lands — docs/HYPER-API.md
+ * §3.5.2) before completing the round without it. The terminator
+ * normally rides the same read as [DONE], so the budget costs nothing;
+ * a server that computes the figure after the marker sends it in a
+ * LATER segment (crush's client pays an unbounded drain-to-EOF for
+ * that shape; a laggy gateway is exactly what we do not want to copy).
+ * The figure is worth a bounded wait and nothing more: telemetry,
+ * never a reason to stall — or fail — a turn whose answer has already
+ * rendered. The wait itself is fd-driven with this as the deadline;
+ * no read ever blocks. */
+#define NM_CHAT_TAIL_BUDGET_MS 250
+
 /* Silences -Wunused-parameter on params kept for vtable symmetry. */
 #if defined(__GNUC__)
 #define NM_UNUSED __attribute__((unused))
@@ -304,22 +318,31 @@ struct NmChatStream
      * can fill result->meta from the retained response headers. NULL
      * for a provider with no such metadata. */
     void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
-    int done;     /* stream finished: a fatal error, or the OK path
-                   * (framing end reached). NOT "[DONE] seen" — that is
-                   * saw_done, because a chunked response's trailers
-                   * arrive AFTER [DONE] and must still be read. */
-    int saw_done; /* the [DONE] marker was seen (the stream is
-                   * logically complete, but the transport may still
-                   * carry the chunked trailer section: the transport
-                   * framing end, not [DONE], is what completes the
-                   * round — docs/HYPER-API.md §3.5.2). */
-    int finished; /* a non-empty choices[0].finish_reason was
-                   * seen: the generation is complete. [DONE]
-                   * is not universal — OpenCode Go's
-                   * minimax-m3 ends after the trailing cost
-                   * event with no marker at all — so a clean
-                   * transport end plus this flag is also a
-                   * complete stream; see chat_step. */
+    int done;             /* stream finished: a fatal error, or the OK path
+                           * (framing end reached). NOT "[DONE] seen" — that is
+                           * saw_done, because a chunked response's trailers
+                           * arrive AFTER [DONE] and must still be read. */
+    int saw_done;         /* the [DONE] marker was seen (the stream is
+                           * logically complete, but the transport may still
+                           * carry the chunked trailer section: the transport
+                           * framing end, not [DONE], is what completes the
+                           * round — docs/HYPER-API.md §3.5.2). */
+    int in_tail;          /* [DONE] seen and the framing tail (terminator +
+                           * trailer section) is still owed: the content is
+                           * complete, the round waits — fd-driven, bounded by
+                           * NM_CHAT_TAIL_BUDGET_MS — for the tail alone. */
+    double tail_deadline; /* monotonic seconds at which the tail budget
+                           * is spent. Armed once (the FIRST would-block
+                           * after [DONE]); a later gap does not extend
+                           * it, so the tail can never out-wait its own
+                           * budget no matter how the bytes pace. */
+    int finished;         /* a non-empty choices[0].finish_reason was
+                           * seen: the generation is complete. [DONE]
+                           * is not universal — OpenCode Go's
+                           * minimax-m3 ends after the trailing cost
+                           * event with no marker at all — so a clean
+                           * transport end plus this flag is also a
+                           * complete stream; see chat_step. */
     /* The reason itself, verbatim (NM_CHAT_FINISH_MAX): the FIRST
      * non-empty value wins (providers stamp null on every mid-stream
      * chunk), and it is published into NmChatResult.finish_reason so a
@@ -681,6 +704,63 @@ static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
     return r;
 }
 
+/* The framing tail: everything after [DONE]. The content is complete
+ * the moment the marker is dispatched, but a chunked response is not —
+ * the 0-chunk terminator and the trailer section are still owed, and a
+ * server that computes a streamed Prism savings after the marker sends
+ * them in a LATER segment. Read what is buffered; if none of the tail
+ * is here yet, arm the budget (once) and return PENDING — the wait
+ * hook (nm_openai_stream_wait_ms) gives the loop the deadline, the fd
+ * gives it the bytes, and neither blocks.
+ *
+ * However the tail ends, the round is OK, because the answer has
+ * already been delivered:
+ *   - framing end (n == 0): the terminator and trailer section are in
+ *     the transport's header store — the savings figure is captured;
+ *   - a hard read error (n < 0, not would-block): a peer that drops
+ *     the socket instead of terminating the chunk. A framing fault
+ *     AFTER a complete answer is telemetry for the wire recorder, not
+ *     a failed turn — the truncation verdict in chat_step keeps it
+ *     that way by refusing to classify a saw_done stream as cut;
+ *   - the budget spent: complete without the figure, exactly what a
+ *     client that does not wait reports.
+ * Only a stream that never saw [DONE] (and never reported a
+ * finish_reason) can be truncated; see the verdict in chat_step. */
+static NmChatStatus tail_step(NmChatStream *st)
+{
+    /* Only a CHUNKED response can carry a trailer section. A length- or
+     * EOF-delimited body has nothing after its last byte but the
+     * connection's close, and waiting for THAT would hand the round's
+     * end to the peer's teardown schedule — a completed answer is
+     * complete the moment it ends. Return immediately, exactly what
+     * the pre-tail client did. */
+    if (!st->conn || !nm_response(st->conn)->chunked)
+        return NM_CHAT_OK;
+    char sink[512];
+    for (;;) {
+        long n = nm_read_body(st->conn, sink, sizeof(sink));
+        if (n > 0)
+            continue; /* tail bytes: the transport retains the trailer
+                       * lines as response headers; the sink discards
+                       * the rest, and the saw_done guard in
+                       * feed_and_dispatch keeps the SSE parser out
+                       * of all of it */
+        if (n == 0)
+            return NM_CHAT_OK; /* framing end: the tail is complete */
+        if (n != NM_READ_WOULD_BLOCK)
+            return NM_CHAT_OK; /* read error in the tail: the answer
+                                * stands, the figure is abandoned */
+        if (!st->in_tail) {
+            st->in_tail = 1;
+            st->tail_deadline = nm_monotonic_seconds() +
+                                (double)NM_CHAT_TAIL_BUDGET_MS / 1000.0;
+        }
+        if (nm_monotonic_seconds() >= st->tail_deadline)
+            return NM_CHAT_OK;  /* budget spent: no figure, no stall */
+        return NM_CHAT_PENDING; /* bytes or budget, whichever wakes */
+    }
+}
+
 /* One step: drain everything the transport can hand over right now,
  * feeding the SSE parser and dispatching every complete event.
  *
@@ -697,7 +777,12 @@ static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
  * 540 bytes and completed the stream).
  *
  * So PENDING means exactly "no more input is immediately available",
- * which is the only state in which waiting on the fd is honest.
+ * which is the only state in which waiting on the fd is honest — with
+ * one exception: a stream past [DONE] owes only the framing tail, and
+ * its PENDING means "waiting for the terminator or the tail budget"
+ * (tail_step). The budget is the tail's own wakeup, reported through
+ * nm_openai_stream_wait_ms, because a server that never terminates
+ * the chunk signals nothing an fd wait could ever see.
  *
  * Returns NM_CHAT_PENDING, NM_CHAT_OK (stream complete), or an error. */
 static NmChatStatus stream_one_step(NmChatStream *st)
@@ -715,13 +800,18 @@ static NmChatStatus stream_one_step(NmChatStream *st)
         }
         if (st->done) /* a fatal event rode the head-adjacent bytes */
             return st->status;
-        if (st->saw_done) {
-            char sink[512];
-            while (nm_read_body(st->conn, sink, sizeof(sink)) > 0)
-                ;
-            return NM_CHAT_OK;
-        }
     }
+
+    /* [DONE] seen (and the preread stash, which may itself carry the
+     * marker, is consumed): nothing but the framing tail can remain,
+     * and tail_step owns every step from here. The hoist matters: the
+     * read loop below answers a would-block socket with PENDING —
+     * "waiting on the fd is the only honest wait" — and a tail left
+     * to that answer would wait on the fd FOREVER (a server that never
+     * sends the terminator signals nothing), its budget never
+     * consulted. The tail's own deadline is the honest wait instead. */
+    if (st->saw_done)
+        return tail_step(st);
 
     for (;;) {
         long n = nm_read_body(st->conn, st->rbuf, READ_BUF_CAP);
@@ -749,20 +839,14 @@ static NmChatStatus stream_one_step(NmChatStream *st)
          * outright: return its status, do not keep draining. */
         if (st->done)
             return st->status;
-        /* [DONE]: the content is complete. Consume any tail the
-         * transport ALREADY holds — the chunked terminator and trailer
-         * section, where a streamed Prism savings lands
-         * (docs/HYPER-API.md §3.5.2) — with a NON-BLOCKING drain: a
-         * read that would block is the "not here yet" answer, and the
-         * round completes anyway (the savings are telemetry, never a
-         * reason to stall a finished turn). The dispatch guard above
-         * keeps the SSE parser out of the drained bytes. */
-        if (st->saw_done) {
-            char sink[512];
-            while (nm_read_body(st->conn, sink, sizeof(sink)) > 0)
-                ;
-            return NM_CHAT_OK;
-        }
+        /* [DONE]: the content is complete; the framing tail (the
+         * chunked terminator + trailer section, where a streamed
+         * Prism savings lands — docs/HYPER-API.md §3.5.2) is all that
+         * can still arrive. The dispatch guard above keeps the SSE
+         * parser out of the tail bytes; tail_step owns the bounded,
+         * fd-driven wait for them. */
+        if (st->saw_done)
+            return tail_step(st);
         /* Bytes arrived: loop for the next read, which returns
          * would-block (or 0) the moment the transport is drained. */
     }
@@ -1287,9 +1371,25 @@ unsigned nm_openai_stream_interest(NmChatStream *h)
 
 int nm_openai_stream_wait_ms(NmChatStream *h)
 {
+    /* The framing tail owns the wait while it is owed: the tail budget
+     * is the deadline, and 0 means spent — the next step completes the
+     * round with whatever the tail delivered (see tail_step). */
+    if (h && h->in_tail) {
+        int left = (int)((h->tail_deadline - nm_monotonic_seconds()) *
+                         1000.0);
+        return left > 0 ? left : 0;
+    }
     if (!h || !h->conn)
         return -1;
     return nm_connection_wait_ms(h->conn);
+}
+
+int nm_openai_stream_finishing(NmChatStream *h)
+{
+    /* Armed exactly when the tail is owed (tail_step arms it at the
+     * first would-block after [DONE]); before that, the round is still
+     * producing content and the silence clock keeps its authority. */
+    return h ? h->in_tail : 0;
 }
 
 void nm_openai_chat_end(NmChatStream *h)

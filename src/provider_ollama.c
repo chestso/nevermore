@@ -410,6 +410,7 @@ const struct NmProvider nm_ollama_provider = {
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
+    nm_openai_stream_finishing,
     nm_openai_chat_end,
     nm_ollama_models,
     nm_ollama_models_cached,

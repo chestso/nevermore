@@ -262,6 +262,51 @@ static void *agent_prism_server_thread(void *arg)
     return NULL;
 }
 
+/* Late-trailer variant: the terminator + trailer section go out ~40 ms
+ * AFTER [DONE] — a server that computes the savings after the stream
+ * ends (docs/HYPER-API.md §3.5.2). The agent's drive sees the framing
+ * tail: PENDING through the gap, the figure on the round meta once the
+ * framing ends. */
+static void *agent_prism_late_trailer_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
+    static const char body[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    static const char tail[] =
+        "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
+        "X-Prism-Dollar-Savings: 0.0021\r\n\r\n";
+    char resp[1024];
+    size_t n = (size_t)snprintf(resp, sizeof(resp),
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n");
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
+                          strlen(body));
+    memcpy(resp + n, body, strlen(body));
+    n += strlen(body);
+    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
+    send(cfd, resp, n, 0);
+    usleep(40 * 1000); /* the tail: sent well after [DONE] was read */
+    send(cfd, tail, strlen(tail), 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
 /* Two rounds, each stamped with a DIFFERENT routed model: see
  * test_agent_round_meta_notice_fires_per_round (the script needs
  * FIXTURE, so it lives below that define). */
@@ -5567,6 +5612,48 @@ static void test_agent_round_meta_from_prism(void)
     close(lfd);
 }
 
+/* Same routing headers, but the trailer section lands AFTER the [DONE]
+ * read: the round stays PENDING through the framing tail and the round
+ * meta is still complete once the framing ends (docs/HYPER-API.md
+ * §3.5.2). The 40 ms server gap is well inside the tail budget — this
+ * pins the wait's capture, not its expiry. */
+static void test_agent_round_meta_from_late_trailer(void)
+{
+    reset_capture();
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_prism_late_trailer_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "glm-5.3-flash", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "hi", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(agent, 5000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    NmRoundMeta meta;
+    nm_agent_round_meta(agent, &meta);
+    ASSERT_STR_EQ(meta.routed_model, "glm-5.3-flash");
+    ASSERT_STR_EQ(meta.hc_savings, "12.5");
+    ASSERT_STR_EQ(meta.usd_savings, "0.0021");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void *agent_prism_two_round_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -5864,6 +5951,7 @@ int main(void)
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_round_meta_from_prism);
+    RUN_TEST(test_agent_round_meta_from_late_trailer);
     RUN_TEST(test_agent_round_meta_notice_fires_per_round);
     RUN_TEST(test_agent_round_meta_notice_silent_when_direct);
     RUN_TEST(test_agent_round_meta_text_shapes);

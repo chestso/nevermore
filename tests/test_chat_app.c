@@ -116,13 +116,22 @@ struct ServerScript
     int n_rounds;
     int port;
     int fd;
-    int delay_us;           /* between events of each round (0 = none) */
-    int stall_at_end;       /* keep the last round's connection open (no
-                             * terminating chunk) until the peer closes */
-    const char *prism_head; /* extra response-head lines, in wire form
-                             * (CRLF-terminated) — a routed round's
-                             * `X-Prism-*` headers. NULL = the direct
-                             * case. */
+    int delay_us;              /* between events of each round (0 = none) */
+    int stall_at_end;          /* keep the last round's connection open (no
+                                * terminating chunk) until the peer closes */
+    const char *prism_head;    /* extra response-head lines, in wire form
+                                * (CRLF-terminated) — a routed round's
+                                * `X-Prism-*` headers. NULL = the direct
+                                * case. */
+    const char *prism_trailer; /* extra trailer-section lines, in wire
+                                * form — the savings a routed round
+                                * reports AFTER the final chunk. NULL =
+                                * the empty trailer section. */
+    int terminator_delay_ms;   /* hold between the last event and the
+                                * 0-chunk: the late-trailer shape, where
+                                * the gateway computes the figure after
+                                * [DONE]. 0 = the terminator rides the
+                                * last event's read (today's gateway). */
 
     /* Rendezvous pacing — the deterministic replacement for delay_us
      * for tests that need ONE event per client step. With `paced` set,
@@ -287,7 +296,16 @@ static void *chat_server_thread(void *arg)
             close(cfd);
             continue;
         }
-        send(cfd, "0\r\n\r\n", 5, 0);
+        /* The 0-chunk terminator + trailer section. The hold makes the
+         * trailer arrive in a segment AFTER [DONE] was read (the
+         * framing tail — a server that computes the figure after the
+         * stream ends, docs/HYPER-API.md §3.5.2). */
+        if (sc->terminator_delay_ms)
+            usleep((unsigned)sc->terminator_delay_ms * 1000);
+        send(cfd, "0\r\n", 3, 0);
+        if (sc->prism_trailer)
+            send(cfd, sc->prism_trailer, strlen(sc->prism_trailer), 0);
+        send(cfd, "\r\n", 2, 0);
         close(cfd);
     }
     return NULL;
@@ -3132,10 +3150,9 @@ static void test_separator_collapses_trailing_blank_lines(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    const char *out = harness_read(h);
-    /* The fence body committed, followed by exactly ONE blank row: the
-     * two trailing blank lines the model emitted are collapsed, never
-     * stacked onto the separator. */
+    const char *out = harness_read(h); /* The fence body committed, followed by exactly ONE blank row: the
+                                        * two trailing blank lines the model emitted are collapsed, never
+                                        * stacked onto the separator. */
     ASSERT_TRUE(strstr(out, "```\r\ncode\r\n\r\n") != NULL);
     ASSERT_TRUE(strstr(out, "code\r\n\r\n\r\n") == NULL);
 
@@ -8222,6 +8239,119 @@ static void test_prism_notice_off_silences_only_the_line(void)
     close(lfd);
 }
 
+/* The framing tail, full stack: a routed round whose trailer section
+ * (the savings) arrives AFTER the [DONE] read — the shape of a gateway
+ * that computes the figure once the stream ends (docs/HYPER-API.md
+ * §3.5.2). The round must stay PENDING through the tail and still
+ * produce the complete notice: the line is composed from the round
+ * meta at the framing end, so it carries the figure, not a partial. */
+static void test_prism_notice_prints_under_a_late_trailer_round(void)
+{
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sc.prism_head =
+        "X-Prism-Model-Id: glm-5.3-flash\r\n"
+        "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
+    sc.prism_trailer =
+        "X-Prism-Hypercredit-Savings: 12.5\r\n"
+        "X-Prism-Dollar-Savings: 0.0021\r\n";
+    sc.terminator_delay_ms = 40; /* well inside the tail budget */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
+                            "(GLM 5.3 Flash) · saved 12.5 hypercredits / "
+                            "$0.0021") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The tail budget's expiry, on the fake clock: [DONE] arrives, the
+ * connection is held WITHOUT the terminating chunk, and no trailer
+ * ever comes. The round still ends DONE — routing, no figure, no
+ * error — because the tail's own budget (the stream's deadline seam,
+ * 250 ms) is what ends it, and a no-figure answer beats a stalled or
+ * failed one. Virtual time is the only honest way to spend a
+ * deadline; real readiness consumes the events first. */
+static void test_prism_tail_budget_ends_the_round_without_a_figure(void)
+{
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sc.prism_head =
+        "X-Prism-Model-Id: glm-5.3-flash\r\n"
+        "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
+    sc.stall_at_end = 1; /* no terminator, no trailer: the tail hangs */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    for (int i = 0; i < 400; i++) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR)
+            break;
+        NmSource s = nm_chat_app_source(h->app);
+        if (s.handle >= 0 && s.flags)
+            app_wait(h, 2); /* real readiness: the events, then quiet */
+        harness_step_ack(h);
+        nm_test_clock_advance_ms(25); /* the 250 ms budget: due by spin 10 */
+        nm_chat_app_tick(h->app);     /* fires only when it is due NOW */
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    /* The routing rode the head, so it is named; the figure never
+     * arrived, so no savings — and no failure anywhere. */
+    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
+                            "(GLM 5.3 Flash)") != NULL);
+    ASSERT_NULL(strstr(out, "saved"));
+    ASSERT_NULL(strstr(out, "timed out"));
+    ASSERT_NULL(strstr(out, "chat failed"));
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The Agent Skills round trip on the real transcript: the menu is what
  * the model read, load_skill's body is what it got, and BOTH are
  * visible — the menu in the request the wire carried, the instructions
@@ -8375,6 +8505,8 @@ int main(void)
     RUN_TEST(test_prism_notice_prints_under_a_routed_round);
     RUN_TEST(test_prism_notice_closes_its_own_block);
     RUN_TEST(test_prism_notice_off_silences_only_the_line);
+    RUN_TEST(test_prism_notice_prints_under_a_late_trailer_round);
+    RUN_TEST(test_prism_tail_budget_ends_the_round_without_a_figure);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);

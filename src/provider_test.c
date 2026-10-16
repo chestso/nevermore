@@ -128,6 +128,7 @@ const struct NmProvider nm_test_provider = {
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
+    nm_openai_stream_finishing,
     nm_openai_chat_end,
     test_replay_models,
     test_replay_models_cached,

@@ -566,12 +566,22 @@ can announce the routed model as soon as the head lands — it does not have
 to wait for the body. The savings figures are, today, **non-streamed only**:
 a client that always streams (nevermore does) sees the routing and no
 figure. A capture should stay forward-compatible rather than special-case
-this: read the four names from the header store, and if the gateway starts
-stamping them as trailers on streams (the 2026-10-12 contract), the figure
-appears with no client change. nevermore does exactly this
-(`provider_hyper.c`'s `hyper_read_response_meta` → `NmRoundMeta`), and shows
-the result as a terminal-only notice under each routed round, which the
-`prism_notice` config key gates (default on).
+this — and that is more than reading the four names from the header store. A
+trailer that arrives after `data: [DONE]` (crush's own test reproduces one
+~100 ms past the sentinel; its client drains the body to EOF to catch it) is
+a LATER TCP segment, so a client that completes the round at the marker never
+sees it, however well its header store reads. nevermore waits for the chunked
+terminator + trailer section after `[DONE]` on a 250 ms, fd-driven budget:
+however the tail ends — the framing completes, the peer drops the socket, or
+the budget is spent — the round is OK, because the answer has already
+rendered; the figure arrives when the gateway sends one and nothing stalls
+when it does not. The wait is chunked-only (a length- or EOF-delimited body
+has no trailer section; waiting there buys a round end on the peer's
+teardown schedule for nothing — the one part of crush's drain-to-EOF
+nevermore declines to copy). `provider_hyper.c`'s `hyper_read_response_meta` →
+`NmRoundMeta` reads whatever the tail delivered, and shows the result as a
+terminal-only notice under each routed round, which the `prism_notice`
+config key gates (default on).
 
 **Prism's reasoning claim is wrong in the catalog, live-confirmed.** `/v1/provider`
 marks `prism` `can_reason: false`, and `/v1/models` gives it no `reasoning`

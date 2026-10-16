@@ -433,7 +433,19 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   figure is never computed client-side: what the gateway did not report
   is not shown (the context gauge's rule — provider-reported or catalog
   metadata, never an estimate), even though the savings are exact
-  arithmetic over `usage.cost` and the catalog price.
+  arithmetic over `usage.cost` and the catalog price. **A trailer that
+  lands after `[DONE]` is still captured, on a bounded wait**
+  (`openai_client.c`'s `tail_step`): the terminator + trailer section of
+  a chunked response can arrive in a later TCP segment than the marker
+  (crush's client pays an unbounded drain-to-EOF for that shape),
+  so the client waits for it on a 250 ms budget — the deadline rides
+  `chat_stream_wait_ms` into the loop's tick, the bytes ride the fd,
+  and however the tail ends (framing complete, a dropped socket, the
+  budget spent) the round is OK, because the answer has already
+  rendered. The stream-inactivity deadline stands down while it runs
+  (`chat_stream_finishing`): a silence clock must not fail a completed
+  turn. Chunked-only — a length- or EOF-delimited body has no trailer
+  section, and its round ends at `[DONE]` exactly as before the tail.
 - **A step drains every byte available, or its tail is stranded**
   (`openai_client.c`'s `stream_one_step` loops `nm_read_body` until
   would-block, so `NM_CHAT_PENDING` means exactly "no more input is
@@ -444,7 +456,10 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   end of a turn (the peer's FD_CLOSE is consumed once by
   `WSAEnumNetworkEvents`); POSIX's level-triggered poll masks the same
   bug rather than preventing it. Pinned by
-  `test_chat_step_drains_everything_available`.
+  `test_chat_step_drains_everything_available`. The one PENDING whose
+  wakeup is not the fd is a post-`[DONE]` framing tail: its budget
+  rides `chat_stream_wait_ms` so the tick wakes it (the Prism bullet
+  above).
 - **User images are shown ONCE, where they are attached**: `/image
 <path>` posts the `![alt](data_url)` block to the content stream
   itself, right below the line that names it, when the terminal renders

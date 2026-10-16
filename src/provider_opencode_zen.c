@@ -33,6 +33,7 @@ const struct NmProvider nm_opencode_zen_provider = {
     nm_openai_stream_fd,
     nm_openai_stream_interest,
     nm_openai_stream_wait_ms,
+    nm_openai_stream_finishing,
     nm_openai_chat_end,
     nm_openaicompat_models,
     nm_openaicompat_models_cached,

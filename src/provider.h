@@ -441,12 +441,23 @@ struct NmProvider
     int (*chat_stream_fd)(NmChatStream *h);
     unsigned (*chat_stream_interest)(NmChatStream *h);
     /* Milliseconds until the open stream wants a step with no fd ready
-     * (a connect attempt's per-address budget), or -1 when the stream
-     * is purely interest-driven. The transport's own
-     * nm_connection_wait_ms; folded into the loop's tick exactly as a
-     * tool's deadline_ms is, so a black-holed connect address — which
-     * signals nothing, ever — still gets its budget enforced. */
+     * (a connect attempt's per-address budget, or the post-[DONE]
+     * framing tail's own budget), or -1 when the stream is purely
+     * interest-driven. The transport's own nm_connection_wait_ms;
+     * folded into the loop's tick exactly as a tool's deadline_ms is,
+     * so a black-holed connect address — which signals nothing, ever —
+     * still gets its budget enforced. The tail is why the hook must
+     * stay consulted even after the content is complete: a round can
+     * be PENDING with its answer already delivered. */
     int (*chat_stream_wait_ms)(NmChatStream *h);
+    /* Nonzero once the stream's CONTENT is complete ([DONE] or an
+     * equivalent end) and only the framing tail remains — the chunked
+     * terminator + trailer section, on the tail budget that
+     * chat_stream_wait_ms reports. The agent's stream-inactivity
+     * deadline stands down while this runs: a silence clock must not
+     * fail a turn whose answer has already rendered, and the tail's
+     * own bounded wait is what ends the round. */
+    int (*chat_stream_finishing)(NmChatStream *h);
     void (*chat_end)(NmChatStream *h);
 
     /* Model catalog. Returns a NULL-terminated array of NmModel

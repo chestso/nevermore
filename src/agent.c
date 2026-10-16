@@ -1942,6 +1942,20 @@ int nm_agent_start(NmAgent *a, const char *user_input,
     return begin_round(a);
 }
 
+/* A stream whose CONTENT is complete ([DONE] seen) owes only the
+ * framing tail — the chunked terminator + trailer section, on the
+ * tail budget chat_stream_finishing/chat_stream_wait_ms own. The
+ * inactivity deadline stands down then: a silence clock must not fail
+ * a turn whose answer already rendered, and the tail ends the round
+ * inside its own bound (the loop's tick wakes at the deadline through
+ * nm_agent_next_timeout_ms). The walk phase keeps its own budget and
+ * is NOT this: there the silence clock keeps its authority. */
+static int stream_finishing(NmAgent *a)
+{
+    return a->stream && a->provider->chat_stream_finishing &&
+           a->provider->chat_stream_finishing(a->stream);
+}
+
 int nm_agent_step(NmAgent *a)
 {
     if (!a)
@@ -1972,9 +1986,11 @@ int nm_agent_step(NmAgent *a)
      * round_on_delta) and so does raw traffic (a keep-alive comment:
      * NmChatResult.traffic, folded in below).
      * nm_agent_next_timeout_ms is what tells the loop when to make
-     * this call. */
+     * this call. A stream whose content is complete (stream_finishing)
+     * stands the check down: the framing tail's own budget ends the
+     * round. */
     int to = nm_agent_timeout_ms(a);
-    if (budget_spent(a->last_activity, to)) {
+    if (budget_spent(a->last_activity, to) && !stream_finishing(a)) {
         a->provider->chat_end(a->stream);
         a->stream = NULL;
         char msg[160];
