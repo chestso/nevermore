@@ -650,7 +650,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_LOGIN_SHELL);
     ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
     ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_SPINNER_RAMP);
-    ASSERT_NULL(nm_config_key_at(18));
+    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_PRISM_NOTICE);
+    ASSERT_NULL(nm_config_key_at(19));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -1096,6 +1097,43 @@ static void test_spinner_ramp_key(void)
     nm_config_free(c);
 }
 
+/* The Prism notice gate (`prism_notice`): a bool, ON by default — a
+ * round Hyper's model router answered says so on the terminal, and the
+ * key is the user's volume knob for that line, nothing more. The CAPTURE
+ * is not this key's business: the round's NmRoundMeta and `/context`
+ * report routing with the key off (conf.h). */
+static void test_prism_notice_key(void)
+{
+    pin_paths("prismnotice");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_PRISM_NOTICE), "on");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_PRISM_NOTICE),
+                  "NEVERMORE_PRISM_NOTICE");
+
+    write_file_at(g_user, "prism_notice = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_PRISM_NOTICE, 1));
+
+    test_setenv("NEVERMORE_PRISM_NOTICE", "YES");
+    nm_config_set_env(c2);
+    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_PRISM_NOTICE, 0));
+    /* Normalized to the file vocabulary, like every bool key. */
+    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PRISM_NOTICE), "on");
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_PRISM_NOTICE");
+
+    /* A shadow write round-trips; a garbage value is refused. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PRISM_NOTICE, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "prism_notice = off\n");
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PRISM_NOTICE, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_PRISM_NOTICE), 0);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1));
+    nm_config_free(c);
+}
+
 /* The model key is PROVIDER-SCOPED: `model.<provider>` is the memory,
  * the plain `model` resolves below it, and -m / $NEVERMORE_MODEL stay
  * global. The precedence matrix, cell by cell. */
@@ -1266,6 +1304,7 @@ int main(void)
     RUN_TEST(test_reminders_key);
     RUN_TEST(test_login_shell_key);
     RUN_TEST(test_spinner_ramp_key);
+    RUN_TEST(test_prism_notice_key);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);
     RUN_TEST(test_scoped_shadow_write_and_reset);

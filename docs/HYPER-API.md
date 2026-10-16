@@ -506,6 +506,13 @@ carries none of the four — their absence is the "direct" case, not an error.
 This is response-side metadata only; nothing extra is sent on the request.
 Source: `crush` `internal/agent/hyper/provider.go` on `main`, 2026-10-12.
 
+**Corrected by the 2026-10-16 probe below:** the trailer half of that
+sentence is crush's contract, not the gateway's behavior — today a streamed
+response emits **no** savings figure anywhere (no header, no trailer), and the
+routing id/name are the only Prism headers a streaming client ever sees. Read
+the paragraph above as "what a client should be able to read", and the live
+probe as "what the gateway sends now".
+
 **Live probe (2026-10-12):** the four Prism headers were **not observed** on
 the live gateway — a streamed and a non-streamed chat completion against
 `deepseek-v4.1-flash` and `qwen3.8-max` (authed, `sk-hyper-` token) carried
@@ -515,6 +522,72 @@ forward-compatible (it reads headers the gateway does not yet emit, or emits
 only under conditions a standard token did not exercise — e.g. a Prism-routed
 model not in the public catalog). The header contract above stands as crush
 defines it; the live evidence is "not yet routed", not "no such feature".
+
+**Live probe (2026-10-16) — Prism is live, and it is a MODEL.** The forward
+guess is now fact: `prism` appears in the catalog (§5) and **is the request
+that turns routing on**. ~35 authed requests, streamed and non-streamed,
+plus a nevermore end-to-end run against its own HTTP/1.1 client:
+
+| Probe                                                       | Result                                                                                                                                                                                                                                                                                |
+| ----------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `model: "prism"`, non-streamed                              | `x-prism-model-id` + `x-prism-model-name` + `x-prism-hypercredit-savings` on the response head.                                                                                                                                                                                       |
+| `model: "prism"`, streamed (HTTP/1.1, raw wire)             | **`-model-id` / `-name` on the head** — the routing decision is known before the first delta. **No savings header, no trailer section** (the tail is `0\r\n\r\n`, empty every time, including with `TE: trailers` advertised by the client).                                          |
+| Any other model (`qwen3.8-flash`, `deepseek-v4.1-flash`, …) | none of the four — the "direct" case, as specified.                                                                                                                                                                                                                                   |
+| `x-prism-dollar-savings`                                    | **never observed** (0 of ~30 responses) — the fourth header exists in crush's contract, not in today's gateway.                                                                                                                                                                       |
+| Routed model                                                | **`qwen3.8-flash` in every probe** — trivial, math, code, proof, long output, tools, vision, mid-conversation system message, `thinking` variants; stable across repeats and independent of `x-session-id`. Today the router has one visible destination; nothing observed varies it. |
+| `usage.model`                                               | stays `"prism"` — the body names the model you asked for; only the headers name the one that answered.                                                                                                                                                                                |
+| Overhead                                                    | a prism request bills **more input tokens** than the same message sent directly (66 vs 28 here): the router's own scaffolding rides the prompt.                                                                                                                                       |
+
+Header names arrive **lowercased** (Google Frontend); a lookup must be
+case-insensitive — nevermore's `nm_response_header` is.
+
+**What the savings figure means (derived, then confirmed).** One round
+measured: 72 prompt + 41 completion tokens, `usage.cost.usd` $0.0001072,
+header `x-prism-hypercredit-savings: 0.015951856`. Prism's own catalog price
+(§5) puts that round at list price $0.0009048, and
+$0.0009048 − $0.0001072 = $0.0007976 = `0.015951856 × $0.05` — exact to the
+last digit on both rounds checked. So:
+
+- **1 hypercredit = $0.05** (20 hc per dollar) — the ratio the `cost` /
+  `remaining.hypercredits` figures already implied, now pinned against a
+  second source.
+- **`X-Prism-Hypercredit-Savings` = (the requested model's list price for
+  this round's tokens) − (what the round billed), in hypercredits.** It is
+  derived arithmetic, not a separate measurement — which means a client
+  that has the round's usage and the catalog price can compute it for
+  itself when the header is absent (a stream). nevermore does **not**: its
+  notices print only what the gateway reported, so a number on screen is
+  the gateway's own (docs say provider-reported-or-catalog, never an
+  estimate; see the context-gauge rule in `ARCHITECTURE.md`).
+
+**Client consequences.** `X-Prism-Model-Id` / `-Name` are ordinary head
+headers on both streamed and non-streamed responses, so a streaming client
+can announce the routed model as soon as the head lands — it does not have
+to wait for the body. The savings figures are, today, **non-streamed only**:
+a client that always streams (nevermore does) sees the routing and no
+figure. A capture should stay forward-compatible rather than special-case
+this: read the four names from the header store, and if the gateway starts
+stamping them as trailers on streams (the 2026-10-12 contract), the figure
+appears with no client change. nevermore does exactly this
+(`provider_hyper.c`'s `hyper_read_response_meta` → `NmRoundMeta`), and shows
+the result as a terminal-only notice under each routed round, which the
+`prism_notice` config key gates (default on).
+
+**Prism's reasoning claim is wrong in the catalog, live-confirmed.** `/v1/provider`
+marks `prism` `can_reason: false`, and `/v1/models` gives it no `reasoning`
+block — yet every prism response streamed `reasoning_content`, and
+`thinking: false` did **not** silence it (a trace arrived anyway). It belongs
+in the un-silenceable class of §3.4 alongside `minimax-m2.7` (whose `can_reason`
+claim was likewise inverted); `qwen3.8-2.4t-a95b` moved out of that class in
+the 2026-10-12 note. A client must not gate the trace display on the catalog
+claim — read the stream, not the flag.
+
+**Tool rounds and images route fine.** prism returned a real `tool_calls`
+block for an announced function and answered correctly on the replayed
+`role: "tool"` round (both rounds stamped as routed); a base64 PNG in a
+multipart user message was grounded correctly ("Red"), matching its
+`capabilities.vision: true` claim. A mid-conversation `role: "system"`
+message is accepted (200) and obeyed.
 
 #### 3.5.3 Rate-limit response headers
 
@@ -668,6 +741,19 @@ and `minimax-m2.7`, both with no levels. The live `/v1/models` `capabilities`
 union is still exactly `{vision}`, and `pricing` still carries
 `input`/`output`/`cache_create`/`cache_hit`.
 
+**Catalog drift (2026-10-16, live probe) — `prism` joined.** The live
+gateway now serves **22** models on both endpoints, the addition being
+**`prism`** itself (§3.5.2 is live; `display_name: "Prism"`,
+`producer: "Charm"`, `owned_by: "hyper"`, `context_window: 1000000`,
+`max_output_tokens: 16000`, `capabilities.vision: true`, pricing
+`input 3.2664 / output 16.332 / cache_create 0 / cache_hit 0.32664` per 1M —
+premium-tier prices, which is what the savings header discounts against).
+On `/v1/provider` it adds `can_reason: false` and `supports_attachments:
+true`; the `can_reason` claim is inverted (§3.5.2's reasoning note) and no
+`reasoning_levels` exist. nevermore's live scanner picks the row up with no
+change — the static fallback stays a single placeholder row, and no bundled
+seed is added (it would stale exactly like crush's snapshot did).
+
 ---
 
 ## 6. Gotchas & caching behavior
@@ -728,6 +814,16 @@ union is still exactly `{vision}`, and `pricing` still carries
   separate messages (an OpenAI `tool` message cannot carry images/audio — the
   gateway silently drops image content in `role: "tool"` messages, see §3.4.1),
   and tool-call JSON is validated/repaired before execution.
+- **`prism` is a router, not a model, and it costs tokens to ask.** A
+  `model: "prism"` request is answered by some upstream the gateway picks
+  (§3.5.2), so the answer's _provenance_ is a header, not the `model` field —
+  and the router's own scaffolding rides the prompt: the identical message
+  billed 66 prompt tokens through prism and 28 sent directly. Ask a Prism turn
+  "which model answered" and read `X-Prism-Model-Id`; ask the body and it
+  says `prism` forever. Pricing is the requested model's list price, and the
+  savings header is that list price minus what the round actually billed
+  (1 hypercredit = $0.05), which is why a figure appears only where the
+  gateway can compute it after serving the round — non-streamed today.
 
 ---
 

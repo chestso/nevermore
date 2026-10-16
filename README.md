@@ -179,6 +179,7 @@ login_shell      = off
 reminders        = on
 kbd              = auto
 spinner_ramp     = on
+prism_notice     = on
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -342,6 +343,27 @@ comes from (including machinery-written runtime values), `/config set
 <key> <value>` writes one key to the shadow, and `/config reset
 [key|all]` drops both the shadow line and any runtime value for the
 key.
+
+`prism_notice` (a bool, default `on`) is the gate for Hyper's Prism
+routing line. `prism` is a model **router**: ask it and the gateway picks
+the upstream that actually answers, naming it in a response header (not in
+the body, which keeps saying `model: "prism"`). So every round a routed
+turn finishes prints, on the terminal only:
+
+```
+prism: routed to qwen3.8-flash (Qwen3.8-Flash)
+```
+
+and a savings figure rides the same line when the gateway reported one
+(today it reports it only for a non-streamed round, so a streaming client
+usually sees the model alone). The line is a **system** message — the same
+stream the connect-walk notice uses: it joins neither the conversation nor
+the saved transcript, so it cannot shift the request prefix or the
+gateway's cached prefix, and `/session save` stays the conversation. It is
+one line per routed round, because each tool round is its own request and
+is routed on its own. Turn the key `off` for silence; the capture is not
+gated with it, so `/context` still answers "which model answered the last
+round" either way.
 
 ## Images (vision models)
 

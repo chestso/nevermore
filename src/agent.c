@@ -17,6 +17,7 @@
  * token).
  */
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -96,6 +97,9 @@ struct NmAgent
     NmToolCallback on_tool;    /* tool start/end */
     NmAgentStateFn on_state;   /* spinner state */
     NmAgentNoticeFn on_notice; /* transport notices (connect walk) */
+    /* Provider response metadata, one fire per round that reported any
+     * (Hyper's Prism router today — see nm_agent_on_round_meta). */
+    NmAgentRoundMetaFn on_round_meta;
     /* Reminders (reminder.h): every injected reminder is handed to
      * the UI (transparency), and the user gets a warning of its own
      * when untrusted output tried to forge one. */
@@ -500,6 +504,12 @@ void nm_agent_on_reminder(NmAgent *a, NmAgentReminderFn cb)
         a->on_reminder = cb;
 }
 
+void nm_agent_on_round_meta(NmAgent *a, NmAgentRoundMetaFn cb)
+{
+    if (a)
+        a->on_round_meta = cb;
+}
+
 void nm_agent_on_warning(NmAgent *a, NmAgentWarningFn cb)
 {
     if (a)
@@ -671,6 +681,72 @@ void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out)
     memset(out, 0, sizeof(*out));
     if (a)
         *out = a->round_meta;
+}
+
+/* A savings header, rounded for reading. The gateway sends a float's
+ * whole tail ("0.031577247999999995") and a notice is prose, so six
+ * significant digits — far past anything the figure carries — keep every
+ * value it has sent readable. A value that does not parse rides through
+ * VERBATIM: a notice never invents a number, and never replaces one it
+ * cannot read with a 0. */
+static void round_meta_savings(const char *raw, char *out, size_t cap)
+{
+    out[0] = '\0';
+    if (!raw || !*raw)
+        return;
+    char *end = NULL;
+    double v = strtod(raw, &end);
+    if (end == raw) {
+        snprintf(out, cap, "%s", raw);
+        return;
+    }
+    snprintf(out, cap, "%.6g", v);
+}
+
+/* Bounded append for the composed notice line: advances `off` by what
+ * actually landed, never past the buffer's last byte, so a truncated
+ * notice loses its tail and nothing else. */
+static size_t round_meta_append(char *out, size_t cap, size_t off,
+                                const char *fmt, ...)
+{
+    if (off + 1 >= cap)
+        return off;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + off, cap - off, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return off;
+    size_t adv = (size_t)n;
+    if (adv > cap - off - 1)
+        adv = cap - off - 1;
+    return off + adv;
+}
+
+int nm_agent_round_meta_text(const NmRoundMeta *meta, char *out, size_t cap)
+{
+    if (!out || !cap)
+        return 0;
+    out[0] = '\0';
+    if (!meta || !meta->routed_model[0])
+        return 0; /* the direct case: nothing to say */
+    size_t off = 0;
+    off = round_meta_append(out, cap, off, "prism: routed to %s",
+                            meta->routed_model);
+    if (meta->routed_name[0])
+        off = round_meta_append(out, cap, off, " (%s)", meta->routed_name);
+    char hc[NM_ROUND_META_STR_MAX], usd[NM_ROUND_META_STR_MAX];
+    round_meta_savings(meta->hc_savings, hc, sizeof(hc));
+    round_meta_savings(meta->usd_savings, usd, sizeof(usd));
+    if (hc[0] || usd[0]) {
+        off = round_meta_append(out, cap, off, " · saved");
+        if (hc[0])
+            off = round_meta_append(out, cap, off, " %s hypercredits", hc);
+        if (usd[0])
+            off = round_meta_append(out, cap, off, "%s$%s", hc[0] ? " / " : " ",
+                                    usd);
+    }
+    return (int)off;
 }
 
 /* The active model's window, from the provider catalog (the one
@@ -1389,8 +1465,18 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
 
     /* The round's provider response metadata (Hyper's Prism routing:
      * which model actually answered, savings — §3.5.2). A failed round
-     * above never reaches here, so it leaves the meta zeroed. */
+     * above never reaches here, so it leaves the meta zeroed.
+     *
+     * Hand it to the UI too, once per routed round: the human picks a
+     * router model precisely to have someone else answer, and the fact
+     * is worth a line the moment it lands rather than only under a
+     * `/context` they have to think to ask for. A round that reported
+     * nothing does not fire — the listener sees routed rounds only, and
+     * each tool round of one turn is its own request with its own
+     * routing decision. */
     a->round_meta = r->meta;
+    if (a->on_round_meta && r->meta.routed_model[0])
+        a->on_round_meta(&r->meta, a->userdata);
 
     /* A round the output limit cut short is incomplete by construction:
      * the model was still writing when the cap landed and nothing was

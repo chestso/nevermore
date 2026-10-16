@@ -398,6 +398,38 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   minutes-long image-generation gap count) resets the agent's
   `last_activity` exactly like a delta does, so a live-but-eventless
   stream is never cut (the counter-proof: silence still times out).
+- **Provider response metadata is a per-round fact, and it has its own
+  seam** (`NmRoundMeta`, in `NmChatResult.meta`). Some providers report
+  things ABOUT a round that are neither content nor usage: Hyper's Prism
+  model router names the upstream that actually answered a `model:
+"prism"` request in `X-Prism-Model-Id` / `-Name`, and its savings in
+  `X-Prism-*-Savings` (docs/HYPER-API.md §3.5.2 — live 2026-10-16: the
+  id/name ride the response HEAD of a routed request, streamed or not;
+  the savings figures arrive only on non-streamed responses, never as
+  the trailers the crush contract predicted). The read is the
+  provider's own: `NmOpenaiEndpoint.read_response_meta` is an optional
+  hook the shared client calls once per round while the connection is
+  still open, and `provider_hyper.c` implements it against the
+  transport's retained headers (`nm_response_header`, which answers
+  case-insensitively from head headers AND chunked trailers — the wire
+  sends them lowercased). A field is copied verbatim, so an absent
+  header is an empty string and all-empty means "not routed" (the
+  direct case, which is every non-prism model). The agent keeps the
+  last COMPLETED round's copy (`nm_agent_round_meta`, zeroed at round
+  start — the /context contract) and fires `nm_agent_on_round_meta`
+  once per routed round, because a turn's tool rounds are separate
+  requests and each is routed on its own. The notice line's text is one
+  spelling for both entry paths (`nm_agent_round_meta_text`: the TUI's
+  system-stream line, ask mode's dim stderr line) — the same reason the
+  no-model hint has one — and it rounds a savings figure for reading
+  while `/context` and the wire dump keep the header verbatim.
+  **The `prism_notice` key gates the LINE, not the capture**: the hook,
+  the round's meta and `/context` ignore it, because the setting is the
+  human's volume knob on a terminal notice, not a wire behavior. The
+  figure is never computed client-side: what the gateway did not report
+  is not shown (the context gauge's rule — provider-reported or catalog
+  metadata, never an estimate), even though the savings are exact
+  arithmetic over `usage.cost` and the catalog price.
 - **A step drains every byte available, or its tail is stranded**
   (`openai_client.c`'s `stream_one_step` loops `nm_read_body` until
   would-block, so `NM_CHAT_PENDING` means exactly "no more input is

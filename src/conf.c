@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 18
+#define NM_CFG_NKEYS 19
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -148,6 +148,7 @@ static const struct
     { NM_CFG_KEY_LOGIN_SHELL, "NEVERMORE_LOGIN_SHELL", "off" },
     { NM_CFG_KEY_KBD, "NEVERMORE_KBD", "auto" },
     { NM_CFG_KEY_SPINNER_RAMP, "NEVERMORE_SPINNER_RAMP", "on" },
+    { NM_CFG_KEY_PRISM_NOTICE, "NEVERMORE_PRISM_NOTICE", "on" },
 };
 
 static void init_keys(NmConfig *c)
@@ -652,6 +653,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_SPINNER_RAMP) == 0 ||
+               strcmp(key, NM_CFG_KEY_PRISM_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {
         if (!nm_config_valid_bool(raw))
             return 0;

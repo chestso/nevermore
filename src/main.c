@@ -220,6 +220,23 @@ static void ask_on_state(NmAgentState state, void *userdata)
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
 }
 
+/* A round Hyper's Prism model router answered: the same notice the TUI
+ * prints on its system stream, dimmed to STDERR — the answer on stdout
+ * stays pipe-clean, exactly like the reasoning trace. Gated by the
+ * `prism_notice` key (resolved from the process store, which main.c
+ * installs before any turn runs). */
+static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
+{
+    (void)userdata;
+    NmConfig *c = nm_config_store();
+    if (c && !nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1))
+        return;
+    char line[512];
+    if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
+        return;
+    fprintf(stderr, "\033[2m%s\033[0m\n", line);
+}
+
 /* The registry check config.c validates provider names through (it
  * links no registry of its own, so its unit test stays dependency-free;
  * main.c installs the real one before any config is read). */
@@ -515,6 +532,7 @@ int main(int argc, char *argv[])
         nm_agent_on_delta(agent, ask_on_delta);
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
+        nm_agent_on_round_meta(agent, ask_on_round_meta);
         nm_agent_set_endpoint(agent, base_url, api_key);
         /* The round cap, the reasoning echo, the stream-inactivity
          * timeout, the connect budget and the family policy are all

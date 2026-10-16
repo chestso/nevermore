@@ -242,6 +242,28 @@ extern "C" {
  * NEVERMORE_SPINNER_RAMP. */
 #define NM_CFG_KEY_SPINNER_RAMP "spinner_ramp"
 
+/* Whether a round Hyper's Prism model router answered prints a
+ * terminal-only notice (`prism: routed to qwen3.8-flash (Qwen3.8-Flash)`,
+ * plus the savings figure when the gateway reports one). A bool,
+ * default on.
+ *
+ * The notice is a SYSTEM line — the same stream the connect-walk notice
+ * and the reminder lines use. It is echoed to the terminal and joins
+ * neither the conversation nor the saved transcript, which is what makes
+ * it free to print: a line the model never sees cannot change the
+ * request prefix or the provider's cached prefix. It gates the NOTICE
+ * only, never the capture — `/context` and the wire recorder report
+ * routing facts with this key off, because those read the round's
+ * `NmRoundMeta`, not this setting.
+ *
+ * Wire facts behind it (docs/HYPER-API.md §3.5.2, live-probed
+ * 2026-10-16): `X-Prism-Model-Id`/`-Name` ride the response head of
+ * EVERY `model: "prism"` request, streamed or not; the savings figure
+ * arrives on non-streamed responses only (never as a chunked trailer),
+ * so a streaming client sees the routed model and, today, no savings.
+ * Env spelling: NEVERMORE_PRISM_NOTICE. */
+#define NM_CFG_KEY_PRISM_NOTICE "prism_notice"
+
 typedef enum
 {
     NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */

@@ -1298,6 +1298,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_on_notice(a, nm_chat_app_on_notice);
+    nm_agent_on_round_meta(a, nm_chat_app_on_round_meta);
     nm_agent_on_reminder(a, nm_chat_app_on_reminder);
     nm_agent_on_warning(a, nm_chat_app_on_warning);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
@@ -1582,6 +1583,37 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     if (!app || !msg || !*msg)
         return;
     sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    tui_runtime_wakeup(app->rt);
+}
+
+/* A round Hyper's Prism model router answered (nm_agent_on_round_meta):
+ * which model actually did the work, on the SYSTEM stream — the same
+ * seam the connect notice uses. The line is terminal-only by
+ * construction: it joins neither the conversation (so it cannot shift
+ * the request prefix or the gateway's cached prefix) nor the saved
+ * transcript. The `prism_notice` key silences the LINE, never the
+ * capture: `/context` still reports routing with the key off.
+ *
+ * Called from inside nm_agent_step at the round's finish, which is
+ * BEFORE the round's own text is committed — so close the agent streams
+ * first (stream_end_all, idempotent, the same thing on_tool's START
+ * does before it draws a panel). A RAW line posted into a live region
+ * lands in the middle of the answer it is supposed to sit under. Then
+ * the step's flush commits it with the rest of that step's units. */
+void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !meta)
+        return;
+    if (app->cfg && !nm_config_resolve_bool(app->cfg, NM_CFG_KEY_PRISM_NOTICE,
+                                            1))
+        return;
+    char line[SYS_LINE_BUF];
+    if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
+        return;
+    stream_end_all(app);
+    sys_line(app, NM_SGR_TOOL "%s" NM_SGR_RESET, line);
     tui_runtime_wakeup(app->rt);
 }
 

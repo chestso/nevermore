@@ -7926,6 +7926,94 @@ static void test_context_reports_the_prism_routed_model(void)
     close(lfd);
 }
 
+/* The notice the `prism_notice` key gates (default on): a routed round
+ * says which model actually answered, on the SYSTEM stream, under the
+ * round it describes. The line is terminal-only — the conversation the
+ * model receives never carries it, so /session's counts stay what a
+ * direct round's are and no request prefix can change. The savings
+ * figure rides the same line when the gateway reported one (the canned
+ * trailers here). */
+static void test_prism_notice_prints_under_a_routed_round(void)
+{
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
+                            "(GLM 5.3 Flash) · saved 12.5 hypercredits / "
+                            "$0.0021") != NULL);
+    /* The conversation is untouched: /session counts the same three
+     * messages a direct round leaves (user, assistant, the system
+     * prompt) — a notice is UI output, never transcript material. */
+    harness_type(h, "/session");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "session: 3 messages — 1 user, 1 assistant, "
+                            "0 tool, 1 system") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The gate: `prism_notice off` silences the LINE and nothing else —
+ * /context still reports the routing, because the key owns the notice,
+ * not the capture (conf.h). */
+static void test_prism_notice_off_silences_only_the_line(void)
+{
+    pin_cfg_paths("prism-notice-off");
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+    /* The runtime layer, the way /config set does — takes effect this
+     * chat, and /config reports it. */
+    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_PRISM_NOTICE, "off"), 0);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, "prism: routed") == NULL);
+
+    /* The capture is untouched: /context still answers. */
+    harness_type(h, "/context");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: last round routed to glm-5.3-flash "
+                            "(GLM 5.3 Flash)") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -7967,6 +8055,8 @@ int main(void)
     RUN_TEST(test_separator_collapses_trailing_blank_lines);
     RUN_TEST(test_blank_line_inside_a_run_renders);
     RUN_TEST(test_context_reports_the_prism_routed_model);
+    RUN_TEST(test_prism_notice_prints_under_a_routed_round);
+    RUN_TEST(test_prism_notice_off_silences_only_the_line);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);

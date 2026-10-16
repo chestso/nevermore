@@ -168,6 +168,10 @@ void nm_chat_app_on_notice(const char *msg, void *userdata);
 void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
                              void *userdata);
 void nm_chat_app_on_warning(const char *msg, void *userdata);
+/* A round Hyper's Prism router answered (nm_agent_on_round_meta): the
+ * terminal-only notice the `prism_notice` key gates. One spelling with
+ * ask mode's stderr line (nm_agent_round_meta_text). */
+void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata);
 
 /* Introspection / test seams. */
 NmAgentState nm_chat_app_state(const NmChatApp *app);
