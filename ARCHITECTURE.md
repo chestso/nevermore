@@ -723,8 +723,10 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   holds a single `●`) while the model streams, and the rotating STARS
   (`· ✢ * ✶ ✻ ✽`, the Claude Code set) while a tool runs. The dot has
   two channels beyond its glyph: on a **truecolor** terminal its green
-  PULSES (a 16-point cosine between a deep green and Dracula's
-  `#50FA7B`, sampled — the link carries no libm), on a **16-color** one
+  PULSES (a 16-point cosine between the terminal background the palette
+  assumes — Dracula's `#282A36`, so the dot fades out of the background
+  and back — and Dracula's `#50FA7B`, sampled: the link carries no
+  libm), on a **16-color** one
   it BLINKS instead, and the dark phase declares its columns as spaces
   so the row behind it never moves. The tier is the terminal profile's
   env-derived `truecolor` hint (`COLORTERM`, or a direct-color `TERM`),

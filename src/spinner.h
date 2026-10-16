@@ -9,8 +9,9 @@
  * The styles, and what each does on which terminal:
  *
  *   - NM_SPINNER_PULSE_DOT: the size ramp (· • ● •) plus, on a
- *     truecolor terminal, a brightness pulse of the green; on a
- *     16-color terminal the same dot BLINKS instead.
+ *     truecolor terminal, a brightness pulse of the green — the dot
+ *     fades out of the terminal background into full green and back;
+ *     on a 16-color terminal the same dot BLINKS instead.
  *   - NM_SPINNER_PULSE_DOT_FIXED: the same dot with the ramp off (the
  *     config's `spinner_ramp off`): a fixed ●, pulsing or blinking.
  *   - NM_SPINNER_STARS: the star set (· ✢ * ✶ ✻ ✽) rotating — the

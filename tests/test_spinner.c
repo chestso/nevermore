@@ -17,11 +17,13 @@
 #include "spinner.h"
 #include "test_helpers.h"
 
-/* The dot's green, as the style's data: the pulse's low end and its
- * peak (Dracula Green #50FA7B). */
-#define DOT_LOW_R  30
-#define DOT_LOW_G  120
-#define DOT_LOW_B  60
+/* The dot's color, as the style's data: the pulse's two ends — the
+ * terminal background the palette assumes (Dracula Classic #282A36,
+ * which the dot fades out of and back into) and Dracula Green #50FA7B
+ * at the top. */
+#define DOT_LOW_R  40
+#define DOT_LOW_G  42
+#define DOT_LOW_B  54
 #define DOT_PEAK_R 80
 #define DOT_PEAK_G 250
 #define DOT_PEAK_B 123
@@ -52,9 +54,10 @@ static void test_dot_ramp_pingpongs(void)
     nm_spinner_free(s);
 }
 
-/* The brightness pulse on a truecolor terminal: it starts at the low
- * green, climbs to the peak, and comes back down — ease in and out, so
- * both halves are monotonic (a linear saw would not be). */
+/* The brightness pulse on a truecolor terminal: it starts at the
+ * trough — the terminal background, so the dot fades out of the
+ * background — climbs to the peak green, and comes back down — ease in
+ * and out, so both halves are monotonic (a linear saw would not be). */
 static void test_dot_pulse_rises_to_the_peak_and_falls(void)
 {
     NmSpinner *s = running(NM_SPINNER_PULSE_DOT);
@@ -83,7 +86,7 @@ static void test_dot_pulse_rises_to_the_peak_and_falls(void)
         f = n;
     }
     /* 8 steps up to the peak, 7 down after it, and the cycle wraps to
-     * the low end rather than resting at the top */
+     * the trough rather than resting at the top */
     ASSERT_EQ(rises, 8);
     ASSERT_EQ(falls, 7);
     NmSpinnerFrame wrap = nm_spinner_tick(s, NM_COLOR_RGB);

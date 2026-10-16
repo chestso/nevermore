@@ -1098,10 +1098,11 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
 }
 
 /* The dot on a TRUECOLOR terminal: the glyph's color is the pulse's,
- * frame by frame — it starts at the style's low green and reaches the
- * peak (Dracula Green) one cycle's midpoint later, at the 50 ms
- * cadence. The tier comes from the terminal profile's env-derived
- * hint, which is what harness_new_rgb pins. */
+ * frame by frame — it starts at the trough (the terminal background,
+ * so the dot fades out of the background) and reaches the peak (Dracula
+ * Green) one cycle's midpoint later, at the 50 ms cadence. The tier
+ * comes from the terminal profile's env-derived hint, which is what
+ * harness_new_rgb pins. */
 static void test_dot_pulses_on_a_truecolor_terminal(void)
 {
     struct ServerScript sc;
@@ -1124,12 +1125,14 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     harness_single_step(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
 
-    /* Tick 0: the ramp's first glyph (·) at the pulse's LOW end. */
+    /* Tick 0: the ramp's first glyph (·) at the pulse's trough (the
+     * terminal background the palette assumes — the dot is fading in
+     * from it). */
     nm_chat_app_tick(h->app);
     tui_runtime_flush(h->rt);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *low = span_bytes(tui_color_rgb(30, 120, 60), "\xc2\xb7 ");
+    char *low = span_bytes(tui_color_rgb(40, 42, 54), "\xc2\xb7 ");
     ASSERT_NOT_NULL(low);
     ASSERT_TRUE(strstr(frame, low) != NULL);
     free(low);

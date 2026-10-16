@@ -310,11 +310,12 @@ store alone cannot say whether the protocol is in use.
 `spinner_ramp` (a bool, default `on`) is the thinking dot's size ramp:
 while the model streams, the glyph breathes through `· • ● •`, and
 turning it `off` holds a single `●`. It changes nothing about the
-color: on a 24-bit terminal the dot pulses between a deep green and
-Dracula's green, and on a terminal without truecolor (no `COLORTERM`,
-no direct-color `TERM`) it blinks instead — the same animation, told in
-the color the terminal can actually show. The star set that rotates
-while a tool runs is unaffected either way.
+color: on a 24-bit terminal the dot pulses between the terminal
+background and Dracula's green — it fades out of the background and
+back, rather than dipping to a dark green — and on a terminal without
+truecolor (no `COLORTERM`, no direct-color `TERM`) it blinks instead:
+the same animation, told in the color the terminal can actually show.
+The star set that rotates while a tool runs is unaffected either way.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation

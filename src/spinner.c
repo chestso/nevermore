@@ -34,7 +34,8 @@ static const uint8_t pulse_curve[16] = { 0, 10, 37, 79, 128, 176,
 #define PULSE_N (sizeof(pulse_curve) / sizeof(pulse_curve[0]))
 
 /* One animation, as data. Colors are per tier: `peak`/`low` are the
- * 24-bit ends of the pulse (equal for a style that does not pulse),
+ * 24-bit ends of the pulse (equal for a style that does not pulse; the
+ * dot's low end is the assumed terminal background, below),
  * and `ansi16` is the 16-color tier's color — a palette index, not an
  * approximation of the RGB (boba emits 38;5 only when asked, and a
  * 24-bit sequence on a 16-color terminal is the thing this tier
@@ -60,11 +61,16 @@ typedef struct
     int ansi16;
 } NmSpinnerStyle;
 
-/* The dot's green: Dracula's Green #50FA7B at the top of the pulse.
- * The bottom is hand-picked rather than a scaled peak — a dimmed
- * #50FA7B reads as grey-green, while this stays green and stays
- * readable on a dark background, which is the whole point of the
- * low end being visible at all. */
+/* The pulse's two ends. The TOP is Dracula's Green #50FA7B. The
+ * BOTTOM is the terminal background — the dot fades out of the
+ * background and back into it, so the trough is not a dark dot but NO
+ * dot — and since no terminal will say what its background is without
+ * an OSC 11 query it is the background the palette already assumes:
+ * Dracula Classic's #282A36 (colors.h is dark-only, Alucard/light a
+ * non-goal, so a light terminal is wrong well beyond this dot). A
+ * scaled #50FA7B would not do the job: dimming green toward black
+ * lands on grey-green, a colour of its own that reads as "a dark dot"
+ * rather than as the background. */
 static const NmSpinnerStyle styles[] = {
     [NM_SPINNER_PULSE_DOT] = {
         .tick_ms = 50,
@@ -76,7 +82,7 @@ static const NmSpinnerStyle styles[] = {
         .blinks = 1,
         .blink_every = 10,
         .peak = { 80, 250, 123 },
-        .low = { 30, 120, 60 },
+        .low = { 40, 42, 54 },
         .ansi16 = 10, /* bright green */
     },
     [NM_SPINNER_PULSE_DOT_FIXED] = {
@@ -86,7 +92,7 @@ static const NmSpinnerStyle styles[] = {
         .blinks = 1,
         .blink_every = 10,
         .peak = { 80, 250, 123 },
-        .low = { 30, 120, 60 },
+        .low = { 40, 42, 54 },
         .ansi16 = 10,
     },
     [NM_SPINNER_STARS] = {
