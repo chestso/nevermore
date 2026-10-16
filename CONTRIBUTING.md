@@ -21,10 +21,19 @@ conventions, and the traps that are not obvious from any single file.
   binary, the runtime libraries its OS does not ship, the docs, a
   README-PORTABLE.txt). Run it from a build dir configured
   `--enable-release` — the default build is the sanitizer build, and a
-  binary that needs a sanitizer runtime is not portable. `DIST_TARGET`
-  packs a tree built by another host (`DIST_TARGET=windows` over the
-  wine pre-flight's cross build). GNU/Linux is deliberately not packaged:
-  `make dist` is the Linux artifact.
+  binary that needs a sanitizer runtime is not portable. **The
+  dependency has to be release-built too**: boba's default on macOS and
+  Linux is ASan+UBSan, and an unsanitized nevermore cannot resolve the
+  sanitizer calls its static archive still holds — the link dies with
+  `ld: symbol(s) not found`. The macOS job builds a second boba,
+  `--enable-release`, into a prefix of its own and links the ZIP
+  against that. Windows needs no second build: MinGW has no sanitizer
+  runtime, so boba's default there is already unsanitized.
+  `DIST_TARGET` packs a tree built by another host
+  (`DIST_TARGET=windows` over the wine pre-flight's cross build).
+  GNU/Linux is deliberately not packaged: `make dist` is the Linux
+  artifact — a Linux binary links a TLS library the OS may not have
+  (OpenSSL here), which a ZIP would then have to carry.
 
 From a build dir: `make -C build format` (the source-tree Makefile
 needs config.status; the target lives in the top-level `Makefile.am`).
@@ -44,9 +53,11 @@ coffer release hit. Notes go on afterwards with `gh release edit`.
   call. Adding a `tags:` trigger back to a platform workflow silently
   doubles every release's CI.
 - **The tested binary and the shipped one are different builds** — the
-  tests gate the sanitized build, the ZIP carries `--enable-release`.
-  Both are made in the same job, so a packaging failure is red on every
-  push, not first at release time.
+  tests gate the sanitized build, the ZIP carries `--enable-release`,
+  and the macOS ZIP links a second, release-built boba (a sanitized
+  libboba.a leaves `__ubsan_*` undefined at that link). All of it is
+  made in the same job, so a packaging failure is red on every push,
+  not first at release time.
 - **Green master before the tag**: a red required job skips the release
   job and no release appears at all; move the tag to the fixed commit
   only after master runs green.

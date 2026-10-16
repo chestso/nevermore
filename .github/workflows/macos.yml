@@ -175,8 +175,23 @@ jobs:
         # that needs a sanitizer runtime the user's machine does not have is
         # not portable. Second out-of-tree build dir, release mode, src
         # only — the ZIP carries one file.
+        #
+        # boba is rebuilt for it, release mode, into its own prefix. Its
+        # default build is ASan+UBSan too — that is what the tests link —
+        # and an unsanitized nevermore cannot resolve the __asan_/__ubsan_
+        # calls its static archive still holds: the first link of this step
+        # died with `ld: symbol(s) not found for architecture arm64` on
+        # exactly that. (Windows needs no second build: MinGW has no
+        # sanitizer runtime, so boba's default there is already
+        # unsanitized.) Same reason coffer is built --enable-release above.
         run: |
-          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
+          cd boba
+          ./autogen.sh
+          mkdir -p build-rel && cd build-rel
+          ../configure --enable-release --prefix="$RUNNER_TEMP/boba-rel"
+          make -j"$(sysctl -n hw.ncpu)" && make install
+          cd "$GITHUB_WORKSPACE"
+          export PKG_CONFIG_PATH="$RUNNER_TEMP/boba-rel/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
           mkdir build-rel && cd build-rel
           ../configure --enable-release
           make -j"$(sysctl -n hw.ncpu)" -C src
