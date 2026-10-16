@@ -101,7 +101,11 @@ static void usage(FILE *out)
             "                          message. Frozen once a trace has\n"
             "                          been sent in a chat\n"
             "  NEVERMORE_DEBUG_WIRE=1  record the wire to\n"
-            "                          ~/.local/state/nevermore/wire/\n");
+            "                          ~/.local/state/nevermore/wire/\n"
+            "  NEVERMORE_SKILLS=off    disable Agent Skills discovery\n"
+            "                          (on by default; the skills live in\n"
+            "                          ~/.agents/skills and in the\n"
+            "                          project's .agents/skills)\n");
 }
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity
@@ -529,6 +533,10 @@ int main(int argc, char *argv[])
             fprintf(stderr, "nevermore: out of memory\n");
             return 1;
         }
+        /* The skills tool only when this session discovered skills
+         * (tools.h): the menu and the tool are the same table's two
+         * halves. */
+        nm_toolset_add_skills(tools, nm_agent_skills(agent));
         nm_agent_on_delta(agent, ask_on_delta);
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);

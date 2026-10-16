@@ -28,6 +28,7 @@
 #include "conf.h" /* the store the machinery reads (no proxies) */
 #include "proc.h" /* the <env> git stage runs as a hidden job */
 #include "session.h"
+#include "skills.h" /* the registry the menu and load_skill share */
 #include "transport.h"
 
 /* Blocking-turn pump (nm_agent_turn): readiness waits. */
@@ -70,6 +71,14 @@ struct NmAgent
      * at new, owned here, rebuilt only when a new agent is (fresh
      * chat / provider switch). */
     NmContext *context;
+    /* The Agent Skills registry whose menu rode that prompt: built with
+     * the agent and freed with it (see skills.h — a shared table would
+     * outlive the prompt its menu rode). The SAME pointer is in
+     * tool_ctx below, so the names the model reads and the names
+     * load_skill accepts cannot diverge, and /skills shows the human
+     * exactly what the model was offered. NULL = discovery found
+     * nothing, or could not allocate. */
+    NmSkills *skills;
     /* The context's async <env> git stage (context.h). Spawned at new
      * (a hidden process job), driven by nm_agent_step and bounded by
      * env_deadline; awaiting_env is 1 while the first round waits for
@@ -381,6 +390,13 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
      * BUG 1 measured. A cold cache claims nothing (context.c adds no
      * clause for -1); the /model popup's async fetch warms it. */
     a->context = nm_context_new(NULL, model_vision(provider, model));
+    /* The Agent Skills registry, owned by THIS agent for its whole life:
+     * one build feeds both halves — the prompt's menu here and the
+     * load_skill lookup in tool_ctx below — so a name the model reads is
+     * a name the tool accepts. Rebuilt with the agent (a /provider switch
+     * re-discovers, which is also when a re-set `skills` key lands). */
+    a->skills = nm_skills_new(NULL);
+    nm_context_set_skills(a->context, a->skills);
     /* That read can be cold (a wire provider's warm lands later), so the
      * clause is not final: the first turn resolves it again, before its
      * request is built. */
@@ -414,6 +430,7 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->file_ledger = nm_file_ledger_new();
     a->tool_ctx.workdir = NULL; /* relative paths resolve against the cwd */
     a->tool_ctx.ledger = a->file_ledger;
+    a->tool_ctx.skills = a->skills; /* the menu's own table */
     return a;
 }
 
@@ -444,6 +461,7 @@ void nm_agent_free(NmAgent *a)
     free(a->tool_images);
     nm_tool_calls_free(a->calls, a->n_calls);
     nm_context_free(a->context);
+    nm_skills_free(a->skills); /* the table the context's menu came from */
     nm_session_free(a->session);
     nm_file_ledger_free(a->file_ledger);
     free(a->round_images);
@@ -758,6 +776,11 @@ long nm_agent_context_limit(const NmAgent *a)
 {
     const NmModel *m = a ? model_entry(a->provider, a->model) : NULL;
     return m ? m->context_length : -1;
+}
+
+NmSkills *nm_agent_skills(const NmAgent *a)
+{
+    return a ? a->skills : NULL;
 }
 
 /* ---- session accounting (provider-agnostic; see NmUsage) ---- */

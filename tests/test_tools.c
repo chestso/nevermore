@@ -25,6 +25,7 @@
 #include "conf.h" /* the store the run_command budget resolves from */
 #include "image_bytes.h"
 #include "proc.h"
+#include "skills.h"
 #include "tools.h"
 #include "transport.h" /* NM_INTEREST_* (the exec tools' wait sets) */
 
@@ -4835,6 +4836,157 @@ static void test_every_tool_result_has_one_shape(void)
     nm_toolset_free(ts);
 }
 
+/* ---------------------------------------------------------------- */
+/* load_skill (Agent Skills activation)                              */
+/* ---------------------------------------------------------------- */
+
+/* mkdir -p for the fixture tree (forward slashes; Windows accepts). */
+static void skills_mkdir_p(const char *path)
+{
+    char buf[512];
+    snprintf(buf, sizeof(buf), "%s", path);
+    for (char *p = buf + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(buf, 0755);
+            *p = '/';
+        }
+    }
+    mkdir(buf, 0755);
+}
+
+/* The user tier pinned to a directory this run never creates: a dev
+ * box's real ~/.agents/skills must not leak into these assertions, the
+ * same isolation the agent-building tests apply. */
+static void skills_pin_user_tier(void)
+{
+    char none[128];
+#ifdef _WIN32
+    snprintf(none, sizeof(none), "C:/Users/Public/nm-skills-none-%d",
+             (int)getpid());
+#else
+    snprintf(none, sizeof(none), "/tmp/nm-skills-none-%d", (int)getpid());
+#endif
+    nm_skills_set_global_dir(none);
+}
+
+/* A scratch registry holding ONE skill. */
+static NmSkills *skill_fixture(const char *sub)
+{
+    skills_pin_user_tier();
+    char proj[512], dir[600], md[700];
+    snprintf(proj, sizeof(proj), "%s/skill-fixture-%s", scratch_dir(), sub);
+    snprintf(dir, sizeof(dir), "%s/.agents/skills/pdf", proj);
+    skills_mkdir_p(dir);
+    snprintf(md, sizeof(md), "%s/SKILL.md", dir);
+    FILE *f = fopen(md, "wb");
+    if (f) {
+        fputs("---\nname: pdf\ndescription: Extract PDF text.\n---\n\n"
+              "# PDF\n\nUse pypdf.\n",
+              f);
+        fclose(f);
+    }
+    return nm_skills_new(proj);
+}
+
+/* Found: the one result shape, the body with its frontmatter stripped,
+ * and the directory line the model resolves relative paths from. */
+static void test_load_skill_reads_body(void)
+{
+    NmSkills *reg = skill_fixture("body");
+    ASSERT_NOT_NULL(reg);
+    NmToolCtx ctx = { .workdir = NULL, .ledger = NULL, .skills = reg };
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    nm_toolset_add_skills(ts, reg);
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "load_skill"));
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "name", nm_json_new_string("pdf"));
+    char *args = nm_json_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "load_skill", args, &ctx);
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "Loaded skill 'pdf'") == r.output);
+    ASSERT_NOT_NULL(strstr(r.output, "Output:"));
+    ASSERT_NOT_NULL(strstr(r.output, "Skill directory:"));
+    ASSERT_NOT_NULL(strstr(r.output, "Use pypdf."));
+    ASSERT_NULL(strstr(r.output, "name: pdf")); /* frontmatter stripped */
+    nm_tool_result_free(&r);
+    free(args);
+    nm_json_free(j);
+    nm_toolset_free(ts);
+    nm_skills_free(reg);
+}
+
+/* A wrong name is refused BY name — never a fuzzy match (the model read
+ * the menu, so a guess is its own fact). */
+static void test_load_skill_unknown_name(void)
+{
+    NmSkills *reg = skill_fixture("unknown");
+    ASSERT_NOT_NULL(reg);
+    NmToolCtx ctx = { .workdir = NULL, .ledger = NULL, .skills = reg };
+
+    NmToolset *ts = nm_toolset_new_defaults();
+    nm_toolset_add_skills(ts, reg);
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "name", nm_json_new_string("nope"));
+    char *args = nm_json_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "load_skill", args, &ctx);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "no skill named 'nope'"));
+    nm_tool_result_free(&r);
+    free(args);
+    nm_json_free(j);
+    nm_toolset_free(ts);
+    nm_skills_free(reg);
+}
+
+/* No registry in the call context (a bare embedder, a direct caller): a
+ * refusal naming the absence, never a reach for a cwd of its own. */
+static void test_load_skill_without_registry(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    /* The tool is registered by hand here: the case is the tool's own
+     * answer when the CALL CONTEXT carries no registry, which the
+     * discovery gate would otherwise never let it be asked. */
+    nm_toolset_add(ts, &nm_tool_load_skill);
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "name", nm_json_new_string("pdf"));
+    char *args = nm_json_dump(j);
+    NmToolResult r = nm_toolset_execute(ts, "load_skill", args, NULL);
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(strstr(r.output, "no skills"));
+    nm_tool_result_free(&r);
+    free(args);
+    nm_json_free(j);
+    nm_toolset_free(ts);
+}
+
+/* The gate: no skills, no tool; skills, the tool; and a second call
+ * does not duplicate it (a /provider switch rebuilds the agent while
+ * this toolset lives). */
+static void test_toolset_skills_gate(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    size_t base = nm_toolset_len(ts);
+
+    skills_pin_user_tier();
+    NmSkills *empty = nm_skills_new(scratch_dir()); /* no .agents/skills */
+    nm_toolset_add_skills(ts, empty);
+    ASSERT_EQ(nm_toolset_len(ts), base); /* nothing found: nothing added */
+    nm_skills_free(empty);
+
+    NmSkills *reg = skill_fixture("gate");
+    nm_toolset_add_skills(ts, reg);
+    ASSERT_EQ(nm_toolset_len(ts), base + 1);
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "load_skill"));
+    nm_toolset_add_skills(ts, reg); /* the idempotent second call */
+    ASSERT_EQ(nm_toolset_len(ts), base + 1);
+    nm_skills_free(reg);
+    nm_toolset_free(ts);
+}
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -4845,6 +4997,10 @@ int main(void)
     }
     nm_config_set_store(g_cfg);
     RUN_TEST(test_registry_defaults);
+    RUN_TEST(test_load_skill_reads_body);
+    RUN_TEST(test_load_skill_unknown_name);
+    RUN_TEST(test_load_skill_without_registry);
+    RUN_TEST(test_toolset_skills_gate);
     RUN_TEST(test_unknown_tool_error);
     RUN_TEST(test_schema_json);
     RUN_TEST(test_tool_emoji_presentation_only);

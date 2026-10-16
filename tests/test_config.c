@@ -651,7 +651,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
     ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_SPINNER_RAMP);
     ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_NULL(nm_config_key_at(19));
+    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SKILLS);
+    ASSERT_NULL(nm_config_key_at(20));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old

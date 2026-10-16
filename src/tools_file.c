@@ -53,6 +53,7 @@
 #include "file_ledger.h"
 #include "image_bytes.h"
 #include "size.h"
+#include "skills.h"
 #include "tools.h"
 #include "xxh3.h"
 
@@ -2109,6 +2110,94 @@ static const char search_dir_schema[] =
     "find; no regex.\"}},"
     "\"required\":[\"path\",\"needle\"]}";
 
+/* ---------------------------------------------------------------- */
+/* load_skill (Agent Skills activation)                              */
+/* ---------------------------------------------------------------- */
+
+/* The guide's "dedicated tool activation", in nevermore's shape: the
+ * model reads a skill's instructions BY NAME, and the result names the
+ * directory the instructions' relative paths live in. The frontmatter
+ * is stripped (discovery already read it) and the body rides the one
+ * result shape every tool uses — a status line, then Output:.
+ *
+ * There is no permission gate to allowlist: nevermore's file tools read
+ * anything on this machine already, which is the product's contract, so
+ * a bundled references/ file is a normal read_file away. */
+static const char load_skill_schema[] =
+    "{\"type\":\"object\",\"properties\":{"
+    "\"name\":{\"type\":\"string\",\"description\":\"The skill's name, "
+    "exactly as the <skills> block lists it.\"}},"
+    "\"required\":[\"name\"]}";
+
+static NmToolResult load_skill_exec(const NmTool *tool,
+                                    const char *args_json,
+                                    const NmToolCtx *ctx)
+{
+    (void)tool;
+    const char *jerr = NULL;
+    NmJson *args = nm_json_parse(args_json, strlen(args_json), &jerr);
+    if (!args)
+        return nm_tool_result_error("arguments are not a JSON object");
+    NmJson *jn = nm_json_get(args, "name");
+    const char *name = jn ? nm_json_str(jn) : NULL;
+    if (!name || !*name) {
+        nm_json_free(args);
+        return nm_tool_result_error("missing or empty name");
+    }
+
+    const NmSkills *skills = ctx ? ctx->skills : NULL;
+    if (!skills || nm_skills_count(skills) == 0) {
+        nm_json_free(args);
+        return nm_tool_result_error(
+            "no skills are available: nothing was discovered under "
+            ".agents/skills");
+    }
+
+    const NmSkill *sk = nm_skills_find(skills, name);
+    if (!sk) {
+        /* A near miss names the miss (the model read the menu; a wrong
+         * guess is its own fact), and never a fuzzy match. */
+        char msg[NM_SKILL_NAME_MAX + 96];
+        snprintf(msg, sizeof(msg),
+                 "no skill named '%.64s' — the <skills> block lists what "
+                 "was found",
+                 name);
+        nm_json_free(args);
+        return nm_tool_result_error(msg);
+    }
+    nm_json_free(args);
+
+    size_t blen = 0;
+    char *body = nm_skill_body(sk, &blen);
+    if (!body) {
+        char msg[NM_SKILL_PATH_MAX + 32];
+        snprintf(msg, sizeof(msg), "cannot read %s/SKILL.md", sk->dir);
+        return nm_tool_result_error(msg);
+    }
+
+    /* The directory line comes first: a skill's instructions reference
+     * its bundled files by RELATIVE path, and the model resolves them
+     * from here (the guide's own note on what a dedicated tool owes). */
+    size_t need = strlen(sk->dir) + blen + 160;
+    char *text = malloc(need);
+    if (!text) {
+        free(body);
+        return nm_tool_result_error("out of memory");
+    }
+    snprintf(text, need,
+             "Skill directory: %s\n"
+             "Relative paths in this skill are relative to that "
+             "directory.\n\n%s",
+             sk->dir, body);
+    free(body);
+
+    char status[NM_SKILL_NAME_MAX + 32];
+    snprintf(status, sizeof(status), "Loaded skill '%s'", sk->name);
+    NmToolResult r = nm_tool_result_head(status, 1, text);
+    free(text);
+    return r;
+}
+
 const NmTool nm_tool_read_file = {
     .name = "read_file",
     /* The image case comes FIRST: the model reads this list to find out
@@ -2125,6 +2214,17 @@ const NmTool nm_tool_read_file = {
     .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,
+};
+const NmTool nm_tool_load_skill = {
+    .name = "load_skill",
+    .description = "Read a discovered Agent Skill's instructions by name. "
+                   "The <skills> block in the system prompt lists the "
+                   "names; the result is that skill's SKILL.md body, and "
+                   "names its directory so the files the instructions "
+                   "reference resolve",
+    .emoji = "📜",
+    .params_schema = load_skill_schema,
+    .execute = load_skill_exec,
 };
 const NmTool nm_tool_edit_file = {
     .name = "edit_file",

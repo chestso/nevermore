@@ -5921,6 +5921,67 @@ static void test_ps_without_jobs(void)
     harness_free(h);
 }
 
+/* /skills with nothing discovered: the honest "none found" line — the
+ * tier main() pins is an empty directory, so this is exactly what a
+ * user on a machine without skills sees. */
+static void test_skills_reports_none_found(void)
+{
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/skills");
+    harness_enter(h);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "skills: none found") != NULL);
+    free(clean);
+
+    harness_free(h);
+}
+
+/* /skills lists what discovery found, by name and description. The
+ * user tier is re-pointed at a fixture directory THIS test creates,
+ * then restored to the empty one main() pinned (the seam is
+ * process-global, like every other path seam). */
+static void test_skills_lists_found_skills(void)
+{
+    char fixture[512];
+    snprintf(fixture, sizeof(fixture), "%s/skills-fixture",
+             test_scratch_dir());
+    char skill[700], md[800];
+    snprintf(skill, sizeof(skill), "%s/pdf-processing", fixture);
+    chat_mkdir(fixture);
+    chat_mkdir(skill);
+    snprintf(md, sizeof(md), "%s/SKILL.md", skill);
+    FILE *f = fopen(md, "wb");
+    ASSERT_NOT_NULL(f);
+    if (f) {
+        fputs("---\nname: pdf-processing\n"
+              "description: Extract text from PDF files.\n---\n\n"
+              "# PDF\n\nUse pypdf.\n",
+              f);
+        fclose(f);
+    }
+    nm_skills_set_global_dir(fixture);
+
+    AppHarness *h = harness_new("openai", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/skills");
+    harness_enter(h);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "skills: 1 found") != NULL);
+    ASSERT_TRUE(strstr(clean, "pdf-processing") != NULL);
+    ASSERT_TRUE(strstr(clean, "Extract text from PDF files.") != NULL);
+    free(clean);
+
+    harness_free(h);
+    char none[512];
+    snprintf(none, sizeof(none), "%s/no-skills", test_scratch_dir());
+    nm_skills_set_global_dir(none);
+}
+
 #ifndef _WIN32
 /* /ps lists every registered job with its id, state, command and
  * how much output is waiting; /kill <id> then removes exactly one. */
@@ -8036,6 +8097,15 @@ int main(void)
         fprintf(stderr, "  FAIL: scratch cwd\n");
         return 1;
     }
+    /* The Agent Skills half of the same pin: the tier must not be the
+     * dev box's real ~/.agents/skills, or its menu rides every captured
+     * request this file asserts on. */
+    {
+        char noskills[512];
+        snprintf(noskills, sizeof(noskills), "%s/no-skills",
+                 test_scratch_dir());
+        nm_skills_set_global_dir(noskills);
+    }
     /* Pin ~/.authinfo away from the real file: the app resolves each
      * provider's key (env then authinfo) when it builds an agent, so a
      * dev box's real keys would otherwise leak into the canned-server
@@ -8187,6 +8257,8 @@ int main(void)
     RUN_TEST(test_img_pending_dropped_on_provider_switch);
     RUN_TEST(test_job_cap_fits_the_fd_budget);
     RUN_TEST(test_ps_without_jobs);
+    RUN_TEST(test_skills_reports_none_found);
+    RUN_TEST(test_skills_lists_found_skills);
 #ifdef _WIN32
     RUN_TEST(test_windows_job_source_kind);
 #else

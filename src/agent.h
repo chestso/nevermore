@@ -14,6 +14,7 @@
 #include "conf.h"
 #include "provider.h"
 #include "session.h"
+#include "skills.h"
 #include "tools.h"
 
 #ifdef __cplusplus
@@ -91,8 +92,14 @@ long nm_agent_context_used_tokens(const NmAgent *a);
 long nm_agent_context_cached_tokens(const NmAgent *a);
 long nm_agent_context_limit(const NmAgent *a);
 
-/* The last COMPLETED round's provider response metadata — Hyper's Prism
- * router facts (which model actually answered, the savings it produced;
+/* The Agent Skills registry this agent's prompt was built with — the
+ * table whose <skills> menu the model read, and the one its load_skill
+ * calls answer from. Borrowed (process-global, see skills.h); NULL only
+ * if discovery could not allocate. /skills prints it so the human sees
+ * the same list the model was offered. */
+NmSkills *nm_agent_skills(const NmAgent *a);
+
+/* The last COMPLETED round's provider response metadata — Hyper's Prism * router facts (which model actually answered, the savings it produced;
  * docs/HYPER-API.md §3.5.2). out is zeroed first and filled from the
  * last round; all-empty means the provider reported none (the "direct"
  * case, which is what hyper.charm.land does today). Safe with a NULL

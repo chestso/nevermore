@@ -10,7 +10,8 @@
 #include <string.h>
 
 #include "json.h"
-#include "conf.h" /* the store the run_command budget is read from */
+#include "conf.h"   /* the store the run_command budget is read from */
+#include "skills.h" /* the registry the skills tool is gated on */
 #include "tools.h"
 
 #include "tools_internal.h"
@@ -282,6 +283,20 @@ NmToolset *nm_toolset_new_defaults(void)
     nm_toolset_add(ts, &nm_tool_kill_job);
     nm_toolset_add(ts, &nm_tool_web_search);
     return ts;
+}
+
+/* The skills tool joins a toolset only when this session's registry has
+ * entries (see tools.h): the prompt carries no <skills> menu in the
+ * other case, so a registered load_skill would be a tool whose every
+ * call is a refusal. Idempotent, because a /provider switch rebuilds
+ * the agent while this toolset lives. */
+void nm_toolset_add_skills(NmToolset *ts, const NmSkills *skills)
+{
+    if (!ts || nm_skills_count(skills) == 0)
+        return;
+    if (nm_toolset_find(ts, "load_skill"))
+        return;
+    nm_toolset_add(ts, &nm_tool_load_skill);
 }
 
 /* The two assembled shapes (tools_internal.h): the caller's status

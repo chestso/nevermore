@@ -115,6 +115,12 @@ extern const NmTool nm_tool_edit_file;
 extern const NmTool nm_tool_list_dir;
 extern const NmTool nm_tool_search_dir;
 
+/* tools_file.c: the Agent Skills activation tool (load_skill). Not in
+ * nm_toolset_new_defaults(): it joins a toolset only when discovery
+ * found skills (tools.h's nm_toolset_add_skills), so a machine with no
+ * skills never offers a tool with nothing behind it. */
+extern const NmTool nm_tool_load_skill;
+
 /* tools_spawn_posix.c / tools_spawn_w32.c: run_command tool. */
 extern const NmTool nm_tool_run_command;
 

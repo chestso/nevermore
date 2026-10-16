@@ -1294,6 +1294,11 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     NmAgent *a = nm_agent_new(p, app->model, app->tools, NULL);
     if (!a)
         return -1;
+    /* The skills tool follows the agent's own registry (tools.h): the
+     * menu the model reads and the tool it calls are the same table's
+     * two halves. Idempotent, so a /provider switch into a tree with no
+     * skills leaves the warm toolset as it is. */
+    nm_toolset_add_skills(app->tools, nm_agent_skills(a));
     nm_agent_on_delta(a, nm_chat_app_on_delta);
     nm_agent_on_tool(a, nm_chat_app_on_tool);
     nm_agent_on_state(a, nm_chat_app_on_state);
@@ -1953,6 +1958,8 @@ static void print_help(NmChatApp *app)
                   "  /config set <k> <v>  write one key to the session shadow\n"
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
                   "  /context           context-window usage (provider-reported)\n"
+                  "  /skills            discovered Agent Skills (and any\n"
+                  "                     refusals); load_skill reads one\n"
                   "  /image <path>      attach an image to the next message\n"
                   "                     (shown here when the terminal can)\n"
                   "  /image             list pending attachments\n"
@@ -2069,6 +2076,53 @@ static void print_context(NmChatApp *app)
         format_tokens_exact(write, sw, sizeof(sw));
         sys_line(app, "context: session cache write %s tokens", sw);
     }
+}
+
+/* /skills: what discovery found, where each one came from, and what it
+ * refused. The transparency half of the feature — the model was offered
+ * a menu at construction, and this is that same list plus the
+ * provenance a menu line leaves out (scope, path, validation finding)
+ * and the entries the spec's rules refused. */
+static void print_skills(NmChatApp *app)
+{
+    if (!app->agent) {
+        sys_line(app, "skills: no agent");
+        return;
+    }
+    if (!nm_skills_enabled()) {
+        sys_line(app, "skills: discovery is off — /config set skills on "
+                      "(or NEVERMORE_SKILLS=on)");
+        return;
+    }
+    const NmSkills *sk = nm_agent_skills(app->agent);
+    size_t n = nm_skills_count(sk);
+    if (n == 0) {
+        sys_line(app, "skills: none found in ~/.agents/skills or the "
+                      "project's .agents/skills");
+    } else {
+        sys_line(app, "skills: %zu found", n);
+        for (size_t i = 0; i < n; i++) {
+            const NmSkill *s = nm_skills_at(sk, i);
+            sys_line(app, "  %s — %s [%s]", s->name,
+                     s->desc[0] ? s->desc : "(no description)",
+                     s->user ? "user" : s->label);
+            if (s->note[0])
+                sys_line(app, "    %s", s->note);
+        }
+    }
+    /* Refusals read like the entries they are: named, with the reason
+     * the spec's rules gave. Nothing the user cannot see. */
+    size_t nr = nm_skills_refusals(sk);
+    for (size_t i = 0; i < nr; i++) {
+        const NmSkillRefusal *r = nm_skills_refusal_at(sk, i);
+        sys_line(app, "  refused: %s — %s", r->path, r->reason);
+    }
+    if (nm_skills_refusals_dropped(sk))
+        sys_line(app, "  (%zu further refusals beyond the report cap)",
+                 nm_skills_refusals_dropped(sk));
+    if (nm_skills_dropped(sk))
+        sys_line(app, "  (%zu skills beyond the registry cap of %d)",
+                 nm_skills_dropped(sk), NM_SKILLS_MAX);
 }
 
 /* Show a picker whose first entry is the currently active one: the
@@ -3544,6 +3598,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         print_context(app);
         return;
     }
+    if (NAME_IS("skills")) {
+        print_skills(app);
+        return;
+    }
     if (NAME_IS("image")) {
         image_command(app, arg);
         return;
@@ -3675,8 +3733,8 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/context", "/image",
-        "/session", "/ps", "/kill", "/quit", NULL
+        "/help", "/model", "/provider", "/config", "/context", "/skills",
+        "/image", "/session", "/ps", "/kill", "/quit", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;

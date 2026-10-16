@@ -13,6 +13,7 @@
 #include <stddef.h>
 
 #include "file_ledger.h" /* NmFileVerdict: the file ledger's answer */
+#include "skills.h"      /* NmSkills: the registry load_skill answers from */
 #include "transport.h"   /* NmSource: what an async tool waits on */
 
 #ifdef __cplusplus
@@ -38,6 +39,13 @@ typedef struct NmToolCtx
 {
     const char *workdir;  /* borrowed; NULL = the process cwd */
     NmFileLedger *ledger; /* this session's ledger, or NULL */
+    /* The Agent Skills registry the load_skill tool answers from
+     * (skills.h), or NULL. The agent fills it from the same registry
+     * whose menu rode the system prompt, so the names the model reads
+     * and the names the tool accepts are ONE table — and a caller
+     * outside an agent (a test, an embedder) leaves it NULL, which makes
+     * load_skill refuse instead of reaching for a cwd of its own. */
+    const NmSkills *skills;
 } NmToolCtx;
 
 /* How a tool call ended. The step machine's progress and the finished
@@ -269,6 +277,19 @@ char *nm_tool_plan(const char *name, const char *args_json);
  * web_search(query) — a local SearXNG instance over HTTP (one async
  * step machine, see tools_websearch.c) */
 NmToolset *nm_toolset_new_defaults(void);
+
+/* Register the Agent Skills activation tool (load_skill) when this
+ * session discovered skills — no skills, no tool. The spec's client
+ * guide says it plainly: a skill tool with no valid options behind it
+ * confuses the model, and the prompt carries no <skills> menu in that
+ * case either. Call after the agent is built (the registry is the
+ * agent's), once per toolset: a second call is a no-op, which is what
+ * makes it safe across /provider switches, where the toolset outlives
+ * the agent. A switch that turns discovery OFF leaves the tool
+ * registered — the agent rebuilt without a menu, and every call refuses
+ * with the reason; removing it would mean un-serializing a warm toolset
+ * for a setting change. */
+void nm_toolset_add_skills(NmToolset *ts, const NmSkills *skills);
 
 /* ---------------------------------------------------------------- */
 /* web_search runtime knobs (process-global, like the TLS backend /  */

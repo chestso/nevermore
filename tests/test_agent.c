@@ -5834,6 +5834,18 @@ int main(void)
         fprintf(stderr, "  FAIL: scratch cwd\n");
         return 1;
     }
+    /* The other half of the discovery pin: agent construction also reads
+     * the Agent Skills user tier (~/.agents/skills), so a dev box's real
+     * collection would join the captured request as a <skills> menu and
+     * shift every prompt-size assertion. Point the tier at a directory
+     * this run never creates — under the scratch root, so no platform
+     * can read "/nonexistent" as anything but absent. */
+    {
+        char noskills[512];
+        snprintf(noskills, sizeof(noskills), "%s/no-skills",
+                 test_scratch_dir());
+        nm_skills_set_global_dir(noskills);
+    }
     printf("test_agent:\n");
     RUN_TEST(test_offline_catalog_is_pinned);
     /* The agent resolves the tool-round cap and the reasoning echo from
