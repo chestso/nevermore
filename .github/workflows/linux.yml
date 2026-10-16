@@ -1,11 +1,14 @@
 name: GNU/Linux
 
+# Tag pushes do NOT trigger this file: release.yml owns the tag and calls
+# this workflow through `workflow_call`, so one tag means one run of every
+# job here rather than two.
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_call:
 
 permissions:
   contents: write
@@ -180,10 +183,8 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-  release:
-    name: Publish release
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux]
+  dist:
+    name: Source tarball
     runs-on: ubuntu-latest
 
     steps:
@@ -192,14 +193,44 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build release tarball
+      - name: Checkout boba (dependency)
+        uses: actions/checkout@v5
+        with:
+          repository: chestso/boba
+          # The same pin as the linux job above (keep them together):
+          # configure resolves boba through pkg-config, and a missing
+          # boba.pc is a hard error, so a tarball job cannot skip the
+          # dependency it does not compile.
+          ref: 7d0101b882646df66af7e0d2976f869832d3cc27
+          path: boba
+          fetch-depth: 0
+
+      - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake libtool make pkg-config
+
+      - name: Build and install boba
+        run: |
+          cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --enable-release
+          ../configure --prefix="$HOME/.local"
+          make -j"$(nproc)" && make install
+
+      - name: Create distribution tarball
+        run: |
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig"
+          ./autogen.sh
+          mkdir build && cd build
+          ../configure
           make dist
 
-      - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+      - name: Upload tarball artifact
+        uses: actions/upload-artifact@v7
         with:
-          files: build/nevermore-*.tar.gz
+          name: nevermore-source-tarball
+          path: build/nevermore-*.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 30 }}

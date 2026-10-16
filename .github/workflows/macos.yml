@@ -1,11 +1,14 @@
 name: macOS
 
+# Tag pushes do NOT trigger this file: release.yml owns the tag and calls
+# this workflow through `workflow_call`, so one tag means one run of every
+# job here rather than two.
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_call:
 
 permissions:
   contents: write
@@ -165,6 +168,83 @@ jobs:
           # drives; without it on PATH that test SKIPs (77).
           export PATH="$HOME/.local/bin:$PATH"
           make -C build check
+
+      - name: Build portable ZIP
+        # The shipped binary is NOT the tested one, on purpose: the tested
+        # tree is the sanitized build (ASan+UBSan by default), and a binary
+        # that needs a sanitizer runtime the user's machine does not have is
+        # not portable. Second out-of-tree build dir, release mode, src
+        # only — the ZIP carries one file.
+        run: |
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
+          mkdir build-rel && cd build-rel
+          ../configure --enable-release
+          make -j"$(sysctl -n hw.ncpu)" -C src
+          make dist-portable
+
+      - name: Verify extracted portable ZIP
+        run: |
+          set -eu
+          archives=(build-rel/nevermore-*-macos-*.zip)
+          test "${#archives[@]}" -eq 1 && test -f "${archives[0]}" || {
+            echo "ERROR: expected exactly one macOS ZIP, found: ${archives[*]}" >&2
+            exit 1
+          }
+          archive="${archives[0]}"
+          package_dir=$(mktemp -d "$RUNNER_TEMP/nm-zip.XXXXXX")
+          ditto -x -k "$archive" "$package_dir"
+
+          # The archive name IS the version: nevermore-<ver>-macos-<arch>.zip.
+          version=$(basename "$archive" | sed 's/^nevermore-//; s/-macos-.*$//')
+          stage=("$package_dir"/nevermore-"$version"-macos-*)
+          test -d "$stage" || {
+            echo "ERROR: the ZIP does not hold a nevermore-$version-macos-* folder:" >&2
+            find "$package_dir" -maxdepth 2 >&2
+            exit 1
+          }
+          bin="$stage/nevermore"
+          for file in "$bin" "$stage/README.md" "$stage/COPYING" \
+              "$stage/README-PORTABLE.txt"; do
+            test -f "$file" || { echo "ERROR: $file missing from the ZIP" >&2; exit 1; }
+          done
+
+          # Every load command must be a system one — the same rule the
+          # packing script applies, checked on the bytes that actually
+          # shipped rather than on the ones it started from.
+          otool -l "$bin" |
+            awk '$1 == "cmd" {
+                   want = ($2 ~ /^LC_(LOAD|LOAD_WEAK|REEXPORT|LOAD_UPWARD|LAZY_LOAD)_DYLIB$/)
+                 }
+                 want && $1 == "name" {
+                   sub(/^[[:space:]]*name /, ""); sub(/ \(offset [0-9]+\)$/, "")
+                   print
+                   want = 0
+                 }' >"$package_dir/deps.txt"
+          if grep -qvE '^(/usr/lib|/System/Library)' "$package_dir/deps.txt"; then
+            echo "ERROR: the shipped binary links a non-system library:" >&2
+            cat "$package_dir/deps.txt" >&2
+            exit 1
+          fi
+          echo "  links only system libraries:"
+          sed 's/^/    /' "$package_dir/deps.txt"
+
+          # The linker's ad-hoc signature has to survive the ZIP, and the
+          # version the binary prints has to be the version it is named for.
+          codesign --verify --strict "$bin"
+          out=$("$bin" --version)
+          echo "  $out"
+          printf '%s\n' "$out" | grep -q "nevermore $version" || {
+            echo "ERROR: named $version, reports something else" >&2
+            exit 1
+          }
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: nevermore-macos-arm64
+          path: build-rel/nevermore-*-macos-*.zip
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 30 }}
 
       - name: Upload test logs
         if: failure()

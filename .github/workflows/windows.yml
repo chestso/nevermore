@@ -1,11 +1,14 @@
 name: Windows
 
+# Tag pushes do NOT trigger this file: release.yml owns the tag and calls
+# this workflow through `workflow_call`, so one tag means one run of every
+# job here rather than two.
 on:
   push:
     branches: [master]
-    tags: ["v*"]
   pull_request:
     branches: [master]
+  workflow_call:
 
 permissions:
   contents: write
@@ -109,6 +112,8 @@ jobs:
             git
             mingw-w64-ucrt-x86_64-toolchain
             pkg-config
+            zip
+            unzip
 
       - name: Cache boba install
         id: boba-cache
@@ -160,6 +165,73 @@ jobs:
         # the whole step so no hang can burn the job budget.
         timeout-minutes: 20
         run: make -C build check
+
+      - name: Build portable ZIP
+        # The shipped .exe is NOT the tested one, on purpose: --enable-release
+        # is the -O3 build with no sanitizer, and a .exe that needs a
+        # sanitizer runtime the user's machine does not have is not portable.
+        # Second out-of-tree build dir, src only — the ZIP carries one exe
+        # plus whatever DLLs Windows does not ship.
+        run: |
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
+          mkdir build-rel && cd build-rel
+          ../configure --enable-release
+          make -j"$(nproc)" -C src
+          make dist-portable
+
+      - name: Verify extracted portable ZIP
+        run: |
+          set -eu
+          archives=(build-rel/nevermore-*-windows-*.zip)
+          test "${#archives[@]}" -eq 1 && test -f "${archives[0]}" || {
+            echo "ERROR: expected exactly one Windows ZIP, found: ${archives[*]}" >&2
+            exit 1
+          }
+          archive="${archives[0]}"
+          package_dir=$(mktemp -d)
+          unzip -q "$archive" -d "$package_dir"
+
+          # The archive name IS the version: nevermore-<ver>-windows-<arch>.zip.
+          version=$(basename "$archive" | sed 's/^nevermore-//; s/-windows-.*$//')
+          stage=("$package_dir"/nevermore-"$version"-windows-*)
+          test -d "$stage" || {
+            echo "ERROR: the ZIP does not hold a nevermore-$version-windows-* folder:" >&2
+            find "$package_dir" -maxdepth 2 >&2
+            exit 1
+          }
+          exe="$stage/nevermore.exe"
+          for file in "$exe" "$stage/README.md" "$stage/COPYING" \
+              "$stage/README-PORTABLE.txt"; do
+            test -f "$file" || { echo "ERROR: $file missing from the ZIP" >&2; exit 1; }
+          done
+          echo "  the bundle:"
+          ls -l "$stage" | sed 's/^/    /'
+
+          # Windows resolves an executable's imports from its own directory
+          # first, so a PATH holding nothing but System32 proves the bundle is
+          # self-contained: whatever it does not provide has to come from
+          # Windows. System32 has its own timeout.exe, so name the coreutils
+          # one outright.
+          timeout_bin=$(command -v timeout)
+          test -n "$timeout_bin"
+          system32="$(cygpath -u "${SYSTEMROOT:-C:\\Windows}")/System32"
+          if ! out=$(cd "$stage" && PATH="$system32" "$timeout_bin" 60 "$exe" --version); then
+            echo "ERROR: the packaged nevermore.exe did not start with only $system32 on PATH" >&2
+            exit 1
+          fi
+          echo "  $out"
+          printf '%s\n' "$out" | grep -q "nevermore $version" || {
+            echo "ERROR: named $version, reports something else" >&2
+            exit 1
+          }
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v7
+        with:
+          name: nevermore-windows-x86_64
+          path: build-rel/nevermore-*-windows-*.zip
+          if-no-files-found: error
+          retention-days: ${{ startsWith(github.ref, 'refs/tags/v') && 1 || 30 }}
 
       - name: Upload test logs on failure
         if: failure()

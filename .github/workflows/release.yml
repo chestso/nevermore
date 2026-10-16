@@ -1,0 +1,93 @@
+name: Release
+
+# The ONLY workflow that triggers on a tag. It runs the three platform
+# workflows as jobs, then publishes what they produced: the portable ZIPs
+# (macOS, Windows) and the source tarball for everyone who compiles.
+# The platform workflows therefore carry no `tags:` trigger of their own -
+# one tag, one run of each build.
+#
+# Publishing is CI's, not a human's: a release is only ever cut from bytes
+# that passed every platform's test gate on the commit the tag names. If a
+# required job is red the release job is skipped and no release appears.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Build & Test (GNU/Linux)
+    uses: ./.github/workflows/linux.yml
+
+  build-macos:
+    name: Build & Test (macOS)
+    uses: ./.github/workflows/macos.yml
+
+  build-windows:
+    name: Build & Test (Windows)
+    uses: ./.github/workflows/windows.yml
+
+  release:
+    name: Publish release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download macOS portable ZIP
+        uses: actions/download-artifact@v8
+        with:
+          name: nevermore-macos-arm64
+          path: artifacts/macos-arm64
+
+      - name: Download Windows portable ZIP
+        uses: actions/download-artifact@v8
+        with:
+          name: nevermore-windows-x86_64
+          path: artifacts/windows-x86_64
+
+      - name: Download source tarball
+        uses: actions/download-artifact@v8
+        with:
+          name: nevermore-source-tarball
+          path: artifacts/tarball
+
+      - name: Every artifact carries the tag's own version
+        # Names are stamped from git describe, so a stale artifact from an
+        # earlier run — or a tarball whose `version` file was baked before
+        # the tag — fails here instead of shipping a misnamed release.
+        run: |
+          set -eu
+          v=${GITHUB_REF_NAME#v}
+          echo "tag $GITHUB_REF_NAME -> version $v"
+          ls -l artifacts/macos-arm64 artifacts/windows-x86_64 artifacts/tarball
+          test -f "artifacts/tarball/nevermore-$v.tar.gz" || {
+            echo "ERROR: no nevermore-$v.tar.gz in the tarball artifact" >&2
+            exit 1
+          }
+          test -n "$(ls artifacts/macos-arm64/nevermore-"$v"-macos-*.zip 2>/dev/null)" || {
+            echo "ERROR: the macOS ZIP is not stamped $v" >&2
+            exit 1
+          }
+          test -n "$(ls artifacts/windows-x86_64/nevermore-"$v"-windows-*.zip 2>/dev/null)" || {
+            echo "ERROR: the Windows ZIP is not stamped $v" >&2
+            exit 1
+          }
+          # The file the tarball carries, not just the name it is wrapped in.
+          stamped=$(tar xzf "artifacts/tarball/nevermore-$v.tar.gz" -O "nevermore-$v/version" |
+            tr -d '[:space:]')
+          test "$stamped" = "$v" || {
+            echo "ERROR: the tarball's version file says '$stamped', the tag says '$v'" >&2
+            exit 1
+          }
+          echo "  every artifact is stamped $v"
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            artifacts/macos-arm64/nevermore-*-macos-*.zip
+            artifacts/windows-x86_64/nevermore-*-windows-*.zip
+            artifacts/tarball/nevermore-*.tar.gz
+          generate_release_notes: false
+          fail_on_unmatched_files: true

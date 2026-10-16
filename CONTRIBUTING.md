@@ -17,9 +17,45 @@ conventions, and the traps that are not obvious from any single file.
   tree is part of the gate, not a periodic cleanup; re-run `make check`
   afterwards if formatting touched anything.
 - `make bear` — `compile_commands.json` for clangd.
+- `make dist-portable` — macOS/Windows only: a self-contained ZIP (the
+  binary, the runtime libraries its OS does not ship, the docs, a
+  README-PORTABLE.txt). Run it from a build dir configured
+  `--enable-release` — the default build is the sanitizer build, and a
+  binary that needs a sanitizer runtime is not portable. `DIST_TARGET`
+  packs a tree built by another host (`DIST_TARGET=windows` over the
+  wine pre-flight's cross build). GNU/Linux is deliberately not packaged:
+  `make dist` is the Linux artifact.
 
 From a build dir: `make -C build format` (the source-tree Makefile
 needs config.status; the target lives in the top-level `Makefile.am`).
+
+## Releasing
+
+A tag is the whole trigger. `git tag -a v0.1.0 -m "v0.1.0" && git push
+origin v0.1.0` runs `release.yml` — the only workflow with a `tags:`
+trigger — which calls the three platform workflows through
+`workflow_call` and publishes what they built: the macOS ZIP, the
+Windows ZIP, the source tarball. The release job also checks that the
+tarball's own `version` stamp agrees with the tag, the trap the first
+coffer release hit. Notes go on afterwards with `gh release edit`.
+
+- **One tag, one run**: the platform workflows carry no `tags:` trigger;
+  a tag push must not double-run them through both the push and the
+  call. Adding a `tags:` trigger back to a platform workflow silently
+  doubles every release's CI.
+- **The tested binary and the shipped one are different builds** — the
+  tests gate the sanitized build, the ZIP carries `--enable-release`.
+  Both are made in the same job, so a packaging failure is red on every
+  push, not first at release time.
+- **Green master before the tag**: a red required job skips the release
+  job and no release appears at all; move the tag to the fixed commit
+  only after master runs green.
+- **Windows ZIP contents are not asserted**, they are PROVEN: the verify
+  step extracts the ZIP and runs `nevermore.exe --version` with
+  `System32` as the only `PATH` — if anything else had to come from
+  MSYS2, that run fails. The macOS step makes the same proof through
+  `otool` (every load command must be `/usr/lib` or `/System/Library`)
+  plus `codesign --verify`.
 
 ## Dependency traps (beyond README's Build section)
 

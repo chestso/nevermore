@@ -63,6 +63,19 @@ format:
         echo "prettier not found - skipping Markdown formatting." >&2; \
     fi
 
+# Portable ZIP — a self-contained folder for macOS or Windows: the binary,
+# the runtime libraries it needs that the OS does not ship, the docs, and a
+# README-PORTABLE.txt. GNU/Linux is deliberately not packaged: the source
+# tarball (`make dist`) is the Linux artifact, and CI builds it in a job of
+# its own.
+#
+# Run it from a build dir configured --enable-release: the default build is
+# the sanitizer build, and a sanitizer binary is not a portable binary.
+# DIST_TARGET=windows|macos packs a cross-built tree from another host.
+.PHONY: dist-portable
+dist-portable:
+	@sh "$(top_srcdir)/scripts/make-dist-zip.sh" "$(abs_builddir)" "$(abs_builddir)" "$(DIST_TARGET)"
+
 # Bear target — produce compile_commands.json for clangd.
 .PHONY: bear
 bear:
