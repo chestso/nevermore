@@ -18,6 +18,7 @@ check_PROGRAMS = \
     test_tls \
     test_session \
     test_context \
+    test_skills \
     test_tools \
     test_web_search \
     test_proc \
@@ -241,8 +242,15 @@ test_session_CFLAGS = $(TEST_CFLAGS)
 
 # Context: AGENTS.md discovery + system-prompt assembly (pure C,
 # links context.c only — no network, no boba).
-test_context_SOURCES = test_context.c ../src/context.c ../src/reminder.c
+test_context_SOURCES = test_context.c ../src/context.c ../src/reminder.c \
+    ../src/skills.c ../src/conf.c
 test_context_CFLAGS = $(TEST_CFLAGS)
+
+# Skills: Agent Skills discovery (the open SKILL.md format) — scratch
+# trees only, no network, no boba. The store rides along because the
+# `skills` key is resolved from it at the point of use.
+test_skills_SOURCES = test_skills.c ../src/skills.c ../src/conf.c
+test_skills_CFLAGS = $(TEST_CFLAGS)
 
 # Tools: registry + schemas + file tools + spawn (canned temp files).
 # Same spawn split as src/Makefile.am — one file per OS.
@@ -258,7 +266,7 @@ endif
 # spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
-    ../src/file_ledger.c ../src/xxh3.c \
+    ../src/file_ledger.c ../src/xxh3.c ../src/skills.c \
     ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
@@ -273,7 +281,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # reachability cache and its timeout.
 test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/file_ledger.c ../src/xxh3.c \
+    ../src/file_ledger.c ../src/xxh3.c ../src/skills.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
@@ -294,6 +302,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
     ../src/image_bytes.c ../src/size.c \
     ../src/context.c ../src/reminder.c \
+    ../src/skills.c \
     ../src/file_ledger.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
@@ -377,7 +386,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c \
     ../src/markdown.c ../src/markdown_render.c ../src/highlight.c \
-    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/skills.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \

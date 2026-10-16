@@ -148,6 +148,8 @@ nevermore_SOURCES = \
     conversation_id.c \
     context.h \
     context.c \
+    skills.h \
+    skills.c \
     source.h \
     source.c \
     tools_internal.h \

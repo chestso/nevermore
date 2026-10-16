@@ -201,7 +201,9 @@ run_build test_config tests/test_config.c src/conf.c
 run_build test_args tests/test_args.c src/args.c
 run_build test_session tests/test_session.c src/session.c src/image_bytes.c src/size.c \
 	src/json.c
-run_build test_context tests/test_context.c src/context.c src/reminder.c
+run_build test_context tests/test_context.c src/context.c src/reminder.c \
+	src/skills.c src/conf.c
+run_build test_skills tests/test_skills.c src/skills.c src/conf.c
 
 run_build test_file_ledger tests/test_file_ledger.c src/file_ledger.c
 
@@ -209,7 +211,7 @@ run_build test_proc tests/test_proc.c src/proc.c src/proc_w32.c
 
 run_build test_tools tests/test_tools.c tests/fake_clock.c \
 	src/tools.c src/tools_file.c \
-	src/file_ledger.c src/xxh3.c \
+	src/file_ledger.c src/xxh3.c src/skills.c \
 	src/tools_websearch.c src/tools_exec.c src/proc.c src/proc_w32.c \
 	src/tools_spawn_w32.c src/os_compat_w32.c \
 	src/json.c src/transport.c src/transport_socket.c src/addr_cache.c \
@@ -218,7 +220,7 @@ run_build test_tools tests/test_tools.c tests/fake_clock.c \
 
 run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
 	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/proc.c \
-	src/file_ledger.c src/xxh3.c \
+	src/file_ledger.c src/xxh3.c src/skills.c \
 	src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/transport.c \
 	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c \
@@ -275,7 +277,7 @@ run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_c
 	-lws2_32 -lpthread
 
 run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/image_bytes.c src/size.c \
-	src/context.c src/reminder.c src/file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
+	src/context.c src/reminder.c src/skills.c src/file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
 	src/tools_exec.c src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 	src/os_compat_w32.c src/json.c src/sse.c \
 	src/openai_client.c src/transport.c \
@@ -320,7 +322,7 @@ if [ -n "$BOBA_LIB" ]; then
 		src/markdown.c src/markdown_render.c src/highlight.c \
 		src/image.c src/image_bytes.c src/image_codec.c src/size.c \
 		src/agent.c src/conversation_id.c src/xxh3.c src/session.c \
-		src/context.c src/reminder.c src/file_ledger.c src/tools.c \
+		src/context.c src/reminder.c src/skills.c src/file_ledger.c src/tools.c \
 		src/tools_file.c src/tools_websearch.c src/tools_exec.c \
 		src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
 		src/os_compat_w32.c src/json.c src/sse.c src/openai_client.c \

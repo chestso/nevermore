@@ -264,6 +264,16 @@ extern "C" {
  * Env spelling: NEVERMORE_PRISM_NOTICE. */
 #define NM_CFG_KEY_PRISM_NOTICE "prism_notice"
 
+/* Whether Agent Skills discovery may run: a bool, default ON. Skills are
+ * folders of instructions in the open SKILL.md format, discovered from
+ * `~/.agents/skills/` and every `<dir>/.agents/skills/` from the repo
+ * root down to the working directory (src/skills.h); the found names and
+ * descriptions ride the system prompt as a menu and a body is loaded
+ * only when the model asks for it (the load_skill tool). Off means no
+ * discovery, no menu and no tool — the prompt is what it was before the
+ * feature. Env spelling: NEVERMORE_SKILLS. */
+#define NM_CFG_KEY_SKILLS "skills"
+
 typedef enum
 {
     NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */
