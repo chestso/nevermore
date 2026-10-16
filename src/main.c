@@ -39,6 +39,7 @@
 #include "chat_app.h"
 #include "conf.h"
 #include "args.h"
+#include "reminder.h"
 #include "sysout.h"
 
 #include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
@@ -239,6 +240,52 @@ static void ask_on_state(NmAgentState state, void *userdata)
 {
     (void)userdata;
     (void)state; /* spinner is a phase-4/6 concern; ask mode is plain */
+}
+
+/* The agent's connect-walk notice (nm_agent_on_notice): the address it
+ * abandoned and the family it now skips. The TUI prints the same text on
+ * its system stream; ask mode dims it onto stderr, because "which of the
+ * families answered" is exactly the thing a person piping an answer to
+ * grep for has a right to know. The message carries its own framing
+ * (agent.c composes it), so it lands verbatim. */
+static void ask_on_notice(const char *msg, void *userdata)
+{
+    (void)userdata;
+    if (!msg || !*msg)
+        return;
+    nm_sysout_line(&g_ask_out, "\033[2m%s\033[0m", msg);
+}
+
+/* A reminder the harness injected (nm_agent_on_reminder). TRANSPARENCY:
+ * the human sees the harness's own speech — the rule's name and the text
+ * the model received. USER channel only, exactly as the TUI gates it:
+ * the TOOL-channel reminders ride the result body, and ask mode prints
+ * that body verbatim under `[tool done …]`, so a second showing would be
+ * its own kind of lie. */
+static void ask_on_reminder(const char *name, const char *text, int channel,
+                            void *userdata)
+{
+    (void)userdata;
+    if (!text || !*text)
+        return;
+    if (channel != NM_REMINDER_CHANNEL_USER)
+        return;
+    nm_sysout_line(&g_ask_out, "\033[2mreminder (%s): %s\033[0m",
+                   name ? name : "?", text);
+}
+
+/* A warning for the USER — the model is not told (nm_agent_on_warning):
+ * untrusted tool output tried to forge a reminder tag and the trust
+ * boundary neutralized it. Its message already opens with "warning:", so
+ * the line needs no decoration to read as what it is; the TUI's red is
+ * the same information carried a different way (and ask mode's stderr
+ * keeps to dim + plain, so a truecolor SGR does not ride a pipe). */
+static void ask_on_warning(const char *msg, void *userdata)
+{
+    (void)userdata;
+    if (!msg || !*msg)
+        return;
+    nm_sysout_line(&g_ask_out, "\033[2m%s\033[0m", msg);
 }
 
 /* A round Hyper's Prism model router answered: the same notice the TUI
@@ -559,7 +606,10 @@ int main(int argc, char *argv[])
         nm_agent_on_delta(agent, ask_on_delta);
         nm_agent_on_tool(agent, ask_on_tool);
         nm_agent_on_state(agent, ask_on_state);
+        nm_agent_on_notice(agent, ask_on_notice);
         nm_agent_on_round_meta(agent, ask_on_round_meta);
+        nm_agent_on_reminder(agent, ask_on_reminder);
+        nm_agent_on_warning(agent, ask_on_warning);
         nm_agent_set_endpoint(agent, base_url, api_key);
         /* The round cap, the reasoning echo, the stream-inactivity
          * timeout, the connect budget and the family policy are all
