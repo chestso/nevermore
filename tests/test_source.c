@@ -47,14 +47,14 @@ static void test_registry_source_names_round_trip(void)
 
     size_t n = 0;
     const NmEntry *items = nm_source_items(s, &n);
-    int saw_ollama = 0, saw_openai = 0;
+    int saw_ollama = 0, saw_zen = 0;
     for (size_t i = 0; i < n; i++) {
         if (strcmp(items[i].id, "ollama:cloud") == 0)
             saw_ollama = 1;
-        if (strcmp(items[i].id, "openai") == 0)
-            saw_openai = 1;
+        if (strcmp(items[i].id, "opencode:zen") == 0)
+            saw_zen = 1;
     }
-    ASSERT_TRUE(saw_ollama && saw_openai);
+    ASSERT_TRUE(saw_ollama && saw_zen);
     nm_source_free(s);
 }
 

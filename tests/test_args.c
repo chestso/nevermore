@@ -103,10 +103,10 @@ static void test_models_verb(void)
     ASSERT_NULL(a.prompt);
 
     /* Options still apply (the catalog is per provider). */
-    char *argv2[] = { "nevermore", "models", "-p", "openai", NULL };
+    char *argv2[] = { "nevermore", "models", "-p", "hyper", NULL };
     ASSERT_EQ(parse(argv2, &a, err, sizeof(err)), 0);
     ASSERT_EQ(a.mode, NM_ARG_MODE_MODELS);
-    ASSERT_STR_EQ(a.provider, "openai");
+    ASSERT_STR_EQ(a.provider, "hyper");
 }
 
 static void test_models_takes_no_prompt(void)
@@ -123,7 +123,7 @@ static void test_a_mode_word_elsewhere_is_refused(void)
 {
     /* Never silently a prompt, and never a silent mode switch either:
      * `nevermore -p x models` must not become a billable turn. */
-    char *argv[] = { "nevermore", "-p", "openai", "models", NULL };
+    char *argv[] = { "nevermore", "-p", "hyper", "models", NULL };
     NmArgs a;
     char err[256];
     err[0] = '\0';

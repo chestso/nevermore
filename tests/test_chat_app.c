@@ -397,7 +397,7 @@ static void pin_color_env(int truecolor)
 }
 
 /* Create the app + runtime pair wired like main.c does it. Provider
- * defaults to "openai" (static catalog + openai_client wire). */
+ * defaults to "ollama:local" (static catalog + openai_client wire). */
 static AppHarness *harness_new_full(const char *provider, const char *model,
                                     const char *base_url, int truecolor)
 {
@@ -941,7 +941,7 @@ static void test_submit_echoes_and_prints_answer(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hi there");
@@ -999,7 +999,7 @@ static void test_delta_line_continuation_is_preserved(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
     h->pacer = &sc;
 
@@ -1043,7 +1043,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -1072,7 +1072,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     char *rule =
-        status_row_bytes("\xc2\xb7 -/- ", IDENT("openai", "test-model"));
+        status_row_bytes("\xc2\xb7 -/- ", IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -1095,7 +1095,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * column is the row's last column: the right edge is flush. */
     char ident_text[128];
     snprintf(ident_text, sizeof(ident_text), " %s",
-             IDENT("openai", "test-model"));
+             IDENT("ollama:local", "test-model"));
     char *identity = span_bytes(nm_color_status_identity(), ident_text);
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
@@ -1145,7 +1145,7 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new_rgb("openai", "test-model", base);
+    AppHarness *h = harness_new_rgb("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -1213,7 +1213,7 @@ static void test_submit_paints_the_handoff_frame(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new_rgb("openai", "test-model", base);
+    AppHarness *h = harness_new_rgb("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -1267,7 +1267,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -1295,7 +1295,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_NOT_NULL(frame);
     char *dark = span_bytes(tui_color_ansi(10), "  ");
     char *dark_row =
-        status_row_bytes("  -/- ", IDENT("openai", "test-model"));
+        status_row_bytes("  -/- ", IDENT("ollama:local", "test-model"));
     char *lit_glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(dark);
     ASSERT_NOT_NULL(dark_row);
@@ -1337,7 +1337,7 @@ static void test_spinner_clears_when_round_completes(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hi");
@@ -1368,7 +1368,7 @@ static void test_spinner_clears_when_round_completes(void)
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
     char *gauge = span_bytes(nm_color_gutter(), "-/- ");
-    char *rule = status_row_bytes("-/- ", IDENT("openai", "test-model"));
+    char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(rule);
@@ -1415,7 +1415,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
     /* The startup preflight note (a keyed provider with no key) is a
      * committed unit from BEFORE the stream: baseline it. */
@@ -1476,14 +1476,14 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
  * no window for this model. */
 static void test_context_gauge_unknown_reads_as_dash(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gutter(), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *rule = status_row_bytes("-/- ", IDENT("openai", "test-model"));
+    char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
@@ -1518,7 +1518,7 @@ static void test_context_gauge_unknown_reads_as_dash(void)
  * its own, the continuation column is the prompt's width alone. */
 static void test_multiline_input_continuation_aligns_under_prompt(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -1563,7 +1563,7 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
  * until we push. */
 static void test_kbd_tier_follows_the_terminal(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     /* Started like the real loop (tui_runtime_run), so the stop path
      * that pops the flags is live. */
@@ -1601,7 +1601,7 @@ static void test_kbd_tier_follows_the_terminal(void)
  * gives. */
 static void test_kbd_mode_overrides_the_probe(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     ASSERT_NOT_NULL(cfg);
@@ -1627,7 +1627,7 @@ static void test_kbd_mode_overrides_the_probe(void)
  * 97;2;65u) lands as the capital. */
 static void test_kbd_full_tier_gives_shift_enter(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     h->rt->probe_state = 3;
     h->rt->profile.resolved = 1;
@@ -1666,7 +1666,7 @@ static void test_kbd_full_tier_gives_shift_enter(void)
  * modifiers must survive the lock bits. */
 static void test_kbd_wire_lock_modifiers_keep_the_modifiers(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     h->rt->probe_state = 3;
     h->rt->profile.resolved = 1;
@@ -1702,7 +1702,7 @@ static void test_kbd_wire_lock_modifiers_keep_the_modifiers(void)
  * invisible character — and the capital must arrive exactly once. */
 static void test_kbd_wire_shift_press_types_nothing(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     h->rt->probe_state = 3;
     h->rt->profile.resolved = 1;
@@ -1730,7 +1730,7 @@ static void test_kbd_wire_shift_press_types_nothing(void)
  * the one thing the row is for. */
 static void test_config_reports_the_kbd_tier(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     ASSERT_NOT_NULL(cfg);
@@ -1761,7 +1761,7 @@ static void test_config_reports_the_kbd_tier(void)
  * exactly the submit this must not be. */
 static void test_paste_lands_as_text_with_newlines(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "before ");
@@ -1959,8 +1959,9 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
 
 /* The gauge's tier tracks how full the window is: Orange past ~85 % of a
  * KNOWN limit, Red past ~95 % (Comment at rest). The window is the
- * catalog's (openai's o3, 200000) — resolved at the point of use, so the
- * tiers are exercised through the real path, not a pushed fixture. */
+ * catalog's (hyper's gpt-oss-120b, 131072 — the same shipped row the two
+ * gauge tests above resolve), so the tiers are exercised through the real
+ * path, not a pushed fixture. */
 static void test_context_gauge_warns_near_the_limit(void)
 {
     struct ServerScript sc;
@@ -1968,13 +1969,13 @@ static void test_context_gauge_warns_near_the_limit(void)
     sc.n_rounds = 2;
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":170000,"
-        "\"completion_tokens\":1,\"total_tokens\":170001}}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":115000,"
+        "\"completion_tokens\":1,\"total_tokens\":115001}}\n\n"
         "data: [DONE]\n\n";
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":190000,"
-        "\"completion_tokens\":1,\"total_tokens\":190001}}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":126000,"
+        "\"completion_tokens\":1,\"total_tokens\":126001}}\n\n"
         "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -1983,7 +1984,7 @@ static void test_context_gauge_warns_near_the_limit(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "o3", base);
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "one");
@@ -1991,7 +1992,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = span_bytes(nm_color_gutter_warn(), "170k/200k ");
+    char *warn = span_bytes(nm_color_gutter_warn(), "115k/131k ");
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -2001,7 +2002,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = span_bytes(nm_color_gutter_warn_hot(), "190k/200k ");
+    char *hot = span_bytes(nm_color_gutter_warn_hot(), "126k/131k ");
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -2020,30 +2021,33 @@ static void test_context_gauge_warns_near_the_limit(void)
  * model id is a new row). */
 static void test_status_row_identity_follows_model(void)
 {
-    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *before = span_bytes(nm_color_status_identity(),
-                              " " IDENT("openai", "gpt-4o"));
+                              " " IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(before);
     ASSERT_TRUE(strstr(frame, before) != NULL);
     free(before);
 
-    harness_type(h, "/model gpt-5");
+    /* The exact-set form: this test is about the IDENTITY ROW changing,
+     * not about catalog membership. (And not a prefix of the old id,
+     * which would make the "old identity is gone" check below vacuous.) */
+    harness_type(h, "/model ! other-model");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-5");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "other-model");
 
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *after =
-        span_bytes(nm_color_status_identity(), " " IDENT("openai", "gpt-5"));
+    char *after = span_bytes(nm_color_status_identity(),
+                             " " IDENT("ollama:local", "other-model"));
     ASSERT_NOT_NULL(after);
     ASSERT_TRUE(strstr(frame, after) != NULL);
     /* The old identity is gone (the declarations changed, not just the
      * text inside one of them). */
-    ASSERT_TRUE(strstr(frame, IDENT("openai", "gpt-4o")) == NULL);
+    ASSERT_TRUE(strstr(frame, IDENT("ollama:local", "test-model")) == NULL);
     free(after);
 
     harness_free(h);
@@ -2056,7 +2060,7 @@ static void test_status_row_identity_follows_model(void)
 static void test_status_row_identity_follows_provider(void)
 {
     pin_cfg_paths("statusrow-provider");
-    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h); /* an empty store: no model memory */
 
@@ -2071,7 +2075,7 @@ static void test_status_row_identity_follows_provider(void)
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
     /* The previous provider's id is nowhere on the row. */
-    ASSERT_TRUE(strstr(frame, IDENT("openai", "gpt-4o")) == NULL);
+    ASSERT_TRUE(strstr(frame, IDENT("hyper", "gpt-oss-120b")) == NULL);
     free(identity);
 
     nm_config_free(cfg);
@@ -2082,14 +2086,14 @@ static void test_status_row_identity_follows_provider(void)
  * the row never shows an empty identity. */
 static void test_status_row_identity_no_model(void)
 {
-    AppHarness *h = harness_new("openai", NULL, NULL);
+    AppHarness *h = harness_new("ollama:local", NULL, NULL);
     ASSERT_NOT_NULL(h);
     ASSERT_NULL(nm_chat_app_model(h->app));
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *identity = span_bytes(nm_color_status_identity(),
-                                " " IDENT("openai", "(no model)"));
+                                " " IDENT("ollama:local", "(no model)"));
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
     free(identity);
@@ -2190,7 +2194,7 @@ static void test_status_row_identity_dropped_when_short(void)
  * (which is what forgetting the offset would do). */
 static void test_status_row_cursor_lands_on_the_input_row(void)
 {
-    AppHarness *h = harness_new("openai", "gpt-4o", NULL);
+    AppHarness *h = harness_new("ollama:local", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "one");
@@ -2239,7 +2243,7 @@ static void test_busy_input_gathers_type_ahead(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "first");
@@ -2438,7 +2442,7 @@ static void test_provider_popup_composes_into_input(void)
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "ollama:cloud") != NULL);
-    ASSERT_TRUE(strstr(frame, "openai") != NULL);
+    ASSERT_TRUE(strstr(frame, "ollama:local") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
     ASSERT_TRUE(strstr(frame, "opencode:zen") != NULL);
 
@@ -2535,12 +2539,12 @@ static void test_provider_command_switches_provider(void)
 
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:cloud");
 
-    harness_type(h, "/provider openai");
+    harness_type(h, "/provider ollama:local");
     harness_enter(h);
 
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
-    ASSERT_TRUE(strstr(harness_read(h), "openai") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "ollama:local") != NULL);
 
     /* Bare /provider opens the registry picker popup (the same
      * truth the router reads). */
@@ -2550,14 +2554,14 @@ static void test_provider_command_switches_provider(void)
     ASSERT_TRUE(strstr(frame, "ollama:cloud") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
     ASSERT_TRUE(strstr(frame, "hyper") != NULL);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
     /* A query that matches nothing: no popup, a printed note, and
      * the provider stays (typo can't silently switch anything). */
     harness_type(h, "/provider nope");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "no providers match 'nope'") != NULL);
 
@@ -2599,7 +2603,7 @@ static void test_cancel_midstream_returns_to_idle(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "stall please");
@@ -2645,7 +2649,7 @@ static AppHarness *turn_to_done(struct ServerScript *sc, pthread_t *th)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     if (!h)
         return NULL;
     harness_type(h, "hi there");
@@ -2727,7 +2731,7 @@ static void test_tick_fires_stream_inactivity_timeout(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A short budget for a fast test: the store's `timeout` key, which
@@ -2777,7 +2781,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "anyone there");
@@ -2831,7 +2835,7 @@ static void test_connect_walk_notice_is_printed(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://localhost:%d/v1", port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello");
@@ -2890,7 +2894,7 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     store_clear(NM_CFG_KEY_SKIP_FAMILIES);
     knobs_set_timeout(250);
 
-    AppHarness *h = harness_new("openai", "test-model",
+    AppHarness *h = harness_new("ollama:local", "test-model",
                                 "http://[2001:db8:dead::1]:9/v1");
     ASSERT_NOT_NULL(h);
 
@@ -2993,7 +2997,7 @@ static void test_reasoning_prints_before_answer(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "think");
@@ -3099,7 +3103,7 @@ static void test_separator_between_reasoning_and_answer(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "why");
@@ -3142,7 +3146,7 @@ static void test_separator_collapses_trailing_blank_lines(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "code please");
@@ -3181,7 +3185,7 @@ static void test_separator_blank_line_after_answer(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hi");
@@ -3290,7 +3294,7 @@ static void test_blank_line_inside_a_run_renders(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "think");
@@ -3337,7 +3341,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "run it");
@@ -3430,7 +3434,7 @@ static void test_cancel_during_tool_closes_the_block(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "run it");
@@ -3508,7 +3512,7 @@ static void test_tool_round_prints_panels(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "change quick to slow");
@@ -3610,7 +3614,7 @@ static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc,
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
-    return harness_new("openai", "test-model", base);
+    return harness_new("ollama:local", "test-model", base);
 }
 
 /* The provider hears no reasoning by default: the trace is received,
@@ -3764,7 +3768,7 @@ static void test_parallel_tool_calls_pair_plan_with_result(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "read both files");
@@ -3865,7 +3869,7 @@ static void test_open_json_fence_before_tool_call_commits(void)
 
     char base2[64];
     snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base2);
+    AppHarness *h = harness_new("ollama:local", "test-model", base2);
     ASSERT_NOT_NULL(h);
     h->pacer = &sc;
 
@@ -4069,7 +4073,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
     h->pacer = &sc;
 
@@ -4194,7 +4198,7 @@ static int fragment_extends_row(const char *hay, const char *frag)
 
 static void test_fence_line_not_split_by_reasoning_stream_end(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     tui_runtime_send(h->rt, tui_msg_window_size(130, 30));
     tui_runtime_drain(h->rt);
@@ -4263,7 +4267,7 @@ static void test_submit_echoes_once(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "unique-user-line");
@@ -4305,7 +4309,7 @@ static void test_submit_does_not_finalize_status_line(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "unique-user-line");
@@ -4356,11 +4360,11 @@ static void test_provider_switch_clears_and_prints_separator(void)
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/provider openai");
+    harness_type(h, "/provider ollama:local");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "provider: openai (fresh session)") != NULL);
+    ASSERT_TRUE(strstr(out, "provider: ollama:local (fresh session)") != NULL);
 
     harness_free(h);
 }
@@ -4387,30 +4391,30 @@ static void test_provider_switch_resolves_new_provider_key(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
     /* A keyed startup provider with its own key. */
-    test_setenv("OPENAI_API_KEY", "sk-old-openai");
-    AppHarness *h = harness_new("openai", "test-model", base);
+    test_setenv("OPENROUTER_API_KEY", "sk-old-openrouter");
+    AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* Switch to a different keyed provider carrying a different key. */
-    test_setenv("OPENROUTER_API_KEY", "sk-new-openrouter");
+    test_setenv("HYPER_API_KEY", "sk-new-hyper");
     g_request[0] = '\0';
-    harness_type(h, "/provider openrouter");
+    harness_type(h, "/provider hyper");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "hyper");
 
     /* The next turn must authorize with the NEW provider's key. */
     harness_type(h, "hi");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_TRUE(strstr(g_request,
-                       "Authorization: Bearer sk-new-openrouter") != NULL);
-    ASSERT_TRUE(strstr(g_request, "sk-old-openai") == NULL);
+                       "Authorization: Bearer sk-new-hyper") != NULL);
+    ASSERT_TRUE(strstr(g_request, "sk-old-openrouter") == NULL);
 
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
-    test_unsetenv("OPENAI_API_KEY");
     test_unsetenv("OPENROUTER_API_KEY");
+    test_unsetenv("HYPER_API_KEY");
 }
 
 /* The app installs its per-stream highlighter state as the
@@ -4419,7 +4423,7 @@ static void test_provider_switch_resolves_new_provider_key(void)
  * Orange). */
 static void test_fence_body_tokens_highlighted_through_app(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     tui_runtime_send(h->rt, tui_msg_window_size(130, 30));
     tui_runtime_drain(h->rt);
@@ -4462,7 +4466,7 @@ static void test_reasoning_and_content_commit_in_order(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "order");
@@ -4503,7 +4507,7 @@ static void test_table_blank_line_renders(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "table please");
@@ -4553,7 +4557,7 @@ static void test_image_followed_by_a_blank_still_parses(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "draw something");
@@ -4615,7 +4619,7 @@ static void test_table_then_fence_keeps_wire_order(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "table then code");
@@ -4664,7 +4668,7 @@ static void test_markdown_table_reaches_scrollback_aligned(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "table please");
@@ -4710,7 +4714,7 @@ static void test_image_data_uri_degrades_to_marker(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "draw something");
@@ -4752,7 +4756,7 @@ static void test_config_runtime_change_writes_shadow(void)
     pin_cfg_paths("write");
     write_file_at(g_cfg_user, "model = from-user\n");
 
-    AppHarness *h = harness_new("openai", "from-user", NULL);
+    AppHarness *h = harness_new("ollama:local", "from-user", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -4786,7 +4790,7 @@ static void test_config_env_pin_is_reported(void)
     pin_cfg_paths("envpin");
     test_setenv("NEVERMORE_MAX_ROUNDS", "9");
 
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     ASSERT_EQ(nm_agent_max_rounds(nm_chat_app_agent(h->app)), 9);
@@ -4812,7 +4816,7 @@ static void test_config_command_reports_and_resets(void)
     pin_cfg_paths("report");
     write_file_at(g_cfg_user, "model = from-user\n");
 
-    AppHarness *h = harness_new("openai", "from-user", NULL);
+    AppHarness *h = harness_new("ollama:local", "from-user", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -4820,7 +4824,7 @@ static void test_config_command_reports_and_resets(void)
      * The model is persisted per provider: `model.<provider>`. */
     harness_type(h, "/model ! from-user");
     harness_enter(h);
-    ASSERT_STR_EQ(cfg_read_shadow(), "model.openai = from-user\n");
+    ASSERT_STR_EQ(cfg_read_shadow(), "model.ollama:local = from-user\n");
 
     harness_type(h, "/config");
     harness_enter(h);
@@ -4885,9 +4889,9 @@ static void test_config_shows_provider_default_echo(void)
 static void test_model_memory_is_per_provider(void)
 {
     pin_cfg_paths("scopedmodel");
-    write_file_at(g_cfg_user, "provider = openai\n");
+    write_file_at(g_cfg_user, "provider = ollama:local\n");
 
-    AppHarness *h = harness_new("openai", "m1", NULL);
+    AppHarness *h = harness_new("ollama:local", "m1", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "m1");
@@ -4896,7 +4900,7 @@ static void test_model_memory_is_per_provider(void)
     harness_type(h, "/model ! m2");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "m2");
-    ASSERT_STR_EQ(cfg_read_shadow(), "model.openai = m2\n");
+    ASSERT_STR_EQ(cfg_read_shadow(), "model.ollama:local = m2\n");
 
     /* A provider with no memory for this model: the switch lands on the
      * ask (no model), not the previous provider's id. */
@@ -4907,10 +4911,10 @@ static void test_model_memory_is_per_provider(void)
     ASSERT_TRUE(strstr(harness_read(h),
                        "no model for provider 'hyper'") != NULL);
 
-    /* Back to openai: the memory restores the id. */
-    harness_type(h, "/provider openai");
+    /* Back to ollama:local: the memory restores the id. */
+    harness_type(h, "/provider ollama:local");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openai");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "m2");
 
     nm_config_free(cfg);
@@ -4922,13 +4926,13 @@ static void test_model_memory_is_per_provider(void)
  * /model. */
 static void test_send_without_model_is_refused(void)
 {
-    AppHarness *h = harness_new("openai", NULL, NULL);
+    AppHarness *h = harness_new("ollama:local", NULL, NULL);
     ASSERT_NOT_NULL(h);
     ASSERT_NULL(nm_chat_app_model(h->app));
 
     /* The startup notice says how to set one. */
     ASSERT_TRUE(strstr(harness_read(h),
-                       "no model for provider 'openai'") != NULL);
+                       "no model for provider 'ollama:local'") != NULL);
 
     /* A plain send is refused: the agent stays idle and the input is
      * NOT cleared (submit's echo/clear never ran). */
@@ -4964,21 +4968,21 @@ static void test_missing_key_preflight_warns(void)
 
     /* Switching to a keyed provider with no key: the note names the env
      * var and the authinfo machine. */
-    harness_type(h0, "/provider openai");
+    harness_type(h0, "/provider openrouter");
     harness_enter(h0);
     const char *out = harness_read(h0);
     ASSERT_TRUE(strstr(out, "needs an API key") != NULL);
-    ASSERT_TRUE(strstr(out, "OPENAI_API_KEY") != NULL);
-    ASSERT_TRUE(strstr(out, "openai.com") != NULL);
+    ASSERT_TRUE(strstr(out, "OPENROUTER_API_KEY") != NULL);
+    ASSERT_TRUE(strstr(out, "openrouter.ai") != NULL);
     harness_free(h0);
 
     /* With the key configured, the same provider is quiet. */
-    test_setenv("OPENAI_API_KEY", "sk-x");
-    AppHarness *h1 = harness_new("openai", "m", NULL);
+    test_setenv("OPENROUTER_API_KEY", "sk-x");
+    AppHarness *h1 = harness_new("openrouter", "m", NULL);
     ASSERT_NOT_NULL(h1);
     ASSERT_TRUE(strstr(harness_read(h1), "needs an API key") == NULL);
     harness_free(h1);
-    test_unsetenv("OPENAI_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
 }
 
 /* The popup no longer blocks on a wire catalog: /model returns at once
@@ -5104,7 +5108,7 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model wire-only-model");
@@ -5114,7 +5118,7 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
      * note says the picker is on its way. */
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "test-model");
     ASSERT_TRUE(strstr(harness_read(h),
-                       "loading the openai model catalog") != NULL);
+                       "loading the ollama:local model catalog") != NULL);
 
     harness_free(h);
     close(lfd);
@@ -5380,16 +5384,16 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
 static void test_config_lists_scoped_model_keys(void)
 {
     pin_cfg_paths("scopedlist");
-    write_file_at(g_cfg_user, "provider = openai\nmodel.openai = gpt-x\n");
+    write_file_at(g_cfg_user, "provider = ollama:local\nmodel.ollama:local = gpt-x\n");
 
-    AppHarness *h = harness_new("openai", "gpt-x", NULL);
+    AppHarness *h = harness_new("ollama:local", "gpt-x", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
     harness_type(h, "/config");
     harness_enter(h);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "model.openai") != NULL);
+    ASSERT_TRUE(strstr(out, "model.ollama:local") != NULL);
     ASSERT_TRUE(strstr(out, "gpt-x") != NULL);
 
     nm_config_free(cfg);
@@ -5403,7 +5407,7 @@ static void test_config_lists_scoped_model_keys(void)
 static void test_config_set_and_runtime_layer(void)
 {
     pin_cfg_paths("cfgset");
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -5452,7 +5456,7 @@ static void test_config_set_and_runtime_layer(void)
 static void test_config_absent_is_no_persistence(void)
 {
     pin_cfg_paths("absent");
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/config set rounds 5");
@@ -5482,7 +5486,7 @@ TEST_OFFLINE_CATALOG_PIN_CHECK()
 static void test_connect_knobs_via_config_command(void)
 {
     pin_cfg_paths("connectcmd");
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -5550,7 +5554,7 @@ static void test_connect_knobs_from_config_reach_transport(void)
     pin_cfg_paths("connectcfg");
     write_file_at(g_cfg_user, "connect_timeout = 850\nfamily_skip = on\n");
 
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -5592,7 +5596,7 @@ static int count_substr(const char *hay, const char *needle)
 static void test_family_skip_notice_prints_once(void)
 {
     pin_cfg_paths("connectskip");
-    AppHarness *h = harness_new("openai", "m", NULL);
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     harness_type(h, "/config set family_skip on");
@@ -5635,7 +5639,7 @@ static void test_job_cap_fits_the_fd_budget(void)
 {
     ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 1 <= TUI_IO_SOURCE_MAX);
 #ifndef _WIN32
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     nm_proc_reset(); /* a clean cap + registry, whatever ran before */
 
@@ -5675,7 +5679,7 @@ static void test_job_cap_fits_the_fd_budget(void)
  * the handle back to the job. */
 static void test_windows_job_source_kind(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     NmSource set[TUI_IO_SOURCE_MAX];
@@ -5712,7 +5716,7 @@ static void test_windows_job_source_kind(void)
  * closed job's fd drops out. */
 static void test_interest_lists_every_job(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     NmSource set[TUI_IO_SOURCE_MAX];
@@ -5757,7 +5761,7 @@ static void test_interest_lists_every_job(void)
  * server the model started keeps running after the user quits. */
 static void test_app_teardown_kills_jobs(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     char err[128];
@@ -5775,7 +5779,7 @@ static void test_app_teardown_kills_jobs(void)
  * /ps is the human's window. */
 static void test_external_ready_drains_background_job(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     char err[128];
@@ -5838,7 +5842,7 @@ static void test_interest_dedupes_active_exec_job(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "start it");
@@ -5931,7 +5935,7 @@ static int utf8_well_formed(const char *s)
  * empty registry). Runs on every platform. */
 static void test_ps_without_jobs(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/ps");
@@ -5949,7 +5953,7 @@ static void test_ps_without_jobs(void)
  * user on a machine without skills sees. */
 static void test_skills_reports_none_found(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/skills");
@@ -5987,7 +5991,7 @@ static void test_skills_lists_found_skills(void)
     }
     nm_skills_set_global_dir(fixture);
 
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/skills");
@@ -6010,7 +6014,7 @@ static void test_skills_lists_found_skills(void)
  * how much output is waiting; /kill <id> then removes exactly one. */
 static void test_ps_lists_and_kill_removes(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     nm_proc_reset();
 
@@ -6116,7 +6120,7 @@ static void test_ps_lists_and_kill_removes(void)
  * an unknown id all refuse without touching the registry. */
 static void test_kill_rejects_bad_ids(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     nm_proc_reset();
 
@@ -6157,7 +6161,7 @@ static void test_kill_rejects_bad_ids(void)
  * elides with "…", and the cut never splits a multi-byte character. */
 static void test_ps_command_column_elides_safely(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     nm_proc_reset();
 
@@ -6238,7 +6242,7 @@ static void test_exec_command_spinner_tier(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
     nm_proc_reset(); /* this test owns the registry */
 
@@ -6353,7 +6357,7 @@ static void chat_img_cmd(AppHarness *h, const char *path)
 
 static void test_image_command_attaches_lists_and_drops(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("chat-img.png");
@@ -6383,7 +6387,7 @@ static void test_image_command_attaches_lists_and_drops(void)
 
 static void test_image_command_refusals(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     /* unreadable: named, not attached */
@@ -6431,7 +6435,7 @@ static void test_image_command_refusals(void)
  * named save.png, it does not save anything. */
 static void test_image_subcommands_are_whole_words(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("save.png");
@@ -6467,7 +6471,7 @@ static void test_img_submit_sends_parts_and_echoes(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("chat-img-send.png");
@@ -6541,7 +6545,7 @@ static void test_img_text_only_model_warns(void)
  * never silent (an id into a dead store would be worse). */
 static void test_img_pending_dropped_on_provider_switch(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("chat-img-switch.png");
@@ -6549,10 +6553,10 @@ static void test_img_pending_dropped_on_provider_switch(void)
     ASSERT_TRUE(strstr(harness_read(h), "1 pending") == NULL ||
                 strstr(harness_read(h), "image: chat-img-switch.png") != NULL);
 
-    harness_type(h, "/provider openai");
+    harness_type(h, "/provider ollama:local");
     harness_enter(h);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "— provider: openai (fresh session) —") != NULL);
+    ASSERT_TRUE(strstr(out, "— provider: ollama:local (fresh session) —") != NULL);
     ASSERT_TRUE(strstr(out,
                        "image: 1 pending attachment dropped with the "
                        "session") != NULL);
@@ -6594,7 +6598,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* The terminal answered the kitty query: images are supported. */
@@ -6671,7 +6675,7 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A graphics terminal: the image renders (kitty APC). */
@@ -6738,7 +6742,7 @@ static void test_tool_image_after_streamed_text_never_commits_payload(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A graphics terminal: the image renders (kitty APC). */
@@ -6805,7 +6809,7 @@ static void test_tool_read_file_image_degrades_to_the_panel_line(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A resolved profile with NO graphics support: the gate says no. */
@@ -6928,7 +6932,7 @@ static void test_recv_image_renders_through_image_block(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A graphics terminal: the image renders (kitty APC). Resolve the
@@ -6999,7 +7003,7 @@ static void test_recv_image_marker_on_dumb_terminal(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* Resolved, no graphics. */
@@ -7074,7 +7078,7 @@ static void test_image_save_writes_the_received_image(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     /* A terminal without graphics: the caption is the image's only
@@ -7132,7 +7136,7 @@ static void test_image_save_writes_the_received_image(void)
  * invent a file. */
 static void test_image_save_without_images(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     harness_type(h, "/image save");
     harness_enter(h);
@@ -7171,7 +7175,7 @@ static void test_session_inspects_and_saves(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hello agent");
@@ -7272,7 +7276,7 @@ static void test_session_inspects_and_saves(void)
  * transcript or write an empty file. */
 static void test_session_without_a_transcript(void)
 {
-    AppHarness *h = harness_new("openai", "test-model", NULL);
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     harness_type(h, "/session");
     harness_enter(h);
@@ -7723,7 +7727,7 @@ static void test_recv_image_after_text_opens_its_own_block(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     h->rt->probe_state = 3;
@@ -7755,7 +7759,7 @@ static void test_recv_image_after_text_opens_its_own_block(void)
 static void test_reminder_panel_renders_in_its_own_role(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     char body[512];
@@ -7798,7 +7802,7 @@ static void test_reminder_panel_renders_in_its_own_role(void)
 static void test_reminder_panel_styles_a_body_without_a_final_newline(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     NmReminderBuf body, blocks;
@@ -7839,7 +7843,7 @@ static void test_reminder_panel_styles_a_body_without_a_final_newline(void)
 static void test_reminder_panel_ignores_an_escaped_tag(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     NmToolResult res = { .status = NM_TOOL_OK,
@@ -7866,7 +7870,7 @@ static void test_reminder_panel_ignores_an_escaped_tag(void)
 static void test_reminder_user_channel_is_shown(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     nm_chat_app_on_reminder("context-pressure",
@@ -7888,7 +7892,7 @@ static void test_reminder_user_channel_is_shown(void)
 static void test_reminder_tool_channel_is_not_echoed(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     nm_chat_app_on_reminder("read-partial", "This read returned only part.",
@@ -7906,7 +7910,7 @@ static void test_reminder_tool_channel_is_not_echoed(void)
 static void test_reminder_forgery_warning_is_red(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     nm_chat_app_on_warning("warning: read_file output contained 1 forged "
@@ -7932,7 +7936,7 @@ static void test_reminder_forgery_warning_is_red(void)
 static void test_notice_sites_each_close_their_block(void)
 {
     AppHarness *h =
-        harness_new("openai", "test-model", "http://127.0.0.1:1/v1");
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
     ASSERT_NOT_NULL(h);
 
     nm_chat_app_on_notice("connect: IPv6 did not answer — walk 1/1", NULL);
@@ -8400,7 +8404,7 @@ static void test_load_skill_round_shows_the_body(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("openai", "test-model", base);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "use the reader skill");

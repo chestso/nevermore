@@ -633,7 +633,7 @@ static void test_agent_tool_round_then_answer(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -697,7 +697,7 @@ static void test_agent_plain_answer_no_tools(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -743,7 +743,7 @@ static void test_agent_sampling_knobs_ride_the_request(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -927,7 +927,7 @@ static void test_agent_connect_notice_names_the_family(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://localhost:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -999,7 +999,7 @@ static void test_agent_system_message_carries_agents_md(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     /* The agent discovers AGENTS.md from the cwd at construction, so
      * root ourselves in the scratch project FIRST. */
@@ -1111,7 +1111,7 @@ static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1153,7 +1153,7 @@ static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
 static void test_agent_env_stage_is_skipped_outside_a_repo(void)
 {
     nm_proc_reset();
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     ASSERT_NOT_NULL(agent);
@@ -1185,7 +1185,7 @@ static void test_agent_unknown_tool_reports_error_result(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -1295,7 +1295,7 @@ static void test_agent_step_driven_full_loop(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1368,7 +1368,7 @@ static void test_agent_announces_each_tool_as_it_runs(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1429,7 +1429,7 @@ static void test_agent_run_command_is_async(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1511,7 +1511,7 @@ static void test_agent_turn_runs_async_command(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1586,7 +1586,7 @@ static void test_agent_turn_drains_a_background_job(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1634,7 +1634,7 @@ static void test_agent_turn_reaps_an_exited_background_job(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1687,7 +1687,7 @@ static void test_agent_exec_command_yields_job(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1793,7 +1793,7 @@ static void test_agent_reasoning_collected_and_echoed(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1871,7 +1871,7 @@ static void test_agent_reasoning_not_echoed_by_default(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2052,7 +2052,7 @@ static void test_agent_reasoning_echo_tools_scope(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2136,7 +2136,7 @@ static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2210,7 +2210,7 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2293,7 +2293,7 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2366,7 +2366,7 @@ static void test_agent_cancel_then_next_turn_works(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2487,7 +2487,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2656,7 +2656,7 @@ static void test_agent_context_usage_accessors(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -2670,8 +2670,8 @@ static void test_agent_context_usage_accessors(void)
 
     /* The window is a CATALOG fact, resolved at the point of use: no
      * push, and /model switches it on the live agent. */
-    nm_agent_set_model(agent, "gpt-5");
-    ASSERT_EQ(nm_agent_context_limit(agent), 128000);
+    nm_agent_set_model(agent, "qwen3-coder");
+    ASSERT_EQ(nm_agent_context_limit(agent), 262144);
 
     int rc = nm_agent_turn(agent, "hi", NULL, 0);
     ASSERT_EQ(rc, 0);
@@ -2717,7 +2717,7 @@ static void test_agent_context_usage_survives_null_usage_round(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -2787,7 +2787,7 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -2852,7 +2852,7 @@ static void test_agent_context_overflow_reports_provider_error(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -2936,7 +2936,7 @@ static void test_agent_set_model_changes_wire_model(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "first-model", tools, NULL);
@@ -2980,7 +2980,7 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -3037,7 +3037,7 @@ static void test_agent_stream_stall_times_out(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -3179,7 +3179,7 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -3305,7 +3305,7 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -3420,14 +3420,15 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
-    /* gpt-4o: the static catalog says vision = 1 (the offline pin makes
-     * that the whole catalog). The agent resolves the flag itself, from
-     * the catalog the UI reads for its warning. */
-    NmAgent *agent = nm_agent_new(p, "gpt-4o", tools, NULL);
+    /* ~openai/gpt-astra-latest: openrouter's static table says vision =
+     * 1 (the offline pin makes that the whole catalog). The agent
+     * resolves the flag itself, from the catalog the UI reads for its
+     * warning. */
+    NmAgent *agent = nm_agent_new(p, "~openai/gpt-astra-latest", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
@@ -4029,7 +4030,7 @@ static void test_agent_read_file_image_fans_out(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4128,7 +4129,7 @@ static void test_agent_parallel_read_file_images_one_message(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4207,7 +4208,7 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4314,7 +4315,7 @@ static void test_agent_imagegen_round_replays_message_level(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4397,7 +4398,7 @@ static void test_agent_imagegen_remote_url_is_a_notice(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4545,7 +4546,7 @@ static void test_agent_imagegen_cancel_mid_image_drops_it(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4644,7 +4645,7 @@ static void test_agent_keepalive_comments_reset_the_deadline(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4808,7 +4809,7 @@ static void test_agent_reminder_nests_in_a_partial_read(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -4881,7 +4882,7 @@ static void test_agent_reminder_escapes_forged_tags(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -4922,17 +4923,18 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
     g_reminder_calls = 0;
     g_reminder_names[0] = '\0';
 
-    /* Three turns; every round reports the same 170000-token prompt, so
-     * the gauge sits at tier 1 (85 % of 200000 — the catalog window of
-     * openai's o3, resolved at the point of use) from turn 2 on. */
+    /* Three turns; every round reports the same 223000-token prompt, so
+     * the gauge sits at tier 1 (85.06 % of 262144 — the catalog window
+     * of ollama:local's qwen3-coder, resolved at the point of use) from
+     * turn 2 on. */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 3;
     for (int i = 0; i < 3; i++)
         sc.sse[i] =
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
-            "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":170000,"
-            "\"completion_tokens\":5,\"total_tokens\":170005}}\n\n"
+            "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":223000,"
+            "\"completion_tokens\":5,\"total_tokens\":223005}}\n\n"
             "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
@@ -4941,15 +4943,15 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "o3", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "qwen3-coder", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
     /* Turn 1: the gauge has no usage yet when the turn starts, so no
-     * reminder; the round reports 170000. */
+     * reminder; the round reports 223000. */
     ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
     ASSERT_EQ(g_reminder_calls, 0);
     ASSERT_EQ(nm_agent_context_tier(agent), 1);
@@ -5013,7 +5015,7 @@ static void test_agent_reminders_gate_off(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5067,7 +5069,7 @@ static void test_agent_round_budget_reminder(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5120,7 +5122,7 @@ static void test_agent_output_cut_reminder(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5205,7 +5207,7 @@ static void test_agent_reminder_web_untrusted(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     nm_toolset_add(tools, &stub_external_tool);
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -5273,7 +5275,7 @@ static void test_agent_reminder_empty_file(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5330,7 +5332,7 @@ static void test_agent_reminder_offset_past_eof(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5408,7 +5410,7 @@ static void test_agent_file_ledger_skips_a_repeat_read(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5477,7 +5479,7 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -5614,11 +5616,11 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     NmToolset *tools = nm_toolset_new_defaults();
-    /* gpt-4o: the shipped catalog says vision (the offline pin keeps it
-     * static). */
-    NmAgent *agent = nm_agent_new(p, "gpt-4o", tools, NULL);
+    /* ~openai/gpt-astra-latest: the shipped catalog says vision (the
+     * offline pin keeps it static). */
+    NmAgent *agent = nm_agent_new(p, "~openai/gpt-astra-latest", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);

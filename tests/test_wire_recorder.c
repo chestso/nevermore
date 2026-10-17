@@ -343,17 +343,17 @@ static void test_explicit_path_and_empty_env(void)
     /* Explicit path form ($NEVERMORE_DEBUG_WIRE=/path). */
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "qwen3-coder"), 1);
     nm_wire_recorder_shutdown();
 
     char *log = log_read();
     ASSERT_NOT_NULL(log);
-    ASSERT_TRUE(strstr(log, "# provider openai model gpt-4o") != NULL);
+    ASSERT_TRUE(strstr(log, "# provider ollama:cloud model qwen3-coder") != NULL);
     free(log);
 
     /* Empty: off. */
     test_setenv("NEVERMORE_DEBUG_WIRE", "", 1);
-    ASSERT_EQ(nm_wire_recorder_init("openai", NULL), 0);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", NULL), 0);
     ASSERT_NULL(nm_wire_tap());
     test_unsetenv("NEVERMORE_DEBUG_WIRE");
 }
@@ -394,7 +394,7 @@ static void test_error_line_shape(void)
      * contract, stage "connect", and no xchg (nothing was queued). */
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "qwen3-coder"), 1);
 
     NmConnectInfo ci;
     NmConnection *c = nm_connect("127.0.0.1", 1, NM_TRANSPORT_PLAIN, &ci);
@@ -428,7 +428,7 @@ static void test_connect_retry_line_shape(void)
 
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "qwen3-coder"), 1);
 
     NmConnectInfo ci = { 0 };
     NmConnection *c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);

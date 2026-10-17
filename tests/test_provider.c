@@ -74,7 +74,6 @@ static void test_provider_registry_complete(void)
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_HYPER));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA_LOCAL));
-    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENAI));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENROUTER));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE_ZEN));
@@ -86,7 +85,6 @@ static void test_provider_lookup_by_name(void)
     ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
     ASSERT_NOT_NULL(nm_provider_by_name("ollama:cloud"));
     ASSERT_NOT_NULL(nm_provider_by_name("ollama:local"));
-    ASSERT_NOT_NULL(nm_provider_by_name("openai"));
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:go"));
     ASSERT_NOT_NULL(nm_provider_by_name("opencode:zen"));
@@ -206,30 +204,30 @@ static void test_provider_reasoning_echo_declarations(void)
 
 static void test_provider_api_key_env_then_authinfo(void)
 {
-    const NmProvider *p = nm_provider_by_name("openai");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
     /* No env, no authinfo file: NULL. */
-    test_unsetenv("OPENAI_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
     nm_authinfo_set_path("/nonexistent/nm-authinfo-test");
     ASSERT_NULL(nm_provider_api_key(p));
 
     /* authinfo alone resolves. */
-    const char *path = write_authinfo("machine openai.com password file-key\n");
+    const char *path = write_authinfo("machine openrouter.ai password file-key\n");
     ASSERT_NOT_NULL(path);
     nm_authinfo_set_path(path);
     ASSERT_STR_EQ(nm_provider_api_key(p), "file-key");
 
     /* Env wins over the file... */
-    test_setenv("OPENAI_API_KEY", "env-key");
+    test_setenv("OPENROUTER_API_KEY", "env-key");
     ASSERT_STR_EQ(nm_provider_api_key(p), "env-key");
 
     /* ...an EMPTY env var is unset for this purpose (falls through
      * to the file, never an empty key). */
-    test_setenv("OPENAI_API_KEY", "");
+    test_setenv("OPENROUTER_API_KEY", "");
     ASSERT_STR_EQ(nm_provider_api_key(p), "file-key");
 
-    test_unsetenv("OPENAI_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
     nm_authinfo_set_path(NULL);
 
     /* Providers with an authinfo machine but no key for it: NULL.
@@ -263,8 +261,6 @@ static void test_provider_authinfo_machines(void)
                   "hyper.charm.land");
     ASSERT_STR_EQ(nm_provider_by_name("ollama:cloud")->authinfo_machine,
                   "ollama.com");
-    ASSERT_STR_EQ(nm_provider_by_name("openai")->authinfo_machine,
-                  "openai.com");
     ASSERT_STR_EQ(nm_provider_by_name("openrouter")->authinfo_machine,
                   "openrouter.ai");
     /* Both OpenCode tiers share the one box line. */
@@ -1739,81 +1735,6 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     ASSERT_EQ(g[0].context_length, 1000000);
 }
 
-/* OpenAI catalog: the live /v1/models wire is ids-only (no
- * capabilities, no context window), so a live fetch takes membership
- * from the wire and METADATA from the curated static table by id —
- * exactly the opencode case. Without it every live OpenAI model would
- * read as text-only, which would both suppress the system prompt's
- * image-capability clause and warn "text-only" at the wrong models. */
-static void *openai_models_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char body[] =
-        "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"gpt-4o\",\"object\":\"model\",\"owned_by\":\"openai\"},"
-        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"openai\"}"
-        "]}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    send(cfd, head, strlen(head), 0);
-    send(cfd, body, sizeof(body) - 1, 0);
-    close(cfd);
-    close(lfd);
-    return NULL;
-}
-
-static void test_openai_models_fetch_keeps_curated_capabilities(void)
-{
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openai_models_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openai");
-    ASSERT_NOT_NULL(p);
-
-    size_t n = 0;
-    const NmModel *models = p->models(p, base, NULL, &n);
-    ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 2);
-    /* Known id: curated label, vision and window, NOT the ids-only
-     * defaults the wire would imply. */
-    ASSERT_STR_EQ(models[0].id, "gpt-4o");
-    ASSERT_STR_EQ(models[0].label, "GPT-4o");
-    ASSERT_EQ(models[0].vision, 1);
-    ASSERT_EQ(models[0].image_gen, 0); /* curated table's claim, copied */
-    ASSERT_EQ(models[0].context_length, 128000);
-    /* The curated table makes no tool-use claim (0 = "says nothing" —
-     * OpenAI's wire has no such field and the table does not assert
-     * one), so a live row keeps sending the toolset. */
-    ASSERT_EQ(models[0].tools, 0);
-    /* An id the curated table has not seen: id-only, unknown window. */
-    ASSERT_STR_EQ(models[1].id, "future-model-9");
-    ASSERT_STR_EQ(models[1].label, "future-model-9");
-    ASSERT_EQ(models[1].vision, 0);
-    ASSERT_EQ(models[1].image_gen, 0);
-    ASSERT_EQ(models[1].context_length, -1);
-    ASSERT_EQ(models[1].tools, 0);
-    pthread_join(th, NULL);
-    close(lfd);
-
-    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* no key */
-}
-
 /* The static fallback is per-tier: Zen's differs from Go's, and both
  * carry the generated models.dev metadata (the offline catalog pin
  * makes default-base calls no-ops, so these are the shipped tables). */
@@ -1912,6 +1833,5 @@ int main(int argc, char *argv[])
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
     RUN_TEST(test_opencode_models_fetch_maps_ids);
     RUN_TEST(test_opencode_live_catalogs_are_per_tier);
-    RUN_TEST(test_openai_models_fetch_keeps_curated_capabilities);
     TEST_SUMMARY();
 }

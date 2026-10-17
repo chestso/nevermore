@@ -2505,7 +2505,7 @@ static void test_wiretap_401_records_error_with_status(void)
 {
     taplog_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("openai", "gpt-4o"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "qwen3-coder"), 1);
 
     int port;
     int lfd = server_listen(&port);
