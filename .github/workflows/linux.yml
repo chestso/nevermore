@@ -98,7 +98,8 @@ jobs:
           # boundary by resetting `prev`).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this tag must exist on the boba remote
-          # BEFORE nevermore, or CI cannot fetch it.
+          # BEFORE nevermore, or CI cannot fetch it. Bump it in all
+          # three platform workflows at once.
           ref: v0.4.0
           path: boba
           fetch-depth: 0

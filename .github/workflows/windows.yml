@@ -20,13 +20,6 @@ jobs:
     defaults:
       run:
         shell: msys2 {0}
-    env:
-      # Pinned boba ref — the single source for the checkout in this file.
-      # Bump alongside the nevermore commit that consumes a new boba API;
-      # the same pin lives in linux.yml / macos.yml (bump all three
-      # together). The boba tag must exist on the remote before nevermore,
-      # or CI cannot fetch it.
-      BOBA_REF: v0.4.0
 
     steps:
       - name: Checkout nevermore
@@ -94,8 +87,9 @@ jobs:
           # block and still end the block where the next one starts).
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this tag must exist on the boba remote
-          # BEFORE nevermore, or CI cannot fetch it.
-          ref: ${{ env.BOBA_REF }}
+          # BEFORE nevermore, or CI cannot fetch it. Bump it in all
+          # three platform workflows at once.
+          ref: v0.4.0
           path: boba
           fetch-depth: 0
 
@@ -223,8 +217,8 @@ jobs:
           expected_boba=$(git -C boba describe --tags --match 'v*' |
             sed 's/^v//;s/-\([0-9]*\)-g/.\1-/')
           printf '%s\n' "$out" | grep -q "nevermore $version (boba $expected_boba)" || {
-            echo "ERROR: named $version (pin $BOBA_REF), but the .exe reports" >&2
-            echo "       '$out' — this checkout builds '(boba $expected_boba)'" >&2
+            echo "ERROR: named $version, but the .exe reports '$out' —" >&2
+            echo "       this checkout builds '(boba $expected_boba)'" >&2
             exit 1
           }
 
