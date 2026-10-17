@@ -338,26 +338,36 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   expired entry, a name too long for the key, a full table — all mean
   "ask", which is the behavior without the cache at all. It is the UI
   thread's state: unlocked, single-writer by the transport's own shape.
-  **The TLS handshake has its own budget** (`handshake_timeout`, a
-  duration key — positive ms or `off`; default
-  `NM_HANDSHAKE_TIMEOUT_MS`, 10 s): the walk bounds the TCP connect,
-  this bounds the handshake that follows it on the same connection. The
-  transport runs the handshake on a **non-blocking fd** (the backends'
-  vtable is unchanged — each one resolves the budget at the point of
-  use, exactly as the walk resolves its own) and every backend waits
-  for readiness itself against the deadline
-  (`nm_handshake_left` + `nm_socket_wait_ready_ms`; one
-  `nm_handshake_timeout_reason` spelling), so the budget bounds the
-  WHOLE handshake rather than one read, and a peer that completes the
-  TCP handshake and then goes silent costs the budget instead of the
-  OS's own minutes-long timeout — on the async path that blocking
-  deferral is the UI thread, which is why it is bounded. `off` restores
-  the OS default (the pre-key behavior). A blocking fd is the one thing
-  the budget cannot reach (the thread sits inside `recv()`), which is
-  why the flip exists; where a Windows socket refuses the flip (a
-  WSAEventSelect association), the handshake still runs — Schannel's
-  own waits carry the budget there. `nm_socket_wait_ready_ms` retries
-  EINTR (a SIGWINCH lands mid-handshake).
+  **The TLS handshake is a phase, not a blocking call**
+  (`NM_CONN_HANDSHAKE`, between CONNECTING and SENDING), and it has its
+  own budget (`handshake_timeout`, a duration key — positive ms or
+  `off`; default `NM_HANDSHAKE_TIMEOUT_MS`, 10 s): the walk bounds the
+  TCP connect, this bounds the handshake that follows it on the same
+  connection. **A step never waits**: the backend's vtable is
+  `handshake_new` (the context, no I/O) plus `handshake_step` (ONE
+  attempt, which reports the direction it needs — `NM_TLS_STEP_WANT`
+  with `*want_write`, or DONE, or ERR with a reason), so the event loop
+  owns every wait and `nm_connection_interest` declares exactly the
+  direction the backend asked for (a standing WRITE on a connected
+  socket would busy-loop the runtime). The budget lives on the
+  CONNECTION (`hs_t0` + `nm_handshake_left`), so the spent verdict has
+  one author — `conn_handshake_step`, next to the one
+  `nm_handshake_timeout_reason` spelling — and `nm_connection_wait_ms`
+  hands the loop the remaining budget as a deadline, the same seam that
+  drives the connect walk's per-address budget (a peer that goes silent
+  produces no socket event at all, so without it the budget would never
+  fire). The blocking path is a pump over the same states
+  (`nm_connection_tls_handshake`), one implementation and two drives,
+  exactly as the connect walk has; the fd is flipped non-blocking for
+  that drive and restored after, or left alone where a Windows
+  WSAEventSelect association refuses the flip. Schannel has no
+  would-block status, so its step is an explicit state machine (recv /
+  one ISC round / send slice / the verification tail) that returns WANT
+  the moment the wire would block; the SSPI-allocated token it can be
+  holding across steps is owned by the connection's context and freed
+  exactly once, cancel included. `off` restores an indefinite wait (the
+  pre-key behavior). `nm_socket_wait_ready_ms` retries EINTR (a SIGWINCH
+  lands mid-handshake).
 - **Agent loop** (`src/agent.c`) — stream → tool-call → execute →
   stream, plain C state machine; UI callbacks fire from inside. The
   event-driven seam: `nm_agent_start` / `nm_agent_step` /

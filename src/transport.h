@@ -119,19 +119,21 @@ int nm_connection_connect_timeout_ms(void);
  * that completes the TCP handshake and then goes silent (a black hole
  * mid-exchange, a wedged middlebox) sits in a blocking read until the
  * OS's own timeout — minutes, on a dropped SYN/ACK-less path — and on
- * the async path that is the UI thread. The handshake is run on a
- * non-blocking fd and each backend waits for readiness against this
- * deadline (nm_socket_wait_ready_ms), so the budget bounds the WHOLE
- * handshake, not one read.
+ * the async path that is the UI thread. The handshake is a PHASE of the
+ * connection state machine on a non-blocking fd: each step makes ONE
+ * attempt and returns with the direction it needs, so nothing blocks the
+ * UI thread, and this deadline is what the loop is handed between those
+ * steps (nm_connection_wait_ms) — which is how the budget bounds the
+ * WHOLE handshake, not one read.
  *
  * 10 s: a handshake is ~1 RTT plus local crypto once the socket is up,
  * so anything inside it is a healthy peer on any real network, while a
  * wedged one surfaces while a human is still watching. Go's
  * http.DefaultTransport picks the same number (TLSHandshakeTimeout).
  * The value lives in the config store's `handshake_timeout` key (a
- * positive decimal ms, or `off` for no deadline — the OS default);
- * the TLS backends resolve it at the point of use and keep no copy,
- * exactly as the connect walk does with its own budget. */
+ * positive decimal ms, or `off` for no deadline — the OS default); the
+ * connection resolves it at the point of use and keeps no copy, exactly
+ * as the connect walk does with its own budget. */
 #define NM_HANDSHAKE_TIMEOUT_MS 10000
 int nm_connection_handshake_timeout_ms(void);
 
@@ -247,18 +249,21 @@ int nm_source_wait_any(const NmSource *set, size_t n, int timeout_ms);
 /* Current wait interest for the event loop: {handle, flags, kind} —
  * handle is -1 when there is nothing to wait on. Each connection
  * answers for itself; the app aggregates multiple sources into its
- * fill array (why the boba seam is fill-array). READ|WRITE while a
- * send is pending, READ once the request is fully on the wire, WRITE
- * only while connect/send are in flight (a perpetually-writable
- * idle socket with WRITE declared busy-loops the runtime). */
+ * fill array (why the boba seam is fill-array). WRITE while the connect
+ * is in flight; the handshake's OWN declared direction while it is in
+ * flight (the backend reports it: a connected socket is writable almost
+ * always, so a standing WRITE there would busy-loop); READ|WRITE while a
+ * send is pending; READ once the request is fully on the wire. */
 NmSource nm_connection_interest(NmConnection *conn);
 
 /* Open a connection WITHOUT blocking on connect(): the socket is
  * non-blocking and connect() is in flight (EINPROGRESS /
  * WSAEWOULDBLOCK). Returns a connection in the CONNECTING phase; step
- * it with nm_connection_step(). (The TLS handshake still runs inline
- * in the step — a bounded deferral: its own `handshake_timeout`, not
- * the OS default. See nm_connection_tls_handshake.)
+ * it with nm_connection_step(). The TLS handshake is a PHASE of its own
+ * (NM_CONN_HANDSHAKE, one attempt per step — see the drive contract
+ * below), so nothing on this path ever waits on the wire: the budget
+ * (`handshake_timeout`) bounds the handshake, and the event loop does
+ * the waiting.
  *
  * What IS synchronous here is the name: the address list comes from the
  * table (addr_cache.h) when the table has it, and from getaddrinfo when
@@ -271,8 +276,8 @@ NmSource nm_connection_interest(NmConnection *conn);
  *
  * Drive contract:
  *   conn = nm_connect_async(host, port, PLAIN, &st)
- *   ... later, when writable (per nm_connection_interest):
- *   nm_connection_step(conn)  // CONNECTING -> SENDING -> READING
+ *   ... later, when ready per nm_connection_interest:
+ *   nm_connection_step(conn)  // CONNECTING -> HANDSHAKE -> SENDING -> READING
  * A failed connect surfaces as ERR_SOCKET from the step (check
  * SO_ERROR semantics are the app's business — the step polls the
  * phase, so writability dispatch arrives with the failure). */
@@ -283,8 +288,15 @@ NmConnection *nm_connect_async(const char *host, int port,
  *
  *   CONNECTING: finish connect() when writable — writable means
  *              completed (SO_ERROR distinguishes failure), then
- *              TLS handshake (inline, on a non-blocking fd, bounded
- *              by handshake_timeout), phase -> SENDING
+ *              phase -> HANDSHAKE (TLS) or SENDING/IDLE (plain)
+ *   HANDSHAKE:  ONE handshake attempt on the non-blocking fd. The
+ *              backend reports the direction it needs and the step
+ *              returns PENDING with that interest declared, so the
+ *              loop waits; the budget (handshake_timeout) is handed to
+ *              the loop through nm_connection_wait_ms, and a spent
+ *              budget fails the step with its one reason. phase ->
+ *              SENDING (draining a queued request in the same step) or
+ *              IDLE on completion
  *   SENDING:   drain req_buf into the socket; EAGAIN leaves the
  *              remainder for the next step, phase -> READING when
  *              fully sent
@@ -297,8 +309,9 @@ NmConnection *nm_connect_async(const char *host, int port,
 NmTransportStatus nm_connection_step(NmConnection *conn);
 
 /* Returned by nm_connection_step when the phase needs the event
- * loop's wait (connect in flight / send buffer full). Not an error:
- * step again when the interest fd is ready. */
+ * loop's wait (connect in flight, the handshake waiting on the peer,
+ * send buffer full). Not an error: step again when the interest fd is
+ * ready (or when nm_connection_wait_ms says the deadline is due). */
 #define NM_TRANSPORT_PENDING 100
 
 /* Queue a request on the connection WITHOUT sending: serialize
@@ -312,16 +325,17 @@ NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    size_t n_headers, const char *body,
                                    size_t body_len);
 
-/* The TLS handshake for async connections, called by
- * nm_connection_step when connect completes. Kept public for test
- * seams. Blocking, but BOUNDED: the backends wait for readiness
- * against the handshake budget (`handshake_timeout`, default
- * NM_HANDSHAKE_TIMEOUT_MS, `off` = the OS default), so the deferral
- * the event loop eats is the budget rather than whatever the OS would
- * have taken on a silent peer. */
+/* The BLOCKING drive of the handshake step machine — one implementation,
+ * two drives (nm_connection_step is the event-driven one). It runs one
+ * attempt per iteration and waits for the declared direction between
+ * them, against the handshake budget, so the wait it owns is the budget's
+ * and nothing else. The TLS tail of the blocking nm_connect and any
+ * one-shot caller that needs a ready connection use it; the async path
+ * never does. Idempotent: a handshake already done is a no-op returning
+ * OK. On failure the reason is on the connection
+ * (nm_connection_last_error), named the one way. */
 NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
                                               const char *host);
-
 /* Send an HTTP/1.1 request and read the response head (status line +
  * headers). The body is then streamed via nm_read_body() so SSE events
  * surface as they arrive.
@@ -431,20 +445,57 @@ int nm_connection_fd(NmConnection *conn);
  *
  * 0 = the current attempt's budget is spent: step NOW and the walk
  * advances to the next address. -1 = nothing to wait for (not
- * connecting). Non-blocking connect only: the blocking nm_connect
- * walks inline and needs no external drive. */
+ * connecting).
+ *
+ * The HANDSHAKE phase answers here too, for the same reason: a peer that
+ * completes the TCP handshake and then says nothing produces no socket
+ * event either, so the handshake budget reaches the loop as this
+ * deadline. It reads: 0 = the budget is spent (step NOW and the step
+ * names the timeout), -1 = no budget (`handshake_timeout = off`, so the
+ * phase is purely interest-driven), positive = the ms left.
+ *
+ * Non-blocking drives only: the blocking nm_connect walks and handshakes
+ * inline and needs no external drive. */
 int nm_connection_wait_ms(const NmConnection *conn);
 
 /* ---------------------------------------------------------------- */
 /* TLS backend interface (internal — implemented per OS)            */
 /* ---------------------------------------------------------------- */
 
+/* One handshake step's verdict (NmTlsBackend.handshake_step). A
+ * vocabulary of its own rather than NmTransportStatus: the record layer
+ * below already carries its own sentinels (NM_READ_WOULD_BLOCK /
+ * NM_WRITE_WOULD_BLOCK), and WANT here is a readiness request the
+ * connection translates into an interest — not a transport phase. */
+typedef enum
+{
+    NM_TLS_STEP_ERR = -1, /* failed: *err names the reason (borrowed)  */
+    NM_TLS_STEP_DONE = 0, /* the context is ready for write/read       */
+    NM_TLS_STEP_WANT = 1  /* the fd must become ready: *want_write     */
+} NmTlsStep;
+
 typedef struct NmTlsBackend
 {
     const char *name;
-    /* Perform the TLS handshake over an already-connected TCP socket.
-     * Returns an opaque context, or NULL on failure. */
-    void *(*handshake)(int fd, const char *host, const char **err);
+    /* Create the TLS state for an already-connected socket: allocate the
+     * context, set the fd, install SNI and the verification target. NO
+     * I/O — the caller steps it. Returns an opaque context, or NULL with
+     * *err set (always) on failure. */
+    void *(*handshake_new)(int fd, const char *host, const char **err);
+    /* ONE attempt at the handshake. The contract is the reason this is a
+     * step and not a loop: a step NEVER waits (no select, no blocking
+     * recv), never changes the fd's blocking mode, and never consults the
+     * budget — it does protocol work and reports what it needs next, so
+     * the event loop owns every wait (and the connection owns the
+     * deadline, which is what makes a silent peer cost the budget).
+     *
+     * *want_write is 1 = the fd must become WRITABLE, 0 = READABLE. The
+     * caller zeroes it before the call: a backend that forgets must not
+     * be able to leave a stale WRITE in the interest, because a connected
+     * socket is almost always writable and a standing WRITE busy-loops
+     * the runtime (see nm_connection_interest). */
+    NmTlsStep (*handshake_step)(void *ctx, int *want_write,
+                                const char **err);
     /* Returns bytes written, or -1 on failure or would-block. A
      * would-block write (a non-blocking fd whose send window is full)
      * is reported as -1 with *err left NULL, so the caller steps again

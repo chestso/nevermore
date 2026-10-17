@@ -35,6 +35,10 @@
  *   IDLE        connected (blocking nm_connect) or async-connect
  *               completed, no request queued
  *   CONNECTING  nm_connect_async: non-blocking connect() in flight
+ *   HANDSHAKE   TLS only: the connect is done and the handshake is in
+ *               flight, one attempt per step (the backend reports the
+ *               direction it needs; the loop waits, the budget comes
+ *               from nm_connection_wait_ms)
  *   SENDING     request serialized into the owned buffer, draining
  *   READING     request fully on the wire; response head + body
  *               (today's machinery, already resumable)
@@ -43,6 +47,7 @@ enum
 {
     NM_CONN_IDLE = 0,
     NM_CONN_CONNECTING,
+    NM_CONN_HANDSHAKE,
     NM_CONN_SENDING,
     NM_CONN_READING
 };
@@ -56,7 +61,13 @@ enum
 struct NmConnection
 {
     int fd;
-    void *tls_ctx; /* opaque backend context, or NULL for plain HTTP */
+    /* Opaque backend context, or NULL for plain HTTP — and NOT a
+     * completion flag: the handshake phase creates it on its first
+     * attempt, so it is non-NULL while the handshake is still in flight.
+     * `phase` is what says whether the handshake finished, and the phase
+     * machine is the only path into SENDING, so the read/write dispatch
+     * below (which routes on this field) is never reached early. */
+    void *tls_ctx;
     const NmTlsBackend *tls;
     NmResponse resp;
     int port;           /* connect port (the failure detail's target) */
@@ -108,6 +119,15 @@ struct NmConnection
     size_t req_len; /* serialized bytes of the current request */
     size_t req_off; /* bytes sent so far */
     size_t req_cap;
+
+    /* The handshake phase (NM_CONN_HANDSHAKE): the budget's start stamp,
+     * armed when the phase is entered, and the direction the backend last
+     * asked for — the interest the loop waits on. Both are the
+     * connection's, not a backend's: the deadline has one author
+     * (nm_handshake_left over hs_t0) and the interest one reader
+     * (nm_connection_interest). */
+    double hs_t0;
+    int hs_want_write;
 
     /* Response-head accumulation: bytes arrive into scratch until the
      * blank line; afterwards scratch holds only body bytes pending

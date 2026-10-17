@@ -325,35 +325,72 @@ static void conn_fail(NmConnection *conn, const char *stage,
 /* Connection lifecycle                                              */
 /* ---------------------------------------------------------------- */
 
-/* Run the backend's handshake over a NON-BLOCKING fd. The backends
- * wait for readiness themselves, against the handshake budget
- * (nm_connection_handshake_timeout_ms), so a peer that goes silent
- * mid-exchange costs the budget instead of the OS's own timeout — on a
- * blocking fd the thread sits inside recv(), where no wait of ours can
- * reach it, and on the async path that thread is the UI's. The mode
- * the caller had is restored either way: the ask path needs a blocking
- * fd for its blocking request, the async stream path owns a
- * non-blocking one (and on Windows the event loop's WSAEventSelect
- * association pins it there already, so the flip is a no-op).
+/* ONE handshake attempt — the whole handshake state machine, and the one
+ * place that decides a step may do. Both drives come through here (the
+ * event loop's nm_connection_step and the blocking pump
+ * nm_connection_tls_handshake), so "one attempt per step" has one author
+ * and neither drive can acquire a wait of its own.
  *
- * The flip is best-effort (a Windows association refuses a mode change
- * back, never this one): if it fails, the handshake still runs — on a
- * blocking fd that is the OS default, which is what
- * `handshake_timeout = off` asks for anyway. Returns 1 on success, 0 on
- * failure with *err set. */
-static int tls_handshake(NmConnection *conn, const char *host,
-                         const char **err)
+ * It owns three things the four backends used to own four copies of: the
+ * budget verdict (nm_handshake_left + the one
+ * nm_handshake_timeout_reason spelling), the context's creation (the
+ * first attempt), and the phase exit. It owns NO waiting: the fd is
+ * non-blocking, the backend's step reports the direction it needs, and
+ * the caller's loop does the rest.
+ *
+ * On failure the phase leaves HANDSHAKE (or the deadline seam in
+ * nm_connection_wait_ms would keep reporting "budget spent" and a caller
+ * that keeps stepping would never see the end) and the reason lands on
+ * the connection, per the always-set contract. */
+static NmTransportStatus conn_handshake_step(NmConnection *conn)
 {
-    int owner_blocking = !conn->nonblocking;
-    if (owner_blocking)
-        nm_socket_set_nonblocking(conn); /* sets conn->nonblocking */
-    conn->tls_ctx = conn->tls->handshake(conn->fd, host, err);
-    int ok = conn->tls_ctx != NULL;
-    if (owner_blocking) {
-        nm_socket_set_blocking(conn->fd);
-        conn->nonblocking = 0;
+    int budget = nm_connection_handshake_timeout_ms();
+    if (nm_handshake_left(conn->hs_t0, budget) < 0) {
+        conn->phase = NM_CONN_IDLE;
+        conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
+                  "TLS handshake with %s failed: %s", conn->tls_host,
+                  nm_handshake_timeout_reason(budget));
+        return NM_TRANSPORT_ERR_TLS;
     }
-    return ok;
+
+    const char *err = NULL;
+    if (!conn->tls_ctx) {
+        /* First attempt: the context, on the socket the connect walk
+         * left connected. */
+        conn->tls_ctx = conn->tls->handshake_new(conn->fd, conn->tls_host,
+                                                 &err);
+        if (!conn->tls_ctx) {
+            conn->phase = NM_CONN_IDLE;
+            conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
+                      "TLS handshake with %s failed: %s", conn->tls_host,
+                      err ? err : "unknown TLS error");
+            return NM_TRANSPORT_ERR_TLS;
+        }
+    }
+
+    int want = 0; /* zeroed every attempt: see NmTlsBackend.handshake_step */
+    NmTlsStep st = conn->tls->handshake_step(conn->tls_ctx, &want, &err);
+    if (st == NM_TLS_STEP_WANT) {
+        conn->hs_want_write = want;
+        return NM_TRANSPORT_PENDING;
+    }
+    if (st == NM_TLS_STEP_ERR) {
+        conn->phase = NM_CONN_IDLE;
+        conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
+                  "TLS handshake with %s failed: %s", conn->tls_host,
+                  err ? err : "unknown TLS error");
+        return NM_TRANSPORT_ERR_TLS;
+    }
+
+    /* Done. A queued request drains in the SAME step chain — what the
+     * connect completion did before the handshake had a phase of its
+     * own. (The blocking drive never has one queued: its callers queue
+     * after nm_connect; the async path always does.) */
+    conn->hs_want_write = 0;
+    conn->phase = conn->req_len > 0 ? NM_CONN_SENDING : NM_CONN_IDLE;
+    if (conn->phase == NM_CONN_SENDING)
+        return nm_socket_step_send(conn);
+    return NM_TRANSPORT_OK;
 }
 
 NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
@@ -386,15 +423,18 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
     }
     if (mode == NM_TRANSPORT_TLS) {
         conn->tls = nm_tls_backend();
-        const char *err = NULL;
-        if (!tls_handshake(conn, host, &err)) {
+        /* The blocking drive of the step machine the event loop drives:
+         * it waits (against the handshake budget) exactly where the async
+         * path would return PENDING. The failure text is the connection's
+         * (one author, and the wire tap already carries it), so this only
+         * has to move it into the caller's info. */
+        if (nm_connection_tls_handshake(conn, host) != NM_TRANSPORT_OK) {
+            const char *d = nm_connection_last_error(conn);
             if (info) {
                 info->status = NM_TRANSPORT_ERR_TLS;
-                snprintf(info->detail, sizeof(info->detail),
-                         "TLS handshake with %s failed: %s", host,
-                         err ? err : "unknown TLS error");
+                snprintf(info->detail, sizeof(info->detail), "%s",
+                         *d ? d : "TLS handshake failed");
             }
-            nm_wire_tap_error(conn, "tls", info ? info->detail : "");
             nm_connection_close(conn);
             return NULL;
         }
@@ -454,6 +494,13 @@ NmSource nm_connection_interest(NmConnection *conn)
     case NM_CONN_CONNECTING:
         i.flags = NM_INTEREST_WRITE; /* writability = completion */
         break;
+    case NM_CONN_HANDSHAKE:
+        /* The backend's declared direction, and nothing else. A
+         * connected socket is writable almost always, so a standing
+         * WRITE here would busy-loop the runtime; READ is the safe
+         * default a backend that reported nothing gets. */
+        i.flags = conn->hs_want_write ? NM_INTEREST_WRITE : NM_INTEREST_READ;
+        break;
     case NM_CONN_SENDING:
         /* Both: the server may start replying mid-send; the send
          * drains on writability. */
@@ -473,25 +520,85 @@ NmSource nm_connection_interest(NmConnection *conn)
     return i;
 }
 
+/* The BLOCKING drive of the handshake step machine: the event loop's
+ * nm_connection_step is the other one, and this is that machine with the
+ * wait moved inside. The two drives exist because the same states have to
+ * serve a loop that owns its waits (the TUI) and a one-shot caller that
+ * does not (the ask path, a catalog fetch); one implementation means the
+ * blocking path cannot drift into a second handshake.
+ *
+ * The fd is flipped non-blocking (best effort) for the drive, because a
+ * step must never sit inside recv(): the wait between attempts is the
+ * budget's (nm_socket_wait_ready_ms, ms <= 0 = no deadline — the
+ * `handshake_timeout = off` spelling) and nothing else's. The mode the
+ * caller had is restored on the way out; a Windows socket subscribed with
+ * WSAEventSelect refuses the flip back and is already non-blocking, which
+ * is why the restore is best-effort.
+ *
+ * A connection with no queued request (which is every caller of this:
+ * nm_request queues after nm_connect) comes out IDLE; a handshake already
+ * done is a no-op. */
 NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
                                               const char *host)
 {
-    if (!conn || !conn->tls || conn->tls_ctx)
+    if (!conn || !conn->tls)
         return conn ? NM_TRANSPORT_OK : NM_TRANSPORT_ERR_SOCKET;
-    /* The handshake runs on the connection's own mode (the async stream
-     * path already flipped the fd non-blocking for the body stream) and
-     * is bounded by the handshake budget — see tls_handshake. It is
-     * still a blocking deferral for the event loop, but a bounded one:
-     * the budget, not the OS's own timeout, is what a silent peer
-     * costs. */
-    const char *err = NULL;
-    if (!tls_handshake(conn, host, &err)) {
-        conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
-                  "TLS handshake with %s failed: %s", host,
-                  err ? err : "unknown TLS error");
-        return NM_TRANSPORT_ERR_TLS;
+    if (conn->phase != NM_CONN_HANDSHAKE && conn->tls_ctx)
+        return NM_TRANSPORT_OK; /* already handshaken */
+
+    int owner_blocking = !conn->nonblocking;
+    if (owner_blocking)
+        nm_socket_set_nonblocking(conn); /* sets conn->nonblocking */
+    conn->phase = NM_CONN_HANDSHAKE;
+    conn->hs_t0 = nm_socket_now();
+    conn->hs_want_write = 0;
+
+    /* The phase is the state: the step leaves it on completion or failure
+     * (which is also how a step that chained the queued request's first
+     * drain is recognised as done), and the loop condition reads that
+     * instead of trying to interpret one status for two things. */
+    int failed = 0;
+    while (conn->phase == NM_CONN_HANDSHAKE) {
+        NmTransportStatus s = conn_handshake_step(conn);
+        if (s != NM_TRANSPORT_PENDING && s != NM_TRANSPORT_OK) {
+            failed = 1; /* ERR_TLS: the reason is on the connection */
+            break;
+        }
+        if (conn->phase != NM_CONN_HANDSHAKE)
+            break; /* done (possibly with a queued request's first drain) */
+        /* Still handshaking: the attempt wants the fd, and hs_want_write
+         * is the direction it asked for. */
+        int left = nm_handshake_left(conn->hs_t0,
+                                     nm_connection_handshake_timeout_ms());
+        if (left < 0)
+            continue; /* spent between the step and here: the step names it */
+        if (!nm_socket_wait_ready_ms(conn->fd, conn->hs_want_write, left)) {
+            /* The wait was bounded by the budget, so "did the budget run
+             * out, or did the socket fail?" is a sub-millisecond rounding
+             * question at this point — the answer the old per-backend
+             * loops gave, and the reason a spent budget must keep its one
+             * spelling: with a budget set, re-check through the step (its
+             * nm_handshake_left test is the authority; a genuine expiry
+             * fails there with nm_handshake_timeout_reason). With `off`
+             * (left == 0, an indefinite wait) only a socket-layer failure
+             * can have ended it. */
+            if (nm_connection_handshake_timeout_ms() > 0)
+                continue;
+            conn_fail(conn, "tls", NM_TRANSPORT_ERR_TLS,
+                      "TLS handshake with %s failed: %s",
+                      host ? host : conn->tls_host,
+                      "connection failed during the TLS handshake");
+            conn->phase = NM_CONN_IDLE;
+            failed = 1;
+            break;
+        }
     }
-    return NM_TRANSPORT_OK;
+
+    if (owner_blocking) {
+        nm_socket_set_blocking(conn->fd);
+        conn->nonblocking = 0;
+    }
+    return failed ? NM_TRANSPORT_ERR_TLS : NM_TRANSPORT_OK;
 }
 
 NmTransportStatus nm_connection_step(NmConnection *conn)
@@ -524,24 +631,28 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
             return NM_TRANSPORT_ERR_SOCKET;
         }
         nm_connection_set_connect_error(NULL); /* connected: clear the notice */
-        /* Connect complete. TLS: run the (blocking) handshake now —
-         * the narrowed deferral (sub-second, post-writability). The
-         * bare hostname (no port): SNI/cert verification. */
-        if (conn->tls && !conn->tls_ctx) {
-            NmTransportStatus t =
-                nm_connection_tls_handshake(conn, conn->tls_host);
-            if (t != NM_TRANSPORT_OK)
-                return t;
+        /* Connect complete: the address walk's part is over (no probe
+         * target), and the next phase takes over — the TLS handshake's
+         * first attempt here, or the queued request's first drain. The
+         * bare hostname (no port) is what the handshake uses: SNI/cert
+         * verification. */
+        conn->addr_len = 0;
+        if (conn->tls) {
+            conn->phase = NM_CONN_HANDSHAKE;
+            conn->hs_t0 = nm_socket_now();
+            conn->hs_want_write = 0;
+            return conn_handshake_step(conn);
         }
-        conn->addr_len = 0; /* connect resolved; no probe target */
         conn->phase = conn->req_len > 0 ? NM_CONN_SENDING : NM_CONN_IDLE;
-        /* A queued request starts draining immediately (the socket
-         * is writable right now — the send below will take what it
-         * accepts, PENDING handles the rest). */
         if (conn->phase == NM_CONN_SENDING)
-            return nm_connection_step(conn);
+            return nm_socket_step_send(conn);
         return NM_TRANSPORT_OK;
     }
+    case NM_CONN_HANDSHAKE:
+        /* ONE attempt (see conn_handshake_step): PENDING means the loop
+         * waits on the interest nm_connection_interest now declares, and
+         * nm_connection_wait_ms hands it the budget as a deadline. */
+        return conn_handshake_step(conn);
     case NM_CONN_SENDING:
         return nm_socket_step_send(conn);
     case NM_CONN_READING:

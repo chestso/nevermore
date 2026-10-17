@@ -131,7 +131,11 @@ static int mb_send(void *ctx, const unsigned char *buf, size_t len)
 
 static void mbedtls_close(void *ctx);
 
-static void *mbedtls_handshake(int fd, const char *host, const char **err)
+/* The connection's TLS state, over an already-connected socket: the
+ * process-global config init, the per-connection context, the SNI name and
+ * the fd's bio. No I/O — the caller steps it. */
+static void *mbedtls_handshake_new(int fd, const char *host,
+                                   const char **err)
 {
     if (err)
         *err = NULL;
@@ -150,44 +154,40 @@ static void *mbedtls_handshake(int fd, const char *host, const char **err)
     }
     c->fd = fd;
     mbedtls_ssl_init(&c->ssl);
-    if ((ret = mbedtls_ssl_setup(&c->ssl, &g_conf)) != 0 || (ret = mbedtls_ssl_set_hostname(&c->ssl, host)) != 0) {
+    if ((ret = mbedtls_ssl_setup(&c->ssl, &g_conf)) != 0 ||
+        (ret = mbedtls_ssl_set_hostname(&c->ssl, host)) != 0) {
         if (err)
             *err = mb_errstr(ret);
         mbedtls_close(c);
         return NULL;
     }
     mbedtls_ssl_set_bio(&c->ssl, c, mb_send, mb_recv, NULL);
-
-    /* The transport runs this on a NON-BLOCKING fd, so a handshake step
-     * that needs the peer reports WANT_READ/WANT_WRITE; the loop waits
-     * for readiness itself, against the handshake budget
-     * (handshake_timeout), which is what bounds a peer that goes silent
-     * mid-exchange. Without a budget (`off`) the wait is indefinite —
-     * the OS default, by request. */
-    int budget = nm_connection_handshake_timeout_ms();
-    double t0 = nm_socket_now();
-    while ((ret = mbedtls_ssl_handshake(&c->ssl)) != 0) {
-        if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
-            ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
-            int left = nm_handshake_left(t0, budget);
-            if (left < 0 ||
-                !nm_socket_wait_ready_ms(
-                    fd, ret == MBEDTLS_ERR_SSL_WANT_WRITE, left)) {
-                if (err)
-                    *err = budget > 0
-                               ? nm_handshake_timeout_reason(budget)
-                               : "connection failed during the TLS handshake";
-                mbedtls_close(c);
-                return NULL;
-            }
-            continue;
-        }
-        if (err)
-            *err = mb_errstr(ret);
-        mbedtls_close(c);
-        return NULL;
-    }
     return c;
+}
+
+/* ONE mbedtls_ssl_handshake attempt. The transport runs this on a
+ * NON-BLOCKING fd, so a step that needs the peer reports WANT_READ/WANT_WRITE
+ * (the return code carries the direction); the connection waits, against
+ * the handshake budget (handshake_timeout), which is what bounds a peer
+ * that goes silent mid-exchange. Without a budget (`off`) the wait is
+ * indefinite — the OS default, by request. */
+static NmTlsStep mbedtls_handshake_step(void *ctx, int *want_write,
+                                        const char **err)
+{
+    MbCtx *c = ctx;
+    if (err)
+        *err = NULL;
+    int ret = mbedtls_ssl_handshake(&c->ssl);
+    if (ret == 0)
+        return NM_TLS_STEP_DONE;
+    if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
+        ret == MBEDTLS_ERR_SSL_WANT_WRITE) {
+        *want_write = ret == MBEDTLS_ERR_SSL_WANT_WRITE;
+        return NM_TLS_STEP_WANT;
+    }
+    if (err)
+        *err = mb_errstr(ret);
+    return NM_TLS_STEP_ERR;
 }
 
 static long mbedtls_write(void *ctx, const char *buf, size_t len,
@@ -251,7 +251,8 @@ const NmTlsBackend *nm_tls_backend_mbedtls(void)
 {
     static const NmTlsBackend backend = {
         "mbedtls",
-        mbedtls_handshake,
+        mbedtls_handshake_new,
+        mbedtls_handshake_step,
         mbedtls_write,
         mbedtls_read,
         mbedtls_close,

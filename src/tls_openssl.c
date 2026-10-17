@@ -91,7 +91,9 @@ static int openssl_is_would_block(SSL *ssl, int ret)
     return 0;
 }
 
-static void *openssl_handshake(int fd, const char *host, const char **err)
+/* The connection's TLS state, over an already-connected socket. No I/O:
+ * the caller steps it. */
+static void *openssl_handshake_new(int fd, const char *host, const char **err)
 {
     SSL *ssl = SSL_new(openssl_ctx());
     if (!ssl) {
@@ -102,46 +104,34 @@ static void *openssl_handshake(int fd, const char *host, const char **err)
     SSL_set_fd(ssl, fd);
     SSL_set_tlsext_host_name(ssl, host); /* SNI */
     SSL_set1_host(ssl, host);            /* hostname verification */
-    /* The transport runs this on a NON-BLOCKING fd, so SSL_connect
-     * reports "not ready yet" (SSL_ERROR_WANT_READ/WANT_WRITE) instead
-     * of sitting in recv(): the loop below waits for readiness itself,
-     * against the handshake budget (handshake_timeout), which is what
-     * bounds a peer that goes silent mid-exchange. Without a budget
-     * (`off`) the wait is indefinite — the OS default, by request. */
-    int budget = nm_connection_handshake_timeout_ms();
-    double t0 = nm_socket_now();
-    int rc;
-    for (;;) {
-        rc = SSL_connect(ssl);
-        if (rc == 1)
-            break;
-        int why = SSL_get_error(ssl, rc);
-        if (why != SSL_ERROR_WANT_READ && why != SSL_ERROR_WANT_WRITE) {
-            if (err)
-                *err = openssl_call_errstr(ssl, rc);
-            SSL_free(ssl);
-            return NULL;
-        }
+    return ssl;
+}
+
+/* ONE SSL_connect attempt. The fd is non-blocking, so the record layer
+ * reports "not ready yet" (SSL_ERROR_WANT_READ/WANT_WRITE) instead of
+ * sitting in recv(); this maps that to the step's direction and the
+ * connection waits, against the handshake budget (handshake_timeout) —
+ * which is what bounds a peer that goes silent mid-exchange. Without a
+ * budget (`off`) the loop's wait is indefinite: the OS default, by
+ * request. */
+static NmTlsStep openssl_handshake_step(void *ctx, int *want_write,
+                                        const char **err)
+{
+    SSL *ssl = ctx;
+    int rc = SSL_connect(ssl);
+    if (rc == 1)
+        return NM_TLS_STEP_DONE;
+    int why = SSL_get_error(ssl, rc);
+    if (why == SSL_ERROR_WANT_READ || why == SSL_ERROR_WANT_WRITE) {
         /* WANT_* is also pushed onto the error queue; clear it or the
          * next call's reason reads as this one's. */
         ERR_clear_error();
-        int left = nm_handshake_left(t0, budget);
-        if (left < 0) {
-            if (err)
-                *err = nm_handshake_timeout_reason(budget);
-            SSL_free(ssl);
-            return NULL;
-        }
-        if (!nm_socket_wait_ready_ms(fd, why == SSL_ERROR_WANT_WRITE, left)) {
-            if (err)
-                *err = budget > 0 ? nm_handshake_timeout_reason(budget)
-                                  : "connection failed during the TLS "
-                                    "handshake";
-            SSL_free(ssl);
-            return NULL;
-        }
+        *want_write = why == SSL_ERROR_WANT_WRITE;
+        return NM_TLS_STEP_WANT;
     }
-    return ssl;
+    if (err)
+        *err = openssl_call_errstr(ssl, rc);
+    return NM_TLS_STEP_ERR;
 }
 
 static long openssl_write(void *ctx, const char *buf, size_t len,
@@ -197,7 +187,8 @@ const NmTlsBackend *nm_tls_backend_openssl(void)
 {
     static const NmTlsBackend backend = {
         "openssl",
-        openssl_handshake,
+        openssl_handshake_new,
+        openssl_handshake_step,
         openssl_write,
         openssl_read,
         openssl_close,

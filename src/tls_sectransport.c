@@ -45,7 +45,7 @@ typedef struct StCtx
     SSLContextRef ssl;
     int fd;
     int want_write; /* the last IO callback's direction: what the
-                     * handshake loop must wait on */
+                     * handshake step reports as its interest */
 } StCtx;
 
 /* Secure Transport IO callbacks: bridge the socket. The fd is
@@ -53,9 +53,10 @@ typedef struct StCtx
  * way), so a would-block read/write callback returns errSSLWouldBlock —
  * Secure Transport surfaces that as errSSLWouldBlock out of
  * SSLRead/SSLWrite and the record layer maps it to the transport's
- * would-block sentinel, while the handshake loop waits for readiness
- * itself (bounded by the handshake budget). The direction is recorded
- * because SSLHandshake does not say which side it wants. */
+ * would-block sentinel, while the handshake step reports the direction for
+ * the event loop to wait on (bounded by the handshake budget). The
+ * direction is recorded because SSLHandshake does not say which side it
+ * wants. */
 static OSStatus st_read(SSLConnectionRef conn, void *data, size_t *len)
 {
     StCtx *c = conn;
@@ -95,8 +96,11 @@ static OSStatus st_write(SSLConnectionRef conn, const void *data,
 
 static void sectransport_close(void *ctx);
 
-static void *sectransport_handshake(int fd, const char *host,
-                                    const char **err)
+/* The connection's TLS state, over an already-connected socket: the
+ * context, the hostname-verification target, the IO callbacks and the
+ * connection reference. No I/O — the caller steps it. */
+static void *sectransport_handshake_new(int fd, const char *host,
+                                        const char **err)
 {
     if (err)
         *err = NULL;
@@ -129,41 +133,34 @@ static void *sectransport_handshake(int fd, const char *host,
         sectransport_close(c);
         return NULL;
     }
-
-    /* Drive the handshake. Secure Transport does verification during
-     * the handshake; a failure returns errSSLXCertChainInvalid etc.
-     * The fd is non-blocking, so a step that needs the peer comes back
-     * errSSLWouldBlock: wait for the direction the callbacks recorded,
-     * against the handshake budget (handshake_timeout), which is what
-     * bounds a peer that goes silent mid-exchange. (The old loop
-     * `continue`d on would-block — an unbounded busy spin the moment
-     * the fd stopped blocking.) Without a budget (`off`) the wait is
-     * indefinite: the OS default, by request. */
-    int budget = nm_connection_handshake_timeout_ms();
-    double t0 = nm_socket_now();
-    for (;;) {
-        st = SSLHandshake(c->ssl);
-        if (st == noErr)
-            break;
-        if (st == errSSLWouldBlock) {
-            int left = nm_handshake_left(t0, budget);
-            if (left < 0 ||
-                !nm_socket_wait_ready_ms(fd, c->want_write, left)) {
-                if (err)
-                    *err = budget > 0
-                               ? nm_handshake_timeout_reason(budget)
-                               : "connection failed during the TLS handshake";
-                sectransport_close(c);
-                return NULL;
-            }
-            continue;
-        }
-        if (err)
-            *err = "TLS handshake failed";
-        sectransport_close(c);
-        return NULL;
-    }
     return c;
+}
+
+/* ONE SSLHandshake attempt. Secure Transport does verification during the
+ * handshake; a failure returns errSSLXCertChainInvalid etc. The fd is
+ * non-blocking, so a step that needs the peer comes back errSSLWouldBlock:
+ * report the direction the IO callbacks recorded and the connection waits
+ * for it, against the handshake budget (handshake_timeout), which is what
+ * bounds a peer that goes silent mid-exchange. (The old loop `continue`d on
+ * would-block — an unbounded busy spin the moment the fd stopped blocking.)
+ * Without a budget (`off`) the wait is indefinite: the OS default, by
+ * request. */
+static NmTlsStep sectransport_handshake_step(void *ctx, int *want_write,
+                                             const char **err)
+{
+    StCtx *c = ctx;
+    if (err)
+        *err = NULL;
+    OSStatus st = SSLHandshake(c->ssl);
+    if (st == noErr)
+        return NM_TLS_STEP_DONE;
+    if (st == errSSLWouldBlock) {
+        *want_write = c->want_write;
+        return NM_TLS_STEP_WANT;
+    }
+    if (err)
+        *err = "TLS handshake failed";
+    return NM_TLS_STEP_ERR;
 }
 
 static long sectransport_write(void *ctx, const char *buf, size_t len,
@@ -223,7 +220,8 @@ const NmTlsBackend *nm_tls_backend_sectransport(void)
 {
     static const NmTlsBackend backend = {
         "sectransport",
-        sectransport_handshake,
+        sectransport_handshake_new,
+        sectransport_handshake_step,
         sectransport_write,
         sectransport_read,
         sectransport_close,

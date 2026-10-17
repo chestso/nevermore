@@ -570,13 +570,29 @@ static int attempt_budget_spent(const NmConnection *conn)
            (double)nm_connection_connect_timeout_ms();
 }
 
-/* See nm_connection_wait_ms (transport.h). The walk's CONNECTING phase
- * is the only interest-less wait in the transport: a black-holed
- * address never signals, so the budget has to be handed to the event
- * loop as a deadline or it never fires. */
+/* See nm_connection_wait_ms (transport.h). Two phases have an
+ * interest-less wait to hand the loop: the connect walk's CONNECTING (a
+ * black-holed address never signals, so the per-address budget has to
+ * arrive as a deadline) and the TLS HANDSHAKE (a peer that completes the
+ * TCP handshake and then says nothing never signals either, so the
+ * handshake budget does). Everything else is purely interest-driven. */
 int nm_socket_wait_ms(const NmConnection *conn)
 {
-    if (!conn || conn->phase != NM_CONN_CONNECTING)
+    if (!conn)
+        return -1;
+    if (conn->phase == NM_CONN_HANDSHAKE) {
+        /* nm_handshake_left's vocabulary is 0 = no budget
+         * (`handshake_timeout = off`), < 0 = spent, > 0 = ms left; the
+         * seam's is -1 = nothing to wait for, 0 = due now. So: no budget
+         * is purely interest-driven, a spent budget is due now (the next
+         * step names the timeout), and the rest is the ms left — with
+         * nm_handshake_left's 1 ms floor keeping a spent budget from
+         * reading as an unbounded wait. */
+        int left = nm_handshake_left(conn->hs_t0,
+                                     nm_connection_handshake_timeout_ms());
+        return left < 0 ? 0 : (left == 0 ? -1 : left);
+    }
+    if (conn->phase != NM_CONN_CONNECTING)
         return -1;
     int budget = nm_connection_connect_timeout_ms();
     double left =
@@ -1079,9 +1095,11 @@ NmTransportStatus nm_socket_request_queue(NmConnection *conn, const char *method
     reset_response_state(conn);
 
     /* Phase: a connected socket goes straight to draining; an
-     * async-connecting socket waits for CONNECTING to finish first
-     * (the step machine runs phases in order). */
-    if (conn->phase != NM_CONN_CONNECTING)
+     * async-connecting (or handshaking) socket waits for its phase to
+     * finish first (the step machine runs phases in order, and stomping
+     * CONNECTING/HANDSHAKE here would strand the walk or the handshake). */
+    if (conn->phase != NM_CONN_CONNECTING &&
+        conn->phase != NM_CONN_HANDSHAKE)
         conn->phase = NM_CONN_SENDING;
     return NM_TRANSPORT_OK;
 }

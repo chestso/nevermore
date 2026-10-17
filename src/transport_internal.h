@@ -63,10 +63,11 @@ NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn, int seconds);
  * nfds). */
 int nm_socket_wait_ready_ms(int fd, int for_write, int ms);
 
-/* The TLS handshake's deadline arithmetic, shared by the four backends
- * so their loops cannot drift (transport.c — next to the budget
- * resolver both read). See nm_handshake_left / nm_handshake_timeout_
- * reason there. */
+/* The TLS handshake's deadline arithmetic (transport.c — next to the
+ * budget resolver both read). The handshake used to have four copies of
+ * this, one per backend's wait loop; now the connection's step machine
+ * reads it and the spent verdict has ONE author (conn_handshake_step),
+ * so the four backends cannot spell the same timeout four ways. */
 int nm_handshake_left(double t0, int budget_ms);
 const char *nm_handshake_timeout_reason(int budget_ms);
 
