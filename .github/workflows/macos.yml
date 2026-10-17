@@ -248,8 +248,19 @@ jobs:
           codesign --verify --strict "$bin"
           out=$("$bin" --version)
           echo "  $out"
-          printf '%s\n' "$out" | grep -q "nevermore $version" || {
-            echo "ERROR: named $version, reports something else" >&2
+          # Both halves of the line, not just the name the ZIP carries:
+          # boba's version comes from ITS configure, via its own
+          # build-aux/git-version.sh rule (strip the `v`, `-<n>-g<sha>`
+          # becomes `.<n>-<sha>`, `-dirty` on a dirty tree), so the
+          # packaged binary has to agree with what this checkout
+          # describes as. A boba built from anywhere else — a cache, a
+          # stale prefix — fails here instead of shipping a version the
+          # pin does not name.
+          expected_boba=$(git -C boba describe --tags --match 'v*' |
+            sed 's/^v//;s/-\([0-9]*\)-g/.\1-/')
+          printf '%s\n' "$out" | grep -q "nevermore $version (boba $expected_boba)" || {
+            echo "ERROR: named $version, but the binary reports '$out' —" >&2
+            echo "       this checkout builds '(boba $expected_boba)'" >&2
             exit 1
           }
 

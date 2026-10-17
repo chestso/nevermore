@@ -105,6 +105,22 @@ every line.
   boba's `.pc` is written at its own configure time — so a freshly
   built pair still reports the old versions until both trees are
   re-configured. Trust a rebuilt binary, not the banner.
+- **boba, the version is not in the pin — it is in the compile**: boba
+  bakes its version string in at its OWN configure time, from the tags
+  `git describe --tags` sees in that checkout, so a pin names the tree
+  and nothing else — the same commit describes as `v0.3.0-5-g…` before
+  a tag lands on it and as `v0.4.0` after. The Windows job used to skip
+  that compile on a cache hit keyed on the pin; when boba tagged the
+  commit the pin already named, the ref did not change, the key did not
+  move, and the run restored an install compiled before the tag existed
+  — v0.2.0 shipped a Windows `.exe` reading `boba 0.3.0.5-7d0101b`
+  beside a macOS ZIP from the same run reading `boba 0.4.0`. So: **no
+  CI cache for a dependency whose version a shipped binary prints**, and
+  **both packaged binaries are asserted against what the checkout
+  describes as** (the artifact's own `(boba …)` line — a restored
+  install, a moved tag or a dirty dependency tree fails the build
+  instead of shipping). macOS and GNU/Linux never had the trap: they
+  compile every run (6–15 s).
 - **stb** (image transcode) is gitignored, not committed:
   `scripts/fetch-stb.sh` pins the upstream commit and `configure`
   fetches a missing header — a first configure (and CI) needs network.

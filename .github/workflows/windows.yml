@@ -21,11 +21,11 @@ jobs:
       run:
         shell: msys2 {0}
     env:
-      # Pinned boba ref — single source for both the checkout and the
-      # boba-install cache key in this file. Bump alongside the nevermore
-      # commit that consumes a new boba API; the same pin lives in
-      # linux.yml / macos.yml (bump all three together). The boba tag
-      # must exist on the remote before nevermore, or CI cannot fetch it.
+      # Pinned boba ref — the single source for the checkout in this file.
+      # Bump alongside the nevermore commit that consumes a new boba API;
+      # the same pin lives in linux.yml / macos.yml (bump all three
+      # together). The boba tag must exist on the remote before nevermore,
+      # or CI cannot fetch it.
       BOBA_REF: v0.4.0
 
     steps:
@@ -93,7 +93,7 @@ jobs:
           # what lets nevermore keep the model's blank lines inside a
           # block and still end the block where the next one starts).
           # A floating master would let boba churn break this repo's CI
-          # mid-work. NOTE: this SHA must be PUSHED to the boba remote
+          # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
           ref: ${{ env.BOBA_REF }}
           path: boba
@@ -115,22 +115,15 @@ jobs:
             zip
             unzip
 
-      - name: Cache boba install
-        id: boba-cache
-        uses: actions/cache@v5
-        with:
-          # The prefix ($HOME/.local inside the MSYS2 shell) maps to the
-          # MSYS2 install root + /home/runneradmin on the host. We cache
-          # the host-side Windows path because actions/cache runs on the
-          # host, not in the MSYS2 shell. Keyed on the boba ref + msystem:
-          # a pin bump rebuilds; otherwise the install is restored in
-          # seconds instead of recompiled. A stale key (moved MSYS2 root)
-          # degrades to a miss+rebuild, never a break.
-          path: C:/msys64/home/runneradmin/.local
-          key: boba-install-ucrt64-${{ env.BOBA_REF }}
-
       - name: Build and install boba
-        if: steps.boba-cache.outputs.cache-hit != 'true'
+        # No cache: a restored boba install is a compiled artifact whose
+        # version string was baked by ITS configure, from the tags visible
+        # then — so a hit could hand this job a boba older than the pin
+        # names, silently (v0.2.0 shipped exactly that: a Windows .exe
+        # reading `boba 0.3.0.5-7d0101b` beside a macOS ZIP from the same
+        # run reading `boba 0.4.0`). The rebuild costs ~26 s of a ~6 min
+        # job; linux.yml and macos.yml have always paid it (6-15 s) and
+        # cannot drift for the same reason.
         run: |
           cd boba
           ./autogen.sh
@@ -143,10 +136,10 @@ jobs:
           # setup-msys2 does not pass PKG_CONFIG_PATH through to the
           # MSYS2 environment (msys2/setup-msys2#98), and /etc/profile
           # overwrites it on every login shell; export it here so
-          # pkgconf finds the boba.pc we just installed (from the cache
-          # or the fresh build above). $HOME/.local is a POSIX path
-          # (no drive letter) — a C:/... path here would split on the
-          # drive-letter colon and pkg-config would see two bogus dirs.
+          # pkgconf finds the boba.pc built just above. $HOME/.local is a
+          # POSIX path (no drive letter) — a C:/... path here would split
+          # on the drive-letter colon and pkg-config would see two bogus
+          # dirs.
           export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$PKG_CONFIG_PATH"
           ./autogen.sh
           mkdir build && cd build
@@ -220,8 +213,18 @@ jobs:
             exit 1
           fi
           echo "  $out"
-          printf '%s\n' "$out" | grep -q "nevermore $version" || {
-            echo "ERROR: named $version, reports something else" >&2
+          # The pin is the claim, the binary is the evidence — and the
+          # boba half of the line is the half that lies when the install
+          # came from anywhere but this checkout. boba bakes its version
+          # in at ITS configure time, from the tags it can see, with the
+          # rule in its own build-aux/git-version.sh (strip the `v`,
+          # `-<n>-g<sha>` becomes `.<n>-<sha>`, `-dirty` on a dirty tree):
+          # reproduce that rule and require the packaged .exe to agree.
+          expected_boba=$(git -C boba describe --tags --match 'v*' |
+            sed 's/^v//;s/-\([0-9]*\)-g/.\1-/')
+          printf '%s\n' "$out" | grep -q "nevermore $version (boba $expected_boba)" || {
+            echo "ERROR: named $version (pin $BOBA_REF), but the .exe reports" >&2
+            echo "       '$out' — this checkout builds '(boba $expected_boba)'" >&2
             exit 1
           }
 
