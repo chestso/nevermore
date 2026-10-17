@@ -60,6 +60,14 @@ static NmConfig *g_cfg;
 static int tls_port;
 static int tls_listen_fd = -1;
 
+/* The hold knob (see the held-reply test): how long the server half waits
+ * after accept() before it says anything in TLS. 0 = answer at once, which
+ * is what the certificate test wants; anything else MAKES the gap the step
+ * machine has to report — with the reply already in the socket there is no
+ * gap to observe and the assertion would prove nothing. */
+static int tls_server_hold_ms;
+#define TLS_HOLD_MS 300
+
 static const char *CERT = "tls/test-cert.pem";
 static const char *KEY = "tls/test-key.pem";
 
@@ -97,6 +105,10 @@ static void *tls_server_thread(void *arg)
     int cfd = accept(tls_listen_fd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    /* The hold: nothing is spoken in TLS until it is over (see
+     * tls_server_hold_ms). */
+    if (tls_server_hold_ms > 0)
+        usleep((unsigned)tls_server_hold_ms * 1000);
     SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
     if (!ctx) {
         close(cfd);
@@ -175,6 +187,10 @@ static void *tls_server_thread(void *arg)
     int cfd = accept(tls_listen_fd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    /* The hold: nothing is spoken in TLS until it is over (see
+     * tls_server_hold_ms). */
+    if (tls_server_hold_ms > 0)
+        usleep((unsigned)tls_server_hold_ms * 1000);
 
     mbedtls_ssl_config conf;
     mbedtls_x509_crt srvcert;
@@ -289,6 +305,87 @@ static void test_tls_no_backend_fails_fast(void)
 #endif
 
 /* ---------------------------------------------------------------- */
+/* The gap the step machine exists for: a peer that holds its reply    */
+/* ---------------------------------------------------------------- */
+
+/* One TLS server that says nothing for HOLD_MS after accepting. The
+ * client's first handshake attempt puts the ClientHello on the wire and
+ * must then report PENDING with READ interest — it is waiting for the
+ * ServerHello, which is genuinely absent. Against the pre-step handshake
+ * the same drive returns a VERDICT from that first step (the whole
+ * handshake, hold included, ran inside it), so this is the assertion that
+ * pins "a step never waits".
+ *
+ * No timing assertion is needed to prove the reply was held: the client
+ * cannot reach the certificate verdict without the server's flight, and the
+ * server sends that only after the hold. What the assertions DO pin is
+ * where the client waited: READ interest (the ServerHello's arrival) while
+ * the hold runs, and a verdict that is the certificate refusal and NOT the
+ * budget — the budget is 5 s and the hold is 300 ms, so a client that
+ * simply burned its deadline would say "timed out". */
+
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
+static void test_tls_handshake_step_pends_on_a_held_reply(void)
+{
+    if (!nm_tls_backend()) {
+        printf("  (no TLS backend — skipped by contract)\n");
+        return;
+    }
+    ASSERT_EQ(tls_server_start(), 0);
+    tls_server_hold_ms = TLS_HOLD_MS; /* MAKE the gap */
+    pthread_t th;
+    pthread_create(&th, NULL, tls_server_thread, NULL);
+
+    /* A budget far above the hold: this test is about the GAP, and a
+     * budget that fired would be a different failure. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "5000");
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c =
+        nm_connect_async("localhost", tls_port, NM_TRANSPORT_TLS, &ci);
+    ASSERT_NOT_NULL(c);
+
+    /* Drive connect + handshake to a verdict, counting what the client
+     * waited on. The connect's own PENDING declares WRITE (a connect in
+     * flight), so a PENDING that declares READ can only be the handshake
+     * waiting for the server. */
+    int held_read = 0;
+    NmTransportStatus s = NM_TRANSPORT_OK;
+    for (int spin = 0; spin < 400; spin++) {
+        s = nm_connection_step(c);
+        if (s == NM_TRANSPORT_ERR_TLS)
+            break;
+        NmSource i = nm_connection_interest(c);
+        if (s == NM_TRANSPORT_PENDING && i.handle >= 0 &&
+            i.flags == (unsigned)NM_INTEREST_READ)
+            held_read = 1;
+        if (i.handle >= 0 && i.flags != 0)
+            nm_source_wait_any(&i, 1, 20);
+    }
+    const char *detail = nm_connection_last_error(c);
+
+    /* Restore the store BEFORE asserting: a failed assert must not leak
+     * the budget into the tests that follow. */
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+
+    ASSERT_TRUE(held_read);                           /* the handshake PENDS in the gap ... */
+    ASSERT_TRUE(strstr(detail, "timed out") == NULL); /* ... and is not
+                                                       * ended by the budget */
+    ASSERT_TRUE(strstr(detail, "TLS handshake") != NULL);
+
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    tls_server_hold_ms = 0;
+    tls_server_stop();
+}
+#else /* no Linux TLS backend in this build */
+static void test_tls_handshake_step_pends_on_a_held_reply(void)
+{
+    printf("  (no Linux TLS backend compiled — held-reply gap n/a)\n");
+}
+#endif
+
+/* ---------------------------------------------------------------- */
 /* Windows: the handshake must survive an event-loop-owned socket     */
 /* ---------------------------------------------------------------- */
 
@@ -302,9 +399,13 @@ static void test_tls_no_backend_fails_fast(void)
  * 10022"). The handshake now runs on such a socket and only a WIRE
  * reason can end it.
  *
- * The peer here is a stub: it drains the ClientHello and closes, so
- * the verdict must be a TLS/handshake failure — never a socket-mode
- * one. That single distinction is the regression.
+ * The peer here is a stub that drains the ClientHello and then HOLDS, so
+ * what ends the handshake is the budget (300 ms through the store) and the
+ * verdict must be a TLS/handshake timeout — never a socket-mode one. The
+ * hold is also what makes the step machine visible on this substrate: a
+ * client that waited inside the step could not report PENDING with READ
+ * interest (waiting for a ServerHello that never comes), and the whole
+ * handshake ran inside one step before this change.
  */
 
 static int stub_server_bind(int *port)
@@ -339,9 +440,10 @@ static void *stub_server_thread(void *arg)
         return NULL;
     /* Drain-recv: a closed peer is READABLE, so a select-only wait
      * hot-spins, and the accept/send race means the first poll may
-     * legitimately see nothing. */
+     * legitimately see nothing. Then HOLD the connection open: the client
+     * gives up on its own budget and closes, which ends this loop (EOF). */
     char drain[2048];
-    for (int spin = 0; spin < 100; spin++) {
+    for (;;) {
         fd_set r;
         FD_ZERO(&r);
         FD_SET(cfd, &r);
@@ -349,8 +451,8 @@ static void *stub_server_thread(void *arg)
         if (select(0, &r, NULL, NULL, &tv) <= 0)
             continue;
         int n = recv(cfd, drain, sizeof(drain), 0);
-        if (n <= 0 || n < (int)sizeof(drain))
-            break; /* closed, or the ClientHello is in (enough) */
+        if (n <= 0)
+            break; /* the client gave up (or closed): the hold is over */
     }
     close(cfd);
     return NULL;
@@ -399,24 +501,38 @@ static void test_tls_handshake_on_loop_owned_socket(void)
                                FD_CLOSE | FD_READ | FD_WRITE | FD_CONNECT) ==
                 0);
 
+    /* A budget the hold can outlive: the client must give up on its OWN
+     * deadline, over a socket whose mode the association owns. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "300");
+
     /* Step the connect + handshake to a verdict (PENDING is part of
-     * the contract, never a verdict). */
+     * the contract, never a verdict), and record what the client waited
+     * on: the connect's PENDING is WRITE, so READ there is the handshake
+     * waiting for a ServerHello the stub never sends. */
+    int held_read = 0;
     NmTransportStatus s = NM_TRANSPORT_OK;
     for (int spin = 0; spin < 200; spin++) {
-        NmSource i = nm_connection_interest(c);
-        if (i.handle < 0 || i.flags == 0)
-            break;
-        win_wait_interest((int)i.handle, i.flags, 50);
         s = nm_connection_step(c);
-        if (s == NM_TRANSPORT_OK || s == NM_TRANSPORT_PENDING)
-            continue;
-        break;
+        if (s == NM_TRANSPORT_ERR_TLS)
+            break;
+        NmSource i = nm_connection_interest(c);
+        if (s == NM_TRANSPORT_PENDING && i.handle >= 0 &&
+            i.flags == (unsigned)NM_INTEREST_READ)
+            held_read = 1;
+        if (i.handle >= 0 && i.flags != 0)
+            win_wait_interest((int)i.handle, i.flags, 50);
     }
-    /* The stub answers nothing, so the handshake MUST fail — but as
-     * a TLS failure: the old socket-mode failure is the bug. */
-    ASSERT_EQ(s, NM_TRANSPORT_ERR_TLS);
     const char *detail = nm_connection_last_error(c);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+
+    /* The stub answers nothing, so the handshake MUST fail on the budget —
+     * but as a TLS failure: the old socket-mode failure is the bug, and a
+     * client that waited inside the step could not have reported the
+     * PENDING above. */
+    ASSERT_TRUE(held_read);
+    ASSERT_EQ(s, NM_TRANSPORT_ERR_TLS);
     ASSERT_TRUE(strstr(detail, "TLS handshake") != NULL);
+    ASSERT_TRUE(strstr(detail, "timed out") != NULL);
     ASSERT_TRUE(strstr(detail, "blocking") == NULL);
 
     WSAEventSelect((SOCKET)fd, NULL, 0); /* release before close */
@@ -748,6 +864,7 @@ int main(int argc, char *argv[])
     printf("test_tls:\n");
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
+    RUN_TEST(test_tls_handshake_step_pends_on_a_held_reply);
     RUN_TEST(test_tls_handshake_on_loop_owned_socket);
     RUN_TEST(test_schannel_record_view_consumed);
     RUN_TEST(test_schannel_flight_view_keeps_leftover);
