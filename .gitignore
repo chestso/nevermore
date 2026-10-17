@@ -1,5 +1,6 @@
 build/
 build-rel/
+build-mbedtls/
 build-w32/
 build-w32-rel/
 build-macos-zig/

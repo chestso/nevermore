@@ -166,6 +166,7 @@ static void test_tls_no_backend_fails_fast(void)
 #include <mbedtls/net_sockets.h>
 #include <mbedtls/pk.h>
 #include <mbedtls/ssl.h>
+#include <mbedtls/version.h> /* MBEDTLS_VERSION_NUMBER: 2.28 vs 3.x (below) */
 #include <mbedtls/x509_crt.h>
 
 static void *tls_server_thread(void *arg)
@@ -189,9 +190,19 @@ static void *tls_server_thread(void *arg)
     mbedtls_ctr_drbg_init(&drbg);
 
     int ok = mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                                   (const unsigned char *)"test-tls-server", 15) == 0 &&
+                                   (const unsigned char *)"test-tls-server",
+                                   15) == 0 &&
              mbedtls_x509_crt_parse_file(&srvcert, CERT) == 0 &&
+    /* mbedTLS 3.x made the key parser's RNG explicit (2.28's is
+     * 3-arg, 3.x's 5-arg); CI's floor is the distro's 2.28
+     * (CONTRIBUTING), so both spellings have to compile. The
+     * drbg is already seeded by the clause above. */
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
+             mbedtls_pk_parse_keyfile(&pkey, KEY, NULL,
+                                      mbedtls_ctr_drbg_random, &drbg) == 0 &&
+#else
              mbedtls_pk_parse_keyfile(&pkey, KEY, NULL) == 0 &&
+#endif
              mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER,
                                          MBEDTLS_SSL_TRANSPORT_STREAM,
                                          MBEDTLS_SSL_PRESET_DEFAULT) == 0;
