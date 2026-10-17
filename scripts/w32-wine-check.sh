@@ -242,7 +242,6 @@ run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
 	src/provider_ollama_local.c \
 	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
 	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
 	src/wire_recorder.c \
@@ -256,7 +255,6 @@ run_build test_source src/clock.c tests/test_source.c src/source.c src/nevermore
 	src/provider_ollama_local.c \
 	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
 	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
 	src/wire_recorder.c \
@@ -273,7 +271,6 @@ run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_c
 	src/provider_ollama_local.c \
 	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/provider_test.c \
 	-lws2_32 -lpthread
 
 run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/image_bytes.c src/size.c \
@@ -289,7 +286,6 @@ run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c sr
 	src/provider_ollama_local.c \
 	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/provider_test.c \
 	-lws2_32 -lpthread
 
 run_build test_spinner tests/test_spinner.c src/spinner.c
@@ -333,7 +329,6 @@ if [ -n "$BOBA_LIB" ]; then
 		src/provider_ollama.c src/provider_ollama_local.c \
 		src/provider_openrouter.c \
 		src/provider_opencode.c src/provider_opencode_zen.c \
-		src/provider_test.c \
 		-lpthread
 else
 	BOBA_SKIP="needs a Windows boba (set BOBA_SRC, or check out ./boba or ../boba)"

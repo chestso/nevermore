@@ -20,14 +20,22 @@ typedef struct
     size_t n;
 } RegistrySource;
 
-/* Provider display labels — the human name for each built-in,
- * indexed by NmProviderId. */
+/* Provider display labels — the human name for each built-in, indexed
+ * by NmProviderId: one entry per enum arm, in enum order. */
 static const char *const provider_labels[] = {
-    "Charm Hyper", "Ollama Cloud", "Ollama Local", "OpenAI",
+    "Charm Hyper", "Ollama Cloud", "Ollama Local",
     "OpenRouter", "OpenCode Go", "OpenCode Zen"
 };
 #define PROVIDER_LABELS_N \
     (sizeof(provider_labels) / sizeof(provider_labels[0]))
+
+/* The id is the index, so a table that fell out of step with the enum
+ * does not fall back — it labels a DIFFERENT provider: dropping an arm
+ * from the middle of the enum once shifted every label after it by
+ * one, and the compile-time count is what makes the next such edit
+ * fail here instead of shipping as an OpenRouter row named "OpenAI". */
+_Static_assert(PROVIDER_LABELS_N == (size_t)NM_PROVIDER_OPENCODE_ZEN + 1,
+               "one provider_labels[] entry per NmProviderId arm, in order");
 
 static int registry_fetch_begin(NmListSource *s, const char *query_hint)
 {

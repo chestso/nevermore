@@ -3539,11 +3539,11 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
     pthread_t th;
     pthread_create(&th, NULL, agent_server_thread, &sc);
 
-    /* The test provider's loopback wire surface with the catalog seam
+    /* The local tier's loopback wire surface with the catalog seam
      * replaced: the blocking drive counts (and claims text-only / no
      * tools), the cached read claims vision and says nothing about
      * tools. */
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models = stub_blocking_models_drive;
     p.models_cached = stub_cached_models_read;
 
@@ -3623,7 +3623,7 @@ static const NmModel *stub_catalog_read(const NmProvider *p, size_t *n_out)
 
 static void test_agent_context_limit_follows_a_warmed_catalog(void)
 {
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
 
     /* A cold cache: the fallback does not carry the model, so the window
@@ -3681,7 +3681,7 @@ static void test_agent_vision_clause_follows_a_warmed_catalog(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models = stub_blocking_models_drive;
     p.models_cached = stub_catalog_read;
 
@@ -3746,7 +3746,7 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
 
     g_stub_catalog = stub_see_models;
@@ -3804,7 +3804,7 @@ static void test_agent_vision_clause_follows_a_model_switch(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
     g_stub_catalog = stub_switch_models;
 
@@ -3865,7 +3865,7 @@ static void test_agent_model_reset_is_not_a_change(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
     g_stub_catalog = stub_see_models;
 
@@ -3923,7 +3923,7 @@ static void test_agent_vision_clause_drops_for_an_unknown_model(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    struct NmProvider p = nm_test_provider;
+    struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
     g_stub_catalog = stub_see_models;
 

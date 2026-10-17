@@ -51,7 +51,6 @@ static const NmOpenaiCompat *const g_compat[NM_PROVIDER_MAX] = {
     [NM_PROVIDER_OPENROUTER] = &nm_openrouter_compat,
     [NM_PROVIDER_OPENCODE] = &nm_opencode_compat,
     [NM_PROVIDER_OPENCODE_ZEN] = &nm_opencode_zen_compat,
-    [NM_PROVIDER_TEST] = &nm_test_replay_compat,
 };
 
 static const NmOpenaiCompat *openaicompat_of(const NmProvider *p)

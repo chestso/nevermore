@@ -163,8 +163,7 @@ TEST_PROVIDER_SOURCES = \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
-    ../src/provider_test.c
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).

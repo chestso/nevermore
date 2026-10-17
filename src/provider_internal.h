@@ -17,7 +17,6 @@ extern const struct NmProvider nm_ollama_local_provider;
 extern const struct NmProvider nm_openrouter_provider;
 extern const struct NmProvider nm_opencode_provider;     /* :go */
 extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
-extern const struct NmProvider nm_test_provider;         /* test:replay */
 
 /* Shared OpenCode wire surface (provider_opencode.c): the two tiers
  * differ only in base URL and shipped table, so they share one vtable

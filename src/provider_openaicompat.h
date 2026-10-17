@@ -83,9 +83,11 @@ struct NmOpenaiCompat
 {
     NmOpenaiCompatChatEndpoint chat_endpoint;       /* required */
     NmOpenaiCompatCatalogEndpoint catalog_endpoint; /* required with row */
-    /* The static fallback catalog (NULL-terminated). Required with row;
-     * the provider with no live catalog at all (test:replay) keeps its
-     * own vtable slots and needs neither. */
+    /* The static fallback catalog (NULL-terminated), the third leg of
+     * the live-catalog triple: the shared drive requires it alongside
+     * row + catalog_endpoint, and the any-of-them-NULL case means "this
+     * provider has no live catalog" — the vtable slots stay its own
+     * (ollama's native /api catalog is the precedent). */
     const NmModel *static_models;
     /* NULL = this provider has no live catalog: the catalog vtable
      * slots are not wired to the shared ones. */
@@ -103,7 +105,6 @@ extern const NmOpenaiCompat nm_ollama_compat;
 extern const NmOpenaiCompat nm_openrouter_compat;
 extern const NmOpenaiCompat nm_opencode_compat;
 extern const NmOpenaiCompat nm_opencode_zen_compat;
-extern const NmOpenaiCompat nm_test_replay_compat;
 
 /* The shared vtable slots. */
 NmChatResult nm_openaicompat_chat(const NmProvider *p,

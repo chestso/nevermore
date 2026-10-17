@@ -32,7 +32,6 @@ static const struct NmProvider *const g_providers[] = {
     &nm_openrouter_provider,   /* provider_openrouter.c */
     &nm_opencode_provider,     /* provider_opencode.c (opencode:go) */
     &nm_opencode_zen_provider, /* provider_opencode_zen.c (opencode:zen) */
-    &nm_test_provider          /* provider_test.c (test:replay) */
 };
 
 const NmProvider *nm_provider_get(NmProviderId id)

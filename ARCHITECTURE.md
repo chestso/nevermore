@@ -87,8 +87,8 @@ architecture "the right way"**: fix a design flaw at its root
   `grep -rn provider_ollama_local` enumerates every spot from any one
   existing provider; the `NM_PROVIDER_MAX`-bounded stack arrays
   (picker, sources, error hint) need nothing until the registry passes 16.
-  **A provider speaking the shared OpenAI-compatible wire** (all
-  seven do) adds one thing more: an `NmOpenaiCompat` descriptor
+  **A provider speaking the shared OpenAI-compatible wire** (all six
+  do) adds one thing more: an `NmOpenaiCompat` descriptor
   (`src/provider_openaicompat.h`) registered in that module's table —
   its endpoint builders, its static table and a row mapper for one
   catalog entry — and points its vtable's chat/catalog slots at the
@@ -162,8 +162,10 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `models_begin` returns 0 when there is nothing to fetch: already
   cached, gated off (`!base_url && !nm_live_catalog_enabled()`), or
   **already in flight**, which is what makes `models()` safe mid-fetch.
-  One parse per provider, two drives; `test:replay` leaves the seam
-  NULL. The engine is `NmFetchStream` (`openai_client.c`), an async
+  One parse per provider, two drives: every provider wires the seam —
+  the shared one (`provider_openaicompat.c`) for the OpenAI-shaped
+  catalogs, ollama's own (`/api/tags` + `/api/show`) for the two
+  Ollama tiers. The engine is `NmFetchStream` (`openai_client.c`), an async
   one-shot JSON fetch with a per-REQUEST deadline (2 s) — per request,
   not per fetch, so ollama's `/api/tags` + one `/api/show` per model
   each get their own budget and a wedged peer fails a request instead

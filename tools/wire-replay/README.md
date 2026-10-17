@@ -135,32 +135,55 @@ locally.
 
 ### Driving nevermore at the replay server
 
-The `test:replay` provider exists for exactly this: a loopback base, no
-auth, a tokenless static catalog, and the same OpenAI-compatible wire
-the other providers use. Two knobs make a recorded dump reproducible:
+`ollama:local` is the vehicle: its base is the loopback default the
+`--port 11434` above lands on, it is keyless by construction (the tier
+names no key source at all, so a cloud token exported in the same shell
+cannot ride to the replay server), and its chat half is the same
+OpenAI-compatible wire the recorded exchanges were captured on.
 
 ```sh
 # 1. capture a real session (any provider)
 NEVERMORE_DEBUG_WIRE=1 nevermore -p opencode:go -m deepseek-v4.1-flash ...
 
-# 2. serve the dump (--loose: later rounds embed unreproducible tool
-#    output; see the flag note above)
+# 2. serve the dump on the local tier's own port (--loose: later rounds
+#    embed unreproducible tool output; see the flag note above)
 tools/wire-replay/wire-replay ~/.local/state/nevermore/wire/DUMP.ndjson \
     --port 11434 --loose &
 
-# 3. replay it through the real client. NEVERMORE_BASE_URL overrides the
-#    provider's endpoint, and its PATH is what the dump's request target
-#    was recorded under (a Go dump carries /zen/go/v1).
-NEVERMORE_BASE_URL=http://localhost:11434/zen/go/v1 \
-NEVERMORE_AUTHINFO=/dev/null NM_NO_LIVE_CATALOG=1 \
-    nevermore -p test:replay -m deepseek-v4.1-flash
+# 3. replay it through the real client: no base override (the tier's
+#    default IS localhost:11434/v1) and the live catalog switched off,
+#    since the replay server holds only what was recorded.
+NM_NO_LIVE_CATALOG=1 nevermore -p ollama:local -m deepseek-v4.1-flash
 ```
 
-`NM_NO_LIVE_CATALOG=1` keeps the model popup from fetching `/models`
-over the wire (the replay server holds only chat completions).
-`NEVERMORE_AUTHINFO=/dev/null` is belt-and-braces: `test:replay` is
-keyless on loopback, but a stray real authinfo entry would otherwise
-ride along.
+The model id is not looked up: `-m` goes to the wire as typed, which is
+what the dump's request signature needs (the picker would offer the
+daemon's models, not the dump's).
+
+**A dump recorded under another path needs `NEVERMORE_BASE_URL`** — a
+Go dump carries `/zen/go/v1`, and the override's path is what a request
+target is matched on:
+
+```sh
+NEVERMORE_BASE_URL=http://localhost:11434/zen/go/v1 \
+NM_NO_LIVE_CATALOG=1 \
+    nevermore -p ollama:local -m deepseek-v4.1-flash
+```
+
+Two things change with that override, both from the same rule: **an
+explicit base wins the live-catalog gate**, and `ollama:local` is a
+wire-catalog provider. So
+
+- `NM_NO_LIVE_CATALOG=1` stops nothing here. It gates the probe only
+  while no base is named; with one, the run warms the catalog (ask
+  mode) or the `/model` popup fetches, and a **`GET /api/tags`** goes
+  to the replay server (followed by one `POST /api/show` per tag it
+  answers with).
+- **Keep the dump's own catalog exchange in the file.** In strict mode
+  the probe is simply unmatched (503, and nothing is consumed — the
+  chat round still pairs). Under `--loose` a miss falls back to the
+  oldest pending action, so a chat-only dump hands the probe the CHAT
+  response and the chat itself then 503s.
 
 ## Behavior notes
 
