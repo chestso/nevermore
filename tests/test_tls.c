@@ -21,6 +21,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 #include <pthread.h>
@@ -30,7 +31,8 @@
 #include <time.h>
 
 #include "transport.h"
-#include "clock.h" /* nm_monotonic_seconds: the per-step tripwire below */
+#include "transport_internal.h" /* NM_TLS_CA_FILE_ENV (the trust anchor) */
+#include "clock.h"              /* nm_monotonic_seconds: the per-step tripwire below */
 #include "conf.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
@@ -69,8 +71,36 @@ static int tls_listen_fd = -1;
 static int tls_server_hold_ms;
 #define TLS_HOLD_MS 300
 
+/* The large-write test's collector: when tls_server_recv is non-NULL the
+ * server half records everything the peer writes (until it closes) into
+ * that buffer instead of answering the tiny canned page, and defers its
+ * first read by tls_server_defer_ms so the client's send window closes
+ * while it is mid-request. */
+static unsigned char *tls_server_recv;
+static size_t tls_server_recv_cap;
+static size_t tls_server_recv_len;
+static int tls_server_defer_ms;
+
+/* The committed fixture lives in the SOURCE tests/ tree: `make check`
+ * exports $srcdir (../../tests from the build dir) and a direct run from
+ * the source dir has none at all. Resolve it once, in main, so the
+ * server half (and the large-write test's trust anchor) name a file that
+ * is actually there. */
 static const char *CERT = "tls/test-cert.pem";
 static const char *KEY = "tls/test-key.pem";
+static char cert_path[512];
+static char key_path[512];
+
+static void tls_resolve_fixtures(void)
+{
+    const char *srcdir = getenv("srcdir");
+    if (srcdir && *srcdir) {
+        snprintf(cert_path, sizeof(cert_path), "%s/tls/test-cert.pem", srcdir);
+        snprintf(key_path, sizeof(key_path), "%s/tls/test-key.pem", srcdir);
+        CERT = cert_path;
+        KEY = key_path;
+    }
+}
 
 static int tls_server_start(void)
 {
@@ -96,6 +126,10 @@ static void tls_server_stop(void)
         close(tls_listen_fd);
     tls_listen_fd = -1;
 }
+#else /* no Linux TLS backend in this build */
+static void tls_resolve_fixtures(void)
+{
+}
 #endif
 
 #ifdef NM_TLS_OPENSSL
@@ -120,13 +154,37 @@ static void *tls_server_thread(void *arg)
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, cfd);
     if (SSL_accept(ssl) == 1) {
-        /* Drain any request bytes, answer with a tiny page. */
-        char d[512];
-        SSL_read(ssl, d, sizeof(d));
-        const char resp[] =
-            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-            "Content-Length: 2\r\n\r\nhi";
-        SSL_write(ssl, resp, sizeof(resp) - 1);
+        if (tls_server_recv) {
+            if (tls_server_defer_ms > 0)
+                usleep((unsigned)tls_server_defer_ms * 1000);
+            size_t total = 0;
+            for (;;) {
+                if (total >= tls_server_recv_cap) {
+                    /* Over the cap: keep draining (counting only) so a
+                     * corrupted stream is measured, not reset mid-send. */
+                    unsigned char sink[4096];
+                    int r = SSL_read(ssl, sink, sizeof(sink));
+                    if (r <= 0)
+                        break;
+                    total += (size_t)r;
+                    continue;
+                }
+                int r = SSL_read(ssl, tls_server_recv + total,
+                                 (int)(tls_server_recv_cap - total));
+                if (r <= 0)
+                    break;
+                total += (size_t)r;
+            }
+            tls_server_recv_len = total;
+        } else {
+            /* Drain any request bytes, answer with a tiny page. */
+            char d[512];
+            SSL_read(ssl, d, sizeof(d));
+            const char resp[] =
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                "Content-Length: 2\r\n\r\nhi";
+            SSL_write(ssl, resp, sizeof(resp) - 1);
+        }
     }
     SSL_shutdown(ssl);
     SSL_free(ssl);
@@ -237,13 +295,37 @@ static void *tls_server_thread(void *arg)
                     break;
             }
             if (ret == 0) {
-                unsigned char d[512];
-                mbedtls_ssl_read(&ssl, d, sizeof(d));
-                const char resp[] =
-                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                    "Content-Length: 2\r\n\r\nhi";
-                mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
-                                  sizeof(resp) - 1);
+                if (tls_server_recv) {
+                    if (tls_server_defer_ms > 0)
+                        usleep((unsigned)tls_server_defer_ms * 1000);
+                    size_t total = 0;
+                    for (;;) {
+                        if (total >= tls_server_recv_cap) {
+                            /* Over the cap: drain-count (see the OpenSSL
+                             * half) so the corruption is measured. */
+                            unsigned char sink[4096];
+                            int r = mbedtls_ssl_read(&ssl, sink, sizeof(sink));
+                            if (r <= 0)
+                                break;
+                            total += (size_t)r;
+                            continue;
+                        }
+                        int r = mbedtls_ssl_read(&ssl, tls_server_recv + total,
+                                                 tls_server_recv_cap - total);
+                        if (r <= 0)
+                            break;
+                        total += (size_t)r;
+                    }
+                    tls_server_recv_len = total;
+                } else {
+                    unsigned char d[512];
+                    mbedtls_ssl_read(&ssl, d, sizeof(d));
+                    const char resp[] =
+                        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                        "Content-Length: 2\r\n\r\nhi";
+                    mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
+                                      sizeof(resp) - 1);
+                }
             }
             mbedtls_ssl_close_notify(&ssl);
             mbedtls_ssl_free(&ssl);
@@ -384,6 +466,156 @@ static void test_tls_handshake_step_pends_on_a_held_reply(void)
 {
     printf("  (no Linux TLS backend compiled — held-reply gap n/a)\n");
 }
+#endif
+
+/* ---------------------------------------------------------------- */
+/* The write half: a body larger than the send window must arrive      */
+/* whole. Regression for opencode:go's "HTTP 400: no error body"       */
+/* ---------------------------------------------------------------- */
+
+/* A tool round on opencode:go grew the request past the socket send
+ * window. The mbedTLS backend answered "nothing was written" for a
+ * write that had already put records on the wire; the transport retried
+ * the whole buffer, the retry re-sent the records that had gone out,
+ * and the peer answered HTTP 400 with an empty body — from then on
+ * every round, because the transcript only grew. The property under
+ * test is the transport contract: a request bigger than the window
+ * arrives BYTE-EXACT. The server half records until the peer closes;
+ * the client half pins SO_SNDBUF so the window closes mid-body, which
+ * is the trigger, and defers the server's first read the same way. */
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
+
+#define TLS_BIG_BODY (128 * 1024)
+
+static int tls_large_write_child(void)
+{
+    if (tls_server_start() != 0) {
+        fprintf(stderr, "  child: loopback bind failed\n");
+        return 2;
+    }
+    static unsigned char recv[TLS_BIG_BODY + 64 * 1024];
+    static unsigned char body[TLS_BIG_BODY];
+    for (size_t i = 0; i < sizeof(body); i++)
+        body[i] = (unsigned char)('a' + (i % 26));
+
+    tls_server_recv = recv;
+    tls_server_recv_cap = sizeof(recv);
+    tls_server_recv_len = 0;
+    tls_server_defer_ms = TLS_HOLD_MS; /* the window closes while we write */
+    pthread_t th;
+    if (pthread_create(&th, NULL, tls_server_thread, NULL) != 0) {
+        fprintf(stderr, "  child: server thread failed\n");
+        tls_server_stop();
+        return 3;
+    }
+
+    NmConnectInfo ci = { 0 };
+    NmConnection *c = nm_connect("localhost", tls_port, NM_TRANSPORT_TLS, &ci);
+    if (!c) {
+        fprintf(stderr, "  child: connect: %s\n",
+                ci.detail[0] ? ci.detail : "(no detail)");
+        pthread_join(th, NULL);
+        tls_server_stop();
+        return 4;
+    }
+
+    /* One TLS record (~16 KiB) has to flush before the window closes, or
+     * the would-block lands on the first record and the offset is still
+     * zero — the retry is then correct by construction and the bug is
+     * invisible. Twice this is the socket's whole queued budget: room
+     * for exactly one record, not two. */
+    int small = 16384;
+    setsockopt(nm_connection_fd(c), SOL_SOCKET, SO_SNDBUF,
+               (const char *)&small, sizeof(small));
+    if (nm_connection_set_nonblocking(c) != NM_TRANSPORT_OK) {
+        fprintf(stderr, "  child: set_nonblocking failed\n");
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        tls_server_stop();
+        return 5;
+    }
+
+    /* The exact bytes the transport serializes for this request (see
+     * nm_socket_request_queue): request line, Host, Content-Length,
+     * Connection: close, then the body. */
+    char head[256];
+    int head_len = snprintf(head, sizeof(head),
+                            "POST /big HTTP/1.1\r\nHost: localhost:%d\r\n"
+                            "Content-Length: %zu\r\nConnection: close\r\n\r\n",
+                            tls_port, sizeof(body));
+
+    NmTransportStatus s = nm_request_send(c, "POST", "/big", NULL, 0,
+                                          (const char *)body, sizeof(body));
+    if (s != NM_TRANSPORT_OK)
+        fprintf(stderr, "  child: send: %s\n", nm_connection_last_error(c));
+    /* The last bytes are only queued locally; let the server drain them
+     * before the close, or the close discards them (RST). */
+    usleep(TLS_HOLD_MS * 1000);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    tls_server_stop();
+
+    if (s != NM_TRANSPORT_OK)
+        return 6;
+    size_t expect = (size_t)head_len + sizeof(body);
+    if (tls_server_recv_len != expect) {
+        fprintf(stderr,
+                "  child: server captured %zu bytes, expected %zu "
+                "(the request was corrupted on the wire)\n",
+                tls_server_recv_len, expect);
+        return 7;
+    }
+    if (memcmp(recv, head, (size_t)head_len) != 0) {
+        fprintf(stderr, "  child: request head corrupted\n");
+        return 8;
+    }
+    if (memcmp(recv + head_len, body, sizeof(body)) != 0) {
+        fprintf(stderr, "  child: request body corrupted\n");
+        return 9;
+    }
+    return 0;
+}
+
+static void test_tls_large_write_arrives_intact(void)
+{
+    if (!nm_tls_backend()) {
+        printf("  (no TLS backend — skipped by contract)\n");
+        return;
+    }
+#ifdef _WIN32
+    printf("  (POSIX loopback only — skipped)\n");
+#else
+    /* The trust store is process-global and built once: the certificate
+     * test needs the committed cert UNtrusted, this one needs it
+     * TRUSTED. So the positive half runs in a forked child — and this
+     * test runs FIRST, so the child starts with a cold store and its
+     * first connect reads the extra anchor. */
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("  FAIL: fork failed\n");
+        return;
+    }
+    if (pid == 0) {
+        setenv(NM_TLS_CA_FILE_ENV, CERT, 1);
+        _exit(tls_large_write_child());
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("  FAIL: waitpid failed\n");
+        return;
+    }
+    ASSERT_TRUE(WIFEXITED(st));
+    ASSERT_EQ(WEXITSTATUS(st), 0);
+#endif
+}
+
+#else /* no Linux TLS backend in this build */
+
+static void test_tls_large_write_arrives_intact(void)
+{
+    printf("  (no Linux TLS backend compiled — large-write test n/a)\n");
+}
+
 #endif
 
 /* ---------------------------------------------------------------- */
@@ -911,7 +1143,9 @@ int main(int argc, char *argv[])
         return 1;
     }
     nm_config_set_store(g_cfg);
+    tls_resolve_fixtures();
     printf("test_tls:\n");
+    RUN_TEST(test_tls_large_write_arrives_intact);
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_step_pends_on_a_held_reply);

@@ -24,6 +24,7 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -89,6 +90,16 @@ static int mb_init_once(void)
     }
     if (!loaded)
         return MBEDTLS_ERR_X509_FILE_IO_ERROR;
+    /* Plus any anchor the env names (see NM_TLS_CA_FILE_ENV): a
+     * private CA, and the loopback positive test's self-signed cert.
+     * A named file that will not parse fails the init — a trust knob
+     * that silently does nothing is worse than a loud refusal. */
+    const char *extra = getenv(NM_TLS_CA_FILE_ENV);
+    if (extra && *extra) {
+        ret = mbedtls_x509_crt_parse_file(&g_cacert, extra);
+        if (ret != 0)
+            return ret;
+    }
     mbedtls_ssl_conf_ca_chain(&g_conf, &g_cacert, NULL);
     mbedtls_ssl_conf_authmode(&g_conf, MBEDTLS_SSL_VERIFY_REQUIRED);
     mbedtls_ssl_conf_rng(&g_conf, mbedtls_ctr_drbg_random, &g_drbg);
@@ -202,10 +213,17 @@ static long mbedtls_write(void *ctx, const char *buf, size_t len,
                                     len - off);
         /* Not ready on a non-blocking fd: the send path steps again on
          * writability (-1 with *err NULL is the record layer's
-         * would-block convention). */
+         * would-block convention). The bytes ACCEPTED so far must be
+         * reported, not discarded: mbedtls buffers the record it could
+         * not flush, so the caller's next call re-enters here with the
+         * remainder — and a caller told "nothing was written" re-passes
+         * the whole buffer, re-sending the records that already went out
+         * (a duplicated body the peer answers with HTTP 400). The fd's
+         * send window filling mid-request is the trigger; `off > 0` is
+         * the partial-write contract nm_conn_write documents. */
         if (ret == MBEDTLS_ERR_SSL_WANT_READ ||
             ret == MBEDTLS_ERR_SSL_WANT_WRITE)
-            return -1;
+            return off > 0 ? (long)off : -1;
         if (ret <= 0) {
             if (err)
                 *err = mb_errstr(ret);

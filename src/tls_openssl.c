@@ -16,6 +16,7 @@
 #ifdef NM_TLS_OPENSSL
 
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <openssl/err.h>
@@ -36,8 +37,17 @@ static SSL_CTX *openssl_ctx(void)
         return NULL;
     SSL_CTX_set_min_proto_version(c, TLS1_2_VERSION);
     /* System trust store, hostname verification ON — we are a client
-     * that talks to public endpoints; no custom CA story yet. */
+     * that talks to public endpoints. Plus any anchor the env names
+     * (see NM_TLS_CA_FILE_ENV): a private CA, and the loopback positive
+     * test's self-signed cert. A named file that will not load fails
+     * the init rather than silently trusting less than asked. */
     SSL_CTX_set_default_verify_paths(c);
+    const char *extra = getenv(NM_TLS_CA_FILE_ENV);
+    if (extra && *extra &&
+        SSL_CTX_load_verify_locations(c, extra, NULL) != 1) {
+        SSL_CTX_free(c);
+        return NULL;
+    }
     SSL_CTX_set_verify(c, SSL_VERIFY_PEER, NULL);
     g_ctx = c;
     return c;

@@ -368,6 +368,16 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   exactly once, cancel included. `off` restores an indefinite wait (the
   pre-key behavior). `nm_socket_wait_ready_ms` retries EINTR (a SIGWINCH
   lands mid-handshake).
+  **A write backend reports progress, not a binary verdict**: a
+  partial sent count (a send window that filled mid-buffer) comes back
+  as the BYTES ACCEPTED, and only a would-block with nothing accepted
+  is the `-1` / `NM_WRITE_WOULD_BLOCK` sentinel. The backend that
+  answers "nothing written" for a buffer it partly sent makes
+  `nm_socket_step_send` retry from the stale offset and re-send the
+  records already on the wire — a corrupted body the peer answers 400
+  (the mbedTLS backend's trap: `mbedtls_ssl_write` holds the record it
+  could not flush, so the next call returns its count, and the
+  adapter must hand the outer loop the offset it reached).
 - **Agent loop** (`src/agent.c`) — stream → tool-call → execute →
   stream, plain C state machine; UI callbacks fire from inside. The
   event-driven seam: `nm_agent_start` / `nm_agent_step` /

@@ -82,6 +82,8 @@ static void usage(FILE *out)
             "  NEVERMORE_MODEL         default model (as -m)\n"
             "  NEVERMORE_BASE_URL      override the provider's endpoint\n"
             "                          (e.g. a wire-replay server)\n"
+            "  NEVERMORE_TLS_CA_FILE   extra TLS trust anchor (PEM), for a\n"
+            "                          private CA; adds to the system store\n"
             "  NEVERMORE_SEARXNG_URL   SearXNG endpoint the web_search\n"
             "                          tool queries (default\n"
             "                          http://127.0.0.1:8888)\n"

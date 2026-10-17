@@ -18,6 +18,15 @@ extern "C" {
 /* Defined in transport.c; the full NmConnection struct lives there. */
 struct NmConnection;
 
+/* An extra trust anchor file, read at the TLS config's init when the
+ * env names one (both Linux backends). It adds to the system store — a
+ * private/enterprise CA is the production use — and it is what lets the
+ * loopback positive TLS test (test_tls) trust the committed self-signed
+ * cert. Env-only on purpose, the NEVERMORE_BASE_URL precedent: an
+ * exploratory knob, not a durable profile. The Windows/macOS backends
+ * take their trust from the OS and ignore it. */
+#define NM_TLS_CA_FILE_ENV "NEVERMORE_TLS_CA_FILE"
+
 /* transport_socket.c */
 NmConnection *nm_socket_connect(const char *host, int port,
                                 NmConnectInfo *info);
