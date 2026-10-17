@@ -23,10 +23,10 @@ jobs:
     env:
       # Pinned boba ref — single source for both the checkout and the
       # boba-install cache key in this file. Bump alongside the nevermore
-      # commit that consumes a new boba API; the same SHA lives in
-      # linux.yml / macos.yml (bump all three together). The boba commit
-      # must be PUSHED before nevermore, or CI cannot fetch it.
-      BOBA_REF: 7d0101b882646df66af7e0d2976f869832d3cc27
+      # commit that consumes a new boba API; the same pin lives in
+      # linux.yml / macos.yml (bump all three together). The boba tag
+      # must exist on the remote before nevermore, or CI cannot fetch it.
+      BOBA_REF: v0.4.0
 
     steps:
       - name: Checkout nevermore

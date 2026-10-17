@@ -88,9 +88,9 @@ jobs:
           # which is nevermore's one-line rule, and the explicit image
           # route gets the same boundary by resetting `prev`).
           # A floating master would let boba churn break this repo's CI
-          # mid-work. NOTE: this SHA must be PUSHED to the boba remote
+          # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it.
-          ref: 7d0101b882646df66af7e0d2976f869832d3cc27
+          ref: v0.4.0
           path: boba
           fetch-depth: 0
 
