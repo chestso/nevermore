@@ -151,15 +151,26 @@ else
 	fi
 	boba_pc_dir=$boba_prefix/lib/pkgconfig
 
-	# Which boba this run verified: the pinned SHA is what CI uses, so say
-	# when they differ (an uncommitted boba change is the one case this
+	# Which boba this run verified: the CI pin is what a release uses, so
+	# say when they differ (an uncommitted boba change is the one case this
 	# pre-flight is MOST wanted for).
 	bo_sha="$(git -C "$boba_src" rev-parse --short HEAD 2>/dev/null || echo unknown)"
-	pin_sha="$(sed -n 's/^ *BOBA_REF: *\([0-9a-f]*\)$/\1/p' .github/workflows/windows.yml)"
-	pin_short="$(printf '%s' "$pin_sha" | cut -c1-7)"
+	# The pin is a literal at the boba checkout in windows.yml, and it is a
+	# TAG — so resolve it in the tree on disk instead of comparing the
+	# string (the tree may not carry the tag at all, which is worth saying
+	# rather than assuming). `^{commit}` peels the annotated tag: without it
+	# `rev-parse` answers with the tag OBJECT's sha, which never equals HEAD.
+	pin_ref="$(sed -n 's/^ *ref: *\(v[^ ]*\)$/\1/p' .github/workflows/windows.yml |
+		head -1)"
+	pin_short="$(git -C "$boba_src" rev-parse --short "$pin_ref^{commit}" 2>/dev/null ||
+		true)"
 	echo "PASS: libboba.a (Windows, $BOBA_SRC @ $bo_sha)"
-	if [ -n "$pin_short" ] && [ "$bo_sha" != "$pin_short" ]; then
-		echo "NOTE: boba HEAD $bo_sha is not the pinned $pin_short"
+	if [ -z "$pin_ref" ]; then
+		echo "NOTE: no boba pin in windows.yml — has its checkout shape changed?"
+	elif [ -z "$pin_short" ]; then
+		echo "NOTE: the pin $pin_ref is not in $BOBA_SRC (HEAD $bo_sha)"
+	elif [ "$bo_sha" != "$pin_short" ]; then
+		echo "NOTE: boba HEAD $bo_sha is not the pinned $pin_ref ($pin_short)"
 		echo "      (the run verifies the tree on disk, not the pin)"
 	fi
 fi
