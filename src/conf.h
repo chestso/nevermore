@@ -274,6 +274,38 @@ extern "C" {
  * feature. Env spelling: NEVERMORE_SKILLS. */
 #define NM_CFG_KEY_SKILLS "skills"
 
+/* Sampling temperature for a chat round: a decimal in `0`–`2`, the
+ * OpenAI-compatible range the gateways publish (docs/HYPER-API.md's
+ * request table). NO built-in default: unset means the field never
+ * rides the request and the model runs on its provider's own default —
+ * exactly what every build did before this key existed.
+ *
+ * What it does: it divides the model's logits before the softmax, so it
+ * decides how often the third-most-likely token wins. `0` is greedy
+ * decoding (the front-runner every step), `1` is the model's own
+ * distribution, `2` flattens it. It is NOT a capability or quality
+ * dial: past ~1.1 the visible effect is drifting tool arguments and
+ * wandering prose, and a reasoning model samples over its own trace, so
+ * there the knob mostly moves the trace's verbosity. Its one honest use
+ * in an agent is reproducibility — `0` turns a flaky live repro into a
+ * mostly-stable one.
+ *
+ * A value outside the grammar is refused at the layer boundary (never
+ * clamped), because the upstream would 400 on it and a refusal here
+ * names the key. `0` is a real value, so the "off" spelling is a number
+ * here, not a bool. Env spelling: NEVERMORE_TEMPERATURE. */
+#define NM_CFG_KEY_TEMPERATURE "temperature"
+/* Output-token cap per chat round: a positive decimal (the shape
+ * `rounds` and `connect_timeout` share, so `nm_config_resolve_int`
+ * clamps the read at 100000). NO built-in default: unset = the field is
+ * off the request and the provider's own limit rules.
+ *
+ * The wire's behavior when a round hits the limit is already handled —
+ * the round's `finish_reason` ("length") is captured and reported
+ * (NmChatResult.finish_reason); this key only lets a caller set the
+ * limit. Env spelling: NEVERMORE_MAX_TOKENS. */
+#define NM_CFG_KEY_MAX_TOKENS "max_tokens"
+
 typedef enum
 {
     NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */
@@ -353,6 +385,15 @@ int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback);
  * stream-inactivity budget is legitimately minutes to hours. */
 int nm_config_resolve_duration_ms(const NmConfig *c, const char *key,
                                   int fallback);
+
+/* The `temperature` key resolved and parsed as a number, or -1.0 when
+ * NO layer sets it. -1 is not a temperature: it is the
+ * `NmChatRequest.temperature` sentinel for "send no field at all", so
+ * the provider's own default rules. This is what the agent reads at the
+ * point of use. (`max_tokens` needs no reader of its own — it is the
+ * positive-int shape, read with nm_config_resolve_int and the same -1
+ * sentinel.) */
+double nm_config_resolve_temperature(const NmConfig *c);
 
 /* The model id for `provider` (see the `model` key's comment): the
  * scoped spellings outrank the plain one, in the same layer order. This
@@ -475,6 +516,16 @@ void nm_config_set_provider_validator(int (*fn)(const char *name));
  * `rounds` name is this shape under its own key's spelling. */
 int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
+/* Is `value` a `temperature` spelling — a decimal in `0`–`2` (digits,
+ * optionally '.' + digits; no sign, no exponent, no bare `.5`, no
+ * trailing dot)? The range is the OpenAI-compatible one the gateways
+ * publish, and a value outside it is REFUSED rather than clamped. */
+int nm_config_valid_temperature(const char *value);
+/* Canonicalize a validated temperature into `out`: leading zeros gone,
+ * trailing fraction zeros gone, so "00.500" is "0.5" and "1.0" is "1" —
+ * the ONE spelling the file, the shadow, the env layer and /config all
+ * read. Returns 1 on success, 0 when `value` is not a temperature. */
+int nm_config_temperature_canon(const char *value, char *out, size_t cap);
 /* Is `value` a bool spelling (1/true/on/yes, 0/false/off/no,
  * case-insensitive)? The shape the bool keys (family_skip,
  * searxng_enabled) share, read back by

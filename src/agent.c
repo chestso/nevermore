@@ -1376,14 +1376,25 @@ static int begin_round(NmAgent *a)
             echoed = 1;
     }
 
+    /* The sampling knobs are store keys resolved at the point of use
+     * (like `timeout`: the agent keeps no copy, so /config and the
+     * environment reach the next request). Unset resolves to -1, the
+     * request's "send no field" sentinel — so a build with nothing
+     * configured composes exactly the request it always did, and the
+     * provider's own default rules. */
+    NmConfig *cfg = nm_config_store();
+    double temperature = cfg ? nm_config_resolve_temperature(cfg) : -1.0;
+    long max_tokens =
+        cfg ? nm_config_resolve_int(cfg, NM_CFG_KEY_MAX_TOKENS, -1) : -1;
+
     NmChatRequest req = {
         a->model,
         msgs,
         n_msgs,
         NULL, /* system prompt rides in the session transcript */
         tools_json,
-        -1,
-        -1,
+        temperature,
+        max_tokens,
         a->conversation_id, /* borrowed; outlives compose+queue */
         round_on_delta,
         round_on_usage,

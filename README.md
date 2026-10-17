@@ -162,7 +162,8 @@ Settings resolve once, lowest to highest:
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
-   `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
+   `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_TEMPERATURE`,
+   `NEVERMORE_MAX_TOKENS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
    `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`,
@@ -201,6 +202,10 @@ kbd              = auto
 spinner_ramp     = on
 prism_notice     = on
 skills           = on
+# These two have NO default: unset, the field is never sent and the
+# provider's own value rules (what every build did before they existed).
+# temperature    = 0.3
+# max_tokens     = 8192
 ```
 
 The value is the rest of the line, trimmed and taken verbatim — no
@@ -246,6 +251,31 @@ same shape for the `run_command` tool: a child that produces no output
 for that long is stopped and its partial output returned. Either key
 takes `off` to disable the deadline entirely (a purely readiness-driven
 wait).
+
+`temperature` (`$NEVERMORE_TEMPERATURE`) and `max_tokens`
+(`$NEVERMORE_MAX_TOKENS`) are the request's two sampling knobs, and
+**neither has a default**: unset, the field is not sent at all and the
+provider's own value rules — which is exactly what every build did
+before they existed. `/config` prints an unset one as `-`.
+
+`temperature` is a decimal in the `0`–`2` range the OpenAI-compatible
+gateways publish. It divides the model's logits before the softmax, so
+it decides how often the third-most-likely token wins: `0` is greedy
+decoding (the front-runner at every step), `1` is the model's own
+distribution, `2` flattens it toward uniform. It is not a capability or
+quality dial — past about 1.1 what you see is drifting tool arguments
+and wandering prose, and a reasoning model samples over its own trace,
+so there the knob moves the trace's verbosity, not its correctness. Its
+honest use in an agent is reproducibility: `temperature = 0` turns a
+flaky live repro into a mostly-stable one. A value outside the grammar
+(or above `2`) is refused at the layer that set it, never silently
+clamped.
+
+`max_tokens` caps the output of one round; a positive decimal, the same
+shape `rounds` uses (so the read clamps at 100000). A round that hits
+the cap ends with `finish_reason: length`, which nevermore already
+reports — the key only sets the limit. Both are resolved at the point of
+use, so `/config set temperature 0` applies to the next round.
 
 `connect_timeout` is the per-address budget in milliseconds for the
 bounded connect walk (default 750): a hostname resolves to several

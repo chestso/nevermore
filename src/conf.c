@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 20
+#define NM_CFG_NKEYS 22
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -150,6 +150,12 @@ static const struct
     { NM_CFG_KEY_SPINNER_RAMP, "NEVERMORE_SPINNER_RAMP", "on" },
     { NM_CFG_KEY_PRISM_NOTICE, "NEVERMORE_PRISM_NOTICE", "on" },
     { NM_CFG_KEY_SKILLS, "NEVERMORE_SKILLS", "on" },
+    /* The sampling knobs have NO built-in default: unset is the value
+     * that keeps the field off the request (the provider's own default
+     * rules), which is what every build did before these keys existed.
+     * A `def` of NULL is also what /config prints as `-`. */
+    { NM_CFG_KEY_TEMPERATURE, "NEVERMORE_TEMPERATURE", NULL },
+    { NM_CFG_KEY_MAX_TOKENS, "NEVERMORE_MAX_TOKENS", NULL },
 };
 
 static void init_keys(NmConfig *c)
@@ -318,6 +324,103 @@ int nm_config_valid_positive_int(const char *value)
 int nm_config_valid_rounds(const char *value)
 {
     return nm_config_valid_positive_int(value);
+}
+
+/* The `temperature` grammar and its canonical form, in one hand-rolled
+ * scan — no regex, no strtod, so the value is locale-independent by
+ * construction (a comma decimal point is not the JSON the wire wants):
+ *
+ *   value = 1*8 DIGIT [ '.' 1*9 DIGIT ]      with 0 <= value <= 2
+ *
+ * The bound is the OpenAI-compatible range the gateways publish
+ * (docs/HYPER-API.md's request table). `2.1` and `3` are REFUSED rather
+ * than clamped: the upstream 400s on them, and a refusal that names the
+ * key beats a silent rewrite of what the user typed. `0` is a real
+ * value (greedy decoding), so "not set" is spelled by the key being
+ * absent, never by a value of zero.
+ *
+ * `out` (when given) receives the canonical spelling — leading zeros
+ * gone, trailing fraction zeros gone, so "00.500" is "0.5" and "1.0" is
+ * "1": the ONE form the file, the shadow, the env layer and /config all
+ * read. `num` (when given) receives the value as a double, from ONE
+ * division of two exact operands: with the integer part bounded by 2
+ * and at most 9 fraction digits, every accepted digit string
+ * accumulates below 3e9 (a `long long`, and exactly representable as a
+ * double), so the division rounds once. Returns 1 when the spelling
+ * parses and is in range. */
+static int temperature_scan(const char *value, char *out, size_t cap,
+                            double *num)
+{
+    if (!value || !*value)
+        return 0;
+    const char *p = value;
+    const char *is = p;
+    size_t ni = 0;
+    while (*p >= '0' && *p <= '9') {
+        p++;
+        ni++;
+    }
+    if (ni == 0 || ni > 8)
+        return 0; /* ".5" is not a spelling; a longer run is a typo */
+    const char *fs = NULL;
+    size_t nf = 0;
+    if (*p == '.') {
+        p++;
+        fs = p;
+        while (*p >= '0' && *p <= '9') {
+            p++;
+            nf++;
+        }
+        if (nf == 0 || nf > 9)
+            return 0; /* "1.", and more precision than this knob carries */
+    }
+    if (*p != '\0')
+        return 0; /* a sign, an exponent, a space: not this grammar */
+
+    long long ip = 0;  /* the integer part's value */
+    long long all = 0; /* every digit, integer then fraction */
+    for (size_t i = 0; i < ni; i++) {
+        ip = ip * 10 + (is[i] - '0');
+        all = all * 10 + (is[i] - '0');
+    }
+    if (ip > 2)
+        return 0;
+    size_t last = 0; /* fraction digits up to the last significant one */
+    for (size_t i = 0; i < nf; i++) {
+        all = all * 10 + (fs[i] - '0');
+        if (fs[i] != '0')
+            last = i + 1;
+    }
+    if (ip == 2 && last != 0)
+        return 0; /* 2.x is above the range */
+    double scale = 1.0;
+    for (size_t i = 0; i < nf; i++)
+        scale *= 10.0;
+    if (num)
+        *num = (double)all / scale;
+    if (out && cap) {
+        char tmp[16];
+        size_t n = 0;
+        tmp[n++] = (char)('0' + ip); /* the bound leaves a single digit */
+        if (last) {
+            tmp[n++] = '.';
+            for (size_t i = 0; i < last; i++)
+                tmp[n++] = fs[i];
+        }
+        tmp[n] = '\0';
+        snprintf(out, cap, "%s", tmp);
+    }
+    return 1;
+}
+
+int nm_config_valid_temperature(const char *value)
+{
+    return temperature_scan(value, NULL, 0, NULL);
+}
+
+int nm_config_temperature_canon(const char *value, char *out, size_t cap)
+{
+    return temperature_scan(value, out, cap, NULL);
 }
 
 /* A bool spelling: 1/true/on/yes, 0/false/off/no (case-insensitive) —
@@ -629,9 +732,15 @@ static int normalize_value(const char *key, const char *raw, char *out,
             return 0;
     } else if (strcmp(key, NM_CFG_KEY_ROUNDS) == 0 ||
                strcmp(key, NM_CFG_KEY_CONNECT_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_SEARXNG_TIMEOUT) == 0) {
+               strcmp(key, NM_CFG_KEY_SEARXNG_TIMEOUT) == 0 ||
+               strcmp(key, NM_CFG_KEY_MAX_TOKENS) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
+    } else if (strcmp(key, NM_CFG_KEY_TEMPERATURE) == 0) {
+        /* A decimal in the published 0-2 range, canonicalized so every
+         * layer reads one spelling (a token-count key is stored
+         * verbatim; this one has a fraction to normalize). */
+        return nm_config_temperature_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0) {
         /* The one key whose value space is not a bool: off/tools/all
          * (with the old bool spellings folded in). */
@@ -1169,6 +1278,22 @@ int nm_config_resolve_duration_ms(const NmConfig *c, const char *key,
         return 0; /* `off`: no deadline */
     long n = duration_parse(v);
     return n > 0 ? (int)n : fallback;
+}
+
+/* The `temperature` key, resolved and parsed. Every layer validates on
+ * write, so a value that fails to parse here means NO layer set the key
+ * — and -1 is the request's own sentinel for "send no field". With no
+ * store installed (a unit test with no config) the same -1 answers: the
+ * provider's default rules. */
+double nm_config_resolve_temperature(const NmConfig *c)
+{
+    double v = -1.0;
+    if (!c)
+        return v;
+    if (!temperature_scan(nm_config_resolve(c, NM_CFG_KEY_TEMPERATURE, NULL),
+                          NULL, 0, &v))
+        return -1.0;
+    return v;
 }
 
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)

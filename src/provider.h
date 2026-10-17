@@ -351,8 +351,15 @@ typedef struct NmChatRequest
     size_t n_messages;
     const char *system;     /* optional system prompt, prepended by the client */
     const char *tools_json; /* optional JSON array of tool schemas, or NULL */
-    double temperature;     /* -1 = provider default */
-    long max_tokens;        /* -1 = provider default */
+    /* The sampling knobs, -1 each = "send no field at all" (the
+     * provider's own default rules — the shape of every request
+     * composed before the keys existed). The agent fills them from the
+     * config store's `temperature` / `max_tokens` keys at the point of
+     * use; the composer emits a field only when its value is >= 0, so
+     * a zero here is a real setting (`temperature: 0` is greedy
+     * decoding), never an absent one. */
+    double temperature; /* -1 = provider default */
+    long max_tokens;    /* -1 = provider default */
     /* Provider-scoped routing id (design §3): the agent's stable
      * per-conversation id, or NULL. Borrowed — it points into the
      * NmAgent's inline array, which outlives the compose+queue

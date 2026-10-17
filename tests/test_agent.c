@@ -718,6 +718,70 @@ static void test_agent_plain_answer_no_tools(void)
     close(sc.fd);
 }
 
+/* The sampling knobs reach the WIRE. Unset, neither field is composed
+ * (the provider's own default rules — the shape every build shipped
+ * before these keys existed); set, the request carries exactly what the
+ * store says, in the store's canonical spelling. */
+static void test_agent_sampling_knobs_ride_the_request(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openai");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+
+    /* Round 1: no key set anywhere. */
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+
+    /* Round 2: both knobs through the store's own validated write (a
+     * trailing zero is normalized exactly as the file and env layers
+     * normalize it). */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_TEMPERATURE, "0.30"), 0);
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_MAX_TOKENS, "256"), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+
+    /* Capture the bodies, THEN restore the store: a failed assert must
+     * not leak the knobs into the next test's requests. */
+    char r0[REQ_CAP], r1[REQ_CAP];
+    snprintf(r0, sizeof(r0), "%s", g_requests[0]);
+    snprintf(r1, sizeof(r1), "%s", g_requests[1]);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_TEMPERATURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_MAX_TOKENS);
+
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(r0, "\"temperature\"") == NULL);
+    ASSERT_TRUE(strstr(r0, "\"max_tokens\"") == NULL);
+    ASSERT_TRUE(strstr(r1, "\"temperature\":0.3") != NULL);
+    ASSERT_TRUE(strstr(r1, "\"max_tokens\":256") != NULL);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The catalog's tool-use claim gates the toolset (NmModel.tools): a
  * model whose openrouter entry lists supported_parameters WITHOUT
  * "tools" (every image generator but three — the live 404 that
@@ -5947,6 +6011,7 @@ int main(void)
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_image_turn_parts_and_prefix_stability);
     RUN_TEST(test_agent_plain_answer_no_tools);
+    RUN_TEST(test_agent_sampling_knobs_ride_the_request);
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_system_message_carries_agents_md);

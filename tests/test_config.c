@@ -652,7 +652,9 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_SPINNER_RAMP);
     ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_PRISM_NOTICE);
     ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SKILLS);
-    ASSERT_NULL(nm_config_key_at(20));
+    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_NULL(nm_config_key_at(22));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -683,6 +685,10 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_SEARXNG_ENABLED");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SEARXNG_TIMEOUT),
                   "NEVERMORE_SEARXNG_TIMEOUT_MS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_TEMPERATURE),
+                  "NEVERMORE_TEMPERATURE");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_MAX_TOKENS),
+                  "NEVERMORE_MAX_TOKENS");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
@@ -1135,6 +1141,131 @@ static void test_prism_notice_key(void)
     nm_config_free(c);
 }
 
+/* The sampling knobs. Neither key has a built-in default: unset means
+ * the field never rides the request and the provider's own default
+ * rules — the shape every shipped build has used all along.
+ * `temperature` is a decimal in the published OpenAI-compatible 0-2
+ * range with its own grammar; `max_tokens` is the shared positive-int
+ * shape (`rounds`, `connect_timeout`). */
+static void test_sampling_knobs(void)
+{
+    pin_paths("sampling");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* No default text, and the readers say "not set" (-1) — which is
+     * what keeps both fields off the composed request. */
+    ASSERT_NULL(nm_config_default(NM_CFG_KEY_TEMPERATURE));
+    ASSERT_NULL(nm_config_default(NM_CFG_KEY_MAX_TOKENS));
+    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_TEMPERATURE));
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TEMPERATURE), NM_CFG_DEFAULT);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == -1.0);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), -1);
+
+    /* The temperature grammar: digits, optionally '.' + digits. No
+     * sign, no exponent, no bare ".5", no trailing dot, nothing above
+     * the published bound of 2. `0` IS valid — greedy decoding is a
+     * real setting, not an absent one. */
+    ASSERT_TRUE(nm_config_valid_temperature("0"));
+    ASSERT_TRUE(nm_config_valid_temperature("0.05"));
+    ASSERT_TRUE(nm_config_valid_temperature("0.7"));
+    ASSERT_TRUE(nm_config_valid_temperature("1"));
+    ASSERT_TRUE(nm_config_valid_temperature("2"));
+    ASSERT_TRUE(nm_config_valid_temperature("2.0"));
+    ASSERT_FALSE(nm_config_valid_temperature(""));
+    ASSERT_FALSE(nm_config_valid_temperature(NULL));
+    ASSERT_FALSE(nm_config_valid_temperature("-0.5"));
+    ASSERT_FALSE(nm_config_valid_temperature("2.1"));
+    ASSERT_FALSE(nm_config_valid_temperature("3"));
+    ASSERT_FALSE(nm_config_valid_temperature(".5"));
+    ASSERT_FALSE(nm_config_valid_temperature("1."));
+    ASSERT_FALSE(nm_config_valid_temperature("0.7.1"));
+    ASSERT_FALSE(nm_config_valid_temperature("1e-1"));
+    ASSERT_FALSE(nm_config_valid_temperature("hot"));
+    ASSERT_FALSE(nm_config_valid_temperature("0.1234567890")); /* >9 frac digits */
+
+    /* Canonicalization: leading zeros gone, trailing fraction zeros
+     * gone, so every layer and the /config view read one spelling. */
+    char canon[32];
+    ASSERT_TRUE(nm_config_temperature_canon("1.0", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "1");
+    ASSERT_TRUE(nm_config_temperature_canon("00.500", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "0.5");
+    ASSERT_TRUE(nm_config_temperature_canon("2.000", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "2");
+    ASSERT_TRUE(nm_config_temperature_canon("0.0", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "0");
+    ASSERT_TRUE(nm_config_temperature_canon("0.30", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "0.3");
+    ASSERT_FALSE(nm_config_temperature_canon("2.5", canon, sizeof(canon)));
+
+    /* A shadow write persists the CANONICAL text; a value outside the
+     * grammar is refused and leaves the stored one standing. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TEMPERATURE, "0.30"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "256"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "temperature = 0.3\nmax_tokens = 256\n");
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == 0.3);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), 256);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TEMPERATURE), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TEMPERATURE, "2.5"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_TEMPERATURE, "off"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "0"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "-8"), -1);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == 0.3);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), 256);
+
+    /* A reload of the same file reads the same values. */
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_TRUE(nm_config_resolve_temperature(c2) == 0.3);
+    ASSERT_EQ(nm_config_resolve_int(c2, NM_CFG_KEY_MAX_TOKENS, -1), 256);
+    nm_config_free(c2);
+
+    /* The env layer speaks the same grammar, normalized the same, and
+     * outranks the shadow. */
+    test_setenv("NEVERMORE_TEMPERATURE", "1.0");
+    test_setenv("NEVERMORE_MAX_TOKENS", "4096");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_TEMPERATURE), "1");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TEMPERATURE), NM_CFG_ENV);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == 1.0);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), 4096);
+
+    /* An out-of-range env value is DROPPED, exactly like a garbage
+     * rounds value: a typo in the environment must never silently
+     * change what the provider is handed — the shadow's value stands. */
+    test_setenv("NEVERMORE_TEMPERATURE", "3");
+    test_unsetenv("NEVERMORE_MAX_TOKENS");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TEMPERATURE), NM_CFG_SHADOW);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == 0.3);
+    test_unsetenv("NEVERMORE_TEMPERATURE");
+
+    /* `max_tokens` shares the positive-int shape's read clamp: a
+     * request for 200000 is stored but resolved at 100000, and a
+     * decimal past the shape's width is refused outright. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "200000"), 0);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), 100000);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "9999999"), -1);
+
+    /* The runtime layer (what the machinery writes) outranks every
+     * persisted one, and clearing it + resetting the shadow puts the
+     * keys back to "not set". */
+    ASSERT_EQ(nm_config_runtime_set(c, NM_CFG_KEY_TEMPERATURE, "0.0"), 0);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == 0.0);
+    nm_config_runtime_clear(c, NM_CFG_KEY_TEMPERATURE);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_TEMPERATURE), 0);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MAX_TOKENS), 0);
+    ASSERT_TRUE(nm_config_resolve_temperature(c) == -1.0);
+    ASSERT_EQ(nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1), -1);
+
+    /* No store at all (a unit test with no config) is "not set". */
+    ASSERT_TRUE(nm_config_resolve_temperature(NULL) == -1.0);
+
+    nm_config_free(c);
+}
+
 /* The model key is PROVIDER-SCOPED: `model.<provider>` is the memory,
  * the plain `model` resolves below it, and -m / $NEVERMORE_MODEL stay
  * global. The precedence matrix, cell by cell. */
@@ -1269,6 +1400,8 @@ int main(void)
     test_unsetenv("NEVERMORE_CONNECT_TIMEOUT_MS");
     test_unsetenv("NEVERMORE_CONNECT_FAMILY_SKIP");
     test_unsetenv("NEVERMORE_CONNECT_SKIP_FAMILIES");
+    test_unsetenv("NEVERMORE_TEMPERATURE");
+    test_unsetenv("NEVERMORE_MAX_TOKENS");
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
@@ -1306,6 +1439,7 @@ int main(void)
     RUN_TEST(test_login_shell_key);
     RUN_TEST(test_spinner_ramp_key);
     RUN_TEST(test_prism_notice_key);
+    RUN_TEST(test_sampling_knobs);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);
     RUN_TEST(test_scoped_shadow_write_and_reset);
