@@ -319,6 +319,7 @@ if [ -n "$BOBA_LIB" ]; then
 		src/markdown_render.c src/highlight.c
 	run_build_boba test_chat_app tests/test_chat_app.c tests/fake_clock.c \
 		src/chat_app.c src/conf.c src/spinner.c \
+		src/sysout.c \
 		src/markdown.c src/markdown_render.c src/highlight.c \
 		src/image.c src/image_bytes.c src/image_codec.c src/size.c \
 		src/agent.c src/conversation_id.c src/xxh3.c src/session.c \
