@@ -470,7 +470,18 @@ list` / `gh run watch <id> --exit-status` / `gh run view <id>
 2.28 mbedx509 mbedcrypto`) or the link dies "DSO missing from command
   line". **RNG wiring**: `mbedtls_ssl_conf_rng` needs a seeded
   `mbedtls_ctr_drbg_context` passed third, not NULL — the first
-  handshake dereferences it.
+  handshake dereferences it. **3.x also moved `mbedtls_pk_parse_keyfile`'s
+  RNG into the signature** (2.28's 3-arg call is 5-arg there, `f_rng` +
+  `p_rng`), which only the test file notices: its TLS _server_ half parses
+  the committed key, so guard that one call on `MBEDTLS_VERSION_NUMBER`
+  (include `<mbedtls/version.h>` — an `#if` on an undefined macro is
+  silently false, which would compile the 2.28 spelling on 3.x) and pass
+  the drbg the same clause already seeded. **Both legs are runnable
+  locally**: with `mbedtls-devel` installed, `configure`'s `auto` prefers
+  mbedTLS, so a second build tree is the explicit spelling
+  (`../configure --with-tls=mbedtls`, then `make && make check` — the
+  suite builds its own test programs) and the OpenSSL leg needs
+  `--with-tls=openssl`.
 - **clang's UBSan checks function-pointer calls; gcc's does not**: a
   callback cast to the wrong function type is UB that gcc+UBSan, ASan
   and every platform tolerate; clang 19's `-fsanitize=function` catches
