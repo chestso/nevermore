@@ -30,6 +30,7 @@
 #include <time.h>
 
 #include "transport.h"
+#include "clock.h" /* nm_monotonic_seconds: the per-step tripwire below */
 #include "conf.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
@@ -724,52 +725,38 @@ static void silent_server_stop(void)
 /* The handshake budget bounds a silent peer                          */
 /* ---------------------------------------------------------------- */
 
-/* One drive: connect to the silent peer with `budget_ms` configured
- * and return the wall-clock seconds it took. `async_path` picks
- * nm_connect_async + the step loop (what the TUI runs) over the
- * blocking nm_connect. */
-static void run_silent_handshake(int budget_ms, int async_path,
-                                 NmConnectInfo *ci, double *seconds)
+/* The blocking drive (what the ask path runs): connect to the silent peer
+ * with `budget_ms` configured, and return the wall-clock seconds it took.
+ * The budget and the reason are all this drive can assert — the wait it
+ * owns is the pump's. */
+static void run_silent_handshake_sync(int budget_ms, NmConnectInfo *ci,
+                                      double *seconds)
 {
     char buf[32];
     snprintf(buf, sizeof(buf), "%d", budget_ms);
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, buf);
 
     time_t t0 = time(NULL);
-    NmConnection *c;
-    if (async_path) {
-        c = nm_connect_async("127.0.0.1", silent_port, NM_TRANSPORT_TLS, ci);
-        if (c) {
-            /* The step runs the handshake inline (a bounded deferral),
-             * so a short spin reaches the verdict. The step's own
-             * reason rides the connection, not the connect info (which
-             * the async entry point already filled with "OK") — copy it
-             * across so both drives assert the same text. */
-            for (int i = 0; i < 100; i++) {
-                NmTransportStatus s = nm_connection_step(c);
-                if (s != NM_TRANSPORT_OK && s != NM_TRANSPORT_PENDING) {
-                    ci->status = s;
-                    snprintf(ci->detail, sizeof(ci->detail), "%s",
-                             nm_connection_last_error(c));
-                    break;
-                }
-                usleep(20 * 1000);
-            }
-            nm_connection_close(c);
-        }
-    } else {
-        c = nm_connect("127.0.0.1", silent_port, NM_TRANSPORT_TLS, ci);
-        if (c)
-            nm_connection_close(c);
-    }
+    NmConnection *c = nm_connect("127.0.0.1", silent_port, NM_TRANSPORT_TLS, ci);
+    if (c)
+        nm_connection_close(c);
     *seconds = difftime(time(NULL), t0);
 }
 
-/* The budget is the property: a peer that completes the TCP handshake
- * and then goes silent must cost the configured budget, not the OS's
- * own timeout (minutes — the pre-key behavior, and what the wall-clock
- * assertion rules out). Both drives are covered: the blocking ask path
- * and the async path the TUI's event loop steps. */
+/* The budget is the property: a peer that completes the TCP handshake and
+ * then goes silent must cost the configured budget, not the OS's own
+ * timeout (minutes — the pre-key behavior, and what the wall-clock
+ * assertion rules out).
+ *
+ * The event-driven drive asserts more, because the machine that spends the
+ * budget is the step machine: the handshake PENDS on its way to the verdict
+ * (a verdict from the first step would mean the whole handshake ran inside
+ * it, which is what this change removed), the direction it declares is READ
+ * (it waits for a ServerHello that never comes — a client that waited
+ * inside the step could not report a direction at all),
+ * nm_connection_wait_ms hands the loop the remaining budget (no socket
+ * event is ever going to come), and no single step takes anywhere near the
+ * budget. */
 static void test_tls_handshake_budget_bounds_a_silent_peer(void)
 {
     if (!nm_tls_backend()) {
@@ -780,12 +767,16 @@ static void test_tls_handshake_budget_bounds_a_silent_peer(void)
 
     /* A budget small enough to keep the suite fast; the property is
      * that the handshake is bounded BY IT, not what the number is. */
-    for (int async_path = 0; async_path <= 1; async_path++) {
+    const int budget = 400;
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", budget);
+
+    { /* The blocking drive. */
         pthread_t th;
         pthread_create(&th, NULL, silent_server_thread, &silent_listen_fd);
         NmConnectInfo ci = { 0 };
         double dt = 0;
-        run_silent_handshake(400, async_path, &ci, &dt);
+        run_silent_handshake_sync(budget, &ci, &dt);
         ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_TLS);
         /* The always-set contract still holds: the reason names the
          * phase and the budget that ran out. */
@@ -797,11 +788,70 @@ static void test_tls_handshake_budget_bounds_a_silent_peer(void)
         ASSERT_TRUE(dt <= 5);
         pthread_join(th, NULL);
     }
+
+    { /* The event-driven drive (the TUI's). */
+        pthread_t th;
+        pthread_create(&th, NULL, silent_server_thread, &silent_listen_fd);
+        nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, buf);
+
+        NmConnectInfo ci = { 0 };
+        NmConnection *c =
+            nm_connect_async("127.0.0.1", silent_port, NM_TRANSPORT_TLS, &ci);
+        ASSERT_NOT_NULL(c);
+
+        int pends = 0;        /* PENDING steps, any phase */
+        int pends_read = 0;   /* PENDING steps declaring READ */
+        int deadline_ms = -1; /* what nm_connection_wait_ms tells the loop */
+        double slowest = 0;   /* the "a step never waits" tripwire */
+        NmTransportStatus s = NM_TRANSPORT_OK;
+        for (int spin = 0; spin < 400; spin++) {
+            double t0 = nm_monotonic_seconds();
+            s = nm_connection_step(c);
+            double took = (nm_monotonic_seconds() - t0) * 1000.0;
+            if (took > slowest)
+                slowest = took;
+            if (s == NM_TRANSPORT_ERR_TLS)
+                break;
+            NmSource i = nm_connection_interest(c);
+            if (s == NM_TRANSPORT_PENDING) {
+                pends++;
+                if (i.handle >= 0 && i.flags == (unsigned)NM_INTEREST_READ)
+                    pends_read++;
+                int w = nm_connection_wait_ms(c);
+                if (w > 0)
+                    deadline_ms = w;
+            }
+            if (i.handle >= 0 && i.flags != 0)
+                nm_source_wait_any(&i, 1, 20);
+        }
+        const char *detail = nm_connection_last_error(c);
+        /* Restore the store BEFORE asserting: a failed assert must not
+         * leak the budget into the tests that follow. */
+        nm_config_runtime_clear(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+
+        ASSERT_EQ(s, NM_TRANSPORT_ERR_TLS);
+        ASSERT_TRUE(strstr(detail, "timed out") != NULL);
+        /* One attempt per step: a peer that never speaks is stepped more
+         * than once before the budget ends it. */
+        ASSERT_TRUE(pends >= 2);
+        /* The direction it declared: READ, the ServerHello's arrival. */
+        ASSERT_TRUE(pends_read >= 1);
+        /* The deadline seam: no socket event is coming, so the budget has
+         * to reach the loop as a wakeup (0 = spent, -1 = `off`). */
+        ASSERT_TRUE(deadline_ms > 0 && deadline_ms <= budget);
+        /* A step that waited would burn the budget; a step costs
+         * microseconds, so 100 ms is generous in both directions. */
+        ASSERT_TRUE(slowest < 100.0);
+
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+    }
     silent_server_stop();
 
     /* The key's value space: a budget, or `off` (no deadline = the OS
      * default), resolved at the point of use like the connect budget. */
-    ASSERT_EQ(nm_connection_handshake_timeout_ms(), 400);
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, buf);
+    ASSERT_EQ(nm_connection_handshake_timeout_ms(), budget);
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT, "off");
     ASSERT_EQ(nm_connection_handshake_timeout_ms(), 0);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_HANDSHAKE_TIMEOUT);
