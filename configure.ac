@@ -21,6 +21,23 @@ esac
 AM_CONDITIONAL([HOST_WINDOWS], [test "x$host_windows" = "xyes"])
 AM_CONDITIONAL([HOST_MACOS], [test "x$host_macos" = "xyes"])
 
+dnl A cross build FOR WINDOWS: the target is MinGW while the machine
+dnl doing the build is not Windows at all. Autoconf's `cross_compiling`
+dnl is NOT the test — it stays "maybe" until an AC_RUN_IFELSE settles it,
+dnl and this configure never runs one, so a Windows cross tree would
+dnl keep reporting "maybe". The build and host OSes are the two facts.
+dnl (An MSYS2 tree configured with a plain ./configure, and one given
+dnl --host, are both native: the build OS is Windows either way.)
+case "$build_os" in
+  mingw*|msys*|cygwin*) build_windows=yes ;;
+  *) build_windows=no ;;
+esac
+cross_windows=no
+if test "x$host_windows" = "xyes" && test "x$build_windows" = "xno"; then
+  cross_windows=yes
+fi
+AM_CONDITIONAL([CROSS_WINDOWS], [test "x$cross_windows" = "xyes"])
+
 dnl Recompute the version at configure time so a rebuild after new commits
 dnl picks up the current version without needing to re-run autoreconf. Falls
 dnl back to PACKAGE_VERSION (set at autoreconf time via m4_esyscmd_s above)
@@ -168,6 +185,56 @@ fi
 AM_CONDITIONAL([HAVE_WINDRES], [test "x$host_windows" = "xyes" && test "x$WINDRES" != "xno"])
 
 dnl ------------------------------------------------------------------
+dnl Test runner: WHO executes a test binary.
+dnl
+dnl   native build        nothing: the binary runs where it was built.
+dnl   Windows cross build wine: the only way a .exe runs on a
+dnl                       non-Windows host, and the reason a cross tree
+dnl                       can be checked at all instead of only built.
+dnl
+dnl `--with-wine[=PATH]` forces it (a PATH is accepted for a wine that
+dnl is not on PATH); `--without-wine` refuses it. The default is
+dnl inferred: a cross build for Windows whose BUILD host has wine gets
+dnl it, and is only warned when wine is missing, so a bare cross `make`
+dnl still builds.
+dnl
+dnl tests/Makefile.am puts the runner behind the watchdog (which stays
+dnl the process that times and kills the run) — see LOG_COMPILER there.
+dnl ------------------------------------------------------------------
+AC_ARG_WITH([wine],
+  [AS_HELP_STRING([--with-wine@<:@=PATH@:>@],
+    [run the test binaries through wine (the default: a Windows cross build does, when wine is on PATH)])],
+  [with_wine=$withval],
+  [with_wine=auto])
+
+TEST_RUNNER=
+case "$with_wine" in
+  no)
+    AC_MSG_NOTICE([test runner: none (wine refused)])
+    ;;
+  auto)
+    if test "x$cross_windows" = "xyes"; then
+      if command -v wine >/dev/null 2>&1; then
+        TEST_RUNNER=wine
+      else
+        AC_MSG_WARN([cross build for Windows without wine on PATH: the test binaries cannot be run here (install wine, or pass --with-wine=PATH)])
+      fi
+    fi
+    ;;
+  yes)
+    if command -v wine >/dev/null 2>&1; then
+      TEST_RUNNER=wine
+    else
+      AC_MSG_ERROR([--with-wine requested but wine is not on PATH (pass --with-wine=/path/to/wine)])
+    fi
+    ;;
+  *)
+    TEST_RUNNER="$with_wine"
+    ;;
+esac
+AC_SUBST([TEST_RUNNER])
+
+dnl ------------------------------------------------------------------
 dnl stb — single-file, public-domain image codecs: stb_image.h (decode
 dnl to RGBA) and stb_image_write.h (encode RGBA to PNG). Vendored
 dnl unmodified and auto-fetched at configure time by
@@ -203,4 +270,5 @@ nevermore $NEVERMORE_VERSION
   compiler:    $CC
   TLS backend: $tls_backend
   boba:        $BOBA_VERSION_STRING
+  test runner: ${TEST_RUNNER:-none}
 "

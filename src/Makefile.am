@@ -199,6 +199,20 @@ nevermore_CPPFLAGS = \
 
 nevermore_LDADD = $(BOBA_LIBS) $(OPENSSL_LIBS) $(MBEDTLS_LIBS)
 
+# Compile every TU, link nothing. `nevermore_OBJECTS` is automake's own
+# list — the exact set, in the exact order, with the exact flags the real
+# program uses — so a TU added to nevermore_SOURCES lands here with no
+# edit. This is the macOS cross pre-flight's entry point: on a box with
+# no Mac the LINK cannot happen (a macOS binary needs a real SDK: zig
+# ships no Security.framework stub and the staged headers are not a
+# framework), and the compile IS the check. Also a fast natively.
+#
+# $(BUILT_SOURCES) is explicit on purpose: automake hangs the generated
+# nevermore_version.h off `all`, which this target does not go through —
+# without it the two TUs that include the header fail in a fresh tree.
+.PHONY: compile-check
+compile-check: $(BUILT_SOURCES) $(nevermore_OBJECTS)
+
 # Windows resource file — embed application icon into the .exe via windres.
 # The .rc takes its version fields from the build-generated
 # nevermore_version.h, so the header's directory is on windres's include

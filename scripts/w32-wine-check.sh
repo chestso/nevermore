@@ -1,23 +1,66 @@
 #!/bin/sh
-# scripts/w32-wine-check.sh - build + run the Windows test binaries
-# under local Wine before pushing (MSYS2 CI does the real run).
+# scripts/w32-wine-check.sh - build + run the Windows binaries under
+# local wine before pushing (MSYS2 CI does the real run).
 #
-# Prereqs: x86_64-w64-mingw32-gcc (cross toolchain), wine, and a
-# configured build/ (../configure has run for the host build so
-# nevermore_version.h + config.h exist). A boba source tree is needed
-# for the four boba-dependent tests ($BOBA_SRC, else ./boba, else
-# ../boba): the script cross-builds boba's library itself, so the
-# Windows half of a transcript/markdown change is verified HERE instead
-# of waiting for MSYS2 CI. Without one, those four SKIP.
+# The cross compilation is AUTOTOOLS' work; this script provisions what
+# it needs and reads the logs:
 #
-# Exit: 0 = every binary built and passed under wine; 1 = a build or a
-# run failed; 77 = a prereq is missing (no cross toolchain / no wine) —
-# the suite's skip code, so a box without wine reads as "not run", not
-# as sixteen failures.
+#   boba       cross-built by its OWN configure --host into a prefix of
+#              its own (or taken from $BOBA_PREFIX), so pkg-config
+#              answers WINDOWS cflags/libs for it.
+#   nevermore  configure --host=x86_64-w64-mingw32, then `make` (the
+#              .exe — src/nevermore.rc and its version fields come from
+#              src/Makefile.am's own rules) and `make check`: the test
+#              roster, the per-test sources, the TLS backend and the
+#              wine runner all come from Makefile.am and configure
+#              (--with-wine).
+#
+# Nothing here names a source file, an include dir, a link library or a
+# test, so a new TU, a new test or a new TLS backend reaches this
+# pre-flight through the build system alone. In particular the four
+# boba-linking binaries are not special any more: in a cross tree EVERY
+# test binary links boba, exactly as on CI.
+#
+# The portable-ZIP half (--no-zip skips it) is the Windows end of the
+# release recipe, run the same way: a second, --enable-release cross
+# tree, `make dist-portable DIST_TARGET=windows`, then the EXTRACTED
+# .exe under wine with the MinGW bin dirs OFF the path — the
+# self-containment proof AGENTS.md otherwise asks for by hand.
+#
+# Prereqs: x86_64-w64-mingw32-gcc, wine, and boba for the Windows target
+# — a source tree ($BOBA_SRC, else ./boba, else ../boba) to cross-build,
+# or a cross install ($BOBA_PREFIX). Configure requires boba for the
+# target, so this exits 77 without either: it is ONE build now, not a
+# hand-kept per-test list that can quietly skip the boba half.
+#
+# Logs — read them, never buy a second run:
+#   build-w32/boba-{autogen,configure,make,install}.log
+#   build-w32/configure.log, build-w32/build.log, build-w32/check.log
+#   build-w32/nevermore-res.strings (the version the resource carries)
+#   build-w32/tests/*.log + test-suite.log + test-progress.log
+#   build-w32-rel/{configure,build,zip}.log           (the ZIP half)
+#
+# Exit: 0 = every binary built and passed under wine (and, with the ZIP
+# half, the packed .exe ran); 1 = a build, a run or the packaging failed;
+# 77 = a prereq is missing.
+#
+# Usage: scripts/w32-wine-check.sh [--no-zip]
 
 set -e
 
+DO_ZIP=1
+for arg in "$@"; do
+	case "$arg" in
+	--no-zip) DO_ZIP=0 ;;
+	*)
+		echo "usage: scripts/w32-wine-check.sh [--no-zip]" >&2
+		exit 2
+		;;
+	esac
+done
+
 cd "$(dirname "$0")/.."
+srcdir=$PWD
 
 CC=x86_64-w64-mingw32-gcc
 command -v $CC >/dev/null 2>&1 || {
@@ -29,157 +72,141 @@ command -v wine >/dev/null 2>&1 || {
 	exit 77
 }
 
-OUT=build/tests-wine
-mkdir -p "$OUT"
+builddir=$srcdir/build-w32
+relbuild=$srcdir/build-w32-rel
 
-# MinGW's libwinpthread DLL must sit next to the exes for Wine's loader.
-PTHREAD_DLL=/usr/x86_64-w64-mingw32/sys-root/mingw/bin/libwinpthread-1.dll
-[ -f "$PTHREAD_DLL" ] && cp "$PTHREAD_DLL" "$OUT/" 2>/dev/null
+# The toolchain's own tree, DERIVED (never a hardcoded path): it is
+# pkg-config's search path for the target (so a mingw dependency
+# resolves), and the home of the MinGW runtime DLL, which wine needs when
+# the cross gcc links libwinpthread dynamically (Fedora's does; MSYS2's
+# UCRT64 gcc links it statically and needs none). `-print-sysroot` names
+# the tree and each toolchain layout keeps the DLL somewhere under it.
+sysroot=$($CC -print-sysroot 2>/dev/null || echo "")
+[ -n "$sysroot" ] && [ -d "$sysroot" ] || sysroot=
+dll_dir=
+for d in "$sysroot/mingw/bin" "$sysroot/bin" "$sysroot/mingw/lib" \
+	"$sysroot/lib" /usr/x86_64-w64-mingw32/lib \
+	/usr/lib/gcc/x86_64-w64-mingw32/*/; do
+	[ -n "$d" ] && [ -f "$d/libwinpthread-1.dll" ] && dll_dir=$d && break
+done
 
-COMMON="-Wall -Wextra -Isrc -Itests -Ibuild -I. -Ithird_party/stb"
-# (the last is for image_codec.c, the ONE TU that includes the
-# vendored stb headers — the same mirror the macOS script needed)
-TLS_SRC=src/tls_openssl.c # cross-compiled MinGW + OpenSSL; wine
-# runs the schannel path via winemapped
-# dlls only for the real backend tests
-
-# Common core objects each test links (tests link sources directly).
-run_build() {
-	name=$1
-	shift
-	# Remove the target FIRST: a failed compile must not leave the
-	# previous run's exe behind to "pass" under wine (that is how a
-	# src/process.h shadowing <process.h> hid a broken Windows build).
-	rm -f "$OUT/$name.exe"
-	# Capture the compiler's output to a file; never pipe it straight
-	# into `head`. head exits after its line count and SIGPIPEs the
-	# compiler, killing it before the link — so a TU whose build emits
-	# five warning lines "fails" with its real error line unprinted
-	# (transport_socket.c's -Wformat-truncation warnings did exactly
-	# that to test_tools).
-	buildlog="$OUT/$name.build.log"
-	# shellcheck disable=SC2086
-	if ! $CC -o "$OUT/$name.exe" "$@" $COMMON >"$buildlog" 2>&1; then
-		echo "BUILD FAIL: $name"
-		cat "$buildlog"
-		exit 1
-	fi
-	[ -f "$OUT/$name.exe" ] || {
-		# rc was 0 but no artifact: never let a stale/missing exe read
-		# as a pass under wine.
-		echo "BUILD FAIL: $name (no $name.exe produced)"
-		cat "$buildlog"
-		exit 1
-	}
-	# Warnings still surface (the first few), now safely off a file.
-	head -5 "$buildlog"
-	# This run's roster (the wine loop below runs exactly these, never a
-	# stale .exe an earlier checkout left behind).
-	BUILT="$BUILT $name"
-}
+# Every TU is compiled by THIS run: a reused tree would report yesterday's
+# objects as today's OK.
+rm -rf "$builddir"
+mkdir -p "$builddir"
 
 # ---------------------------------------------------------------------
 # boba for Windows
 # ---------------------------------------------------------------------
-# Four tests link boba (test_history, test_markdown, test_chat_app,
-# test_image). They used to be a bare SKIP here — "MSYS2 CI covers it" —
-# which left the Windows half of every transcript/markdown change
-# unverified on this box until CI ran. boba is a plain static library
-# and its own configure cross-compiles, so build it out of tree with
-# THIS script's toolchain and link those tests against it.
-#
-# Source tree: $BOBA_SRC, else ./boba (the layout CI checks out), else
-# ../boba (the sibling on this box). No source tree => the four SKIP,
-# exactly as they did before.
-BOBA_SRC="${BOBA_SRC:-}"
-if [ -z "$BOBA_SRC" ]; then
-	for d in ./boba ../boba; do
-		if [ -f "$d/src/Makefile.am" ]; then
-			BOBA_SRC="$d"
-			break
-		fi
-	done
-fi
-BOBA_LIB=""
-BOBA_SRC_ABS=""
-if [ -n "$BOBA_SRC" ] && [ -f "$BOBA_SRC/src/Makefile.am" ]; then
-	BOBA_SRC_ABS="$(cd "$BOBA_SRC" && pwd)"
-	BOBA_W32="$OUT/boba-w32"
+# configure requires boba for the TARGET, and the native install's
+# boba.pc describes a LINUX library — it must not be what pkg-config
+# answers with, which is why the configure calls below use
+# PKG_CONFIG_LIBDIR (it REPLACES the default search path; PKG_CONFIG_PATH
+# would only prepend to it and the host boba could still win).
+boba_pc_dir=
+if [ -n "${BOBA_PREFIX:-}" ] && [ -f "$BOBA_PREFIX/lib/pkgconfig/boba.pc" ]; then
+	boba_pc_dir=$BOBA_PREFIX/lib/pkgconfig
+	echo "==> boba: cross install in $BOBA_PREFIX"
+else
+	BOBA_SRC=${BOBA_SRC:-}
+	if [ -z "$BOBA_SRC" ]; then
+		for d in ./boba ../boba; do
+			[ -f "$d/src/Makefile.am" ] && BOBA_SRC=$d && break
+		done
+	fi
+	if [ -z "$BOBA_SRC" ] || [ ! -f "$BOBA_SRC/src/Makefile.am" ]; then
+		echo "SKIP: no boba for the Windows target (set BOBA_SRC to a boba" >&2
+		echo "      source tree, or BOBA_PREFIX to a cross install)" >&2
+		exit 77
+	fi
+	boba_src=$(cd "$BOBA_SRC" && pwd)
+	boba_prefix=$builddir/boba-prefix
+	boba_build=$builddir/boba-build
+	mkdir -p "$boba_prefix" "$boba_build"
+
 	# boba's `configure` is autogen.sh's output (gitignored): generate it
 	# when this checkout has never been configured.
-	if [ ! -x "$BOBA_SRC_ABS/configure" ]; then
-		echo "==> boba: ./autogen.sh (no configure in $BOBA_SRC)"
-		(cd "$BOBA_SRC_ABS" && ./autogen.sh) \
-			>"$OUT/boba-autogen.log" 2>&1 ||
-			echo "WARN: boba autogen.sh failed (see $OUT/boba-autogen.log)"
+	if [ ! -x "$boba_src/configure" ]; then
+		echo "==> boba: ./autogen.sh (no configure in $boba_src)"
+		(cd "$boba_src" && ./autogen.sh) >"$builddir/boba-autogen.log" 2>&1 ||
+			echo "WARN: boba autogen.sh failed (see $builddir/boba-autogen.log)"
 	fi
-	if [ -x "$BOBA_SRC_ABS/configure" ]; then
-		mkdir -p "$BOBA_W32"
-		# Out of tree, so boba's own working tree stays clean (its
-		# .gitignore covers the generated files anyway). The logs are
-		# evidence, like every other build here.
-		if (cd "$BOBA_W32" &&
-			"$BOBA_SRC_ABS/configure" --host=x86_64-w64-mingw32) \
-			>"$OUT/boba-configure.log" 2>&1 &&
-			make -C "$BOBA_W32/src" -j"$(nproc)" \
-				>"$OUT/boba-make.log" 2>&1 &&
-			[ -f "$BOBA_W32/src/libboba.a" ]; then
-			BOBA_LIB="$BOBA_W32/src/libboba.a"
-			# Which boba this run verified: the pinned SHA is what CI
-			# uses, so say when they differ (an uncommitted boba change
-			# is the one case this pre-flight is MOST wanted for).
-			bo_sha="$(git -C "$BOBA_SRC_ABS" rev-parse --short HEAD \
-				2>/dev/null || echo unknown)"
-			pin_sha="$(sed -n 's/^ *BOBA_REF: *\([0-9a-f]*\)$/\1/p' \
-				.github/workflows/windows.yml)"
-			pin_short="$(printf '%s' "$pin_sha" | cut -c1-7)"
-			echo "PASS: libboba.a (Windows, $BOBA_SRC @ $bo_sha)"
-			if [ -n "$pin_short" ] && [ "$bo_sha" != "$pin_short" ]; then
-				echo "NOTE: boba HEAD $bo_sha is not the pinned $pin_short"
-				echo "      (the run verifies the tree on disk, not the pin)"
-			fi
-		else
-			echo "WARN: boba Windows build failed (see $OUT/boba-configure.log,"
-			echo "      $OUT/boba-make.log); the four boba tests will SKIP"
-		fi
+
+	echo "==> boba: cross-building for Windows"
+	(cd "$boba_build" &&
+		"$boba_src/configure" --host=x86_64-w64-mingw32 \
+			--prefix="$boba_prefix") \
+		>"$builddir/boba-configure.log" 2>&1 || {
+		echo "FAIL: boba configure (see $builddir/boba-configure.log)"
+		tail -20 "$builddir/boba-configure.log"
+		exit 1
+	}
+	if ! make -C "$boba_build" -j"$(nproc)" >"$builddir/boba-make.log" 2>&1 ||
+		! make -C "$boba_build" install >"$builddir/boba-install.log" 2>&1 ||
+		[ ! -f "$boba_prefix/lib/libboba.a" ]; then
+		echo "FAIL: boba build/install (see $builddir/boba-make.log,"
+		echo "      $builddir/boba-install.log)"
+		tail -20 "$builddir/boba-make.log" "$builddir/boba-install.log"
+		exit 1
+	fi
+	boba_pc_dir=$boba_prefix/lib/pkgconfig
+
+	# Which boba this run verified: the pinned SHA is what CI uses, so say
+	# when they differ (an uncommitted boba change is the one case this
+	# pre-flight is MOST wanted for).
+	bo_sha="$(git -C "$boba_src" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+	pin_sha="$(sed -n 's/^ *BOBA_REF: *\([0-9a-f]*\)$/\1/p' .github/workflows/windows.yml)"
+	pin_short="$(printf '%s' "$pin_sha" | cut -c1-7)"
+	echo "PASS: libboba.a (Windows, $BOBA_SRC @ $bo_sha)"
+	if [ -n "$pin_short" ] && [ "$bo_sha" != "$pin_short" ]; then
+		echo "NOTE: boba HEAD $bo_sha is not the pinned $pin_short"
+		echo "      (the run verifies the tree on disk, not the pin)"
 	fi
 fi
 
-# A boba-linking test: the Windows libboba.a from above, plus the
-# socket library boba's runtime selects on (its own LDADD).
-run_build_boba() {
-	name=$1
-	shift
-	run_build "$name" "$@" -I"$BOBA_SRC_ABS/include" -L"$BOBA_W32/src" \
-		-lboba -lws2_32
-}
-BUILT=""
+pkg_libdir=$boba_pc_dir
+[ -n "$sysroot" ] && [ -d "$sysroot/mingw/lib/pkgconfig" ] &&
+	pkg_libdir="$pkg_libdir:$sysroot/mingw/lib/pkgconfig"
 
-# The Windows resource script (the .exe's icon + version metadata) is
-# compiled only by MSYS2 CI, so compile it here too: a broken include
-# path or macro name in src/nevermore.rc is otherwise invisible until
-# CI. Its version fields come from the build-generated
-# nevermore_version.h, so the resource must carry THIS tree's version —
-# a hand-kept number in the .rc is exactly what the grep catches.
-WR=x86_64-w64-mingw32-windres
-[ -f build/src/nevermore_version.h ] ||
-	make -C build/src nevermore_version.h >/dev/null 2>&1 || true
-rm -f "$OUT/nevermore-res.o"
-if ! $WR --define _UNICODE --define UNICODE \
-	-Ibuild/src -I. -Isrc src/nevermore.rc -O coff \
-	-o "$OUT/nevermore-res.o" >"$OUT/nevermore-res.build.log" 2>&1; then
-	echo "BUILD FAIL: nevermore-res.o (src/nevermore.rc)"
-	cat "$OUT/nevermore-res.build.log"
+# ---------------------------------------------------------------------
+# nevermore for Windows
+# ---------------------------------------------------------------------
+# PKG_CONFIG, not PKG_CONFIG_PATH alone: with --host set, autoconf's
+# PKG_PROG_PKG_CONFIG finds the CROSS-prefixed tool first
+# (x86_64-w64-mingw32-pkg-config), and Fedora's "personality" for it
+# prefixes every -I/-L with the toolchain sysroot — which mangles a boba
+# installed outside that sysroot (-I/usr/.../sys-root/mingw/tmp/... and
+# the build dies on boba/components/textinput.h). The plain tool plus an
+# explicit PKG_CONFIG_LIBDIR is what a cross build means here.
+echo "==> nevermore: configure (--host=x86_64-w64-mingw32)"
+(cd "$builddir" && env -u PKG_CONFIG_PATH PKG_CONFIG=pkg-config \
+	PKG_CONFIG_LIBDIR="$pkg_libdir" \
+	"$srcdir/configure" --host=x86_64-w64-mingw32) \
+	>"$builddir/configure.log" 2>&1 || {
+	echo "FAIL: configure (see $builddir/configure.log)"
+	tail -20 "$builddir/configure.log"
 	exit 1
-fi
+}
+grep -E '^  (compiler|TLS backend|boba|test runner):' "$builddir/configure.log" || true
+
+echo "==> nevermore: make (the app; src/nevermore.rc rides along)"
+make -C "$builddir" -j"$(nproc)" >"$builddir/build.log" 2>&1 || {
+	echo "FAIL: make (see $builddir/build.log)"
+	tail -20 "$builddir/build.log"
+	exit 1
+}
+
+# The version resource: windres compiled it (src/Makefile.am's own rule,
+# run by the make above) from THIS tree's generated header, so the quad
+# the .exe carries cannot drift from the version the binary prints — the
+# same check MSYS2 CI's test_version pins on the host side.
 version=$(sed -n 's/^#define NEVERMORE_VERSION "\(.*\)"$/\1/p' \
-	build/src/nevermore_version.h)
+	"$builddir/src/nevermore_version.h")
 if command -v strings >/dev/null 2>&1 && [ -n "$version" ]; then
 	# Into a file, not a pipe: grep -q exits on the first match, and the
-	# early close would SIGPIPE strings (the same trap as a compiler
-	# piped into head) — plus the dump is evidence to read.
-	strings -el "$OUT/nevermore-res.o" >"$OUT/nevermore-res.strings"
-	if grep -qF "$version" "$OUT/nevermore-res.strings"; then
+	# early close would SIGPIPE strings — plus the dump is evidence.
+	strings -el "$builddir/src/nevermore-res.o" >"$builddir/nevermore-res.strings"
+	if grep -qF "$version" "$builddir/nevermore-res.strings"; then
 		echo "PASS: nevermore-res.o (version $version)"
 	else
 		echo "FAIL: nevermore-res.o does not carry version $version"
@@ -189,170 +216,102 @@ else
 	echo "SKIP: nevermore-res.o version grep (no strings, or no header)"
 fi
 
-run_build test_sse tests/test_sse.c src/sse.c
-run_build test_json tests/test_json.c src/json.c
-run_build test_xxh3 tests/test_xxh3.c src/xxh3.c
-# The remembered name-service answers: pure table + the fake clock (this
-# binary owns time, so expiry is moved through, never waited out).
-run_build test_addr_cache tests/test_addr_cache.c src/addr_cache.c \
-	tests/fake_clock.c
-run_build test_authinfo tests/test_authinfo.c src/authinfo.c
-run_build test_config tests/test_config.c src/conf.c
-run_build test_args tests/test_args.c src/args.c
-run_build test_session tests/test_session.c src/session.c src/image_bytes.c src/size.c \
-	src/json.c
-run_build test_context tests/test_context.c src/context.c src/reminder.c \
-	src/skills.c src/conf.c
-run_build test_skills tests/test_skills.c src/skills.c src/conf.c
+echo "==> nevermore: build the test binaries"
+make -C "$builddir/tests" -j"$(nproc)" check-programs >>"$builddir/build.log" 2>&1 || {
+	echo "FAIL: make check-programs (see $builddir/build.log)"
+	tail -20 "$builddir/build.log"
+	exit 1
+}
 
-run_build test_file_ledger tests/test_file_ledger.c src/file_ledger.c
+# WINEDEBUG=-all: wine's fixme chatter would otherwise land in every
+# test's .log. WINEPATH: a dynamically linked libwinpthread-1.dll has to
+# be findable by the loader. The runner itself is configure's business
+# (TEST_RUNNER, wired into tests/Makefile.am's LOG_COMPILER behind the
+# per-test watchdog), so the roster, the logs and the timeout are the
+# ones the native suite uses.
+echo "==> nevermore: make check under wine"
+run_wine() {
+	if [ -n "$dll_dir" ]; then
+		env WINEDEBUG=-all WINEPATH="$dll_dir" "$@"
+	else
+		env -u WINEPATH WINEDEBUG=-all "$@"
+	fi
+}
 
-run_build test_proc tests/test_proc.c src/proc.c src/proc_w32.c
+check_failed=
+run_wine make -C "$builddir/tests" check >"$builddir/check.log" 2>&1 ||
+	check_failed=1
+if [ -n "$check_failed" ]; then
+	echo "FAIL: make check (see $builddir/check.log, $builddir/tests/*.log)"
+	grep -E '^(FAIL|ERROR):' "$builddir/check.log" || true
+	exit 1
+fi
+# The harness's OWN summary, read with sed: `grep -c` exits 1 when it
+# counts zero, and under `set -e` that would end the run silently on a
+# suite with no skipped tests — the exact shape of the green run.
+passed=$(sed -n 's/^# PASS: *//p' "$builddir/check.log")
+skipped=$(sed -n 's/^# SKIP: *//p' "$builddir/check.log")
+echo "PASS: ${passed:-?} tests under wine, ${skipped:-?} skipped ($builddir/check.log)"
 
-run_build test_tools tests/test_tools.c tests/fake_clock.c \
-	src/tools.c src/tools_file.c \
-	src/file_ledger.c src/xxh3.c src/skills.c \
-	src/tools_websearch.c src/tools_exec.c src/proc.c src/proc_w32.c \
-	src/tools_spawn_w32.c src/os_compat_w32.c \
-	src/json.c src/transport.c src/transport_socket.c src/addr_cache.c \
-	src/conf.c src/wire_recorder.c src/image_bytes.c src/size.c \
-	$TLS_SRC -lws2_32 -lpthread
+if [ "$DO_ZIP" = 1 ]; then
+	echo "==> portable ZIP (release cross tree)"
+	rm -rf "$relbuild"
+	mkdir -p "$relbuild"
+	(cd "$relbuild" && env -u PKG_CONFIG_PATH PKG_CONFIG=pkg-config \
+		PKG_CONFIG_LIBDIR="$pkg_libdir" \
+		"$srcdir/configure" --host=x86_64-w64-mingw32 --enable-release) \
+		>"$relbuild/configure.log" 2>&1 || {
+		echo "FAIL: release configure (see $relbuild/configure.log)"
+		tail -20 "$relbuild/configure.log"
+		exit 1
+	}
+	if ! make -C "$relbuild" -j"$(nproc)" >"$relbuild/build.log" 2>&1 ||
+		! make -C "$relbuild" dist-portable DIST_TARGET=windows \
+			>"$relbuild/zip.log" 2>&1; then
+		echo "FAIL: release build/pack (see $relbuild/build.log,"
+		echo "      $relbuild/zip.log)"
+		tail -20 "$relbuild/build.log" "$relbuild/zip.log"
+		exit 1
+	fi
+	zip=$(find "$relbuild" -maxdepth 1 -name 'nevermore-*-windows-*.zip' |
+		head -1)
+	if [ -z "$zip" ]; then
+		echo "FAIL: dist-portable produced no ZIP in $relbuild"
+		exit 1
+	fi
+	echo "PASS: $(basename "$zip")"
 
-run_build test_web_search src/clock.c tests/test_web_search.c src/tools.c \
-	src/tools_file.c src/tools_websearch.c src/tools_exec.c src/proc.c \
-	src/file_ledger.c src/xxh3.c src/skills.c \
-	src/proc_w32.c src/tools_spawn_w32.c \
-	src/os_compat_w32.c src/json.c src/transport.c \
-	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c \
-	src/image_bytes.c src/size.c $TLS_SRC \
-	-lws2_32 -lpthread
-
-run_build test_wire src/clock.c tests/test_wire.c src/transport.c src/transport_socket.c src/addr_cache.c \
-	src/conf.c src/wire_recorder.c src/json.c $TLS_SRC \
-	-lws2_32 -lpthread
-
-run_build test_wire_recorder src/clock.c tests/test_wire_recorder.c src/wire_recorder.c \
-	src/json.c src/transport.c src/transport_socket.c src/addr_cache.c \
-	src/conf.c $TLS_SRC -lws2_32 -lpthread
-
-run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
-	src/authinfo.c src/conversation_id.c src/xxh3.c \
-	src/provider_openaicompat.c \
-	src/provider_hyper.c src/provider_ollama.c \
-	src/provider_ollama_local.c \
-	src/provider_openrouter.c \
-	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
-	src/wire_recorder.c \
-	$TLS_SRC \
-	-lws2_32 -lsecur32 -lcrypt32
-
-run_build test_source src/clock.c tests/test_source.c src/source.c src/nevermore.c \
-	src/authinfo.c src/conversation_id.c src/xxh3.c \
-	src/provider_openaicompat.c \
-	src/provider_hyper.c src/provider_ollama.c \
-	src/provider_ollama_local.c \
-	src/provider_openrouter.c \
-	src/provider_opencode.c src/provider_opencode_zen.c \
-	src/openai_client.c src/json.c src/sse.c \
-	src/transport.c src/transport_socket.c src/addr_cache.c src/conf.c \
-	src/wire_recorder.c \
-	$TLS_SRC \
-	-lws2_32 -lsecur32 -lcrypt32
-
-run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_client.c \
-	src/json.c src/sse.c src/transport.c \
-	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c $TLS_SRC \
-	src/nevermore.c \
-	src/authinfo.c src/conversation_id.c src/xxh3.c \
-	src/provider_openaicompat.c \
-	src/provider_hyper.c src/provider_ollama.c \
-	src/provider_ollama_local.c \
-	src/provider_openrouter.c \
-	src/provider_opencode.c src/provider_opencode_zen.c \
-	-lws2_32 -lpthread
-
-run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c src/image_bytes.c src/size.c \
-	src/context.c src/reminder.c src/skills.c src/file_ledger.c src/tools.c src/tools_file.c src/tools_websearch.c \
-	src/tools_exec.c src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
-	src/os_compat_w32.c src/json.c src/sse.c \
-	src/openai_client.c src/transport.c \
-	src/transport_socket.c src/addr_cache.c src/conf.c src/wire_recorder.c $TLS_SRC \
-	src/nevermore.c \
-	src/authinfo.c src/conversation_id.c src/xxh3.c \
-	src/provider_openaicompat.c \
-	src/provider_hyper.c src/provider_ollama.c \
-	src/provider_ollama_local.c \
-	src/provider_openrouter.c \
-	src/provider_opencode.c src/provider_opencode_zen.c \
-	-lws2_32 -lpthread
-
-run_build test_spinner tests/test_spinner.c src/spinner.c
-
-# The generated version header's fields (what the .rc above embeds):
-# pure C, no boba. -Ibuild/src is the header's build dir.
-run_build test_version tests/test_version.c -Ibuild/src
-
-run_build test_highlight tests/test_highlight.c src/highlight.c
-
-# The pixel half is pure C (no boba), so it cross-checks under wine.
-run_build test_image_codec tests/test_image_codec.c src/image_codec.c \
-	src/image_bytes.c src/size.c
-
-# The four boba-dependent tests: linked against the Windows libboba.a
-# the section above cross-built. test_chat_app is the whole app path
-# (agent, providers, tools, session, chat_app) driven over a canned
-# server, so it is the widest Windows pin this script can buy; the
-# source lists mirror tests/Makefile.am's SOURCES for each binary.
-if [ -n "$BOBA_LIB" ]; then
-	run_build_boba test_history tests/test_history.c src/history.c
-	run_build_boba test_markdown tests/test_markdown.c src/markdown.c \
-		src/markdown_render.c src/highlight.c src/image.c \
-		src/image_bytes.c src/image_codec.c src/size.c
-	run_build_boba test_image tests/test_image.c src/image.c \
-		src/image_bytes.c src/image_codec.c src/size.c src/markdown.c \
-		src/markdown_render.c src/highlight.c
-	run_build_boba test_chat_app tests/test_chat_app.c tests/fake_clock.c \
-		src/chat_app.c src/conf.c src/spinner.c \
-		src/sysout.c \
-		src/markdown.c src/markdown_render.c src/highlight.c \
-		src/image.c src/image_bytes.c src/image_codec.c src/size.c \
-		src/agent.c src/conversation_id.c src/xxh3.c src/session.c \
-		src/context.c src/reminder.c src/skills.c src/file_ledger.c src/tools.c \
-		src/tools_file.c src/tools_websearch.c src/tools_exec.c \
-		src/proc.c src/proc_w32.c src/tools_spawn_w32.c \
-		src/os_compat_w32.c src/json.c src/sse.c src/openai_client.c \
-		src/transport.c src/transport_socket.c src/addr_cache.c $TLS_SRC \
-		src/nevermore.c src/authinfo.c src/source.c \
-		src/provider_openaicompat.c src/provider_hyper.c \
-		src/provider_ollama.c src/provider_ollama_local.c \
-		src/provider_openrouter.c \
-		src/provider_opencode.c src/provider_opencode_zen.c \
-		-lpthread
-else
-	BOBA_SKIP="needs a Windows boba (set BOBA_SRC, or check out ./boba or ../boba)"
-	echo "SKIP: test_history.exe ($BOBA_SKIP)"
-	echo "SKIP: test_markdown.exe ($BOBA_SKIP)"
-	echo "SKIP: test_chat_app.exe ($BOBA_SKIP)"
-	echo "SKIP: test_image.exe ($BOBA_SKIP)"
+	if ! command -v unzip >/dev/null 2>&1; then
+		echo "WARN: unzip not found — the packed .exe was not run"
+	else
+		stage=$(mktemp -d "${TMPDIR:-/tmp}/nm-w32-zip.XXXXXX")
+		unzip -q "$zip" -d "$stage"
+		exe=$(find "$stage" -name nevermore.exe | head -1)
+		zipver=$(basename "$zip" | sed 's/^nevermore-//; s/-windows-.*$//')
+		if [ -z "$exe" ]; then
+			echo "FAIL: no nevermore.exe in the ZIP"
+			exit 1
+		fi
+		# The self-containment proof: WINEPATH is UNSET and the MinGW bin
+		# dir is off PATH, so a DLL the bundle needs has to sit beside the
+		# .exe — exactly what make-dist-zip.sh's import walk bundled.
+		if out=$(env -u WINEPATH PATH=/usr/bin:/bin WINEDEBUG=-all \
+			wine "$exe" --version 2>&1); then
+			echo "PASS: extracted nevermore.exe: $out"
+			case "$out" in
+			*"nevermore $zipver"*) ;;
+			*)
+				echo "FAIL: the ZIP's .exe does not report $zipver"
+				exit 1
+				;;
+			esac
+		else
+			echo "FAIL: the extracted nevermore.exe did not run:"
+			echo "$out"
+			exit 1
+		fi
+		rm -rf "$stage"
+	fi
 fi
 
-echo "=== running under wine ==="
-fail=0
-# Only what THIS run built: a stale .exe from an earlier checkout (a
-# renamed test) or from a build that failed before its link must not read
-# as a pass — the hazard run_build's `rm -f` already guards at the build
-# step, here at the run step.
-for name in $BUILT; do
-	exe="$OUT/$name.exe"
-	if WINEDEBUG=-all wine "$exe" >"$OUT/$name.log" 2>&1; then
-		echo "PASS: $name.exe"
-	else
-		echo "FAIL: $name.exe (log: $OUT/$name.log)"
-		fail=1
-		cat "$OUT/$name.log"
-	fi
-done
-
-exit $fail
+echo "==> done"

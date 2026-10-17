@@ -1,23 +1,37 @@
 #!/bin/sh
 # zig-macos-check.sh - local macOS CI pre-flight via zig cc.
 #
-# Cross-compiles every translation unit to aarch64-macos Mach-O objects
-# (the exact backend CI selects: Secure Transport on darwin), catching
-# macOS-only compile errors (Secure Transport API misuse, darwin-only
-# headers) without a Mac.
+# Cross-compiles every nevermore TU to aarch64-macos by running the
+# project's OWN build: configure picks the darwin backend (Secure
+# Transport), the flags and the include paths, and `make compile-check`
+# compiles the exact TU set the real build compiles — src/ AND every
+# test program's objects. No source list, no -I list, no backend SKIP
+# list lives here, so a new TU or a new test reaches this check through
+# Makefile.am alone. The check is therefore "does the macOS compiler
+# accept this tree", which is what CI's macOS job answers first.
+#
+# Compile-only BY DESIGN: a macOS binary cannot be linked on this box —
+# a real SDK is needed, and what is staged below is headers (zig's
+# bundled darwin libc carries no Security.framework stub either) — so
+# compile-check stops before the linker, which is the whole reach of a
+# Mac-less box.
 #
 # Security/CoreFoundation headers are fetched from Apple's open-source
 # releases into ~/.cache/nevermore-zig-macos-sdk on first run; the
 # SDK's availability/swift annotations are neutralized by a shim header
-# since the full real SDK is not redistributable. Framework symbols are
-# checked at compile time only — the real link happens on CI.
+# since the full real SDK is not redistributable.
 #
-# Exit: 0 = all units compile for macOS; 1 = compile errors; 77 = no zig.
+# Logs (read them; do not re-run for information already on disk):
+# <builddir>/configure.log, <builddir>/src-build.log,
+# <builddir>/tests-build.log.
+#
+# Exit: 0 = every TU compiled for macOS; 1 = compile errors; 77 = no zig
+# (or no gh, which staging needs).
 #
 # Usage: scripts/zig-macos-check.sh [builddir]
 set -e
 
-builddir=${1:-build}
+builddir=${1:-build-macos-zig}
 cd "$(dirname "$0")/.."
 
 cache=$HOME/.cache/nevermore-zig-macos-sdk
@@ -218,56 +232,51 @@ PY
 	echo patched >>"$cache/.ready"
 fi
 
-fail=0
-# Compile logs land next to the objects (same /tmp scratch the -o uses).
-# The compiler writes to the FILE, never into a `| head`: head exits
-# after its line count and SIGPIPEs the compiler, so a TU that emits
-# more than the shown number of errors could be killed mid-write and
-# report fewer problems than it has (the same trap w32-wine-check.sh
-# hit, where a warning-flooded TU "failed" with its error unprinted).
+# ---------------------------------------------------------------------
+# The compile itself: autotools owns it
+# ---------------------------------------------------------------------
+# Out of tree, so the source tree stays clean, and wiped first: every TU
+# must be compiled by THIS run — a reused tree would report yesterday's
+# objects as today's OK. boba comes from the install this box already
+# has (the prefix the native build links); its HEADERS are all a compile
+# needs, and a macOS boba is not buildable here.
+srcdir=$PWD
+rm -rf "$builddir"
+mkdir -p "$builddir"
+cd "$builddir"
+if ! PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig" \
+	"$srcdir/configure" --host=aarch64-apple-darwin \
+	CC="zig cc -target aarch64-macos" \
+	CPPFLAGS="-isysroot $cache -F $cache -include $cache/nm-zig-shim.h" \
+	>configure.log 2>&1; then
+	echo "FAIL: configure (see $builddir/configure.log)"
+	tail -20 configure.log
+	exit 1
+fi
+grep -E '^  (compiler|TLS backend|boba|test runner):' configure.log || true
+
+# compile-check compiles every object and links NOTHING, so the missing
+# macOS SDK never comes up. Two trees' worth: src/ (the app's TUs) and
+# tests/ (every test program's objects, each program's own copies of the
+# src TUs included). `-k` keeps one broken TU from hiding the rest, and
+# the compiler's output goes to a FILE — never into `| head`: head exits
+# after its line count and SIGPIPEs the compiler, so a TU emitting more
+# errors than the shown number could be killed mid-write and report
+# fewer problems than it has (a trap both pre-flights hit before).
 #
-# The -I list mirrors configure's nevermore_CPPFLAGS: the build dirs,
-# src, third_party/stb (the vendored stb headers — image_codec.c is
-# the one TU that includes them, and without the -I it "FAIL"s for a
-# header that is right there), and boba's install prefix. A new include
-# dir in configure.ac belongs here too.
-logdir=/tmp
-for f in src/*.c; do
-	base=$(basename "$f" .c)
-	log="$logdir/nmm_$base.build.log"
-	case "$f" in
-	src/tls_openssl.c | src/tls_schannel.c | src/tls_mbedtls.c)
-		echo "SKIP $f (backend not selected on macOS CI)"
-		continue
-		;;
-	src/*_w32.c)
-		echo "SKIP $f (windows-only TU)"
-		continue
-		;;
-	src/tls_sectransport.c)
-		zig cc -target aarch64-macos -DNM_TLS_SECTRANSPORT \
-			-include "$cache/nm-zig-shim.h" \
-			-c -o "$logdir/nmm_$base.o" "$f" \
-			-I"$builddir" -I"$builddir/src" -Isrc -I. -Ithird_party/stb \
-			-I"$HOME/.local/include" \
-			-isysroot "$cache" -F "$cache" >"$log" 2>&1 || true
-		out=$(grep -E "error:" "$log" | head -2)
-		;;
-	*)
-		zig cc -target aarch64-macos \
-			-c -o "$logdir/nmm_$base.o" "$f" \
-			-I"$builddir" -I"$builddir/src" -Isrc -I. -Ithird_party/stb \
-			-I"$HOME/.local/include" \
-			>"$log" 2>&1 || true
-		out=$(grep -E "error:" "$log" | head -2)
-		;;
-	esac
-	if [ -n "$out" ]; then
-		echo "FAIL $f"
-		echo "$out"
-		fail=1
+# The count is read with a LOOSE pattern on purpose: with -j, a warning
+# whose diagnostic does not end in a newline (zig's do not always) runs
+# straight into the next `  CC` banner on the same line, so an anchored
+# `^  CC` undercounts by ~40 here.
+fail=0
+for part in src tests; do
+	log="$part-build.log"
+	if make -k -C "$part" -j"$(nproc)" compile-check >"$log" 2>&1; then
+		echo "OK   $part ($(grep -o '  CC  *[^ ][^ ]*\.o' "$log" | wc -l) objects)"
 	else
-		echo "OK   $f"
+		echo "FAIL $part (log: $builddir/$log)"
+		grep -E ' error:|Error [0-9]+$' "$log" | head -10
+		fail=1
 	fi
 done
 

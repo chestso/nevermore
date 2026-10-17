@@ -279,30 +279,86 @@ locally — minutes here vs 4-minute round-trips.
   from a FRESH dir), which is why tests/Makefile.am carries the
   recursive rule for the generated `nevermore_version.h` and why the
   E2E harness needs src built. Reproduce that step after touching
-  anything a test pulls out of src's build dir — zig-macos compiles
-  `src/*.c` and misses test-binary link failures.
-- **macOS**: `scripts/zig-macos-check.sh` (compile-only, every
-  `src/*.c` for aarch64-macos). Its hand-kept `-I` list must MIRROR
-  configure's `nevermore_CPPFLAGS` — a new include dir in configure.ac
-  belongs in the script too.
-- **Windows**: `scripts/w32-wine-check.sh` (MinGW cross-compile, run
-  under Wine, compile + version-grep `src/nevermore.rc`). Wine is not
-  the MSYS2 UCRT64 runtime — pre-flight, not guarantee. The four
-  boba-linking binaries (test_history, test_markdown, test_chat_app,
-  test_image) build against a Windows `libboba.a` the script
-  cross-builds itself (boba's own `configure --host=x86_64-w64-mingw32`,
-  out of tree in `build/tests-wine/boba-w32`) from the boba source tree
-  it finds — `$BOBA_SRC`, else `./boba`, else `../boba`; with no boba
-  source tree they SKIP, as they always did. The run names the boba SHA
-  it verified and notes when that is not the pinned one, so a green
-  pre-flight is never mistaken for the pinned pair.
+  anything a test pulls out of src's build dir.
+- **Both pre-flights are autotools trees now**: `configure` in a dir of
+  their own, `make` to compile, `make check` to run under the runner
+  configure picked. The scripts provision the ENVIRONMENT (the zig SDK
+  cache, the cross boba, `PKG_CONFIG*`/`WINEPATH`) and read the logs —
+  **no source list, include path, link library or test roster lives in
+  either script**, so a new TU, a new test or a new backend reaches both
+  through `Makefile.am` alone. That is the property to keep: a
+  `scripts/*.sh` line naming `src/*.c`, `tests/test_*.c` or a `-I` path
+  is the drift this replaced (the old macOS check needed its `-I` list
+  kept in sync with `nevermore_CPPFLAGS` by hand, and the old Windows
+  script's roster was three tests stale).
+- **macOS**: `scripts/zig-macos-check.sh` — the cross tree in
+  `build-macos-zig/` (`--host=aarch64-apple-darwin`, `CC="zig cc
+-target aarch64-macos"`, SDK shim staged into
+  `~/.cache/nevermore-zig-macos-sdk`). `make compile-check` compiles the
+  app's TUs **and every test program's objects** (~280: each test
+  binary's own copies of the src TUs included) — the compile half of
+  what the macOS job does first. It is compile-only BY DESIGN: a macOS
+  link needs a real SDK, and zig's bundled darwin libc ships no
+  `Security.framework` stub while the staged headers are not a framework.
+- **Windows**: `scripts/w32-wine-check.sh` — the cross tree in
+  `build-w32/` (`configure --host=x86_64-w64-mingw32`, a Windows boba
+  cross-built into `build-w32/boba-prefix`, `--with-wine` wiring the
+  test binaries through wine, so the roster, the per-test watchdog and
+  the `.log`s are the native harness's). Wine is not the MSYS2 UCRT64
+  runtime — pre-flight, not guarantee. The boba source tree is
+  `$BOBA_SRC`, else `./boba`, else `../boba` (an existing cross install
+  in `$BOBA_PREFIX` also works); with neither the run exits 77 —
+  configure requires boba for the target, so it is ONE build now, not a
+  per-test list that could skip. The run names the boba SHA it verified
+  and notes when that is not the pinned one, so a green pre-flight is
+  never mistaken for the pinned pair. `--no-zip` skips its second half:
+  a `--enable-release` tree in `build-w32-rel/`, `make dist-portable
+DIST_TARGET=windows`, then the EXTRACTED `.exe` run under wine with
+  the MinGW bin dir off `PATH` — the self-containment proof otherwise
+  done by hand at release time.
+- Traps in the cross trees, each of which cost a run to find:
+  - **The runner is `--with-wine`/`TEST_RUNNER`, never `PATH`**:
+    autoconf leaves `cross_compiling` at `maybe` here (nothing ever
+    settles it), so the Windows-cross detection is the build/host OS
+    pair (`CROSS_WINDOWS` in configure.ac), and the runner rides
+    `LOG_COMPILER` BEHIND the watchdog — the watchdog stays the process
+    that times and kills the run (`wine test_x.exe`).
+  - **`PKG_CONFIG=pkg-config` in a cross tree**: with `--host`,
+    `PKG_PROG_PKG_CONFIG` finds the cross-prefixed tool first, and
+    Fedora's personality for it prefixes every `-I`/`-L` with the
+    toolchain sysroot, which mangles a boba installed outside that
+    sysroot (`-I/usr/…/sys-root/mingw/tmp/…`) — the build then dies on
+    `boba/components/textinput.h`. `PKG_CONFIG_LIBDIR` (which REPLACES
+    the search path, unlike `PKG_CONFIG_PATH`) names the cross prefixes.
+  - **`WINEPATH` for the runtime DLL**: a cross gcc that links
+    `libwinpthread-1.dll` dynamically (Fedora's does) leaves every
+    `.exe` dying with wine exit 53 (DLL not found) without it; export
+    `WINEDEBUG=-all` too, or wine's fixme chatter lands in every test's
+    `.log`.
+  - **`compile-check` compiles and never links**: src's depends on
+    `$(BUILT_SOURCES)` as well (automake hangs the generated version
+    header off `all`, which that target does not go through); tests'
+    gathers the per-program object lists by re-entering make with
+    `CCLD=true` (a no-op linker), because the POSIX-make construction
+    that would do it directly — `$(foreach p,$(check_PROGRAMS),
+$($(p)_OBJECTS))` — is rejected by this tree's `-Wall -Werror`.
+  - **Under `-j`, zig's diagnostics do not always end in a newline**, so
+    one log line can hold a warning AND the next `  CC` banner: count
+    compiled objects with a loose pattern, never `^  CC`.
+  - **`grep -c` exits 1 when it counts ZERO** — inside a `set -e`
+    script that is a silent early exit on the GREEN path (a suite with
+    no skipped tests). Read the harness's own summary with `sed`.
 - Run the scripts **from the repo ROOT** (0 results from a build dir);
   never zig cc `-fsyntax-only` (`error: FileNotFound`) — use `-c -o
 /tmp/x.o`.
 - **One pass, read the logs**: evidence lands in
-  `build/tests-wine/<name>.build.log` + `<name>.log` and
-  `/tmp/nmm_<base>.build.log` — counts and failed TUs are read from
-  disk, never bought with a second run; re-run only after a tree change.
+  `build-w32/{boba-*,configure,build,check}.log` + `build-w32/tests/*.log`
+  and `build-macos-zig/{configure,src-build,tests-build}.log` — counts
+  and failed TUs are read from disk, never bought with a second run;
+  re-run only after a tree change. Both cross trees are WIPED at the
+  start of a run (every TU compiled by that run), and the harness owns
+  the roster, so the old "delete the target first" guard is gone with
+  the hand-kept lists.
 - **boba's release `build/` and `build-asan/` are two installs**:
   nevermore links whichever is INSTALLED — put the asan lib in for
   nevermore's ASan suite, restore the release lib after. boba's real
@@ -379,8 +435,11 @@ list` / `gh run watch <id> --exit-status` / `gh run view <id>
 - **macOS**: Secure Transport deprecation warnings are expected (by
   design) — don't "fix" by switching frameworks mid-phase.
 - **Wine ≠ CI** (still catches ~90% in seconds), and a pre-flight that
-  reuses its output dir LIES (a failed compile leaves the previous
-  binary "passing") — delete the target first.
+  reuses its output artifacts lies (a tree left over from an earlier
+  checkout can hold a binary the current sources no longer build): the
+  cross trees are wiped per run, and the roster a run executes is the
+  harness's `TESTS`, never a listing of whatever `.exe` files are lying
+  around.
 - **Never pipe a compiler into an early-exiting reader** (`| head -5`):
   SIGPIPE kills the compiler before the link, so a "BUILD FAIL" with a
   warning-only log is this trap. The pre-flight scripts redirect to a

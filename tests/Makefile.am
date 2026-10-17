@@ -69,8 +69,15 @@ AM_CPPFLAGS = \
 # burned 4h with the "watchdog" in place. LOG_COMPILER is the one
 # that fires; TEST_LOG_COMPILER is kept for a future parallel-tests
 # switch.
-LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
-TEST_LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh
+#
+# TEST_RUNNER (configure: empty natively, `wine` for a Windows cross
+# build — --with-wine) is the LAST word, so it stays INSIDE the
+# watchdog: the watchdog has to be the process that times and kills the
+# run, and under wine the run is `wine test_x.exe`. A cross tree that
+# configures without wine leaves it empty and simply cannot run its
+# tests — the build still works.
+LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh $(TEST_RUNNER)
+TEST_LOG_COMPILER = $(SHELL) $(top_srcdir)/scripts/test-watchdog.sh $(TEST_RUNNER)
 
 TEST_CFLAGS = -Wall -Wextra
 
@@ -417,7 +424,15 @@ TESTS = $(check_PROGRAMS)
 # own $0, so the srcdir/builddir duality is its business, not
 # automake's; the binary comes from NM_E2E_NEVERMORE (the build tree,
 # never PATH).
+#
+# NOT in a Windows CROSS tree: the driver runs the binary through a host
+# PTY inspector, and nevermore.exe only exists as something wine can
+# run — cfr-debug would be handed a PE it cannot drive. MSYS2 CI skips
+# it too (no coffer there); a cross tree drops it from the roster
+# outright instead of reporting a mystery failure.
+if !CROSS_WINDOWS
 TESTS += e2e_portty/e2e_turn.sh
+endif
 
 # Build the test binaries WITHOUT running them. CI uses this in the
 # parallel Build step (make -j ... check-programs) so the timed Run
@@ -427,6 +442,26 @@ TESTS += e2e_portty/e2e_turn.sh
 # only expands that variable inside its own recursive rule.)
 .PHONY: check-programs
 check-programs: $(check_PROGRAMS)
+
+# Compile every test TU, link nothing — the macOS cross pre-flight's
+# entry point, where the link is not merely awkward but impossible (a
+# macOS binary needs a real SDK). Unlike src's, this list cannot be
+# written down directly: automake names each program's objects after the
+# program (<prog>-<src>.$(OBJEXT)), and the POSIX-make indirection that
+# would gather them — $(foreach p,$(check_PROGRAMS),$($(p)_OBJECTS)) —
+# is rejected by this tree's automake flags (-Wall -Werror: non-POSIX
+# variable name / recursive variable expansion), while a hand-kept list
+# of 31 names is exactly the drift this target exists to end.
+#
+# So the recursion does the gathering instead: CCLD is the compiler
+# driver automake uses AS the linker, so replacing it with a no-op makes
+# every program's own rule walk its own object list and then "link"
+# nothing. Derived from check_PROGRAMS, never hand-kept; no artifact is
+# written and no compiler flag changes, so a compile error still fails
+# the run the way it does in a real build.
+.PHONY: compile-check
+compile-check:
+	$(MAKE) $(AM_MAKEFLAGS) CCLD=true check-programs
 
 # Verbose logging flag convention: pass -v to any test binary.
 #

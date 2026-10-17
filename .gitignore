@@ -1,5 +1,8 @@
 build/
 build-rel/
+build-w32/
+build-w32-rel/
+build-macos-zig/
 version
 *.o
 *.a
