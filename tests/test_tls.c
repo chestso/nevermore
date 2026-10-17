@@ -685,15 +685,16 @@ static void test_tls_handshake_budget_bounds_a_silent_peer(void)
 
 static void live_tls_probe(void)
 {
-    /* A real HTTPS fetch against a trusted endpoint (OpenAI models
-     * endpoint is public). Run: NM_LIVE_TLS=1 ./tests/test_tls -v */
+    /* A real HTTPS fetch against a provider endpoint nevermore
+     * actually dials (Hyper's /v1 is public and TLS-only).
+     * Run: NM_LIVE_TLS=1 ./tests/test_tls -v */
     if (!getenv("NM_LIVE_TLS") || !nm_tls_backend()) {
         printf("live TLS probe: skipped (set NM_LIVE_TLS=1, needs "
                "network + TLS backend)\n");
         return;
     }
     NmConnectInfo ci = { 0 };
-    NmConnection *c = nm_connect("api.openai.com", 443, NM_TRANSPORT_TLS, &ci);
+    NmConnection *c = nm_connect("hyper.charm.land", 443, NM_TRANSPORT_TLS, &ci);
     if (!c) {
         printf("live TLS probe: connect failed: %s\n",
                *ci.detail ? ci.detail : "(no detail)");

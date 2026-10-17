@@ -162,7 +162,7 @@ TEST_PROVIDER_SOURCES = \
     ../src/provider_openaicompat.c \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
-    ../src/provider_openai.c ../src/provider_openrouter.c \
+    ../src/provider_openrouter.c \
     ../src/provider_opencode.c ../src/provider_opencode_zen.c \
     ../src/provider_test.c
 
@@ -435,7 +435,7 @@ check-programs: $(check_PROGRAMS)
 # that exercise wire paths point at scripted loopback servers via
 # explicit base URLs; but catalog sources default to probing the
 # provider's default endpoint (local daemon 127.0.0.1:11434,
-# api.openai.com, ...) when no base URL is given — on CI that probe's
+# hyper.charm.land, ...) when no base URL is given — on CI that probe's
 # refusal latency is environment-dependent (a blackholed loopback
 # connect stalled Windows CI past the 10s watchdog). NM_NO_LIVE_CATALOG
 # makes default-base probes no-ops (static fallback); explicit-base

@@ -3,7 +3,7 @@
 An interactive coding agent in pure C.
 
 nevermore chats with AI models (Charm Hyper, Ollama local daemon and
-Ollama Cloud, OpenAI, OpenRouter, OpenCode Go and Zen) from a
+Ollama Cloud, OpenRouter, OpenCode Go and Zen) from a
 terminal, with an agent loop that can read, edit, and search files,
 run commands, and search the web through a local SearXNG instance. It
 is a first-class citizen of the [portty](https://github.com/chestso/portty)
@@ -70,7 +70,7 @@ nevermore                          # interactive chat (boba TUI)
 nevermore ask "explain this repo"  # one-shot
 nevermore models                   # provider model catalog
 NEVERMORE_PROVIDER=openrouter nevermore ask "..."
-nevermore -p openai -m glm-5.3     # one run, ignoring the saved config
+nevermore -p opencode:go -m glm-5.3  # one run, ignoring the saved config
 nevermore -i shot.png "what is wrong in this screenshot?"
 ```
 
@@ -81,7 +81,7 @@ prompt — `nevermore ask` alone says the prompt is missing instead of
 asking the model about the word "ask".
 
 Provider keys come from the environment (`HYPER_API_KEY`,
-`OLLAMA_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+`OLLAMA_API_KEY`, `OPENROUTER_API_KEY`,
 `OPENCODE_API_KEY`) or, when an
 env var is unset, from `~/.authinfo` — one `machine <name> password
 <secret>` line per provider:
@@ -89,7 +89,6 @@ env var is unset, from `~/.authinfo` — one `machine <name> password
 ```
 machine hyper.charm.land   login apikey password ...
 machine ollama.com         login apikey password ...
-machine openai.com         login apikey password ...
 machine openrouter.ai      login apikey password ...
 machine opencode.ai        login apikey password ...
 ```
@@ -99,7 +98,7 @@ Environment variables win over the file. Point elsewhere with
 default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
 
 Starting (or switching to) a provider that needs a key with none
-configured says so up front — `export OPENAI_API_KEY`, or add the
+configured says so up front — `export OPENROUTER_API_KEY`, or add the
 `~/.authinfo` line — instead of failing on the first turn. The check
 runs through the same key lookup as the request, so a `~/.authinfo`
 entry counts.
@@ -126,7 +125,7 @@ runs — so there is no word beside it to go stale between states.
 round's numbers plus the session totals, the cache read (and its rate),
 and the cache write count.
 
-Providers differ in what they report: OpenAI, Hyper, OpenRouter and the
+Providers differ in what they report: Hyper, OpenRouter and the
 OpenCode tiers report a cache read (`prompt_tokens_details.cached_tokens`)
 — Hyper's is occasionally absent for a round — the OpenCode upstreams
 also report a cache write, and Ollama reports the token counts but no
@@ -183,7 +182,7 @@ config back in charge, with nothing else to unwind.
 
 ```
 # ~/.config/nevermore/config — '#' comment, blank lines ignored
-provider         = openai
+provider         = opencode:go
 model            = glm-5.3
 rounds           = 40
 reasoning_echo   = tools
@@ -214,7 +213,7 @@ are skipped, so a stale file can never break startup. No secrets: API
 keys stay in the environment or `~/.authinfo`.
 
 `model` is remembered **per provider**: a model id belongs to one
-provider, so a scoped `model.<provider>` line (e.g. `model.openai =
+provider, so a scoped `model.<provider>` line (e.g. `model.opencode:go =
 glm-5.3`) is what the chat writes when you pick a model, and it
 outranks the plain `model`. `-m` and `$NEVERMORE_MODEL` stay global
 (an explicit flag is not memory). With no model set for the active

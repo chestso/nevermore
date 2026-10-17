@@ -28,7 +28,7 @@
  * Grammar (character-level scan, no regex, no quoting, no sections):
  *
  *   # comment to end of line; blank lines ignored
- *   provider  = openai
+ *   provider  = hyper
  *   model     = glm-5.3
  *   rounds    = 40
  *   reasoning_echo = tools

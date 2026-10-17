@@ -5,7 +5,7 @@
  * OpenAI-compatible, so chat + the step API go through the shared
  * openai_client — only the endpoint (hyper.charm.land/v1, $HYPER_URL
  * override) and the auth (Bearer sk-hyper-... from $HYPER_API_KEY)
- * differ from the openai reference provider.
+ * differ from the other bearer-auth providers on that wire.
  *
  * Cache affinity (HYPER-API.md §3.1): every request carries the three
  * Hyper routing headers Crush sends, so a conversation is pinned to

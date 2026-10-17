@@ -4956,7 +4956,6 @@ static void test_send_without_model_is_refused(void)
  * (nm_provider_api_key), so a ~/.authinfo entry counts as configured. */
 static void test_missing_key_preflight_warns(void)
 {
-    test_unsetenv("OPENAI_API_KEY");
     test_unsetenv("OPENROUTER_API_KEY");
     test_unsetenv("OLLAMA_API_KEY");
     test_unsetenv("HYPER_API_KEY");

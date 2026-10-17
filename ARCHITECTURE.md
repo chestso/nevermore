@@ -9,8 +9,8 @@ Wire truth lives in the tracked `docs/*-API.md` specs. A rule stated
 here is stated as the rule it is, never as a pointer to a note that
 does not ship.
 
-nevermore: an interactive coding agent in pure C. Seven providers
-(Charm Hyper, Ollama local + Cloud, OpenAI, OpenRouter, opencode Go +
+nevermore: an interactive coding agent in pure C. Six providers
+(Charm Hyper, Ollama local + Cloud, OpenRouter, opencode Go +
 Zen) over a hand-rolled HTTP/1.1 + SSE transport with OS-native TLS (no
 libcurl, ever). boba TUI front-end modeled on ditty. First-class portty
 citizen.
@@ -87,8 +87,8 @@ architecture "the right way"**: fix a design flaw at its root
   `grep -rn provider_ollama_local` enumerates every spot from any one
   existing provider; the `NM_PROVIDER_MAX`-bounded stack arrays
   (picker, sources, error hint) need nothing until the registry passes 16.
-  **A provider speaking the shared OpenAI-compatible wire** (seven of
-  the eight do) adds one thing more: an `NmOpenaiCompat` descriptor
+  **A provider speaking the shared OpenAI-compatible wire** (all
+  seven do) adds one thing more: an `NmOpenaiCompat` descriptor
   (`src/provider_openaicompat.h`) registered in that module's table —
   its endpoint builders, its static table and a row mapper for one
   catalog entry — and points its vtable's chat/catalog slots at the
@@ -238,8 +238,8 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   (a re-set with the cache moved under it must not churn) and
   `test_model_exact_id_never_fetches_on_the_ui_thread`.
 - **openai_client.c** — shared OpenAI-compatible wire client
-  (openai/ollama/openrouter all reuse it; only endpoint/auth/catalog
-  differ). Port of quoth-openai-client.el. Wire truth:
+  (hyper/ollama/openrouter/opencode all reuse it; only
+  endpoint/auth/catalog differ). Port of quoth-openai-client.el. Wire truth:
   `docs/HYPER-API.md`, `docs/OLLAMA-CLOUD-API.md`, `docs/OPENROUTER-API.md`
   (all ported from quoth and live-probed).
   **Usage accounting is a contract, not a per-provider habit**
@@ -1002,9 +1002,9 @@ JPEG 1408x768, 209 KiB` where the picture renders, plain `image #N`
   PROVIDER-level rule (`tools = 1` on every row — its wire has no
   per-model tool field at all: /v1/models' `capabilities` is
   `{"vision": bool}` only, and all 23 models accepted a toolset);
-  **openai/ollama** catalogs claim nothing (0 — send). A
+  **ollama** catalogs claim nothing (0 — send). A
   table-enriched live catalog must copy EVERY field the picker/agent
-  read (`provider_opencode.c` / `provider_openai.c`: label, vision,
+  read (`provider_opencode.c`: label, vision,
   context_length, image_gen, tools) — image_gen and tools were once
   silently dropped, so a live row read 0 while its table claimed
   otherwise.

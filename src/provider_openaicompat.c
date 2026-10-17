@@ -48,7 +48,6 @@ static const NmOpenaiCompat *const g_compat[NM_PROVIDER_MAX] = {
      * base URL and the authinfo machine, which live in the vtable. */
     [NM_PROVIDER_OLLAMA] = &nm_ollama_compat,
     [NM_PROVIDER_OLLAMA_LOCAL] = &nm_ollama_compat,
-    [NM_PROVIDER_OPENAI] = &nm_openai_compat,
     [NM_PROVIDER_OPENROUTER] = &nm_openrouter_compat,
     [NM_PROVIDER_OPENCODE] = &nm_opencode_compat,
     [NM_PROVIDER_OPENCODE_ZEN] = &nm_opencode_zen_compat,

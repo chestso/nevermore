@@ -100,7 +100,6 @@ extern const NmOpenaiCompat nm_hyper_compat;
  * are vtable data), and the chat half only — the native /api catalog
  * is provider_ollama.c's own machine. */
 extern const NmOpenaiCompat nm_ollama_compat;
-extern const NmOpenaiCompat nm_openai_compat;
 extern const NmOpenaiCompat nm_openrouter_compat;
 extern const NmOpenaiCompat nm_opencode_compat;
 extern const NmOpenaiCompat nm_opencode_zen_compat;

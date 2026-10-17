@@ -51,7 +51,7 @@ static void test_unsetenv(const char *name)
  * Stand in for main.c's nm_provider_by_name check. */
 static int test_valid_provider(const char *name)
 {
-    return strcmp(name, "openai") == 0 || strcmp(name, "ollama:local") == 0;
+    return strcmp(name, "hyper") == 0 || strcmp(name, "ollama:local") == 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -150,13 +150,13 @@ static void test_user_file_parses(void)
     write_file_at(g_user,
                   "# nevermore config\n"
                   "\n"
-                  "provider  = openai\n"
+                  "provider  = hyper\n"
                   "model     = glm-5.3\n"
                   "rounds    = 40\n"
                   "reasoning_echo = on\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openai");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "glm-5.3");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "40");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
@@ -237,11 +237,11 @@ static void test_bad_lines_are_skipped(void)
 static void test_shadow_overrides_user(void)
 {
     pin_paths("shadow-over-user");
-    write_file_at(g_user, "provider = openai\nmodel = from-user\n");
+    write_file_at(g_user, "provider = hyper\nmodel = from-user\n");
     write_file_at(g_shadow, "model = from-shadow\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openai");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_USER);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-shadow");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
@@ -253,14 +253,14 @@ static void test_env_overrides_shadow(void)
 {
     pin_paths("env-over-shadow");
     write_file_at(g_user, "model = from-user\n");
-    write_file_at(g_shadow, "model = from-shadow\nprovider = openai\n");
+    write_file_at(g_shadow, "model = from-shadow\nprovider = hyper\n");
     test_setenv("NEVERMORE_MODEL", "from-env");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-env");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_ENV);
     /* Untouched keys still resolve below. */
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openai");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_SHADOW);
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MODEL");
@@ -270,13 +270,13 @@ static void test_cli_overrides_env(void)
 {
     pin_paths("cli-over-env");
     test_setenv("NEVERMORE_MODEL", "from-env");
-    test_setenv("NEVERMORE_PROVIDER", "openai");
+    test_setenv("NEVERMORE_PROVIDER", "hyper");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
     nm_config_set_cli(c, NM_CFG_KEY_MODEL, "from-flag");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-flag");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_CLI);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openai");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_ENV);
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MODEL");
@@ -467,19 +467,19 @@ static void test_shadow_write_and_reload(void)
     pin_paths("write");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "openai"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "hyper"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "7"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "TRUE"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 3);
     ASSERT_STR_EQ(read_file_at(g_shadow),
-                  "provider = openai\nrounds = 7\nreasoning_echo = all\n");
+                  "provider = hyper\nrounds = 7\nreasoning_echo = all\n");
     nm_config_free(c);
 
     /* A fresh load reads the shadow as the shadow layer. */
     NmConfig *c2 = nm_config_load();
     ASSERT_NOT_NULL(c2);
     ASSERT_EQ(nm_config_source(c2, NM_CFG_KEY_PROVIDER), NM_CFG_SHADOW);
-    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PROVIDER), "openai");
+    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_get_int(c2, NM_CFG_KEY_ROUNDS, 25), 7);
     ASSERT_EQ(nm_config_reasoning_echo_mode(c2), NM_REASONING_ECHO_ALL);
     nm_config_free(c2);
@@ -489,11 +489,11 @@ static void test_shadow_write_and_reload(void)
 static void test_shadow_write_leaves_user_file_alone(void)
 {
     pin_paths("untouched");
-    write_file_at(g_user, "provider = openai\n");
+    write_file_at(g_user, "provider = hyper\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "glm-5.3"), 0);
-    ASSERT_STR_EQ(read_file_at(g_user), "provider = openai\n");
+    ASSERT_STR_EQ(read_file_at(g_user), "provider = hyper\n");
     nm_config_free(c);
 }
 
@@ -625,7 +625,7 @@ static void test_provider_validator_hook(void)
     ASSERT_FALSE(nm_config_valid_provider(""));
     ASSERT_FALSE(nm_config_valid_provider(NULL));
     nm_config_set_provider_validator(test_valid_provider);
-    ASSERT_TRUE(nm_config_valid_provider("openai"));
+    ASSERT_TRUE(nm_config_valid_provider("hyper"));
     ASSERT_FALSE(nm_config_valid_provider("bogus"));
     ASSERT_FALSE(nm_config_valid_provider(""));
 }
@@ -1273,17 +1273,17 @@ static void test_scoped_model_resolution(void)
 {
     pin_paths("scoped");
     write_file_at(g_user,
-                  "provider = openai\n"
+                  "provider = hyper\n"
                   "model = plain-user\n"
-                  "model.openai = scoped-user\n"
+                  "model.hyper = scoped-user\n"
                   "model.ollama:local = local-user\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
 
-    /* The active provider (openai) picks its scoped value, and the
+    /* The active provider (hyper) picks its scoped value, and the
      * scoped spelling outranks the plain one. */
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL), "scoped-user");
-    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "scoped-user");
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-user");
 
     /* Another provider with a scoped value of its own uses it; one with
      * NO memory falls through to the plain spelling. */
@@ -1291,14 +1291,14 @@ static void test_scoped_model_resolution(void)
     ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "plain-user");
 
     /* The shadow's scoped spelling outranks the user's. */
-    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "scoped-shadow"), 0);
-    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "scoped-shadow");
+    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "scoped-shadow"), 0);
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-shadow");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
 
     /* -m / $NEVERMORE_MODEL are GLOBAL: an explicit flag is not memory,
      * so it beats the scoped value on every provider. */
     nm_config_set_cli(c, NM_CFG_KEY_MODEL, "from-cli");
-    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "from-cli");
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "from-cli");
     ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "from-cli");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_CLI);
     nm_config_set_cli(c, NM_CFG_KEY_MODEL, "");
@@ -1318,23 +1318,23 @@ static void test_scoped_key_vocabulary(void)
     pin_paths("scoped-keys");
     nm_config_set_provider_validator(test_valid_provider);
 
-    ASSERT_TRUE(nm_config_scoped_key_ok("model.openai"));
+    ASSERT_TRUE(nm_config_scoped_key_ok("model.hyper"));
     ASSERT_TRUE(nm_config_scoped_key_ok("model.ollama:local"));
     ASSERT_FALSE(nm_config_scoped_key_ok("model.nosuchprovider"));
-    ASSERT_FALSE(nm_config_scoped_key_ok("model"));         /* the plain key */
-    ASSERT_FALSE(nm_config_scoped_key_ok("rounds.openai")); /* not a scoped base */
+    ASSERT_FALSE(nm_config_scoped_key_ok("model"));        /* the plain key */
+    ASSERT_FALSE(nm_config_scoped_key_ok("rounds.hyper")); /* not a scoped base */
     ASSERT_FALSE(nm_config_scoped_key_ok("model."));
     ASSERT_FALSE(nm_config_scoped_key_ok("model..x"));
 
     write_file_at(g_user,
                   "model.nosuchprovider = x\n"
-                  "model.openai = gpt-x\n");
+                  "model.hyper = gpt-x\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_model_for(c, "openai", NULL), "gpt-x");
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "gpt-x");
     ASSERT_NULL(nm_config_model_for(c, "nosuchprovider", NULL));
 
-    ASSERT_STR_EQ(nm_config_scoped_key_at(c, 0), "model.openai");
+    ASSERT_STR_EQ(nm_config_scoped_key_at(c, 0), "model.hyper");
     ASSERT_NULL(nm_config_scoped_key_at(c, 1));
     nm_config_free(c);
 }
@@ -1348,25 +1348,25 @@ static void test_scoped_shadow_write_and_reset(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
 
-    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "gpt-x"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, "model.ollama:local", "local-x"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 2);
     ASSERT_STR_EQ(read_file_at(g_shadow),
-                  "model.openai = gpt-x\nmodel.ollama:local = local-x\n");
+                  "model.hyper = gpt-x\nmodel.ollama:local = local-x\n");
 
     /* A fresh load reads them back as scoped shadow values. */
     NmConfig *c2 = nm_config_load();
-    ASSERT_STR_EQ(nm_config_model_for(c2, "openai", NULL), "gpt-x");
-    ASSERT_EQ(nm_config_source(c2, "model.openai"), NM_CFG_SHADOW);
+    ASSERT_STR_EQ(nm_config_model_for(c2, "hyper", NULL), "gpt-x");
+    ASSERT_EQ(nm_config_source(c2, "model.hyper"), NM_CFG_SHADOW);
     nm_config_free(c2);
 
     /* Resetting one scoped key leaves the other. */
-    ASSERT_EQ(nm_config_shadow_reset(c, "model.openai"), 0);
+    ASSERT_EQ(nm_config_shadow_reset(c, "model.hyper"), 0);
     ASSERT_STR_EQ(read_file_at(g_shadow), "model.ollama:local = local-x\n");
     ASSERT_EQ(nm_config_shadow_count(c), 1);
 
     /* Resetting `model` clears every scoped spelling. */
-    ASSERT_EQ(nm_config_shadow_set(c, "model.openai", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "gpt-x"), 0);
     ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
     ASSERT_FALSE(file_present(g_shadow));
     ASSERT_EQ(nm_config_shadow_count(c), 0);

@@ -39,7 +39,7 @@ extern "C" {
  * a view of it via the catalog source. */
 typedef struct NmEntry
 {
-    const char *id;          /* wire name: "qwen3-coder:latest", "openai" */
+    const char *id;          /* wire name: "qwen3-coder:latest", "hyper" */
     const char *label;       /* display: "Qwen3 Coder" */
     const char *const *tags; /* "vision", "free", "cloud", "tools"… */
     size_t n_tags;

@@ -14,7 +14,6 @@
 extern const struct NmProvider nm_hyper_provider;
 extern const struct NmProvider nm_ollama_provider;
 extern const struct NmProvider nm_ollama_local_provider;
-extern const struct NmProvider nm_openai_provider;
 extern const struct NmProvider nm_openrouter_provider;
 extern const struct NmProvider nm_opencode_provider;     /* :go */
 extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
@@ -58,7 +57,7 @@ void nm_conversation_id_new(char out[NM_CONVERSATION_ID_LEN]);
  * NM_NO_LIVE_CATALOG is set in the environment. `make check` runs
  * with it set (TESTS_ENVIRONMENT) so default-base catalog probes are
  * no-ops (static fallback) — a default-base probe is a real network
- * call (local-daemon 127.0.0.1:11434, api.openai.com, ...) whose
+ * call (local-daemon 127.0.0.1:11434, hyper.charm.land, ...) whose
  * latency or refusal is CI-environment-dependent (a blackholed
  * loopback connect stalled Windows CI past the 10s watchdog).
  * Providers apply the gate ONLY when the caller passed no explicit

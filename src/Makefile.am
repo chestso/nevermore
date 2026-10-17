@@ -123,7 +123,6 @@ nevermore_SOURCES = \
     provider_hyper.c \
     provider_ollama.c \
     provider_ollama_local.c \
-    provider_openai.c \
     provider_openrouter.c \
     provider_opencode.c \
     provider_opencode_zen.c \

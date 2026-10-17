@@ -18,7 +18,7 @@
  *   < runtime shadow ~/.local/state/nevermore/config (written by the
  *   chat's /model /provider /config) < environment < -p/-m.
  * Provider keys come from the environment (HYPER_API_KEY,
- * OLLAMA_API_KEY, OPENAI_API_KEY, OPENROUTER_API_KEY,
+ * OLLAMA_API_KEY, OPENROUTER_API_KEY,
  * OPENCODE_API_KEY) or, when unset, from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
  * nm_provider_api_key; env always wins.
@@ -71,8 +71,8 @@ static void usage(FILE *out)
             "\n"
             "options:\n"
             "  -p, --provider NAME   hyper | ollama:cloud | ollama:local |\n"
-            "                        openai | openrouter | opencode:go |\n"
-            "                        opencode:zen | test:replay\n"
+            "                        openrouter | opencode:go | opencode:zen |\n"
+            "                        test:replay\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -i, --image PATH      attach an image to the prompt (repeatable)\n"
             "  -h, --help            this help\n"

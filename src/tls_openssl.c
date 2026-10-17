@@ -26,7 +26,7 @@
 static SSL_CTX *g_ctx;
 
 /* One-time process-lifetime context. TLS 1.2+ only: nothing we talk
- * to (openai, ollama.com, openrouter) needs anything older. */
+ * to (hyper.charm.land, ollama.com, openrouter) needs anything older. */
 static SSL_CTX *openssl_ctx(void)
 {
     if (g_ctx)

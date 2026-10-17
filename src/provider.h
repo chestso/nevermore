@@ -17,7 +17,6 @@
  *                  chat surface plus the native /api catalog
  *   ollama:local   the local Ollama daemon (http://localhost:11434,
  *                  no auth) — same wire and catalog, other endpoint
- *   openai         OpenAI chat completions
  *   openrouter     OpenAI-compatible aggregator (https://openrouter.ai/api/v1)
  *   opencode:go    OpenCode Go (https://opencode.ai/zen/go/v1, the
  *                  $10/month tier) — OpenAI-compatible chat plus the
@@ -72,7 +71,6 @@ typedef enum
     NM_PROVIDER_HYPER = 0,
     NM_PROVIDER_OLLAMA,       /* Ollama Cloud */
     NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
-    NM_PROVIDER_OPENAI,
     NM_PROVIDER_OPENROUTER,
     NM_PROVIDER_OPENCODE,     /* OpenCode Go (subscription tier) */
     NM_PROVIDER_OPENCODE_ZEN, /* OpenCode Zen (credits tier) */
@@ -389,7 +387,7 @@ struct NmProvider
 {
     NmProviderId id;
     const char *name; /* "hyper", "ollama:cloud", "ollama:local",
-                       * "openai", "openrouter", "opencode:go",
+                       * "openrouter", "opencode:go",
                        * "opencode:zen" */
     const char *default_base_url;
 
@@ -473,7 +471,7 @@ struct NmProvider
      * caller: valid until the next call into this provider.
      * Providers that must fetch catalogs over the wire (ollama native
      * /api/tags + /api/show) do so here; static catalogs (hyper,
-     * openai, openrouter) are embedded from data/nm-*-models.json.
+     * openrouter, opencode) are embedded from data/nm-*-models.json.
      *
      * This is the BLOCKING drive: it pumps the async seam below to
      * completion when a live fetch is warranted, then answers. The

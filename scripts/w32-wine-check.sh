@@ -240,7 +240,7 @@ run_build test_provider src/clock.c tests/test_provider.c src/nevermore.c \
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
-	src/provider_openai.c src/provider_openrouter.c \
+	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
@@ -254,7 +254,7 @@ run_build test_source src/clock.c tests/test_source.c src/source.c src/nevermore
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
-	src/provider_openai.c src/provider_openrouter.c \
+	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	src/openai_client.c src/json.c src/sse.c \
@@ -271,7 +271,7 @@ run_build test_openai_client src/clock.c tests/test_openai_client.c src/openai_c
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
-	src/provider_openai.c src/provider_openrouter.c \
+	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	-lws2_32 -lpthread
@@ -287,7 +287,7 @@ run_build test_agent src/clock.c tests/test_agent.c src/agent.c src/session.c sr
 	src/provider_openaicompat.c \
 	src/provider_hyper.c src/provider_ollama.c \
 	src/provider_ollama_local.c \
-	src/provider_openai.c src/provider_openrouter.c \
+	src/provider_openrouter.c \
 	src/provider_opencode.c src/provider_opencode_zen.c \
 	src/provider_test.c \
 	-lws2_32 -lpthread
@@ -330,7 +330,7 @@ if [ -n "$BOBA_LIB" ]; then
 		src/nevermore.c src/authinfo.c src/source.c \
 		src/provider_openaicompat.c src/provider_hyper.c \
 		src/provider_ollama.c src/provider_ollama_local.c \
-		src/provider_openai.c src/provider_openrouter.c \
+		src/provider_openrouter.c \
 		src/provider_opencode.c src/provider_opencode_zen.c \
 		src/provider_test.c \
 		-lpthread
