@@ -155,6 +155,15 @@ missing prerequisite.
 - **Poll a file's CONTENT, not its existence** (`> file` truncates
   before the write): wait until it PARSES (`wait_for_pid_file`) — the
   signal that means "the data is here" is the data, not a proxy.
+- **A pid-keyed scratch dir outlives the run** (`test_scratch_dir`,
+  the PID in the name, never wiped): a run handed a PID an earlier run
+  used inherits that run's FILES, and a layer that MERGES what it loads
+  — the config shadow is the one that bit — turns an exact-content
+  assert into a failure on a file this test never wrote (under Wine,
+  where the PID repeats, two runs a day apart land in the SAME
+  directory). Remove a fixture before writing it, the way `pin_paths` /
+  `pin_cfg_paths` remove both config files, and give every new fixture
+  the same treatment.
 - **Bound drive loops by WALL CLOCK, not iteration count** when waiting
   on time: a ready-fd pass costs microseconds, so 400 iterations can
   finish in ~20 ms and exit before a 250 ms budget elapses. An
