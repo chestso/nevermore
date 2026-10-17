@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "authinfo.h"
+#include "identity.h"
 #include "provider.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
@@ -1539,7 +1540,7 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-opencode-test") != NULL);
     ASSERT_TRUE(strstr(last_request,
                        "x-opencode-session: nm-0123456789abcdef0123456789abcdef") != NULL);
-    ASSERT_TRUE(strstr(last_request, "User-Agent: nevermore (nevermore agent)") != NULL);
+    ASSERT_TRUE(strstr(last_request, "User-Agent: " NM_USER_AGENT) != NULL);
     ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
 }
 

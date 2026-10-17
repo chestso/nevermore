@@ -15,6 +15,7 @@
 #ifndef NM_OPENAI_CLIENT_H
 #define NM_OPENAI_CLIENT_H
 
+#include "identity.h" /* NM_USER_AGENT — the one identity string */
 #include "json.h"
 #include "provider.h"
 #include "transport.h"
@@ -25,10 +26,9 @@ extern "C" {
 
 /* The User-Agent nevermore identifies as, on every wire surface:
  * chat requests (via NmOpenaiEndpoint.user_agent) and one-shot
- * catalog fetches alike. One definition so they cannot drift — a
- * hardcoded copy in a provider's catalog fetch is the same header
- * with a second source of truth. */
-#define NM_USER_AGENT "nevermore (nevermore agent)"
+ * catalog fetches alike, is NM_USER_AGENT in identity.h — one
+ * definition so they cannot drift, and the same string the TUI banner
+ * and `--version` render. */
 
 /* Provider-supplied extra request headers on top of the fixed set
  * (Content-Type, auth, User-Agent). Two tiers of one gateway that

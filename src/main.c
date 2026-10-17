@@ -42,8 +42,8 @@
 #include "reminder.h"
 #include "sysout.h"
 
-#include "config.h" /* BOBA_VERSION, HAVE_* — from configure */
-#include "nevermore_version.h"
+#include "config.h" /* HAVE_* — from configure */
+#include "identity.h"
 #include "wire_recorder.h"
 
 #ifndef _WIN32
@@ -54,7 +54,7 @@
 
 static void print_version(void)
 {
-    printf("nevermore %s (boba %s)\n", NEVERMORE_VERSION, BOBA_VERSION);
+    puts(NM_IDENTITY_LINE);
 }
 
 static void usage(FILE *out)
@@ -444,12 +444,13 @@ static int run_interactive(const char *provider_name, const char *model,
      * flush, i.e. before any frame or transcript byte, so it is outside
      * the transcript seam's jurisdiction. Routing it through the system
      * stream would need a runtime handle before the transcript attaches
-     * and would make it a repaintable unit for no benefit. The version
-     * is the whole banner: `provider · model` lives in the status row
-     * (nm_chat_app_identity) and is not repeated here. */
-    printf("nevermore %s\n"
+     * and would make it a repaintable unit for no benefit. The identity
+     * is the whole banner — the UA verbatim, so what the user reads is
+     * exactly what the providers receive; `provider · model` lives in
+     * the status row (nm_chat_app_identity) and is not repeated here. */
+    printf("%s\n"
            "Type a prompt; %s/help%s for commands, %s/quit%s to leave.\n\n",
-           NEVERMORE_VERSION, "\033[1m", "\033[1m", "\033[1m", "\033[0m");
+           NM_USER_AGENT, "\033[1m", "\033[1m", "\033[1m", "\033[0m");
 
     int rc = tui_runtime_run(rt);
 

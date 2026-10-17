@@ -216,7 +216,7 @@ jobs:
           # reproduce that rule and require the packaged .exe to agree.
           expected_boba=$(git -C boba describe --tags --match 'v*' |
             sed 's/^v//;s/-\([0-9]*\)-g/.\1-/')
-          printf '%s\n' "$out" | grep -q "nevermore $version (boba $expected_boba)" || {
+          printf '%s\n' "$out" | grep -q "nevermore $version (boba $expected_boba; " || {
             echo "ERROR: named $version, but the .exe reports '$out' —" >&2
             echo "       this checkout builds '(boba $expected_boba)'" >&2
             exit 1

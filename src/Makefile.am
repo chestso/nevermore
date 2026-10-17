@@ -52,6 +52,7 @@ EXTRA_DIST = \
     connection_layout.h \
     context.h \
     history.h \
+    identity.h \
     json.h \
     nevermore.h \
     clock.h \
@@ -126,6 +127,7 @@ nevermore_SOURCES = \
     provider_openrouter.c \
     provider_opencode.c \
     provider_opencode_zen.c \
+    identity.h \
     openai_client.h \
     openai_client.c \
     transport_internal.h \

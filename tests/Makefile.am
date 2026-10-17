@@ -160,6 +160,13 @@ test_version.$(OBJEXT): $(top_builddir)/src/nevermore_version.h
 $(top_builddir)/src/nevermore_version.h:
 	$(MAKE) -C $(top_builddir)/src nevermore_version.h
 
+# Every test object that expands the identity macros (the wire client
+# and provider TUs through identity.h, and test_version's pin) embeds
+# the generated version header. The gcc depfiles record that
+# dependency for rebuilds; the check-programs recipe below supplies the
+# build-ORDER half (the file must exist before any cc runs), which is
+# the macOS pre-flight's fresh-tree case.
+
 # The provider TUs: one variable, referenced BARE (never
 # ../src/$(TEST_PROVIDER_SOURCES) — automake silently drops a path
 # prefix glued to a variable). Every test binary that links the
@@ -440,8 +447,17 @@ endif
 # would otherwise compile all 15 binaries one-by-one inside it.
 # (There is no built-in `make check_PROGRAMS`: the serial harness
 # only expands that variable inside its own recursive rule.)
+#
+# The generated version header is built FIRST, by this recipe, because
+# the objects that expand the identity macros (identity.h: the wire
+# client, the provider TUs, test_version) need it to exist before cc
+# runs — and `make -C tests check-programs` is a fresh tree's entry
+# point on the macOS pre-flight, so no src `all` ever ran. The programs
+# are built by the recursion, never as prerequisites here: prerequisites
+# would compile in parallel with the header and race it.
 .PHONY: check-programs
-check-programs: $(check_PROGRAMS)
+check-programs: $(top_builddir)/src/nevermore_version.h
+	$(MAKE) $(AM_MAKEFLAGS) $(check_PROGRAMS)
 
 # Compile every test TU, link nothing — the macOS cross pre-flight's
 # entry point, where the link is not merely awkward but impossible (a

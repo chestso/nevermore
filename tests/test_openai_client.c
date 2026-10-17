@@ -2386,7 +2386,7 @@ static void test_catalog_fetch_carries_extra_headers(void)
 
     ASSERT_TRUE(strstr(req, "Authorization: Bearer test-key") != NULL);
     ASSERT_TRUE(strstr(req, "x-opencode-session: nm-catalogid") != NULL);
-    ASSERT_TRUE(strstr(req, "User-Agent: nevermore (nevermore agent)") != NULL);
+    ASSERT_TRUE(strstr(req, "User-Agent: " NM_USER_AGENT) != NULL);
     /* And with no extras the fetch is byte-for-byte the old behavior. */
 }
 

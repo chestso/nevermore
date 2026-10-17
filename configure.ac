@@ -21,6 +21,31 @@ esac
 AM_CONDITIONAL([HOST_WINDOWS], [test "x$host_windows" = "xyes"])
 AM_CONDITIONAL([HOST_MACOS], [test "x$host_macos" = "xyes"])
 
+dnl Build identity for the User-Agent, the --version line and the TUI
+dnl banner (src/identity.h): the TARGET, not the build machine. The OS
+dnl label is the canonical triple's own word, not `uname` — so a GNU
+dnl system on the Linux kernel reads GNU/Linux (`linux-gnu`, the
+dnl autotools/glibc case), a musl target reads Linux, and the
+dnl mingw/msys targets read Windows. The CPU is canonicalized to the
+dnl GNU spelling (config.guess already says aarch64 for Apple Silicon;
+dnl the arm64 branch is belt-and-braces for other guessers).
+case "$host_os" in
+  linux-gnu*)   nm_identity_os="GNU/Linux" ;;
+  linux*)       nm_identity_os="Linux" ;;
+  mingw*|msys*) nm_identity_os="Windows" ;;
+  darwin*)      nm_identity_os="macOS" ;;
+  *)            nm_identity_os="$host_os" ;;
+esac
+case "$host_cpu" in
+  amd64) nm_identity_arch="x86_64" ;;
+  arm64) nm_identity_arch="aarch64" ;;
+  *)     nm_identity_arch="$host_cpu" ;;
+esac
+AC_DEFINE_UNQUOTED([NM_BUILD_OS], ["$nm_identity_os"],
+                   [target OS label for the identity strings])
+AC_DEFINE_UNQUOTED([NM_BUILD_ARCH], ["$nm_identity_arch"],
+                   [target CPU label for the identity strings])
+
 dnl A cross build FOR WINDOWS: the target is MinGW while the machine
 dnl doing the build is not Windows at all. Autoconf's `cross_compiling`
 dnl is NOT the test — it stays "maybe" until an AC_RUN_IFELSE settles it,

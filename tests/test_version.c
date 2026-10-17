@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "nevermore_version.h"
+#include "identity.h"
 #include "test_helpers.h"
 
 /* One component of the version's BASE (everything before the first '-',
@@ -73,9 +74,33 @@ static void test_numeric_fields_agree_with_the_version_string(void)
     ASSERT_TRUE(memchr(NEVERMORE_VERSION, '.', base_len) != NULL);
 }
 
+/* The identity surfaces are one string: `--version` prints the human
+ * line, the UA and the TUI banner print the product-token form. Only
+ * the product/version separator may differ; everything from the
+ * version onward — boba, target OS, target CPU — must be byte-identical,
+ * which is what keeps "the UA matches --version" true by construction. */
+static void test_identity_surfaces_agree(void)
+{
+    ASSERT_TRUE(strncmp(NM_IDENTITY_LINE, "nevermore ", 10) == 0);
+    ASSERT_TRUE(strncmp(NM_USER_AGENT, "nevermore/", 10) == 0);
+
+    const char *line_tail = strstr(NM_IDENTITY_LINE, NEVERMORE_VERSION);
+    const char *ua_tail = strstr(NM_USER_AGENT, NEVERMORE_VERSION);
+    ASSERT_NOT_NULL(line_tail);
+    ASSERT_NOT_NULL(ua_tail);
+    ASSERT_STR_EQ(line_tail, ua_tail);
+
+    /* Each build fact is actually spelled in the wire form, not
+     * silently compiled out by the fallbacks. */
+    ASSERT_NOT_NULL(strstr(NM_USER_AGENT, BOBA_VERSION));
+    ASSERT_NOT_NULL(strstr(NM_USER_AGENT, NM_BUILD_OS));
+    ASSERT_NOT_NULL(strstr(NM_USER_AGENT, NM_BUILD_ARCH));
+}
+
 int main(void)
 {
     printf("test_version:\n");
     RUN_TEST(test_numeric_fields_agree_with_the_version_string);
+    RUN_TEST(test_identity_surfaces_agree);
     TEST_SUMMARY();
 }

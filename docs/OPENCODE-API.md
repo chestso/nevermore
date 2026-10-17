@@ -425,8 +425,10 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   machine `opencode.ai` (nevermore resolves exactly one env key per
   provider; the ecosystem's `OPENCODE_ZEN_API_KEY` alias is not part
   of nevermore's contract — set `OPENCODE_API_KEY`);
-- `User-Agent: nevermore (nevermore agent)` — already the shared
-  default;
+- `User-Agent: nevermore/<ver> (boba <boba-ver>; <os> <arch>)` — the
+  shared default from `src/identity.h`, the same identity
+  `nevermore --version` prints (e.g.
+  `nevermore/0.2.0.3-f07d870 (boba 0.4.0; GNU/Linux x86_64)`);
 - **`x-opencode-session: <stable conversation id>` on every
   request** (Go hard-requires it; Zen free ids require it and
   charge nothing);
