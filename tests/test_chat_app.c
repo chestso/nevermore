@@ -500,7 +500,12 @@ static char g_cfg_user[700];
 static char g_cfg_shadow[700];
 
 /* Pin both config paths into the test's own scratch dir — never the
- * real ~/.config or ~/.local/state. */
+ * real ~/.config or ~/.local/state. The two files are removed first,
+ * for the reason test_config.c pins its own the same way: the scratch
+ * root is PID-keyed and a Wine run reuses the previous run's PID, so a
+ * leftover SHADOW leaks into this run — the app loads it and re-emits
+ * what it finds, and an exact-content shadow assert then fails on a
+ * file this run never wrote. */
 static void pin_cfg_paths(const char *sub)
 {
     snprintf(g_cfg_root, sizeof(g_cfg_root), "%s/cfg-%s",
@@ -508,6 +513,8 @@ static void pin_cfg_paths(const char *sub)
     chat_mkdir(g_cfg_root);
     snprintf(g_cfg_user, sizeof(g_cfg_user), "%s/config", g_cfg_root);
     snprintf(g_cfg_shadow, sizeof(g_cfg_shadow), "%s/shadow", g_cfg_root);
+    remove(g_cfg_user);
+    remove(g_cfg_shadow);
     nm_config_set_paths(g_cfg_user, g_cfg_shadow);
 }
 
