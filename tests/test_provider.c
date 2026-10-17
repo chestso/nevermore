@@ -1141,13 +1141,101 @@ static void test_ollama_needs_auth_local_vs_cloud(void)
     ASSERT_NOT_NULL(local);
     ASSERT_EQ(local->needs_auth(local, NULL), 0);
     ASSERT_EQ(local->needs_auth(local, "http://127.0.0.1:11434/v1"), 0);
-    /* Both share one key env name (the daemon ignores it). */
+    /* The cloud key is CLOUD-only: the local tier reads no key source
+     * at all (no env name, no authinfo machine), so a token exported
+     * for the cloud can never resolve into a local round. The wire
+     * half of that rule is test_ollama_local_chat_never_carries_a_key. */
     ASSERT_STR_EQ(cloud->env_key(cloud), "OLLAMA_API_KEY");
-    ASSERT_STR_EQ(local->env_key(local), "OLLAMA_API_KEY");
+    ASSERT_NULL(local->env_key(local));
+    ASSERT_NULL(local->authinfo_machine);
+    ASSERT_NULL(nm_provider_api_key(local));
     /* Endpoint defaults are pinned per provider, not derived from key
      * presence: cloud-vs-local is the user's choice of provider name. */
     ASSERT_STR_EQ(cloud->default_base_url, "https://ollama.com/v1");
     ASSERT_STR_EQ(local->default_base_url, "http://localhost:11434/v1");
+}
+
+/* The local tier is keyless by CONSTRUCTION, not by convention: even
+ * with a cloud token sitting in $OLLAMA_API_KEY (exported for the
+ * cloud tier), a local round must carry no Authorization header —
+ * whatever is listening where the daemon should be (a stray loopback
+ * process, a replay server) must not be handed the cloud credential. */
+static void test_ollama_local_chat_never_carries_a_key(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    /* The key is exported exactly as a cloud user would have it. */
+    test_setenv("OLLAMA_API_KEY", "sk-cloud-must-not-ride");
+    const char *api_key = nm_provider_api_key(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, api_key);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hello, world");
+    pthread_join(th, NULL);
+    test_unsetenv("OLLAMA_API_KEY");
+
+    /* No auth header, not even an empty one: the wire is the proof. */
+    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization") == NULL);
+}
+
+/* The symmetric half: the CLOUD tier still speaks with its credential.
+ * The rule is one tier's keyless story, not a muted bearer builder —
+ * if this ever fails, the fix went a provider too far. */
+static void test_ollama_cloud_chat_carries_the_key(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, hyper_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("ollama:cloud");
+    ASSERT_NOT_NULL(p);
+
+    test_setenv("OLLAMA_API_KEY", "sk-cloud-rides-here");
+    const char *env_key = nm_provider_api_key(p);
+    ASSERT_STR_EQ(env_key, "sk-cloud-rides-here");
+    /* The env block dies with the variable — the CRT's _putenv_s
+     * frees it, so the pointer getenv handed out must be copied
+     * BEFORE the unset (glibc's dangling one only looks alive). */
+    char api_key[64];
+    snprintf(api_key, sizeof(api_key), "%s", env_key);
+    test_unsetenv("OLLAMA_API_KEY");
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:120b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, api_key);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+
+    ASSERT_TRUE(strstr(last_request,
+                       "Authorization: Bearer sk-cloud-rides-here") != NULL);
 }
 
 static void test_ollama_local_catalog_uses_local_default(void)
@@ -1821,6 +1909,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
+    RUN_TEST(test_ollama_local_chat_never_carries_a_key);
+    RUN_TEST(test_ollama_cloud_chat_carries_the_key);
     RUN_TEST(test_ollama_local_catalog_uses_local_default);
     RUN_TEST(test_openrouter_models_fetch);
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);

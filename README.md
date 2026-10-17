@@ -95,7 +95,9 @@ machine opencode.ai        login apikey password ...
 
 Environment variables win over the file. Point elsewhere with
 `NEVERMORE_AUTHINFO=/path/to/authinfo`. `ollama:local` (the zero-config
-default) needs no key: use `-p ollama:cloud` for Ollama Cloud.
+default) needs no key — and reads none either: the local tier has no key
+source at all, so an `OLLAMA_API_KEY` you exported for Ollama Cloud is
+never attached to a local round (use `-p ollama:cloud` for the cloud).
 
 Starting (or switching to) a provider that needs a key with none
 configured says so up front — `export OPENROUTER_API_KEY`, or add the
