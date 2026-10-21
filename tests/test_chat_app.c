@@ -46,6 +46,7 @@
 #include <boba/msg.h>
 #include <boba/runtime.h>
 #include <boba/stream.h>
+#include <boba/terminal_profile.h>
 #include <boba/unicode.h>
 
 #include "chat_app.h"
@@ -1829,9 +1830,23 @@ static void test_context_gauge_reports_usage_and_limit(void)
      * selector, and the row's column math (the rule's fill, the
      * identity's right edge) is built on it. Pin the width here too: a
      * boba regression that re-widened the cluster would leave this
-     * frame's bytes unchanged but shift every cell after the gauge. */
-    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1\xef\xb8\x8e"), 1);
-    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1"), 2);
+     * frame's bytes unchanged but shift every cell after the gauge.
+     *
+     * The width is measured against the UTS #51 rule EXPLICITLY, not
+     * against the ambient model: the marker is written for the rule
+     * (a VS15 cluster takes one cell where UTS #51 defines a text
+     * glyph), but a terminal's own rule may disagree (xterm and
+     * Windows Terminal keep the base's width, so they draw ⚡︎ two
+     * cells wide). The zero-suffix call answers with whatever model is
+     * in force — the process's, on a dev box, and the runner's, in CI —
+     * so the assert would be a coin flip. The _model form is the same
+     * measurement under a named rule. */
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1\xef\xb8\x8e",
+                                           TUI_WIDTH_MODEL_UTS51),
+              1);
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1",
+                                           TUI_WIDTH_MODEL_UTS51),
+              2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x9a\xa1"
