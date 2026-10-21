@@ -2217,18 +2217,27 @@ static void test_status_row_cursor_lands_on_the_input_row(void)
      * output. */
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(out);
-    const char *show = NULL;
-    for (const char *p = strstr(out, "\x1b[?25h"); p;
-         p = strstr(p + 1, "\x1b[?25h"))
-        show = p;
-    ASSERT_NOT_NULL(show);
-    /* Walk back to the up-move that opens the placement (the forward, when
-     * there is one, ends in 'C'; the input's text holds no 'A'). */
-    const char *q = show;
-    while (q > out && q[-1] != 'A')
-        q--;
-    ASSERT_TRUE(q - out >= 4);
-    ASSERT_TRUE(memcmp(q - 4, "\x1b[1A", 4) == 0);
+    /* The placement is the runtime's, not the frame buffer's: the frame
+     * is not bracketed by a hide/show pair (cursor visibility is
+     * reconciled edge to edge, so a frame on a visible cursor emits no
+     * visibility byte), so anchor on the LAST cursor-forward of a
+     * visible-cursor frame — the placement's own column move. */
+    const char *fwd = NULL;
+    for (const char *p = strstr(out, "\x1b["); p;
+         p = strstr(p + 2, "\x1b[")) {
+        const char *q = p + 2;
+        while (*q >= '0' && *q <= '9')
+            q++;
+        if (q > p + 2 && *q == 'C')
+            fwd = p;
+    }
+    ASSERT_NOT_NULL(fwd);
+    /* ...and the move that opens it is exactly ONE row up: two would
+     * mean the chrome row was counted twice; zero would mean the cursor
+     * was declared on the chrome row (which is what forgetting the
+     * offset would do). */
+    ASSERT_TRUE(fwd - out >= 5);
+    ASSERT_TRUE(memcmp(fwd - 5, "\x1b[1A\r", 5) == 0);
 
     harness_free(h);
 }
@@ -3209,58 +3218,185 @@ static void test_separator_blank_line_after_answer(void)
     close(rr.fd);
 }
 
-/* Strip CSI/OSC escape sequences and carriage returns, leaving the
- * logical text rows a user would see (used to assert commit ORDER
- * without live-region framing bytes in the way). Heap-owned. */
-/* Reduce a raw capture to what a terminal would leave in the
- * SCROLLBACK: escape sequences and CRs go, and so does every LIVE
- * FRAME — the runtime brackets each frame repaint with
- * hide-cursor/show-cursor (the input always holds the cursor now), so
- * the whole repaint (spinner, gutter, input row) is dropped. What
- * remains is the committed transcript, which is what the transcript
- * assertions are about; the live region's own content is asserted on
- * the frame itself (tui_runtime_render). */
+/* A screen model for strip_frames: independent rows of bytes, no
+ * bottom edge (a terminal would scroll rows off its screen; a
+ * scrollback read keeps them). */
+typedef struct Screen
+{
+    char **row;
+    size_t *len;
+    size_t *cap;
+    size_t count;
+} Screen;
+
+static void screen_row(Screen *s, size_t r)
+{
+    while (s->count <= r) {
+        size_t k = s->count++;
+        s->row = realloc(s->row, s->count * sizeof(*s->row));
+        s->len = realloc(s->len, s->count * sizeof(*s->len));
+        s->cap = realloc(s->cap, s->count * sizeof(*s->cap));
+        if (!s->row || !s->len || !s->cap)
+            return;
+        s->row[k] = NULL;
+        s->len[k] = 0;
+        s->cap[k] = 0;
+    }
+}
+
+static void screen_put(Screen *s, size_t r, size_t col, char ch)
+{
+    screen_row(s, r);
+    if (r >= s->count || !s->row)
+        return;
+    if (col >= s->cap[r]) {
+        size_t cap = s->cap[r] ? s->cap[r] : 32;
+        while (cap <= col)
+            cap *= 2;
+        char *grown = realloc(s->row[r], cap);
+        if (!grown)
+            return;
+        s->row[r] = grown;
+        s->cap[r] = cap;
+    }
+    while (s->len[r] < col)
+        s->row[r][s->len[r]++] = ' ';
+    if (col == s->len[r])
+        s->len[r]++;
+    s->row[r][col] = ch;
+}
+
+static void screen_free(Screen *s)
+{
+    for (size_t i = 0; i < s->count; i++)
+        free(s->row[i]);
+    free(s->row);
+    free(s->len);
+    free(s->cap);
+    memset(s, 0, sizeof(*s));
+}
+
+/* Reduce a raw capture to the rows a user sees: the committed
+ * transcript above the live region.
+ *
+ * The runtime paints the live region IN PLACE — cursor up to the
+ * frame's top, the rows, then the placement — and it no longer
+ * brackets a frame with a hide/show cursor pair (visibility is
+ * edge-triggered: a change emits one mode byte, a steady cursor emits
+ * none). Dropping the bytes between the old brackets therefore drops
+ * nothing, and every repaint's rows would pile up as if they were new
+ * scrollback. Replay the controls an inline paint actually
+ * emits instead (CR, LF, cursor up/down/forward, erase-in-line, SGR);
+ * the screen model then does the filtering by construction: a repaint
+ * overwrites its own rows, and only the committed transcript stays
+ * above them. The live region's own content is asserted on the frame
+ * itself (tui_runtime_render), never on this text.
+ *
+ * Trailing blanks are trimmed and rows are joined with '\n', so
+ * "\n\n" is one blank row. Heap-owned. */
 static char *strip_frames(const char *in)
 {
-    size_t n = strlen(in), o = 0;
-    char *out = malloc(n + 1);
-    if (!out)
-        return NULL;
+    Screen s = { 0 };
+    size_t row = 0, col = 0, n = strlen(in);
     for (size_t i = 0; i < n;) {
         unsigned char c = (unsigned char)in[i];
         if (c == 0x1b) {
-            /* Hide cursor: drop the frame up to its show-cursor, when
-             * the frame is bracketed before the next one begins. */
-            if (strncmp(in + i, "\x1b[?25l", 6) == 0) {
-                const char *show = strstr(in + i + 6, "\x1b[?25h");
-                const char *hide = strstr(in + i + 6, "\x1b[?25l");
-                if (show && (!hide || show < hide)) {
-                    i = (size_t)(show - in) + 6;
-                    continue;
+            char kind = in[i + 1];
+            if (kind == '[') {
+                /* CSI: params, then one final byte in @..~. Only the
+                 * first parameter matters to the controls below. */
+                size_t j = i + 2, arg = 0;
+                int semi = 0;
+                while (j < n && !(in[j] >= '@' && in[j] <= '~')) {
+                    if (in[j] == ';')
+                        semi = 1;
+                    else if (!semi && in[j] >= '0' && in[j] <= '9')
+                        arg = arg * 10 + (size_t)(in[j] - '0');
+                    j++;
                 }
+                char final = j < n ? in[j] : '\0';
+                size_t mv = arg ? arg : 1; /* cursor moves default to 1 */
+                switch (final) {
+                case 'A':
+                    row = mv > row ? 0 : row - mv;
+                    break;
+                case 'B':
+                    row += mv;
+                    screen_row(&s, row);
+                    break;
+                case 'C':
+                    col += mv;
+                    break;
+                case 'D':
+                    col = mv > col ? 0 : col - mv;
+                    break;
+                case 'G':
+                    col = arg > 0 ? arg - 1 : 0;
+                    break;
+                case 'K': /* EL: 0 to end (default), 1 to start, 2 all */
+                    if (row < s.count) {
+                        if (arg == 2)
+                            s.len[row] = 0;
+                        else if (arg == 1)
+                            for (size_t k = 0; k < col && k < s.len[row]; k++)
+                                s.row[row][k] = ' ';
+                        else if (col < s.len[row])
+                            s.len[row] = col;
+                    }
+                    break;
+                default:
+                    break; /* SGR and the rest: no text */
+                }
+                i = j < n ? j + 1 : n;
+                continue;
             }
-            if (in[i + 1] == '[') {
-                i += 2;
-                while (in[i] && !(in[i] >= '@' && in[i] <= '~'))
-                    i++;
-            } else if (in[i + 1] == ']') {
-                i += 2;
-                while (in[i] && in[i] != 0x07)
-                    i++;
-            } else if (in[i + 1]) {
-                i++;
+            if (kind == ']' || kind == '_' || kind == 'P') {
+                /* OSC (BEL or ST terminated), APC and DCS (ST): no text. */
+                size_t j = i + 2;
+                while (j < n && !(in[j] == 0x07 ||
+                                  (in[j] == 0x1b && in[j + 1] == '\\')))
+                    j++;
+                i = j < n ? j + (in[j] == 0x07 ? 1 : 2) : n;
+                continue;
             }
-            i++;
+            i += 2;
             continue;
         }
         if (c == '\r') {
+            col = 0;
             i++;
             continue;
         }
-        out[o++] = (char)c;
+        if (c == '\n') {
+            row++;
+            screen_row(&s, row);
+            i++;
+            continue;
+        }
+        screen_put(&s, row, col, (char)c);
+        col++;
         i++;
     }
-    out[o] = '\0';
+
+    size_t total = 0;
+    for (size_t r = 0; r < s.count; r++) {
+        while (s.len[r] > 0 && s.row[r][s.len[r] - 1] == ' ')
+            s.len[r]--;
+        total += s.len[r] + 1;
+    }
+    char *out = malloc(total + 1);
+    if (out) {
+        size_t o = 0;
+        for (size_t r = 0; r < s.count; r++) {
+            if (s.len[r] > 0) {
+                memcpy(out + o, s.row[r], s.len[r]);
+                o += s.len[r];
+            }
+            out[o++] = '\n';
+        }
+        out[o] = '\0';
+    }
+    screen_free(&s);
     return out;
 }
 

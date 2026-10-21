@@ -85,11 +85,21 @@ jobs:
           # never takes the fence's bytes into its own cells, which is
           # what lets nevermore keep the model's blank lines inside a
           # block and still end the block where the next one starts).
+          # And, at this pin, the inline paint protocol: a paint is
+          # delivered in ONE write, and cursor visibility is
+          # edge-triggered — a change emits its one mode byte, a steady
+          # cursor emits none — so a frame no longer carries a
+          # hide/show-cursor pair. The chat-app tests replay the
+          # capture as a screen and read the committed scrollback above
+          # the live region.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. NOTE: this tag must exist on the boba remote
-          # BEFORE nevermore, or CI cannot fetch it. Bump it in all
-          # three platform workflows at once.
-          ref: v0.4.0
+          # mid-work. NOTE: this is boba master's head; it must be
+          # PUSHED before nevermore, or CI cannot fetch it. It also
+          # names the version the packaged binaries print (git describe
+          # reads v0.4.0-10-gd3c4c01; nevermore reports
+          # 0.4.0.10-d3c4c01). Bump it in all three platform workflows
+          # at once.
+          ref: d3c4c0135c2e6c017e3c5c3fd6dd7541fbf5c996
           path: boba
           fetch-depth: 0
 
