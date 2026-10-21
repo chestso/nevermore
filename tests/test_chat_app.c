@@ -5571,6 +5571,28 @@ static void test_config_set_and_runtime_layer(void)
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "use /provider or /model") != NULL);
 
+    /* The image window is a plain key like any other: validated,
+     * normalized, persisted, and read by the agent at the point of use
+     * (no push). */
+    harness_type(h, "/config set image_live 3");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: image_live = 3") != NULL);
+    ASSERT_EQ(nm_agent_image_live(nm_chat_app_agent(h->app)), 3ul);
+    harness_type(h, "/config set image_live off");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: image_live = off") != NULL);
+    ASSERT_EQ(nm_agent_image_live(nm_chat_app_agent(h->app)), 0ul);
+    /* `0` is refused: an image that never rides is a broken image. */
+    harness_type(h, "/config set image_live 0");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "invalid value") != NULL);
+    ASSERT_EQ(nm_agent_image_live(nm_chat_app_agent(h->app)), 0ul);
+    /* The refused write left the accepted one in place. */
+    ASSERT_TRUE(strstr(cfg_read_shadow(), "image_live = off") != NULL);
+    harness_type(h, "/config reset image_live");
+    harness_enter(h);
+    ASSERT_EQ(nm_agent_image_live(nm_chat_app_agent(h->app)), 1ul);
+
     /* A machinery-written runtime value shows its own layer. */
     nm_config_runtime_set(nm_config_store(), NM_CFG_KEY_SEARXNG_ENABLED,
                           "off");
