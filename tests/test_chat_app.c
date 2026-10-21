@@ -5411,65 +5411,18 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 /* The fetch's deadline bounds the RESPONSE, not the connect         */
 /* ---------------------------------------------------------------- */
 
-/* A non-blocking socket (the fillers below must never block: a
- * blocking connect past a full accept queue parks for the kernel's
- * SYN timeout, which is minutes). */
-static void sock_nonblock(int fd)
-{
-#ifdef _WIN32
-    u_long one = 1;
-    ioctlsocket(fd, FIONBIO, &one);
-#else
-    int fl = fcntl(fd, F_GETFL, 0);
-    fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-#endif
-}
-
-/* A listener whose accept queue is FULL: the fillers connect and are
- * never accepted, so the kernel drops the NEXT connect's SYN — the
- * peer is reachable (the listener exists) yet the connect never
- * completes. That is a black-holed address in miniature, and it is the
- * one way to hold a fetch in its CONNECT phase. *fillers must stay
- * open for the fetch's whole life; close them with *n out. */
-static int server_bind_full(int *port, int *fillers, int max_fill,
-                            int *n_fill)
-{
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(lfd, (struct sockaddr *)&a, sizeof(a)) < 0 ||
-        listen(lfd, 0) < 0) {
-        close(lfd);
-        return -1;
-    }
-    socklen_t l = sizeof(a);
-    if (getsockname(lfd, (struct sockaddr *)&a, &l) < 0) {
-        close(lfd);
-        return -1;
-    }
-    *port = ntohs(a.sin_port);
-    int n = 0;
-    for (; n < max_fill; n++) {
-        int c = socket(AF_INET, SOCK_STREAM, 0);
-        if (c < 0)
-            break;
-        sock_nonblock(c);
-        struct sockaddr_in b = a;
-        if (connect(c, (struct sockaddr *)&b, sizeof(b)) != 0 &&
-            errno != EINPROGRESS) {
-            close(c);
-            break;
-        }
-        fillers[n] = c;
-    }
-    /* Let whatever can land, land (the SYN queue counts too). */
-    usleep(50 * 1000);
-    *n_fill = n;
-    return lfd;
-}
+/* A BLACK-HOLED address (RFC 5737's TEST-NET-1: reserved, routed
+ * nowhere): the connect is sent and never answered, so the fetch stays
+ * in its CONNECT phase for as long as the transport's own budget says.
+ * It is the one way to hold a fetch in that phase on EVERY platform —
+ * a listener with a full accept queue is a Linux-shaped trick (the
+ * queue's depth is the kernel's, and macOS accepts the next connect
+ * instead of dropping it, which let the fetch's request go out and
+ * ended the phase early).
+ *
+ * The address is unroutable, so nothing answers it and nothing is
+ * left behind: no listener, no filler, no child. */
+#define NM_BLACK_HOLE_HOST "192.0.2.1"
 
 /* The catalog fetch's per-request deadline (openai_client.c) is the
  * RESPONSE bound — "a peer that answers the connection and then never
@@ -5487,18 +5440,21 @@ static int server_bind_full(int *port, int *fillers, int max_fill,
  * Here the fetch is still CONNECTING when the fake clock crosses the
  * deadline: the connect is the walk's to bound (its budget is raised
  * so the walk itself does not abandon the address), so the fetch must
- * still be in flight — no failure note, no popup. */
+ * still be in flight — no failure note, no popup.
+ *
+ * The endpoint is an unroutable address (RFC 5737's TEST-NET-1), so
+ * the connect is sent and never answered: the fetch's CONNECT phase
+ * lasts as long as the transport's budget says. The earlier shape — a
+ * listener with a full accept queue — was Linux-specific: macOS
+ * accepts the next connect instead of dropping its SYN, so the
+ * request went out, the fetch left its CONNECT phase, and the fetch's
+ * own response deadline then fired — the test measured the walk's
+ * queue, not the deadline. */
 static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
 {
-    int port = 0;
-    int fillers[8];
-    int n_fill = 0;
-    int lfd = server_bind_full(&port, fillers, 8, &n_fill);
-    ASSERT_TRUE(lfd >= 0);
-
     pin_cfg_paths("catdeadline");
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://%s:9/v1", NM_BLACK_HOLE_HOST);
     /* hyper: the ONLY provider whose live cache is still clean here
      * (the picker tests pin it offline, and the warm test that commits
      * a live one runs LAST) — an already-cached catalog would answer
@@ -5510,8 +5466,8 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
      * walk abandons the address and the test measures the walk. */
     store_set(NM_CFG_KEY_CONNECT_TIMEOUT, "30000");
 
-    /* /model starts the fetch. The connect is armed but its SYN is
-     * dropped, so nothing is on the wire yet. */
+    /* /model starts the fetch. The connect is armed against an
+     * unroutable address, so nothing is on the wire yet. */
     harness_type(h, "/model");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "loading the hyper") != NULL);
@@ -5531,9 +5487,6 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
     nm_config_free(cfg);
     harness_free(h);
     store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
-    for (int i = 0; i < n_fill; i++)
-        close(fillers[i]);
-    close(lfd);
 }
 
 /* /config lists the provider-scoped keys that are set, after the plain
