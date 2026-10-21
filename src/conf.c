@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 22
+#define NM_CFG_NKEYS 23
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -156,6 +156,7 @@ static const struct
      * A `def` of NULL is also what /config prints as `-`. */
     { NM_CFG_KEY_TEMPERATURE, "NEVERMORE_TEMPERATURE", NULL },
     { NM_CFG_KEY_MAX_TOKENS, "NEVERMORE_MAX_TOKENS", NULL },
+    { NM_CFG_KEY_IMAGE_LIVE, "NEVERMORE_IMAGE_LIVE", "1" },
 };
 
 static void init_keys(NmConfig *c)
@@ -324,6 +325,41 @@ int nm_config_valid_positive_int(const char *value)
 int nm_config_valid_rounds(const char *value)
 {
     return nm_config_valid_positive_int(value);
+}
+
+/* The `image_live` value space: a positive decimal (the number of
+ * requests an image rides) or `off` (every request carries the image).
+ * `0` is refused — an image that never rides is a broken image, and a
+ * silent "0" would read as "the image is gone" rather than as a
+ * refusal. The `off` spelling is the one non-numeric value, so it
+ * needs its own test (duration_off's shape, read here so this file
+ * owns the vocabulary). */
+static int image_live_off(const char *value)
+{
+    return value && (value[0] == 'o' || value[0] == 'O') &&
+           (value[1] == 'f' || value[1] == 'F') &&
+           (value[2] == 'f' || value[2] == 'F') && value[3] == '\0';
+}
+
+int nm_config_image_live_canon(const char *value, char *out, size_t cap)
+{
+    if (image_live_off(value)) {
+        snprintf(out, cap, "off");
+        return 1;
+    }
+    /* A positive decimal, spelled verbatim: the count is the value, and
+     * there is no fraction or sign to normalize. */
+    if (nm_config_valid_positive_int(value)) {
+        snprintf(out, cap, "%s", value);
+        return 1;
+    }
+    return 0;
+}
+
+int nm_config_valid_image_live(const char *value)
+{
+    char tmp[32];
+    return nm_config_image_live_canon(value, tmp, sizeof(tmp));
 }
 
 /* The `temperature` grammar and its canonical form, in one hand-rolled
@@ -736,6 +772,10 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_MAX_TOKENS) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
+    } else if (strcmp(key, NM_CFG_KEY_IMAGE_LIVE) == 0) {
+        /* A positive decimal (the number of requests an image rides) or
+         * `off` (every request carries the image). `0` is refused. */
+        return nm_config_image_live_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TEMPERATURE) == 0) {
         /* A decimal in the published 0-2 range, canonicalized so every
          * layer reads one spelling (a token-count key is stored
@@ -1294,6 +1334,20 @@ double nm_config_resolve_temperature(const NmConfig *c)
                           NULL, 0, &v))
         return -1.0;
     return v;
+}
+
+/* The `image_live` key, resolved and parsed: the number of requests an
+ * image rides, or 0 for `off` (every request carries the image). The
+ * `off` → 0 mapping lives HERE, so no caller has to know the
+ * spelling. Unset resolves to the key's built-in default (1). */
+int nm_config_resolve_image_live(const NmConfig *c)
+{
+    const char *v = c ? nm_config_resolve(c, NM_CFG_KEY_IMAGE_LIVE, NULL)
+                      : NULL;
+    if (image_live_off(v))
+        return 0; /* `off`: the image rides every request */
+    int n = parse_int(v, 1);
+    return n > 0 ? n : 1;
 }
 
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)

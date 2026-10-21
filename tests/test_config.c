@@ -654,7 +654,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SKILLS);
     ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_TEMPERATURE);
     ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_NULL(nm_config_key_at(22));
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_NULL(nm_config_key_at(23));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -689,6 +690,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_TEMPERATURE");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_MAX_TOKENS),
                   "NEVERMORE_MAX_TOKENS");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_IMAGE_LIVE),
+                  "NEVERMORE_IMAGE_LIVE");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");
@@ -830,6 +833,75 @@ static void test_duration_keys(void)
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_TIMEOUT), "off");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_TIMEOUT), NM_CFG_ENV);
     test_unsetenv("NEVERMORE_TIMEOUT_MS");
+
+    nm_config_free(c);
+}
+
+/* The `image_live` key: how many REQUESTS an image rides before its
+ * marker stands in for it. The vocabulary is a positive decimal or
+ * `off`; `0` is REFUSED (an image that never rides is a broken
+ * image), and the `off` → 0 mapping lives in the store's reader, so no
+ * caller has to know the spelling. */
+static void test_image_live_key(void)
+{
+    pin_paths("image-live");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* The vocabulary. */
+    ASSERT_TRUE(nm_config_valid_image_live("1"));
+    ASSERT_TRUE(nm_config_valid_image_live("2"));
+    ASSERT_TRUE(nm_config_valid_image_live("100"));
+    ASSERT_TRUE(nm_config_valid_image_live("off"));
+    ASSERT_TRUE(nm_config_valid_image_live("OFF"));
+    ASSERT_FALSE(nm_config_valid_image_live("0"));
+    ASSERT_FALSE(nm_config_valid_image_live("1.5"));
+    ASSERT_FALSE(nm_config_valid_image_live("-1"));
+    ASSERT_FALSE(nm_config_valid_image_live(""));
+    ASSERT_FALSE(nm_config_valid_image_live("offx"));
+    ASSERT_FALSE(nm_config_valid_image_live("maybe"));
+
+    /* Canonicalization: the decimal verbatim, `off` lowercased. */
+    char canon[32];
+    ASSERT_TRUE(nm_config_image_live_canon("3", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "3");
+    ASSERT_TRUE(nm_config_image_live_canon("Off", canon, sizeof(canon)));
+    ASSERT_STR_EQ(canon, "off");
+    ASSERT_FALSE(nm_config_image_live_canon("0", canon, sizeof(canon)));
+
+    /* The built-in default: an image rides ONE request. */
+    ASSERT_EQ(nm_config_resolve_image_live(c), 1);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_IMAGE_LIVE), NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_IMAGE_LIVE, NULL), "1");
+
+    /* The shadow write-back: a decimal persists, `off` persists
+     * canonical, and the invalid spellings are refused. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_IMAGE_LIVE, "2"), 0);
+    ASSERT_EQ(nm_config_resolve_image_live(c), 2);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_IMAGE_LIVE, "off"), 0);
+    ASSERT_EQ(nm_config_resolve_image_live(c), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_IMAGE_LIVE, "0"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_IMAGE_LIVE, "1.5"), -1);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "image_live = off\n");
+    /* The refused values did not disturb the accepted one. */
+    ASSERT_EQ(nm_config_resolve_image_live(c), 0);
+
+    /* The env layer speaks the same vocabulary. */
+    test_setenv("NEVERMORE_IMAGE_LIVE", "5");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_resolve_image_live(c), 5);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_IMAGE_LIVE), NM_CFG_ENV);
+    /* A garbage env value is DROPPED (the store validates on write),
+     * so the lower layer still decides. */
+    test_setenv("NEVERMORE_IMAGE_LIVE", "nope");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_IMAGE_LIVE), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_resolve_image_live(c), 0);
+    test_unsetenv("NEVERMORE_IMAGE_LIVE");
+
+    /* A reset drops the shadow line, and the default is back. */
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_IMAGE_LIVE), 0);
+    ASSERT_EQ(nm_config_resolve_image_live(c), 1);
 
     nm_config_free(c);
 }
@@ -1430,6 +1502,7 @@ int main(void)
     RUN_TEST(test_key_vocabulary);
     RUN_TEST(test_connect_knobs);
     RUN_TEST(test_duration_keys);
+    RUN_TEST(test_image_live_key);
     RUN_TEST(test_defaults_and_resolve);
     RUN_TEST(test_runtime_layer);
     RUN_TEST(test_store_handle);

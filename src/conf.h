@@ -305,6 +305,20 @@ extern "C" {
  * (NmChatResult.finish_reason); this key only lets a caller set the
  * limit. Env spelling: NEVERMORE_MAX_TOKENS. */
 #define NM_CFG_KEY_MAX_TOKENS "max_tokens"
+/* How many REQUESTS an image rides before a byte-stable text marker
+ * stands in for it. The value space is a positive decimal (the number
+ * of requests an image rides) or `off` (every request carries the
+ * image — the escape hatch for a pixel-hungry workflow). `0` is
+ * REFUSED: an image that never rides is a broken image.
+ *
+ * The age unit is the REQUEST, not the turn: one turn can compose
+ * dozens of requests (a tool loop), and a turn-based window would keep
+ * every image live for the whole turn. Built-in default 1 — an image
+ * rides the request that introduced it and no other. The value is read
+ * at the point of use (the agent, when it composes a request), so a
+ * mid-chat change is harmless: it only changes how OLD images are
+ * presented. Env spelling: NEVERMORE_IMAGE_LIVE. */
+#define NM_CFG_KEY_IMAGE_LIVE "image_live"
 
 typedef enum
 {
@@ -516,6 +530,22 @@ void nm_config_set_provider_validator(int (*fn)(const char *name));
  * `rounds` name is this shape under its own key's spelling. */
 int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
+/* Is `value` an `image_live` spelling — a positive decimal (the number
+ * of requests an image rides) or `off` (every request carries the
+ * image)? `0` is REFUSED: an image that never rides is a broken
+ * image. The ONE place the value space lives, so the file layer, the
+ * env layer, the shadow write-back and /config all agree. */
+int nm_config_valid_image_live(const char *value);
+/* Canonicalize a validated `image_live` value into `out`: the decimal
+ * verbatim, or the canonical `off`. Returns 1 on success, 0 when
+ * `value` is not valid. */
+int nm_config_image_live_canon(const char *value, char *out, size_t cap);
+/* The `image_live` key resolved and parsed: the number of requests an
+ * image rides, or 0 for `off` (every request carries the image). The
+ * `off` → 0 mapping lives HERE, so no caller has to know the
+ * spelling. Unset resolves to the built-in default (1). This is what
+ * the agent reads at the point of use. */
+int nm_config_resolve_image_live(const NmConfig *c);
 /* Is `value` a `temperature` spelling — a decimal in `0`–`2` (digits,
  * optionally '.' + digits; no sign, no exponent, no bare `.5`, no
  * trailing dot)? The range is the OpenAI-compatible one the gateways
