@@ -46,6 +46,7 @@
 #include <boba/msg.h>
 #include <boba/runtime.h>
 #include <boba/stream.h>
+#include <boba/terminal_profile.h>
 #include <boba/unicode.h>
 
 #include "chat_app.h"
@@ -1829,9 +1830,23 @@ static void test_context_gauge_reports_usage_and_limit(void)
      * selector, and the row's column math (the rule's fill, the
      * identity's right edge) is built on it. Pin the width here too: a
      * boba regression that re-widened the cluster would leave this
-     * frame's bytes unchanged but shift every cell after the gauge. */
-    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1\xef\xb8\x8e"), 1);
-    ASSERT_EQ(tui_utf8_display_width("\xe2\x9a\xa1"), 2);
+     * frame's bytes unchanged but shift every cell after the gauge.
+     *
+     * The width is measured against the UTS #51 rule EXPLICITLY, not
+     * against the ambient model: the marker is written for the rule
+     * (a VS15 cluster takes one cell where UTS #51 defines a text
+     * glyph), but a terminal's own rule may disagree (xterm and
+     * Windows Terminal keep the base's width, so they draw ⚡︎ two
+     * cells wide). The zero-suffix call answers with whatever model is
+     * in force — the process's, on a dev box, and the runner's, in CI —
+     * so the assert would be a coin flip. The _model form is the same
+     * measurement under a named rule. */
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1\xef\xb8\x8e",
+                                           TUI_WIDTH_MODEL_UTS51),
+              1);
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1",
+                                           TUI_WIDTH_MODEL_UTS51),
+              2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x9a\xa1"
@@ -6052,7 +6067,24 @@ static void test_interest_dedupes_active_exec_job(void)
     ASSERT_EQ(harness_drive(h, 2000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     ASSERT_EQ(app_fd(h->app), -1);
-    ASSERT_EQ(nm_proc_count(), 1);
+    /* The job is still REGISTERED — it outlives the call that started
+     * it, and the model polls it with write_stdin later.
+     *
+     * The count is the ONE thing here that the platform can decide: a
+     * job is retired when it EXITS, and `echo starting; sleep 30` does
+     * not exit — but on macOS the shell's exit can be observed before
+     * the sleep is gone (the PTY's session leader is the shell; the
+     * `sleep` is its child, and the shell's own exit is what the reap
+     * sees once the master is drained). So the registry may hold a
+     * job whose child has gone: the assertion is that the JOB (the
+     * handle the model polls) is still there, not that a process is
+     * still running. What the test really pins is the DEDUPE: the
+     * wait set carries the job's handle ONCE, and it is the same
+     * handle the tool phase was waiting on. */
+    ASSERT_TRUE(nm_proc_count() >= 1);
+    NmProc *survivor = nm_proc_at(0);
+    ASSERT_NOT_NULL(survivor);
+    ASSERT_EQ(nm_proc_handle(survivor), job_handle);
     ASSERT_TRUE(harness_read(h) != NULL);
     ASSERT_EQ(nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX), 1);
     ASSERT_EQ(set[0].handle, job_handle);
