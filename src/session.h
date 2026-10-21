@@ -11,7 +11,12 @@
  * append. nm_session_get returns a borrowed pointer into that array —
  * valid until the next session mutation or free. The WHOLE transcript
  * rides every request (nevermore never trims it: no token-budget
- * guessing), which is what keeps the request prefix byte-stable.
+ * guessing), which is what keeps the request prefix byte-stable — with
+ * ONE exception: an image rides the request that introduced it and
+ * the next N-1 requests, and after that it is replaced by a byte-
+ * stable text marker (the "LIVE-N" policy; see nm_session_image_part).
+ * So the prefix is byte-stable EXCEPT for one change per image, at the
+ * swap, and that change costs a one-time re-bill of the tail.
  */
 
 #ifndef NM_SESSION_H
@@ -48,6 +53,16 @@ typedef enum
  * (the display path parses, sniffs and sizes it itself). The two cannot
  * disagree because they are the same string.
  *
+ * THE MARKER: an image rides the request that introduced it and the
+ * next N-1 requests; after that it is replaced by `marker_json` — a
+ * pre-serialized TEXT content part that says what the image was and
+ * that it is not repeated. The marker is FROZEN at attach and never
+ * re-derived: the provider's cache is a PREFIX cache, so a marker whose
+ * bytes change re-bills the whole tail on EVERY request. `marker_text`
+ * is the same text without the part wrapper, for the assistant path
+ * (an assistant message's marker rides the message's content string —
+ * the message-level `images` array takes image parts ONLY).
+ *
  * The store is owned by the session, so it dies with the chat (a
  * /provider switch rebuilds the agent and wipes the session — images
  * included). */
@@ -57,6 +72,15 @@ typedef struct NmImage
     size_t data_url_len;
     char *part_json; /* the image_url content part, pre-serialized */
     size_t part_json_len;
+    /* The stand-in for the image once it ages out: the pre-serialized
+     * text content part (user path) and the same text without the
+     * wrapper (assistant path). Both frozen at attach. */
+    char *marker_json;
+    size_t marker_json_len;
+    char *marker_text;
+    /* The request sequence in which this image was FIRST CARRIED
+     * (0 = never sent yet). The age rule is `seq - first_seq < N`. */
+    unsigned long first_seq;
     char alt[64]; /* the display name: the file's base name for an
                    * attached image, "image" for a received one (a
                    * generated picture has no file) */
@@ -78,7 +102,13 @@ typedef struct NmSessionMessage
      * gains or loses an image part is a different prefix, so the list
      * never changes afterwards). User images ride the content-parts
      * array; assistant images (IMAGEGEN — the round's generated
-     * output) ride the message-level "images" array. */
+     * output) ride the message-level "images" array.
+     *
+     * The list is frozen, but the message's WIRE shape no longer
+     * follows from the append alone: an image that ages out is
+     * replaced by its marker (the user path) or dropped from the
+     * array (the assistant path). That is the ONE change the prefix
+     * ever sees, and it happens once per image. */
     size_t *images;
     size_t n_images;
     /* NM_ROLE_ASSISTANT: the round's reasoning trace. Kept for
@@ -147,13 +177,15 @@ long nm_session_attach_image(NmSession *s, const char *path, char *reason,
  * wire part into the store — but from a caller-owned buffer, so the
  * file is read ONCE (the tool's read) and capture-not-reference holds
  * even if the file changes between the read and the attach. `alt` is
- * the marker/alt text (the tool passes the base name). The store copies
- * the bytes into the frozen base64 URL; the caller's buffer is not
- * retained. Returns the new index, or -1 with `reason` filled — the
- * same vocabulary as the path variant ("too large", "unknown
- * container", "no memory", "empty file"). */
+ * the marker/alt text (the tool passes the base name), and `tool` is
+ * the tool that read it (the marker's re-read affordance names it).
+ * The store copies the bytes into the frozen base64 URL; the caller's
+ * buffer is not retained. Returns the new index, or -1 with `reason`
+ * filled — the same vocabulary as the path variant ("too large",
+ * "unknown container", "no memory", "empty file"). */
 long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
-                                   size_t len, const char *alt, char *reason,
+                                   size_t len, const char *alt,
+                                   const char *tool, char *reason,
                                    size_t reason_cap);
 
 /* Attach a RECEIVED image: the whole image arrived
@@ -182,6 +214,34 @@ long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
  * how many are attached. */
 const NmImage *nm_session_image(const NmSession *s, size_t idx);
 size_t nm_session_image_count(const NmSession *s);
+
+/* --- the age rule (LIVE-N) ---------------------------------------- */
+
+/* The request counter: bumped once per request the agent composes.
+ * 1-BASED — the first composed request is 1, so an image's first_seq
+ * == 0 stays the "never sent" sentinel. */
+unsigned long nm_session_next_request(NmSession *s);
+
+/* The part for one image in THIS request: the live image part while
+ * the image is inside the window, else the frozen marker part. The
+ * image's first ride stamps first_seq. `live_requests == 0` spells
+ * `off` (every request carries the image). */
+const char *nm_session_image_part(NmSession *s, size_t idx,
+                                  unsigned long live_requests, size_t *len);
+
+/* The marker TEXT for one image (the assistant path puts it in the
+ * message's content). Never NULL: every attach path builds one. */
+const char *nm_session_image_marker_text(const NmSession *s, size_t idx);
+
+/* The image's first ride sequence (0 = never sent). */
+unsigned long nm_session_image_first_seq(const NmSession *s, size_t idx);
+
+/* Is the image still live in the session's CURRENT request? The
+ * window is `live_requests` requests; `0` spells `off` (the image
+ * rides every request). The count pass asks this without recording
+ * anything — only a ride stamps the image's first sequence. */
+int nm_session_image_live(const NmSession *s, size_t idx,
+                          unsigned long live_requests);
 
 /* Append the user message that owns images (the text part is ALWAYS
  * present — the wire shape is frozen: text first, then the image parts

@@ -24,6 +24,13 @@ struct NmSession
     NmImage *images;
     size_t n_images;
     size_t image_cap;
+    /* The REQUEST counter: how many requests the session has composed.
+     * 1-BASED (the first composed request is 1), so an image's
+     * first_seq == 0 stays the "never sent" sentinel. The age unit is
+     * the request, not the turn: one turn can compose dozens of
+     * requests, and a turn-based window would keep every image live
+     * for the whole turn. */
+    unsigned long request_seq;
 };
 
 static char *dup_or_null(const char *s)
@@ -106,6 +113,8 @@ void nm_session_free(NmSession *s)
     for (size_t i = 0; i < s->n_images; i++) {
         free(s->images[i].data_url);
         free(s->images[i].part_json);
+        free(s->images[i].marker_json);
+        free(s->images[i].marker_text);
     }
     free(s->images);
     free(s->msgs);
@@ -225,6 +234,79 @@ static char *build_part_json(const char *data_url, size_t url_len,
     return p;
 }
 
+/* Where an image came from — the marker's provenance. It decides what
+ * the marker says, and the one thing it may say is an AFFORDANCE the
+ * model can actually take: a file a tool can re-read may be re-read; a
+ * user attachment's bytes live in the store (no path, no tool), and a
+ * generated picture has no re-read at all. */
+typedef enum
+{
+    NM_MARKER_ATTACH,  /* the user attached a file */
+    NM_MARKER_TOOL,    /* a tool read the file (read_file) */
+    NM_MARKER_RECEIVED /* the model generated it */
+} NmMarkerKind;
+
+/* The marker's TEXT: what the image was, and that it is not repeated.
+ * Frozen at attach and never re-derived — the provider's cache is a
+ * PREFIX cache, so a marker whose bytes change re-bills the whole tail
+ * on EVERY request (measured). It is also short: the marker rides
+ * every later request for the rest of the conversation, so a marker
+ * that cost a paragraph would cost a paragraph forever. */
+static char *build_marker_text(const char *alt, const char *tool,
+                               NmMarkerKind kind, NmImageFormat fmt, int w,
+                               int h, size_t bytes)
+{
+    char desc[NM_IMAGE_DESC_MAX];
+    nm_image_describe(nm_image_format_name(fmt), w, h, bytes, desc,
+                      sizeof(desc));
+    const char *name = (alt && *alt) ? alt : "image";
+    char buf[512];
+    switch (kind) {
+    case NM_MARKER_TOOL:
+        /* The one honest affordance: the tool that read the file can
+         * read it again, and the re-read brings the picture back. */
+        snprintf(buf, sizeof(buf),
+                 "[image from %s: %s — %s — sent earlier, not repeated; "
+                 "call %s again to see it]",
+                 tool ? tool : "read_file", name, desc, tool ? tool : "read_file");
+        break;
+    case NM_MARKER_RECEIVED:
+        snprintf(buf, sizeof(buf),
+                 "[image — %s — generated earlier, not repeated]", desc);
+        break;
+    case NM_MARKER_ATTACH:
+    default:
+        /* No affordance: the store keeps the bytes, not a path, and the
+         * model has no tool that could send them again. */
+        snprintf(buf, sizeof(buf),
+                 "[image %s — %s — attached earlier, not repeated]", name,
+                 desc);
+        break;
+    }
+    return strdup(buf);
+}
+
+/* The marker's pre-serialized content part: a TEXT part, so the
+ * content-parts array KEEPS its shape when the image ages out (the
+ * wire shape never flips between "string" and "array" — that is the
+ * prefix-cache discipline, and it is what every probe measured).
+ * Built with the JSON writer because the marker's text can hold a
+ * quote or a backslash (a Windows path in the alt), which a
+ * hand-assembled string cannot escape. */
+static char *build_marker_json(const char *text, size_t *out_len)
+{
+    NmJson *o = nm_json_new_object();
+    if (!o)
+        return NULL;
+    nm_json_set(o, "type", nm_json_new_string("text"));
+    nm_json_set(o, "text", nm_json_new_string(text));
+    char *js = nm_json_dump(o);
+    nm_json_free(o);
+    if (js && out_len)
+        *out_len = strlen(js);
+    return js;
+}
+
 static NmImage *image_slot(NmSession *s)
 {
     if (s->n_images == s->image_cap) {
@@ -246,9 +328,14 @@ static NmImage *image_slot(NmSession *s)
  * caller's buffer is never retained — the tool that read the file frees
  * it with the result. `alt` is the file path (or a base name): the
  * marker/alt text is its last component. On refusal nothing is stored
- * and `reason` carries the shared vocabulary. */
+ * and `reason` carries the shared vocabulary.
+ *
+ * The MARKER is frozen here too: the stand-in the image becomes once it
+ * ages out. `kind` says where the image came from, which is the only
+ * thing that decides whether the marker may name an affordance. */
 static long attach_core(NmSession *s, const unsigned char *bytes, size_t len,
-                        const char *alt, char *reason, size_t reason_cap)
+                        const char *alt, const char *tool, NmMarkerKind kind,
+                        char *reason, size_t reason_cap)
 {
     int w = 0, h = 0;
     NmImageFormat fmt = nm_image_sniff(bytes, len, &w, &h);
@@ -256,9 +343,11 @@ static long attach_core(NmSession *s, const unsigned char *bytes, size_t len,
         attach_reason(reason, reason_cap, "unknown container");
         return -1;
     }
-    /* The wire cap is the attach cap: these bytes ride EVERY request
-     * (chat/completions has no upload endpoint), so refusing locally
-     * keeps the message ours instead of a provider 400. */
+    /* The wire cap is the attach cap: these bytes ride every request
+     * they are live in (chat/completions has no upload endpoint), so
+     * refusing locally keeps the message ours instead of a provider
+     * 400. The cap bounds ONE image, not the conversation: the age
+     * rule (LIVE-N) is what bounds the conversation. */
     if (len > NM_IMAGE_MAX_WIRE_BYTES) {
         attach_reason(reason, reason_cap, "too large");
         return -1;
@@ -277,11 +366,30 @@ static long attach_core(NmSession *s, const unsigned char *bytes, size_t len,
         attach_reason(reason, reason_cap, "no memory");
         return -1;
     }
+    /* The name the marker and the alt show: the caller's name, reduced
+     * to its last component (the path variant passes a path; the tool
+     * passes a base name already). */
+    const char *name = base_name(alt ? alt : "");
+    char *marker_text = build_marker_text(name, tool, kind, fmt, w, h, len);
+    size_t marker_len = 0;
+    char *marker_json = marker_text ? build_marker_json(marker_text,
+                                                        &marker_len)
+                                    : NULL;
+    if (!marker_text || !marker_json) {
+        free(url);
+        free(part);
+        free(marker_text);
+        free(marker_json);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
 
     NmImage *img = image_slot(s);
     if (!img) {
         free(url);
         free(part);
+        free(marker_text);
+        free(marker_json);
         attach_reason(reason, reason_cap, "no memory");
         return -1;
     }
@@ -289,11 +397,14 @@ static long attach_core(NmSession *s, const unsigned char *bytes, size_t len,
     img->data_url_len = url_len;
     img->part_json = part;
     img->part_json_len = part_len;
+    img->marker_json = marker_json;
+    img->marker_json_len = marker_len;
+    img->marker_text = marker_text;
     img->format = fmt;
     img->w = w;
     img->h = h;
     img->bytes = len;
-    snprintf(img->alt, sizeof(img->alt), "%s", base_name(alt ? alt : ""));
+    snprintf(img->alt, sizeof(img->alt), "%s", name);
     return (long)(s->n_images - 1);
 }
 
@@ -331,13 +442,15 @@ long nm_session_attach_image(NmSession *s, const char *path, char *reason,
         attach_reason(reason, reason_cap, msg);
         return -1;
     }
-    long id = attach_core(s, p.bytes, p.len, path, reason, reason_cap);
+    long id = attach_core(s, p.bytes, p.len, path, NULL, NM_MARKER_ATTACH,
+                          reason, reason_cap);
     nm_image_probe_free(&p);
     return id;
 }
 
 long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
-                                   size_t len, const char *alt, char *reason,
+                                   size_t len, const char *alt,
+                                   const char *tool, char *reason,
                                    size_t reason_cap)
 {
     attach_reason(reason, reason_cap, "");
@@ -345,7 +458,8 @@ long nm_session_attach_image_bytes(NmSession *s, const unsigned char *bytes,
         attach_reason(reason, reason_cap, "empty file");
         return -1;
     }
-    return attach_core(s, bytes, len, alt ? alt : "image", reason, reason_cap);
+    return attach_core(s, bytes, len, alt ? alt : "image", tool,
+                       NM_MARKER_TOOL, reason, reason_cap);
 }
 
 long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
@@ -411,10 +525,30 @@ long nm_session_attach_image_url(NmSession *s, const char *url, size_t len,
         attach_reason(reason, reason_cap, "no memory");
         return -1;
     }
+    /* A received image's marker names NO affordance: the bytes are in
+     * the store, and the model has no tool that could send them
+     * again. */
+    char *marker_text = build_marker_text("image", NULL, NM_MARKER_RECEIVED,
+                                          fmt, w, h, (size_t)n);
+    size_t marker_len = 0;
+    char *marker_json = marker_text ? build_marker_json(marker_text,
+                                                        &marker_len)
+                                    : NULL;
+    if (!marker_text || !marker_json) {
+        free(url_copy);
+        free(part);
+        free(marker_text);
+        free(marker_json);
+        attach_reason(reason, reason_cap, "no memory");
+        return -1;
+    }
     img->data_url = url_copy;
     img->data_url_len = len;
     img->part_json = part;
     img->part_json_len = part_len;
+    img->marker_json = marker_json;
+    img->marker_json_len = marker_len;
+    img->marker_text = marker_text;
     img->format = fmt;
     img->w = w;
     img->h = h;
@@ -436,6 +570,91 @@ const NmImage *nm_session_image(const NmSession *s, size_t idx)
 size_t nm_session_image_count(const NmSession *s)
 {
     return s ? s->n_images : 0;
+}
+
+/* ---------------------------------------------------------------- */
+/* The age rule: LIVE-N                                              */
+/* ---------------------------------------------------------------- */
+
+/* The request counter: bumped once per request the agent composes.
+ * 1-BASED — the first composed request is 1, so an image's first_seq
+ * == 0 stays the "never sent" sentinel. */
+unsigned long nm_session_next_request(NmSession *s)
+{
+    if (!s)
+        return 0;
+    s->request_seq++;
+    return s->request_seq;
+}
+
+/* Is the image still live in the session's CURRENT request? The window
+ * is `live` requests: the image rides the request that introduced it
+ * and the next live-1 requests after that, so it is live while
+ * `seq - first_seq < live`. `live == 0` spells `off` — every request
+ * carries the image, and the image never ages.
+ *
+ * The count pass must not STAMP first_seq (only a ride is a ride), so
+ * this answers the question without recording anything; the stamp
+ * happens in nm_session_image_part, which is the one place that
+ * chooses to carry the bytes. */
+int nm_session_image_live(const NmSession *s, size_t idx,
+                          unsigned long live_requests)
+{
+    const NmImage *img = nm_session_image(s, idx);
+    if (!img)
+        return 0;
+    if (live_requests == 0)
+        return 1; /* `off`: the image rides every request */
+    if (img->first_seq == 0)
+        return 1; /* never sent yet: it is live in its first ride */
+    return s->request_seq - img->first_seq < live_requests;
+}
+
+/* The part for one image in THIS request: the live image part while
+ * the image is inside the window, else the frozen marker part. The
+ * image's first ride stamps first_seq.
+ *
+ * `live_requests == 0` spells `off` (every request carries the
+ * image). The returned pointer is borrowed from the session's store
+ * and outlives the request. */
+const char *nm_session_image_part(NmSession *s, size_t idx,
+                                  unsigned long live_requests, size_t *len)
+{
+    if (len)
+        *len = 0;
+    NmImage *img = (NmImage *)nm_session_image(s, idx);
+    if (!img)
+        return NULL;
+    if (nm_session_image_live(s, idx, live_requests)) {
+        /* The ride: stamp the sequence the first time the bytes go
+         * out. An attachment that never reached a request must not
+         * age, so the stamp is here and not at attach. */
+        if (img->first_seq == 0)
+            img->first_seq = s->request_seq ? s->request_seq : 1;
+        if (len)
+            *len = img->part_json_len;
+        return img->part_json;
+    }
+    if (len)
+        *len = img->marker_json_len;
+    return img->marker_json;
+}
+
+/* The marker TEXT for one image (the assistant path puts it in the
+ * message's content). Never NULL for an image in the store: every
+ * attach path builds one. */
+const char *nm_session_image_marker_text(const NmSession *s, size_t idx)
+{
+    const NmImage *img = nm_session_image(s, idx);
+    return img ? img->marker_text : NULL;
+}
+
+/* The image's first ride sequence (0 = never sent). The UI's seam for
+ * "when did this image last go out". */
+unsigned long nm_session_image_first_seq(const NmSession *s, size_t idx)
+{
+    const NmImage *img = nm_session_image(s, idx);
+    return img ? img->first_seq : 0;
 }
 
 /* The deterministic text part for an image-only send: the alt names

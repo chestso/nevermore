@@ -53,13 +53,16 @@ typedef enum
     NM_IMAGE_KIND_WEBP
 } NmImageKind;
 
-/* Wire cap on an attached image (decoded bytes). The bytes ride EVERY
- * request — chat/completions has no upload/reference endpoint — so this
- * bounds the body, not the display. Not a config key: the degradation
- * ladder is the switch, and a knob without a user is noise. It is the
- * ONE cap: there is no display-side cap (image.h), because an image
- * that is in the conversation has already paid for its bytes — a 4 MiB
- * photo sends fine and renders. */
+/* Wire cap on an attached image (decoded bytes). The bytes ride every
+ * request the image is LIVE in — chat/completions has no
+ * upload/reference endpoint — so this bounds ONE image, not the
+ * conversation (the age rule bounds the conversation: an image rides
+ * the request that introduced it and the next N-1 requests, then a
+ * byte-stable text marker stands in for it). Not a config key: the
+ * degradation ladder is the switch, and a knob without a user is
+ * noise. It is the ONE cap: there is no display-side cap (image.h),
+ * because an image that is in the conversation has already paid for
+ * its bytes — a 4 MiB photo sends fine and renders. */
 #define NM_IMAGE_MAX_WIRE_BYTES ((size_t)8 * 1024 * 1024)
 
 /* How a byte-source load ended. Typed (not a string) so each side

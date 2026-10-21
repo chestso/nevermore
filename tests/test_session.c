@@ -1089,7 +1089,7 @@ static void test_session_attach_image_bytes(void)
 
     char reason[64];
     long id = nm_session_attach_image_bytes(s, bytes, sizeof(T_PNG),
-                                            "shot.png", reason,
+                                            "shot.png", "read_file", reason,
                                             sizeof(reason));
     ASSERT_EQ(id, 0);
     ASSERT_STR_EQ(reason, "");
@@ -1114,15 +1114,15 @@ static void test_session_attach_image_bytes(void)
 
     /* unknown container: nothing stored, shared vocabulary */
     ASSERT_EQ(nm_session_attach_image_bytes(
-                  s, (const unsigned char *)"plain text", 10, "x.txt", reason,
-                  sizeof(reason)),
+                  s, (const unsigned char *)"plain text", 10, "x.txt",
+                  "read_file", reason, sizeof(reason)),
               -1);
     ASSERT_STR_EQ(reason, "unknown container");
     ASSERT_EQ(nm_session_image_count(s), 1u);
 
     /* empty: nothing stored */
-    ASSERT_EQ(nm_session_attach_image_bytes(s, NULL, 0, "x", reason,
-                                            sizeof(reason)),
+    ASSERT_EQ(nm_session_attach_image_bytes(s, NULL, 0, "x", "read_file",
+                                            reason, sizeof(reason)),
               -1);
     ASSERT_STR_EQ(reason, "empty file");
 
@@ -1132,7 +1132,8 @@ static void test_session_attach_image_bytes(void)
     unsigned char *huge = calloc(1, big);
     ASSERT_NOT_NULL(huge);
     memcpy(huge, T_PNG, sizeof(T_PNG));
-    ASSERT_EQ(nm_session_attach_image_bytes(s, huge, big, "huge.png", reason,
+    ASSERT_EQ(nm_session_attach_image_bytes(s, huge, big, "huge.png",
+                                            "read_file", reason,
                                             sizeof(reason)),
               -1);
     ASSERT_STR_EQ(reason, "too large");
@@ -1346,9 +1347,9 @@ static void test_session_save_declares_images(void)
     NmSession *s = nm_session_new(NULL);
     size_t ids[2];
     long a = nm_session_attach_image_bytes(s, T_PNG, sizeof(T_PNG),
-                                           "shot.png", NULL, 0);
+                                           "shot.png", "read_file", NULL, 0);
     long b = nm_session_attach_image_bytes(s, T_GIF, sizeof(T_GIF), "image",
-                                           NULL, 0);
+                                           "read_file", NULL, 0);
     ASSERT_EQ(a, 0);
     ASSERT_EQ(b, 1);
     ids[0] = 0;
@@ -1375,6 +1376,170 @@ static void test_session_save_declares_images(void)
     nm_session_free(s);
 }
 
+/* The MARKER: the stand-in that replaces an aged image. It is frozen
+ * at attach (the provider's cache is a PREFIX cache, so a marker whose
+ * bytes change re-bills the whole tail on EVERY request), it is a TEXT
+ * content part (so the content-parts array keeps its shape), and it
+ * names an affordance only where the model can take one: a file a
+ * tool can re-read. */
+static void test_session_image_marker(void)
+{
+    NmSession *s = nm_session_new("sys");
+    ASSERT_NOT_NULL(s);
+    char reason[64];
+
+    /* A user attachment: the marker names the image and says it is not
+     * repeated — and NO affordance (the store keeps the bytes, not a
+     * path, and the model has no tool that could send them again). */
+    char shot[128];
+    t_path(shot, sizeof(shot), "shot");
+    t_write(shot, T_PNG, sizeof(T_PNG));
+    long a = nm_session_attach_image(s, shot, reason, sizeof(reason));
+    ASSERT_EQ(a, 0);
+    const NmImage *img = nm_session_image(s, 0);
+    ASSERT_NOT_NULL(img);
+    ASSERT_NOT_NULL(img->marker_text);
+    ASSERT_NOT_NULL(img->marker_json);
+    ASSERT_TRUE(strstr(img->marker_text, img->alt) != NULL);
+    ASSERT_TRUE(strstr(img->marker_text, "not repeated") != NULL);
+    ASSERT_TRUE(strstr(img->marker_text, "call ") == NULL);
+    /* The part is a TEXT part: {"type":"text","text":"..."} */
+    ASSERT_TRUE(strncmp(img->marker_json, "{\"type\":\"text\",\"text\":\"", 21) ==
+                0);
+    ASSERT_EQ(img->marker_json_len, strlen(img->marker_json));
+
+    /* A tool-read image: the marker names the tool, and the tool is an
+     * affordance the model CAN take (a re-read brings the picture
+     * back). */
+    long b = nm_session_attach_image_bytes(s, T_PNG, sizeof(T_PNG), "shot.png",
+                                           "read_file", reason,
+                                           sizeof(reason));
+    ASSERT_EQ(b, 1);
+    const NmImage *timg = nm_session_image(s, 1);
+    ASSERT_NOT_NULL(timg);
+    ASSERT_TRUE(strstr(timg->marker_text, "read_file") != NULL);
+    ASSERT_TRUE(strstr(timg->marker_text, "call read_file again") != NULL);
+
+    /* A received image: no affordance at all. */
+    char url[256];
+    snprintf(url, sizeof(url), "data:image/png;base64,%s", T_PNG_B64);
+    long c = nm_session_attach_image_url(s, url, strlen(url), reason,
+                                         sizeof(reason));
+    ASSERT_EQ(c, 2);
+    const NmImage *rimg = nm_session_image(s, 2);
+    ASSERT_NOT_NULL(rimg);
+    ASSERT_TRUE(strstr(rimg->marker_text, "generated earlier") != NULL);
+    ASSERT_TRUE(strstr(rimg->marker_text, "call ") == NULL);
+
+    /* BYTE-STABLE: the marker never changes, however many times it is
+     * read. */
+    char *first = strdup(img->marker_text);
+    char *first_json = strdup(img->marker_json);
+    ASSERT_NOT_NULL(first);
+    ASSERT_NOT_NULL(first_json);
+    ASSERT_EQ(nm_session_image_part(s, 0, 0, NULL) != NULL, 1);
+    ASSERT_STR_EQ(nm_session_image(s, 0)->marker_text, first);
+    ASSERT_STR_EQ(nm_session_image(s, 0)->marker_json, first_json);
+    ASSERT_STR_EQ(nm_session_image_marker_text(s, 0), first);
+    free(first);
+    free(first_json);
+
+    /* The marker's text is ESCAPED, not pasted: an alt holding a quote
+     * must not break the JSON. */
+    long d = nm_session_attach_image_bytes(s, T_PNG, sizeof(T_PNG),
+                                           "we\"ird.png", "read_file",
+                                           reason, sizeof(reason));
+    ASSERT_EQ(d, 3);
+    const NmImage *qimg = nm_session_image(s, 3);
+    ASSERT_NOT_NULL(qimg);
+    ASSERT_TRUE(strstr(qimg->marker_json, "\\\"") != NULL);
+    /* The part parses as JSON (the writer's own guarantee, checked
+     * through the reader). */
+    NmJson *parsed = nm_json_parse(qimg->marker_json,
+                                   strlen(qimg->marker_json), NULL);
+    ASSERT_NOT_NULL(parsed);
+    if (parsed) {
+        const char *type = nm_json_str(nm_json_get(parsed, "type"));
+        ASSERT_STR_EQ(type, "text");
+        nm_json_free(parsed);
+    }
+
+    nm_session_free(s);
+}
+
+/* The age rule (LIVE-N): an image rides the request that introduced
+ * it and the next N-1 requests; after that the frozen marker stands
+ * in for it. The window is an ARGUMENT (the store's value is read at
+ * the point of use), and `0` spells `off` — every request carries the
+ * image. */
+static void test_session_image_age_rule(void)
+{
+    NmSession *s = nm_session_new("sys");
+    ASSERT_NOT_NULL(s);
+    char reason[64];
+    char shot[128];
+    t_path(shot, sizeof(shot), "age");
+    t_write(shot, T_PNG, sizeof(T_PNG));
+    long id = nm_session_attach_image(s, shot, reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+    const NmImage *img = nm_session_image(s, 0);
+    ASSERT_NOT_NULL(img);
+    const char *live_part = img->part_json;
+    const char *marker_part = img->marker_json;
+
+    /* Never sent: the first ride stamps the sequence, and the image is
+     * live (an attachment that never reached a request must not age). */
+    ASSERT_EQ(nm_session_image_first_seq(s, 0), 0u);
+    ASSERT_TRUE(nm_session_image_live(s, 0, 1));
+
+    /* Request 1: the image rides, and the ride stamps the sequence. */
+    ASSERT_EQ(nm_session_next_request(s), 1ul);
+    size_t len = 0;
+    ASSERT_STR_EQ(nm_session_image_part(s, 0, 1, &len), live_part);
+    ASSERT_EQ(len, strlen(live_part));
+    ASSERT_EQ(nm_session_image_first_seq(s, 0), 1ul);
+
+    /* Request 2 with a window of 1: the image has aged out, so the
+     * MARKER rides — byte-identical to every later request. */
+    ASSERT_EQ(nm_session_next_request(s), 2ul);
+    ASSERT_STR_EQ(nm_session_image_part(s, 0, 1, &len), marker_part);
+    ASSERT_EQ(len, strlen(marker_part));
+    ASSERT_EQ(nm_session_next_request(s), 3ul);
+    ASSERT_STR_EQ(nm_session_image_part(s, 0, 1, &len), marker_part);
+
+    /* A window of 2: the image rides two requests. */
+    NmSession *s2 = nm_session_new("sys");
+    ASSERT_NOT_NULL(s2);
+    ASSERT_EQ(nm_session_attach_image(s2, shot, reason, sizeof(reason)), 0);
+    const char *live2 = nm_session_image(s2, 0)->part_json;
+    const char *marker2 = nm_session_image(s2, 0)->marker_json;
+    ASSERT_EQ(nm_session_next_request(s2), 1ul);
+    ASSERT_STR_EQ(nm_session_image_part(s2, 0, 2, &len), live2);
+    ASSERT_EQ(nm_session_next_request(s2), 2ul);
+    ASSERT_STR_EQ(nm_session_image_part(s2, 0, 2, &len), live2);
+    ASSERT_EQ(nm_session_next_request(s2), 3ul);
+    ASSERT_STR_EQ(nm_session_image_part(s2, 0, 2, &len), marker2);
+
+    /* `off` (0): the image rides EVERY request and never ages. */
+    NmSession *s3 = nm_session_new("sys");
+    ASSERT_NOT_NULL(s3);
+    ASSERT_EQ(nm_session_attach_image(s3, shot, reason, sizeof(reason)), 0);
+    const char *live3 = nm_session_image(s3, 0)->part_json;
+    for (int i = 0; i < 5; i++) {
+        ASSERT_EQ(nm_session_next_request(s3), (unsigned long)(i + 1));
+        ASSERT_STR_EQ(nm_session_image_part(s3, 0, 0, &len), live3);
+    }
+    ASSERT_TRUE(nm_session_image_live(s3, 0, 0));
+
+    /* An id that does not resolve: no part, no marker. */
+    ASSERT_NULL(nm_session_image_part(s, 99, 1, &len));
+    ASSERT_NULL(nm_session_image_marker_text(s, 99));
+
+    nm_session_free(s);
+    nm_session_free(s2);
+    nm_session_free(s3);
+}
+
 int main(void)
 {
     printf("test_session:\n");
@@ -1395,5 +1560,7 @@ int main(void)
     RUN_TEST(test_session_append_user_images);
     RUN_TEST(test_session_attach_image_url);
     RUN_TEST(test_session_append_assistant_images);
+    RUN_TEST(test_session_image_marker);
+    RUN_TEST(test_session_image_age_rule);
     TEST_SUMMARY();
 }
