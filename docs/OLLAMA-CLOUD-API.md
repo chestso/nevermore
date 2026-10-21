@@ -1434,6 +1434,58 @@ per-request cost out of the settings-page ledger (section 3):
 >   `new_tokens × input_rate + cached_tokens × cached_rate`; after an idle gap
 >   longer than the TTL, `history_tokens × input_rate` again.
 
+### 6.19 The request-body cap: 32 MiB, byte-exact (measured 2026-10-20)
+
+The cloud edge caps the **request body** at **32 MiB (33,554,432 B)**,
+and the cliff is byte-exact: a body of 33,554,432 B answers **200**,
+and 33,554,433 B answers **400**. The cap lives in Ollama's own
+server (`server/routes.go`: `http.MaxBytesReader(c.Writer,
+c.Request.Body, 32<<20)`), which is why the OpenAI-compatible route
+reports it with the cloud edge's own wording:
+
+```json
+{
+  "error": {
+    "message": "failed to read request body (ref: b785963d-...)",
+    "type": "invalid_request_error",
+    "param": null,
+    "code": null
+  }
+}
+```
+
+**The error does not say "too large."** It says _"failed to read
+request body"_, which reads like a transport failure and is not one —
+a client that retries it will fail forever with the same body. The
+native `/api/chat` route says it plainly instead
+(`400 "http: request body too large"`), and Hyper has the same 32 MiB
+ceiling with its own wording (`413 "request body exceeds 32 MiB
+limit"`).
+
+**What makes a chat cross it**: images. A body is ~99 % image data
+when the conversation carries pictures, and a client that re-sends
+every image on every request grows the body monotonically with the
+conversation — 10 KB → 1.4 MB → 29 MB → 33.7 MB over 71 requests —
+until every later request re-sends the same over-cap body and the chat
+is dead for good.
+
+**The client-side answer** (nevermore's, and the shape any client
+needs): an image rides the request that introduced it and the next
+`N-1` requests, and after that it is replaced by a byte-stable text
+marker. The body then grows with the conversation's TEXT, not with its
+picture history. Measured on the same 71-request conversation: the
+body fell from 33,083,540 B to 464,224 B, the prompt from 160,090 to
+60,269 tokens, the wall clock from 20.2 s to 2.4 s per request, and
+the cliff was never reached.
+
+**The cache consequence** (a prefix cache, and the swap costs once):
+dropping an image re-bills the messages after it **once** (12,295
+fresh tokens in the measured case — the prefix before the image
+survived), and the next request is 97.6 % cached again. The marker's
+text must be **byte-stable**: a different marker text is another full
+re-bill (12,287 fresh tokens), so a marker that carried a round
+number would re-bill the tail on EVERY request.
+
 ---
 
 ## 7. Streaming

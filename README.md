@@ -168,7 +168,7 @@ Settings resolve once, lowest to highest:
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
    `NEVERMORE_SEARXNG_TIMEOUT_MS`, `NEVERMORE_RUN_COMMAND_TIMEOUT_MS`,
-   `NEVERMORE_SKILLS`
+   `NEVERMORE_SKILLS`, `NEVERMORE_IMAGE_LIVE`
 5. **command line** — `-p` / `-m`
 
 The environment deliberately outranks both files: a scripted
@@ -203,6 +203,7 @@ kbd              = auto
 spinner_ramp     = on
 prism_notice     = on
 skills           = on
+image_live       = 1
 # These two have NO default: unset, the field is never sent and the
 # provider's own value rules (what every build did before they existed).
 # temperature    = 0.3
@@ -500,11 +501,38 @@ and the message's echo renders the image's marker — alt, format, dims,
 size and the reason — never the payload.
 
 `/image` refuses a file that is unreadable, is not a PNG/JPEG/GIF, or
-is over 8 MiB — the bytes ride **every** request, so the cap bounds the
-body, and a local refusal keeps the message yours instead of a provider
-error. That is the only cap: an image the attach accepted renders,
-however large, because the transcript does not second-guess a payload
-that is already in the conversation.
+is over 8 MiB — the cap bounds **one image**, not the conversation, and
+a local refusal keeps the message yours instead of a provider error.
+That is the only cap: an image the attach accepted renders, however
+large, because the transcript does not second-guess a payload that is
+already in the conversation.
+
+### How long an image rides a request
+
+An image is **not** re-sent on every request. It rides the request
+that introduced it and the next `image_live - 1` requests; after that
+it is replaced by a short, frozen text marker — `[image shot.png —
+PNG 800x600, 42.0 KiB — attached earlier, not repeated]` — that says
+what the image was and that it is not being repeated. The marker is
+byte-stable, so the provider's prefix cache keeps the rest of the
+conversation cached; the swap itself costs one re-bill of the tail.
+
+The window is a `/config` key, `image_live` (default `1`, env
+`NEVERMORE_IMAGE_LIVE`), and it counts **requests**, not turns: one
+turn can compose dozens of requests (a tool loop), and a turn-based
+window would keep every image live for the whole turn. Set it to `off`
+to put every image back on every request (the old behaviour, for a
+workflow that really wants the pixels every time); `0` is refused.
+
+The model's own images follow the same rule. A generated picture that
+has aged out loses its `images` array (the providers' message-level
+array takes image parts only) and its marker rides the message's text
+— so the model re-draws from the description instead of editing the
+picture, which is the trade the age rule buys.
+
+A tool-read image's marker says so: `call read_file again to see it`.
+A user attachment's marker does not — the store keeps the bytes, not a
+path, and there is no tool that could send them again.
 
 The model's own `read_file` meets the same three containers, and a file
 it can see is an image but the wire cannot take (a WebP, say) is named

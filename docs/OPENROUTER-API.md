@@ -165,6 +165,17 @@ part>]}, user]` is accepted (no 400) and the model edits the image
   (gpt-image emits dozens while generating — the minutes-long gap
   before the image event; the stream-inactivity deadline must be
   sized for it, or generation rounds will abort mid-wait).
+- **The assistant `images` array takes IMAGE parts only** (probed
+  2026-10-21, `google/gemini-3.1-flash-lite-image`): a **text** part
+  in that array is a **400** —
+  `image_url content parts must carry an object "image_url" with a
+string "url" (got undefined)`. So an aged-out assistant image
+  cannot be replaced by a text marker IN the array: the array is
+  dropped for that message and the marker rides the message's
+  `content` string instead (the model then re-draws from the text
+  rather than editing the picture — the accepted trade). A **user**
+  message's content-parts array, by contrast, accepts a text part in
+  place of the image part (the swap is legal, 200).
 
 ## 6. Provider notes for the nevermore side
 

@@ -72,6 +72,13 @@ Notes:
 - A generic `User-Agent: Mozilla/5.0` did **not** get rejected on
   the Go path (session header present); the UA rule is documented
   policy, not (yet) a wire gate. Send a real UA anyway.
+- **A GENERIC UA IS A 403 AT THE EDGE** (probed 2026-10-21): a
+  `python-urllib` request (UA `Python-urllib/3.x`) gets
+  **403 `error code: 1010`** (Cloudflare) on the Go path — before
+  the session header is even looked at. A real UA **plus** the
+  session header is the working pair. (The `Mozilla/5.0` probe above
+  was answered by the routing layer; Cloudflare's rule is stricter
+  and sits in front of it.)
 - No server-issued id: the client picks the value. The service
   wants it **stable per conversation** (routing + prompt cache);
   it is not checked for format, not a secret, and needs no
@@ -473,6 +480,15 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   sampled), and whether the routing mix is stable over time — if
   `deepseek` is ever the _only_ upstream, the echo stops being a
   coin-flip workaround and becomes mandatory.
+- **The cache is per-UPSTREAM** (probed 2026-10-21, `deepseek-v4.1-
+flash`): the gateway load-balances one model id across several
+  upstreams (`x-opencode-endpoint-id`: `deepseek`, `novita-deepseek`,
+  `deepinfra-dsv4.1flash`, `orcarouter`), and each upstream has its
+  OWN cache. So a byte-identical body can miss (the same body sent
+  twice landed on two upstreams), and a fresh upstream can answer
+  `429 {"type":"server_error","message":"Upstream request failed:
+Endpoint is rate limited"}`. A cache measurement on this stack is a
+  SHAPE confirmation, not a benchmark.
 
 ## 8. Corrections to the pre-work notes
 

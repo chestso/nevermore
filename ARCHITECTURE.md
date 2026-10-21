@@ -508,6 +508,23 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   iterates `nm_session_len` / `nm_session_get` when it builds the
   round's request. The provider-reported gauge (`/context`) is the only
   usage number, and it is never an estimate.
+  **The ONE exception is the images (the "LIVE-N" age rule).** An
+  image rides the request that introduced it and the next `N-1`
+  requests — `N` is the store's `image_live` key (default 1, `off` =
+  every request), read at the point of use — and after that it is
+  replaced by a byte-stable TEXT marker. The age unit is the REQUEST,
+  not the turn: one turn can compose dozens of requests (a tool loop),
+  and a turn-based window would keep every image live for the whole
+  turn. The prefix is therefore byte-stable **except for one change
+  per image, at the swap**, and that change costs a one-time re-bill of
+  the tail after the image (measured: 12,295 fresh tokens on the
+  ollama run, 2,858 on opencode:go). The marker is frozen at attach
+  and never re-derived: a marker whose bytes change re-bills the tail
+  on EVERY request. The USER path swaps the image part for a text part
+  in the SAME content-parts array (the array's shape never flips); the
+  ASSISTANT path drops the message-level `images` array (it takes
+  image parts only — a text part there is a 400) and puts the marker
+  in the message's content.
   **The UI reads it through ONE const door**: `nm_agent_session(a)`
   (`agent.h`) hands back the agent's `NmSession` borrowed and
   read-only — the `/session` command's inspection seam (`/session`
@@ -918,17 +935,22 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   an over-screen source degrades to the marker with the existing
   `undecodable source` rung — no new reason, so `nm_image_supported`
   (the tier's front door) cannot lie. The ATTACH half lives in the
-  session: `NmImage` holds the canonical `data:` URL and the
-  pre-serialized wire part,
-  both frozen when `nm_session_attach_image` reads the file **once**
+  session: `NmImage` holds the canonical `data:` URL, the
+  pre-serialized wire part, and the FROZEN MARKER (the text part that
+  stands in for the image once it ages out — see the session paragraph
+  above),
+  all frozen when `nm_session_attach_image` reads the file **once**
   (capture, not reference — a re-read would silently swap the image and
   break the provider's prefix cache, which keys on the serialized
   bytes). Messages carry image INDICES; the agent turns them into
-  borrowed part pointers for `NmMessage.image_parts`, and the composer
+  borrowed part pointers for `NmMessage.image_parts` (the image part
+  while the image is live, the marker part after — the pick is the
+  session's own, `nm_session_image_part`), and the composer
   embeds each VERBATIM through `nm_json_new_raw` (base64 is
   escape-free, so no per-round copy of a megabyte). ONE cap bounds the
-  tier: `NM_IMAGE_MAX_WIRE_BYTES` (8 MiB, the attach bound — the bytes
-  ride every request). There is no display-side cap: an image the
+  tier: `NM_IMAGE_MAX_WIRE_BYTES` (8 MiB, the attach bound — it bounds
+  ONE image, not the conversation: the age rule bounds the
+  conversation). There is no display-side cap: an image the
   attach accepted renders, however large (the render path's local-path
   probe reads at that same wire cap), because refusing to render a
   payload that is already in the conversation only makes the transcript
