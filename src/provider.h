@@ -131,6 +131,16 @@ typedef struct NmMessage
      * conversation is about). n_images == 0 keeps `content` a plain
      * string — the shape is decided at append and never flipped.
      *
+     * THE ONE EXCEPTION is the age rule: an image rides the request
+     * that introduced it and the next N-1 requests, and after that it
+     * is replaced by a frozen TEXT part (the marker) in the same
+     * array. The array's shape never flips, and the marker never
+     * changes its bytes — so the prefix stays byte-stable except for
+     * ONE change per image, at the swap, and that change costs a
+     * one-time re-bill of the tail. An ASSISTANT image ages out
+     * differently: the message-level array takes image parts ONLY, so
+     * the array is DROPPED and the marker rides the content string.
+     *
      * Only user and assistant messages carry images: a `tool` message's
      * content is a string by wire contract, and hyper silently DROPS
      * images on one (the tool-result fan-out answers that). */

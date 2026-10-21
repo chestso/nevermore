@@ -200,7 +200,13 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
              * prompt cache keys on). Each part is embedded VERBATIM via
              * the raw node: it is pre-serialized JSON whose payload is
              * megabytes of base64, so a parse/copy/escape round trip per
-             * round is exactly what the seam exists to avoid. */
+             * round is exactly what the seam exists to avoid.
+             *
+             * A part may be an IMAGE part or a TEXT part (the frozen
+             * marker that stands in for an aged image): the composer
+             * does not care which, and the ARRAY keeps its shape either
+             * way — a message that flips between "string" and "array"
+             * is a different prefix, which is what the cache keys on. */
             NmJson *parts = nm_json_new_array();
             NmJson *text_part = nm_json_new_object();
             nm_json_set(text_part, "type", nm_json_new_string("text"));

@@ -836,6 +836,22 @@ int nm_agent_timeout_ms(const NmAgent *a)
              : NM_AGENT_DEFAULT_TIMEOUT_MS;
 }
 
+/* The image window: how many REQUESTS an image rides before its
+ * marker stands in for it (the store's `image_live` key, resolved at
+ * the point of use — 0 = `off` = every request carries the image).
+ * The agent keeps no copy: the store is read when a request is
+ * composed, so `/config set image_live 2` reaches the next request
+ * without a restart. */
+unsigned long nm_agent_image_live(const NmAgent *a)
+{
+    (void)a;
+    NmConfig *c = nm_config_store();
+    if (!c)
+        return 1; /* the built-in default */
+    int n = nm_config_resolve_image_live(c);
+    return n > 0 ? (unsigned long)n : 0;
+}
+
 /* Millis left on a monotonic deadline, clamped to int range; a deadline
  * already in the past is 0.  Truncated, so the value never exceeds the
  * budget that was set — which also means a sub-millisecond remainder
@@ -1275,11 +1291,24 @@ static int begin_round(NmAgent *a)
         (a->tools && model_tools(a->provider, a->model) >= 0)
             ? nm_toolset_to_json(a->tools)
             : NULL;
+    /* The window, read from the store at the point of use (0 = off =
+     * every request carries the image). A mid-chat change is harmless:
+     * it only changes how OLD images are presented. */
+    unsigned long live = nm_agent_image_live(a);
+    /* The request counter: bumped once per request, BEFORE the parts
+     * are gathered, so the age rule sees this request's sequence. */
+    nm_session_next_request(a->session);
 
     /* Build the request from the WHOLE transcript: nevermore never
      * caps it (no token-budget guessing), so the provider reports
      * "too large" and the request prefix stays byte-stable — which is
-     * what keeps the provider's cached prefix paying off. */
+     * what keeps the provider's cached prefix paying off. The ONE
+     * exception is the images: an image rides the request that
+     * introduced it and the next N-1 requests, and after that a
+     * byte-stable text marker stands in for it (the LIVE-N policy —
+     * the age unit is the REQUEST, not the turn, because one turn can
+     * compose dozens of requests and a turn-based window would keep
+     * every image live for the whole turn). */
     size_t n_msgs = nm_session_len(a->session);
     NmMessage *msgs = malloc((n_msgs + 1) * sizeof(*msgs));
     if (!msgs) {
@@ -1287,16 +1316,27 @@ static int begin_round(NmAgent *a)
         return -1;
     }
     /* Image parts, in one flat array for the whole round: every entry
-     * borrows the session's frozen part JSON, and each message points at
-     * its slice. One allocation per round (never per token), and no
-     * copy of the payload — that is what the raw node and this array
-     * exist for. */
+     * borrows the session's frozen part JSON (or the frozen marker
+     * part), and each message points at its slice. One allocation per
+     * round (never per token), and no copy of the payload — that is
+     * what the raw node and this array exist for. */
     size_t total_parts = 0;
     for (size_t i = 0; i < n_msgs; i++) {
         const NmSessionMessage *sm = nm_session_get(a->session, i);
         for (size_t k = 0; k < sm->n_images; k++) {
-            if (nm_session_image(a->session, sm->images[k]))
-                total_parts++;
+            if (!nm_session_image(a->session, sm->images[k]))
+                continue;
+            /* An ASSISTANT image that has aged out contributes NO
+             * part: the message-level `images` array is dropped for
+             * that message and the marker rides the content string
+             * instead (the array takes image parts ONLY — a text part
+             * there is a 400). A USER image always contributes a part:
+             * the marker is a part too, so the content-parts array
+             * keeps its shape. */
+            if (sm->role == NM_ROLE_ASSISTANT &&
+                !nm_session_image_live(a->session, sm->images[k], live))
+                continue;
+            total_parts++;
         }
     }
     const char **parts = NULL;
@@ -1315,6 +1355,23 @@ static int begin_round(NmAgent *a)
      * any actually did is what freezes the mode below. */
     NmReasoningEcho echo = nm_agent_reasoning_echo(a);
     int echoed = 0;
+    /* The DERIVED contents: a per-request array of owned strings, one
+     * slot per message. A slot is non-NULL only for a message whose
+     * content this request DERIVED (an assistant message whose images
+     * aged out: the markers ride the content string, because the
+     * message-level `images` array takes image parts ONLY). The array
+     * is freed after the request is queued — the same request-scoped
+     * lifetime as the `msgs` array itself. */
+    char **derived = NULL;
+    if (n_msgs) {
+        derived = calloc(n_msgs, sizeof(*derived));
+        if (!derived) {
+            free(msgs);
+            free(parts);
+            set_error(a, "out of memory");
+            return -1;
+        }
+    }
     for (size_t i = 0; i < n_msgs; i++) {
         const NmSessionMessage *sm = nm_session_get(a->session, i);
         msgs[i].role = (sm->role == NM_ROLE_USER)        ? "user"
@@ -1329,7 +1386,12 @@ static int begin_round(NmAgent *a)
          * array) follows from what the session froze at append — never
          * from a decision here. An id that does not resolve (impossible
          * today: the store only grows) is left out of the slice rather
-         * than emitted as a null part, which keeps the body valid. */
+         * than emitted as a null part, which keeps the body valid.
+         *
+         * The ONE decision here is WHICH part each image contributes:
+         * the live image part, or the frozen marker part once the
+         * image has aged out. The array's shape never changes, so the
+         * swap is the only thing the cached prefix ever sees. */
         msgs[i].image_parts = NULL;
         msgs[i].n_images = 0;
         if (sm->n_images && parts) {
@@ -1338,14 +1400,118 @@ static int begin_round(NmAgent *a)
             for (size_t k = 0; k < sm->n_images; k++) {
                 const NmImage *img =
                     nm_session_image(a->session, sm->images[k]);
-                if (img) {
-                    parts[pi++] = img->part_json;
+                if (!img)
+                    continue;
+                if (sm->role == NM_ROLE_ASSISTANT) {
+                    /* The ASSISTANT path: the images ride a
+                     * MESSAGE-LEVEL array that takes image parts ONLY
+                     * (a text part there is a 400 — the probed shape).
+                     * So an aged assistant image contributes NO part,
+                     * and its marker rides the content string instead
+                     * (derived below). The live ones take the session's
+                     * own pick, which stamps the first ride. */
+                    if (!nm_session_image_live(a->session, sm->images[k],
+                                               live))
+                        continue;
+                    size_t alen = 0;
+                    const char *apart = nm_session_image_part(
+                        a->session, sm->images[k], live, &alen);
+                    if (apart) {
+                        parts[pi++] = apart;
+                        n++;
+                    }
+                    continue;
+                }
+                /* The USER path: the image part while the image is
+                 * inside the window, else the frozen MARKER part — a
+                 * text part in the SAME array, so the message's shape
+                 * (string vs array) never flips. The pick is the one
+                 * place that stamps the image's first ride. */
+                size_t plen = 0;
+                const char *part = nm_session_image_part(
+                    a->session, sm->images[k], live, &plen);
+                if (part) {
+                    parts[pi++] = part;
                     n++;
                 }
             }
             if (n) {
                 msgs[i].image_parts = slice;
                 msgs[i].n_images = n;
+            }
+        }
+        /* The ASSISTANT path's derived content: the session's content
+         * plus the markers of the AGED images, in image order,
+         * separated by a space. The derivation is deterministic and
+         * byte-stable across requests (the markers are frozen at
+         * attach), so the prefix stays stable once the swap has
+         * happened. A message whose images are all live keeps today's
+         * shape exactly (no derived content at all). */
+        if (sm->role == NM_ROLE_ASSISTANT && sm->n_images) {
+            char *acc = NULL;
+            size_t acc_len = 0; /* the bytes in acc (NUL excluded) */
+            for (size_t k = 0; k < sm->n_images; k++) {
+                if (nm_session_image_live(a->session, sm->images[k], live))
+                    continue; /* still live: the image rides the array */
+                const char *mt =
+                    nm_session_image_marker_text(a->session, sm->images[k]);
+                if (!mt || !*mt)
+                    continue;
+                size_t mlen = strlen(mt);
+                /* The buffer holds the markers so far, a space, this
+                 * marker and the NUL. The LENGTH is tracked, never
+                 * re-read from the buffer: a realloc'd buffer's old
+                 * bytes are not a string. */
+                size_t need = acc_len + 1 + mlen + 1;
+                char *grown = realloc(acc, need);
+                if (!grown) {
+                    free(acc);
+                    set_error(a, "out of memory");
+                    /* The derived contents are freed here; the request
+                     * is abandoned, so nothing rides the wire. */
+                    for (size_t j = 0; j < n_msgs; j++)
+                        free(derived[j]);
+                    free(derived);
+                    free(msgs);
+                    free(parts);
+                    return -1;
+                }
+                acc = grown;
+                if (acc_len)
+                    acc[acc_len++] = ' ';
+                memcpy(acc + acc_len, mt, mlen);
+                acc_len += mlen;
+                acc[acc_len] = '\0';
+            }
+            if (acc) {
+                /* The session's own content comes FIRST: the marker is
+                 * an addition, never a replacement. */
+                const char *own = sm->content ? sm->content : "";
+                size_t own_len = strlen(own);
+                size_t need = own_len + (own_len ? 1 : 0) + acc_len + 1;
+                char *joined = malloc(need);
+                if (!joined) {
+                    free(acc);
+                    set_error(a, "out of memory");
+                    for (size_t j = 0; j < n_msgs; j++)
+                        free(derived[j]);
+                    free(derived);
+                    free(msgs);
+                    free(parts);
+                    return -1;
+                }
+                if (own_len) {
+                    memcpy(joined, own, own_len);
+                    joined[own_len] = ' ';
+                    memcpy(joined + own_len + 1, acc, acc_len);
+                    joined[own_len + 1 + acc_len] = '\0';
+                } else {
+                    memcpy(joined, acc, acc_len);
+                    joined[acc_len] = '\0';
+                }
+                free(acc);
+                derived[i] = joined;
+                msgs[i].content = joined;
             }
         }
         /* Reasoning echo-back: the session keeps every trace for
@@ -1407,6 +1573,13 @@ static int begin_round(NmAgent *a)
                                 &err);
     free(msgs);
     free(parts);
+    /* The derived contents die with the request: the composer has
+     * copied what it needed into the body. */
+    if (derived) {
+        for (size_t i = 0; i < n_msgs; i++)
+            free(derived[i]);
+        free(derived);
+    }
     if (!a->stream) {
         char msg[NM_CHAT_MSG_MAX + 64];
         chat_failure(a, &err, msg, sizeof(msg));
@@ -1603,8 +1776,8 @@ static void finish_tool_call(NmAgent *a, const NmToolCall *tc,
     if (res->image && res->image_len > 0) {
         char reason[64];
         image_id = nm_session_attach_image_bytes(
-            a->session, res->image, res->image_len, res->image_alt, reason,
-            sizeof(reason));
+            a->session, res->image, res->image_len, res->image_alt, tc->name,
+            reason, sizeof(reason));
         if (image_id < 0) {
             /* The bytes never made it into the store: the UI shows the
              * panel line alone, the model gets no fan-out, and the

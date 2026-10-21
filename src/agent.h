@@ -176,6 +176,15 @@ long nm_agent_session_cache_base_tokens(const NmAgent *a);
  * deadline entirely. >0 = ms, 0 = `off` (disabled). */
 int nm_agent_timeout_ms(const NmAgent *a);
 
+/* The image window: how many REQUESTS an image rides before a
+ * byte-stable text marker stands in for it (the store's `image_live`
+ * key, resolved at the point of use; 0 = `off` = every request carries
+ * the image). The age unit is the REQUEST, not the turn: one turn can
+ * compose dozens of requests, and a turn-based window would keep every
+ * image live for the whole turn. The agent keeps no copy, so
+ * `/config set image_live 2` reaches the next request. */
+unsigned long nm_agent_image_live(const NmAgent *a);
+
 /* Milliseconds until the agent wants a step even though no fd is ready,
  * or -1 when it is purely readiness-driven (idle, or a live stream/tool
  * with no pending deadline). The runtime's tick folds this into its wait

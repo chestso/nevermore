@@ -652,6 +652,35 @@ static void test_chat_image_parts_shape(void)
     ASSERT_TRUE(strstr(body, "\"detail\"") == NULL);
 }
 
+/* The marker's part: a TEXT content part that stands in for an aged
+ * image. The composer does not care what a part IS — it embeds the
+ * pre-serialized JSON verbatim — and the ARRAY keeps its shape either
+ * way (a message that flips between "string" and "array" is a
+ * different prefix, which is what the cache keys on). */
+static void test_chat_image_marker_part_shape(void)
+{
+    static const char MARKER[] =
+        "{\"type\":\"text\",\"text\":\"[image shot.png — PNG 64x32, "
+        "24 B — attached earlier, not repeated]\"}";
+    const char *parts[1] = { MARKER };
+    NmMessage msgs[1] = {
+        { "user", "what color is this?", NULL, NULL, parts, 1, NULL },
+    };
+    char body[8192];
+    capture_round(body, sizeof(body), msgs, 1, NULL);
+
+    /* The array is text-part-first, then the marker part, verbatim. */
+    ASSERT_TRUE(strstr(body,
+                       "\"content\":[{\"type\":\"text\",\"text\":\"what "
+                       "color is this?\"},{\"type\":\"text\",\"text\":"
+                       "\"[image shot.png") != NULL);
+    ASSERT_TRUE(strstr(body, MARKER) != NULL);
+    /* The part is embedded VERBATIM, not as a JSON string copy. */
+    ASSERT_TRUE(strstr(body, "\\\"type\\\"") == NULL);
+    /* No image part rode: the aged image is gone from the wire. */
+    ASSERT_TRUE(strstr(body, "\"type\":\"image_url\"") == NULL);
+}
+
 /* The one assertion that pins the prefix invariant, and the reason the
  * whole design is shaped the way it is: round 1's serialized messages
  * must be a BYTE-EQUAL prefix of round 2's body. That single check
@@ -2882,6 +2911,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_finish_reason_is_published);
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_image_parts_shape);
+    RUN_TEST(test_chat_image_marker_part_shape);
     RUN_TEST(test_chat_image_prefix_is_byte_stable);
     RUN_TEST(test_chat_image_large_body_growth);
     RUN_TEST(test_chat_image_delta_fires_whole_url);

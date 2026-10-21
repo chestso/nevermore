@@ -3358,13 +3358,17 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
     ASSERT_TRUE(strstr(g_requests[0], "\"detail\"") == NULL);
     ASSERT_EQ(count_substr(g_requests[0], "\"type\":\"image_url\""), 1);
 
-    /* Round 2 replays the image as history (images in history replay
-     * fine) and adds the tool round trip: the assistant tool_calls
-     * message and the tool message are both plain strings — a tool
-     * message's content is a string by wire contract, and hyper drops
-     * images on one anyway. */
-    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
-    ASSERT_TRUE(strstr(g_requests[1], part) != NULL);
+    /* Round 2 replays the image as history — but the image has AGED
+     * OUT (the default window is one request), so the frozen MARKER
+     * stands in for it: a TEXT part in the SAME array, and no
+     * `image_url` anywhere. The array's shape never flips: a message
+     * that turns from a string into an array (or back) is a different
+     * prefix, and the cache keys on it. */
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 0);
+    ASSERT_TRUE(strstr(g_requests[1], img->marker_json) != NULL);
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"content\":[{\"type\":\"text\",\"text\":\"what is "
+                       "in this image?\"},{\"type\":\"text\",") != NULL);
     const char *asst = strstr(g_requests[1], "\"role\":\"assistant\"");
     ASSERT_NOT_NULL(asst);
     ASSERT_TRUE(strstr(asst, "\"tool_calls\":[") != NULL);
@@ -3373,18 +3377,24 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
     ASSERT_TRUE(strstr(tool, "\"content\":\"") != NULL);
     ASSERT_TRUE(strstr(tool, "\"content\":[") == NULL);
 
-    /* THE assertion: round 1's serialized messages
-     * are a byte-equal prefix of round 2's. The image turn's cached
-     * prefix rests on exactly this — one canonical data URL, verbatim
-     * embedding, frozen order, and no shape flip. */
+    /* THE assertion, amended: the prefix is byte-stable EXCEPT for one
+     * change per image, at the swap. So the messages BEFORE the image
+     * turn are byte-equal across the two requests, and the image turn
+     * itself is the one that changed (the image part became the
+     * marker part). */
     const char *m1 = strstr(g_requests[0], "\"messages\":[");
     const char *m2 = strstr(g_requests[1], "\"messages\":[");
     ASSERT_NOT_NULL(m1);
     ASSERT_NOT_NULL(m2);
-    const char *end1 = strstr(m1, "],\"stream\"");
-    ASSERT_NOT_NULL(end1);
-    size_t n1 = (size_t)(end1 + 1 - m1); /* includes the closing ']' */
-    ASSERT_TRUE(memcmp(m1, m2, n1 - 1) == 0);
+    /* The system message (everything before the user turn) is
+     * byte-equal: the swap changed the image turn, not the prefix
+     * before it. */
+    const char *u1 = strstr(m1, "{\"role\":\"user\"");
+    const char *u2 = strstr(m2, "{\"role\":\"user\"");
+    ASSERT_NOT_NULL(u1);
+    ASSERT_NOT_NULL(u2);
+    size_t npre = (size_t)(u1 - m1);
+    ASSERT_TRUE(memcmp(m1, m2, npre) == 0);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -5964,6 +5974,291 @@ static void test_agent_round_meta_text_shapes(void)
     ASSERT_STR_EQ(line, "");
 }
 
+/* The age rule on the wire: the window is the store's `image_live`
+ * key, read at the point of use. The default (1) means an image rides
+ * exactly ONE request; `off` means every request carries it (today's
+ * shape, byte for byte); a window of 2 lets it ride two. */
+static void test_agent_image_live_window(void)
+{
+    reset_capture();
+    write_fixture();
+
+    char img_path[64];
+    snprintf(img_path, sizeof(img_path), "nm-agent-live.png");
+    FILE *f = fopen(img_path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_PNG_HDR, 1, sizeof(T_PNG_HDR), f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"three\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    char reason[64];
+    long id = nm_agent_attach_image(agent, img_path, reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+    remove(img_path);
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+
+    /* The default window: ONE request. The first request carries the
+     * image; the second carries the marker — byte-identical to the
+     * third's, which is what the prefix cache needs. */
+    size_t ids[1] = { 0 };
+    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_EQ(count_substr(g_requests[0], "\"type\":\"image_url\""), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 0);
+    ASSERT_EQ(count_substr(g_requests[2], "\"type\":\"image_url\""), 0);
+    ASSERT_TRUE(strstr(g_requests[1], img->marker_json) != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], img->marker_json) != NULL);
+    /* The marker's bytes never change: the same part in both. */
+    const char *m1 = strstr(g_requests[1], img->marker_json);
+    const char *m2 = strstr(g_requests[2], img->marker_json);
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    ASSERT_TRUE(memcmp(m1, m2, img->marker_json_len) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* `image_live = off`: every request carries the image, byte for byte —
+ * the escape hatch for a pixel-hungry workflow is a real mode, and the
+ * wire shape is today's. */
+static void test_agent_image_live_off_keeps_the_image(void)
+{
+    reset_capture();
+    write_fixture();
+
+    char img_path[64];
+    snprintf(img_path, sizeof(img_path), "nm-agent-off.png");
+    FILE *f = fopen(img_path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_PNG_HDR, 1, sizeof(T_PNG_HDR), f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    for (int i = 0; i < 3; i++)
+        sc.sse[i] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+            "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_IMAGE_LIVE, "off"), 0);
+    ASSERT_EQ(nm_agent_image_live(agent), 0ul);
+
+    char reason[64];
+    long id = nm_agent_attach_image(agent, img_path, reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+    remove(img_path);
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+
+    size_t ids[1] = { 0 };
+    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_IMAGE_LIVE);
+
+    ASSERT_EQ(g_n_requests, 3);
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(count_substr(g_requests[i], "\"type\":\"image_url\""), 1);
+        ASSERT_TRUE(strstr(g_requests[i], img->part_json) != NULL);
+        ASSERT_TRUE(strstr(g_requests[i], img->marker_json) == NULL);
+    }
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* A window of TWO: the image rides two requests, then the marker. */
+static void test_agent_image_live_window_of_two(void)
+{
+    reset_capture();
+    write_fixture();
+
+    char img_path[64];
+    snprintf(img_path, sizeof(img_path), "nm-agent-live2.png");
+    FILE *f = fopen(img_path, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(T_PNG_HDR, 1, sizeof(T_PNG_HDR), f);
+    fclose(f);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    for (int i = 0; i < 3; i++)
+        sc.sse[i] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+            "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_IMAGE_LIVE, "2"), 0);
+    ASSERT_EQ(nm_agent_image_live(agent), 2ul);
+
+    char reason[64];
+    long id = nm_agent_attach_image(agent, img_path, reason, sizeof(reason));
+    ASSERT_EQ(id, 0);
+    remove(img_path);
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+
+    size_t ids[1] = { 0 };
+    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_IMAGE_LIVE);
+
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_EQ(count_substr(g_requests[0], "\"type\":\"image_url\""), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
+    ASSERT_EQ(count_substr(g_requests[2], "\"type\":\"image_url\""), 0);
+    ASSERT_TRUE(strstr(g_requests[2], img->marker_json) != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The ASSISTANT path: a generated image rides the message-level
+ * `images` array while it is live, and after the window the array is
+ * GONE and the marker rides the message's content (the array takes
+ * image parts ONLY — a text part there is a 400). */
+static void test_agent_imagegen_aged_image_drops_the_array(void)
+{
+    reset_capture();
+
+    char url[256];
+    test_image_url(url, sizeof(url));
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}]}}]}"
+             "\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"made it\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"now blue\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"still blue\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "make it blue", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "keep it blue", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 3);
+
+    const NmImage *img = nm_agent_image(agent, 0);
+    ASSERT_NOT_NULL(img);
+    /* The editing round: the image is still live (it rode the round
+     * that produced it), so the message-level array is there. */
+    ASSERT_TRUE(strstr(g_requests[1], img->part_json) != NULL);
+    ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 1);
+    /* The third request: the image has aged out, so the array is GONE
+     * and the content carries the marker. */
+    ASSERT_TRUE(strstr(g_requests[2], img->part_json) == NULL);
+    ASSERT_EQ(count_substr(g_requests[2], "\"type\":\"image_url\""), 0);
+    ASSERT_TRUE(strstr(g_requests[2], "\"images\":[") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], img->marker_text) != NULL);
+    /* The content keeps the round's own words, and the marker joins
+     * them. */
+    ASSERT_TRUE(strstr(g_requests[2], "made it") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -6012,6 +6307,10 @@ int main(void)
     nm_config_set_store(g_cfg);
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_image_turn_parts_and_prefix_stability);
+    RUN_TEST(test_agent_image_live_window);
+    RUN_TEST(test_agent_image_live_off_keeps_the_image);
+    RUN_TEST(test_agent_image_live_window_of_two);
+    RUN_TEST(test_agent_imagegen_aged_image_drops_the_array);
     RUN_TEST(test_agent_plain_answer_no_tools);
     RUN_TEST(test_agent_sampling_knobs_ride_the_request);
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
