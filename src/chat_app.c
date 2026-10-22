@@ -1840,7 +1840,17 @@ void nm_chat_app_step(NmChatApp *app)
         nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
         report_family_skips(app);
         tui_runtime_flush(app->rt);
-        if (nm_chat_app_source(app).handle >= 0)
+        /* The AGENT's own source decides, never the app's: a catalog
+         * fetch borrows the app's one primary source slot (the agent's
+         * source when it has one, else the catalog's wait target), and
+         * the tool phase is exactly the moment the agent has NO
+         * source. Reading the app's source there ended the loop on the
+         * catalog's socket: the tool never ran, and nothing else ever
+         * steps the agent in the tool phase (it has no deadline), so
+         * the turn waited for the catalog to land — and the landing
+         * did not resume it. */
+        NmSource src = nm_agent_source(app->agent);
+        if (src.handle >= 0 && src.flags)
             return; /* waiting on the stream; the loop will call us back */
         st = nm_agent_state(app->agent);
         if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)

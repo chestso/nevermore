@@ -228,6 +228,13 @@ missing prerequisite.
     deadlineless walk leaves the turn STREAMING silently (a
     Windows-only red). A drive that can end inside a step must flush
     before reading output.
+  - **A drive that steps on EVERY iteration hides a stall**: the tool
+    phase has no deadline, so a step is the only thing that can move
+    it — and the real loop steps on an fd event or a due deadline,
+    never on the passage of time. When the property is that a turn
+    MAKES PROGRESS, drive it the way the loop does (wait on the app's
+    wait target → the ready branch; the tick on a timeout):
+    `harness_drive_events`.
 - **The watchdog cap is a HANG DETECTOR** (`NM_TEST_TIMEOUT`, 60 s):
   MSYS2 slowness is per-test environment overhead, not the waits — keep
   the margin ≥ 5x the worst legitimate runtime.

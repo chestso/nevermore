@@ -176,6 +176,16 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   the fetch **borrows the app's primary source slot** — the agent is
   idle whenever `/model` can run, since it is only reachable from
   submit, a no-op mid-turn.
+  **The borrowed slot is the APP's, and the agent's tool phase is
+  exactly the moment the agent has no source of its own** (the stream
+  is closed and the tool runs inline): so "is the agent waiting on
+  I/O?" is a question about the AGENT (`nm_agent_source`), never about
+  the app's primary slot. Asking the app reads the catalog's socket
+  there, mistakes it for the agent's, and ends the step loop before
+  the tool runs — and the tool phase has no deadline, so nothing else
+  ever steps the agent again: the turn waits for the catalog to land,
+  and the landing does not resume it (the reported "a tool cannot run
+  unless the catalog has been loaded").
   **The UI thread reads `models_cached`, always — never `models()`**
   (the reported freeze): a live fetch there froze the TUI for the whole
   round trip (~13 s on a `/provider` switch) and, with a dead peer,

@@ -190,6 +190,52 @@ static void server_wait_permit(struct ServerScript *sc, int idx)
     pthread_mutex_unlock(&sc->lock);
 }
 
+/* Send one SSE body as a chunked response — the canned server's wire
+ * shape. `sc` may be NULL: no pacing, no inter-event delay, no extra
+ * head lines (the servers that need a held catalog request have their
+ * own thread). The 0-chunk terminator is the caller's (the stalling
+ * rounds send none). */
+static void sse_send_chunked(int cfd, const char *body, struct ServerScript *sc)
+{
+    char head[256];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: text/event-stream\r\n"
+                      "%s"
+                      "Transfer-Encoding: chunked\r\n\r\n",
+                      (sc && sc->prism_head) ? sc->prism_head : "");
+    send(cfd, head, (size_t)hl, 0);
+    size_t bl = strlen(body);
+    size_t off = 0;
+    int ev_idx = 0;
+    while (off < bl) {
+        const char *ev_end = strstr(body + off, "\n\n");
+        size_t ev_len =
+            ev_end ? (size_t)(ev_end - (body + off)) + 2 : bl - off;
+        /* Paced: event N goes out only once the test has stepped N
+         * times (so the client sees one event per step). */
+        if (sc)
+            server_wait_permit(sc, ev_idx);
+        char chunk[REQ_CAP];
+        int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
+        memcpy(chunk + cl, body + off, ev_len);
+        cl += (int)ev_len;
+        memcpy(chunk + cl, "\r\n", 2);
+        cl += 2;
+        size_t cs = 0;
+        while (cs < (size_t)cl) {
+            long n = send(cfd, chunk + cs, (size_t)cl - cs, 0);
+            if (n <= 0)
+                break;
+            cs += (size_t)n;
+        }
+        if (sc && sc->delay_us)
+            usleep((unsigned)sc->delay_us);
+        off += ev_len;
+        ev_idx++;
+    }
+}
+
 static void *chat_server_thread(void *arg)
 {
     struct ServerScript *sc = arg;
@@ -242,42 +288,7 @@ static void *chat_server_thread(void *arg)
             continue;
         }
 
-        char head[256];
-        int hl = snprintf(head, sizeof(head),
-                          "HTTP/1.1 200 OK\r\n"
-                          "Content-Type: text/event-stream\r\n"
-                          "%s"
-                          "Transfer-Encoding: chunked\r\n\r\n",
-                          sc->prism_head ? sc->prism_head : "");
-        send(cfd, head, (size_t)hl, 0);
-        size_t bl = strlen(body);
-        size_t off = 0;
-        int ev_idx = 0;
-        while (off < bl) {
-            const char *ev_end = strstr(body + off, "\n\n");
-            size_t ev_len =
-                ev_end ? (size_t)(ev_end - (body + off)) + 2 : bl - off;
-            /* Paced: event N goes out only once the test has stepped
-             * N times (so the client sees one event per step). */
-            server_wait_permit(sc, ev_idx);
-            char chunk[REQ_CAP];
-            int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
-            memcpy(chunk + cl, body + off, ev_len);
-            cl += (int)ev_len;
-            memcpy(chunk + cl, "\r\n", 2);
-            cl += 2;
-            size_t cs = 0;
-            while (cs < (size_t)cl) {
-                long n = send(cfd, chunk + cs, (size_t)cl - cs, 0);
-                if (n <= 0)
-                    break;
-                cs += (size_t)n;
-            }
-            if (sc->delay_us)
-                usleep((unsigned)sc->delay_us);
-            off += ev_len;
-            ev_idx++;
-        }
+        sse_send_chunked(cfd, body, sc);
         if (sc->stall_at_end && round == sc->n_rounds - 1) {
             /* Hold the connection open without the terminal chunk —
              * the client stays mid-stream until it cancels. A closed
@@ -750,6 +761,99 @@ static int harness_drive(AppHarness *h, int max_spins)
         tui_runtime_flush(h->rt);
     }
     return -1;
+}
+
+/* Milliseconds from a portable wall clock: a test's own bound, never
+ * the clock under test (that one is tests/fake_clock.c). */
+static long long wall_ms(void)
+{
+#ifdef _WIN32
+    return (long long)GetTickCount64();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (long long)tv.tv_sec * 1000 + tv.tv_usec / 1000;
+#endif
+}
+
+/* Wait up to `timeout_ms` on one source; 1 when it became ready, 0 on
+ * a timeout. The ready/timed-out distinction is what the event loop's
+ * two branches turn on (an fd event vs the tick). */
+static int app_wait_ready(const NmSource *sp, int timeout_ms)
+{
+    NmSource s = *sp;
+#ifdef _WIN32
+    if (s.kind == NM_SRC_HANDLE) {
+        DWORD r = WaitForSingleObject((HANDLE)s.handle, (DWORD)timeout_ms);
+        return r == WAIT_OBJECT_0 ? 1 : 0;
+    }
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    if (s.flags & NM_INTEREST_READ)
+        FD_SET((SOCKET)s.handle, &r);
+    if (s.flags & NM_INTEREST_WRITE)
+        FD_SET((SOCKET)s.handle, &w);
+    return select(0, (s.flags & NM_INTEREST_READ) ? &r : NULL,
+                  (s.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL,
+                  &tv) > 0
+               ? 1
+               : 0;
+#else
+    fd_set r, w;
+    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
+    FD_ZERO(&r);
+    FD_ZERO(&w);
+    int fd = (int)s.handle;
+    if (s.flags & NM_INTEREST_READ)
+        FD_SET(fd, &r);
+    if (s.flags & NM_INTEREST_WRITE)
+        FD_SET(fd, &w);
+    return select(fd + 1, (s.flags & NM_INTEREST_READ) ? &r : NULL,
+                  (s.flags & NM_INTEREST_WRITE) ? &w : NULL, NULL,
+                  &tv) > 0
+               ? 1
+               : 0;
+#endif
+}
+
+/* Drive a turn the way boba's EVENT LOOP does: wait on the app's wait
+ * target, run the app's ready branch when it fires, and the app's tick
+ * when the wait times out.
+ *
+ * The plain harness_drive steps on EVERY iteration, and that HIDES a
+ * stall: the tool phase has no deadline, so a step is the only thing
+ * that can move it — and in the real loop a step comes from an fd
+ * event or from a due deadline, never from the passage of time. A turn
+ * that waits for a step nobody makes looks alive to harness_drive and
+ * dead to the user.
+ *
+ * Bounded by WALL CLOCK (a ready fd costs microseconds, so an
+ * iteration count would not bound the wait). */
+static int harness_drive_events(AppHarness *h, int budget_ms)
+{
+    long long t0 = wall_ms();
+    for (;;) {
+        NmAgentState st = nm_chat_app_state(h->app);
+        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
+            st == NM_AGENT_IDLE)
+            return 0;
+        if (wall_ms() - t0 > (long long)budget_ms)
+            return -1;
+        NmSource s = nm_chat_app_source(h->app);
+        int wait_ms = nm_chat_app_tick_ms(h->app);
+        if (wait_ms < 0)
+            wait_ms = 50; /* no cadence: a short poll */
+        int ready = 0;
+        if (s.handle >= 0 && s.flags)
+            ready = app_wait_ready(&s, wait_ms);
+        if (ready)
+            nm_chat_app_external_ready(h->app, s.handle, s.flags);
+        else
+            nm_chat_app_tick(h->app);
+        tui_runtime_flush(h->rt);
+    }
 }
 
 /* One step + frame repaint (for mid-stream assertions). Steps until
@@ -5408,6 +5512,201 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 }
 
 /* ---------------------------------------------------------------- */
+/* The tool phase vs a catalog fetch in flight                        */
+/* ---------------------------------------------------------------- */
+
+/* A catalog fetch borrows the app's ONE primary source slot (the
+ * agent's source when it has one, else the catalog's wait target), and
+ * the TOOL PHASE is exactly the moment the agent has no source of its
+ * own: the stream is closed and the tool runs inline. A step loop that
+ * asked the APP for its source therefore read the catalog's socket,
+ * took it for "the agent is waiting on I/O" and ended the loop before
+ * the tool ran.
+ *
+ * The stall was TOTAL, not a delay: the tool phase has no deadline, so
+ * nothing else ever stepped the agent again — the turn waited for the
+ * catalog to land, and the landing did not resume it. The reported
+ * shape ("a tool cannot run unless the catalog has been loaded") is
+ * this: the warm's fetch is in flight for the first turns of a
+ * session, and the turn that calls a tool in that window dies.
+ *
+ * The server below answers the CHAT and HOLDS the catalog request, so
+ * the fetch stays in flight for the whole turn — the state the stall
+ * needs (the fetch's own deadline is the fake clock's, which does not
+ * move here). */
+struct HeldCatalogServer
+{
+    int lfd;
+    volatile int stop; /* the test is done: leave the accept loop */
+    int chat_rounds;   /* the chat requests served */
+    int held;          /* the catalog request is being held */
+    pthread_t holder;  /* the thread holding the catalog connection */
+};
+
+/* Hold one connection open until the peer closes it. A closed peer is
+ * READABLE (EOF), so poll with a timeout and read: 0 = gone. */
+static void *hold_conn_thread(void *arg)
+{
+    int cfd = (int)(intptr_t)arg;
+    for (;;) {
+        struct timeval tv = { 0, 200 * 1000 };
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(cfd, &rfds);
+        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+            continue;
+        char sink[256];
+        long n = recv(cfd, sink, sizeof(sink), 0);
+        if (n <= 0)
+            break; /* the peer closed */
+    }
+    close(cfd);
+    return NULL;
+}
+
+/* The chat's two canned rounds: the tool call, then the answer. */
+static const char *const g_held_chat_sse[2] = {
+    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+    "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+    "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE_PATH
+    "\\\"}\"}}]}}]}\n\n"
+    "data: [DONE]\n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+    "data: [DONE]\n\n"
+};
+
+/* The server: the catalog's GET is held (in its own thread, so the
+ * accept loop keeps taking the chat's connections), the chat's POST is
+ * answered with the scripted round. */
+static void *held_catalog_server_thread(void *arg)
+{
+    struct HeldCatalogServer *hs = arg;
+    for (;;) {
+        if (hs->stop)
+            return NULL;
+        struct timeval atv = { 0, 100 * 1000 };
+        fd_set arfds;
+        FD_ZERO(&arfds);
+        FD_SET(hs->lfd, &arfds);
+        if (select(hs->lfd + 1, &arfds, NULL, NULL, &atv) <= 0)
+            continue; /* the timeout re-checks `stop` */
+        int cfd = accept(hs->lfd, NULL, NULL);
+        if (cfd < 0)
+            continue;
+        /* Read the request head AND its body: an unread request + close
+         * sends an RST, which on macOS/BSD can discard the client's
+         * unread reply. The body length is the head's Content-Length. */
+        char req[REQ_CAP];
+        size_t got = 0;
+        size_t want = 0;
+        for (;;) {
+            struct timeval tv = { 0, 200 * 1000 };
+            fd_set rfds;
+            FD_ZERO(&rfds);
+            FD_SET(cfd, &rfds);
+            if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
+                break;
+            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+            if (n <= 0)
+                break;
+            got += (size_t)n;
+            req[got] = '\0';
+            const char *end = strstr(req, "\r\n\r\n");
+            if (!end)
+                continue;
+            if (!want) {
+                const char *cl = strstr(req, "Content-Length:");
+                want = cl ? (size_t)strtoul(cl + 15, NULL, 10) : 0;
+                if (!want)
+                    break; /* no body: the head is all there is */
+            }
+            if (got >= (size_t)(end - req) + 4 + want)
+                break;
+        }
+        req[got] = '\0';
+
+        if (strncmp(req, "GET ", 4) == 0) {
+            /* The catalog's request: HOLD it. The fetch stays in flight
+             * for the whole turn, so the app's primary slot is the
+             * catalog's socket while the agent is in its tool phase. */
+            pthread_create(&hs->holder, NULL, hold_conn_thread,
+                           (void *)(intptr_t)cfd);
+            hs->held = 1;
+            continue;
+        }
+        /* The chat: the scripted round (the last one repeats, so a
+         * third request would still be answered). */
+        int round = hs->chat_rounds++;
+        sse_send_chunked(cfd, g_held_chat_sse[round < 2 ? round : 1], NULL);
+        send(cfd, "0\r\n\r\n", 5, 0);
+        close(cfd);
+    }
+}
+
+/* The tool runs while the catalog fetch is in flight. */
+static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
+{
+    /* The fixture the tool reads (removed first: a stale file from an
+     * earlier run would be read instead). */
+    remove(FIXTURE_PATH);
+    FILE *f = fopen(FIXTURE_PATH, "wb");
+    ASSERT_NOT_NULL(f);
+    fputs("the quick brown fox\n", f);
+    fclose(f);
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    struct HeldCatalogServer hs;
+    memset(&hs, 0, sizeof(hs));
+    hs.lfd = lfd;
+    pthread_t th;
+    pthread_create(&th, NULL, held_catalog_server_thread, &hs);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* main.c's warm, verbatim: the fetch is in flight while the turn
+     * runs. The warm is gated on the live-catalog knob, so lift the
+     * suite's pin for it — and put the pin back BEFORE the first
+     * assertion, so a failed assert cannot leave it off for the tests
+     * after this one (they would then dial the real provider). */
+    test_unsetenv("NM_NO_LIVE_CATALOG");
+    nm_chat_app_warm_catalog(h->app);
+    /* The fetch is in flight: the app's primary slot is the catalog's
+     * socket (the agent is idle). */
+    int in_flight = nm_chat_app_source(h->app).handle >= 0;
+
+    harness_type(h, "read it");
+    harness_enter(h);
+    /* The EVENT-LOOP drive, not the plain one: the plain drive steps
+     * on every iteration, and a step is the only thing that can move
+     * the tool phase (it has no deadline) — so the plain drive walks
+     * straight past the stall this test is about. */
+    int drove = harness_drive_events(h, 10000);
+    test_pin_offline_catalog();
+
+    ASSERT_TRUE(in_flight);
+    /* The turn ran to its end: the tool ran, and the answer landed. */
+    ASSERT_EQ(drove, 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    char *clean = strip_frames(harness_read(h));
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "all done") != NULL);
+    free(clean);
+
+    harness_free(h); /* frees the fetch: the held connection closes */
+    hs.stop = 1;
+    pthread_join(th, NULL);
+    if (hs.held)
+        pthread_join(hs.holder, NULL);
+    close(lfd);
+    remove(FIXTURE_PATH);
+}
+
+/* ---------------------------------------------------------------- */
 /* The fetch's deadline bounds the RESPONSE, not the connect         */
 /* ---------------------------------------------------------------- */
 
@@ -8807,6 +9106,7 @@ int main(void)
     RUN_TEST(test_exec_command_spinner_tier);
 #endif
     RUN_TEST(test_catalog_fetch_deadline_does_not_bound_the_connect);
+    RUN_TEST(test_tool_runs_while_a_catalog_fetch_is_in_flight);
     /* LAST on purpose: this one commits a live hyper catalog, and the
      * provider catalogs are process-global — every test after it would
      * read the canned catalog instead of the static fallback it pins. */
