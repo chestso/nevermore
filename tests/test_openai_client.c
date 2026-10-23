@@ -2419,6 +2419,55 @@ static void test_catalog_fetch_carries_extra_headers(void)
     /* And with no extras the fetch is byte-for-byte the old behavior. */
 }
 
+/* The catalog DOCUMENT fetch: the keep set decides what is BUILT (the
+ * model catalog document is 5.9 MB and 230 providers, two of them
+ * ours), and the request carries no credentials — the document is
+ * public and belongs to another vendor. */
+static void test_document_fetch_keeps_only_the_named_members(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    char req[4096] = { 0 };
+    ExtraServer s = {
+        lfd, req, sizeof(req), 0,
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: application/json\r\n"
+        "Content-Length: 33\r\n\r\n"
+        "{\"ours\":{\"v\":1},\"theirs\":{\"v\":2}}"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, extra_capture_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    const char *keys[] = { "ours" };
+    NmFetchStream *f = nm_fetch_begin_document(base, "/api.json", keys, 1, 0);
+    ASSERT_NOT_NULL(f);
+    for (;;) {
+        NmCatalogStatus st = nm_fetch_step(f);
+        if (st != NM_CATALOG_PENDING)
+            break;
+        NmSource src = nm_fetch_source(f);
+        ASSERT_TRUE(src.handle >= 0);
+        nm_source_wait_any(&src, 1, 50);
+    }
+    NmJson *doc = nm_fetch_take(f);
+    ASSERT_NOT_NULL(doc);
+    /* One member, not two: the unwanted one was scanned, not built. */
+    ASSERT_EQ(nm_json_len(doc), 1);
+    ASSERT_NOT_NULL(nm_json_get(doc, "ours"));
+    ASSERT_NULL(nm_json_get(doc, "theirs"));
+    ASSERT_EQ(nm_json_num(nm_json_get(nm_json_get(doc, "ours"), "v")), 1);
+    nm_json_free(doc);
+    nm_fetch_end(f);
+    pthread_join(th, NULL);
+    close(lfd);
+
+    ASSERT_TRUE(strstr(req, "GET /api.json") != NULL);
+    ASSERT_TRUE(strstr(req, "Authorization:") == NULL); /* tokenless */
+}
+
 /* Redaction plumbing: the recorder redacts a marked extra and logs an
  * unmarked one verbatim (the `secret` flag's whole reason for
  * existing). Marked where built — the endpoint carries it. */
@@ -2939,6 +2988,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_extra_headers_empty_value_is_skipped);
     RUN_TEST(test_extra_headers_null_changes_nothing);
     RUN_TEST(test_catalog_fetch_carries_extra_headers);
+    RUN_TEST(test_document_fetch_keeps_only_the_named_members);
     RUN_TEST(test_extra_headers_redaction_marker);
     RUN_TEST(test_affinity_headers_logged_verbatim);
     RUN_TEST(test_reasoning_content_serialized_when_attached);

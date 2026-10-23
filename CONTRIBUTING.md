@@ -213,7 +213,13 @@ missing prerequisite.
   `TEST_OFFLINE_CATALOG_PIN_CHECK`): a catalog lookup with no endpoint
   override resolves the provider's DEFAULT base — a real request whose
   fetched list REPLACES the static catalog the test asserts against. An
-  explicit `base_url` wins whatever the gate says.
+  explicit `base_url` wins whatever the gate says. The same rule
+  governs the OpenCode tiers' catalog DOCUMENT
+  (`NEVERMORE_OPENCODE_CATALOG_URL`): the override is an explicit
+  request and is never gated, the DEFAULT url is live-catalog traffic
+  and the gate governs it — so a test that wants the document points
+  it at its own server, and a test that wants no document at all
+  leaves the override unset.
 - **Pin env-derived terminal hints** (`pin_color_env`, `harness_new` /
   `harness_new_rgb`): truecolor is read when the probe starts (the
   harness's first flush), so the test process's own COLORTERM would

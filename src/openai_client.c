@@ -1504,6 +1504,9 @@ struct NmFetchStream
     NmConnection *conn;
     char *body; /* owned response body (grown geometrically) */
     size_t len, cap;
+    size_t max_body; /* the body cap (0 = the default) */
+    char **keep;     /* the members to build (owned copies) */
+    size_t n_keep;
     NmJson *doc;     /* parsed; owned until taken or freed by end */
     double deadline; /* monotonic seconds; 0 = none */
     int terminal;    /* 1 once the status is OK or ERR */
@@ -1519,11 +1522,21 @@ static void fetch_fail(NmFetchStream *f)
     f->ok = 0;
 }
 
-NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
-                              const char *path, const char *auth_header,
-                              const char *api_key,
-                              const NmExtraHeader *extra, size_t n_extra,
-                              const char *body)
+/* The fetch's own begin: the common path of the two shapes (a catalog
+ * list, a catalog document). `keep` names the top-level members worth
+ * BUILDING (NULL = build them all); the names are COPIED, so the
+ * caller's array need not outlive the fetch. `max_body` overrides the
+ * body cap (0 = the default). */
+static NmFetchStream *fetch_begin_common(const char *base_url,
+                                         const char *method,
+                                         const char *path,
+                                         const char *auth_header,
+                                         const char *api_key,
+                                         const NmExtraHeader *extra,
+                                         size_t n_extra, const char *body,
+                                         size_t max_body,
+                                         const char *const *keep,
+                                         size_t n_keep)
 {
     if (!base_url || !*base_url)
         return NULL;
@@ -1546,10 +1559,35 @@ NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
         return NULL;
     }
     f->conn = conn;
+    f->max_body = max_body;
     /* The response deadline is armed by the first step that puts the
      * request on the wire (nm_fetch_step): the connect + handshake that
      * precede it are the transport's own budgets to bound. */
     f->deadline = 0;
+
+    /* The keep set: the names are copied into the fetch (the parse
+     * happens at step time, long after this call returns). */
+    if (keep && n_keep) {
+        f->keep = calloc(n_keep, sizeof(char *));
+        if (!f->keep) {
+            nm_connection_close(conn);
+            free(f);
+            return NULL;
+        }
+        for (size_t i = 0; i < n_keep; i++) {
+            f->keep[i] = strdup(keep[i] ? keep[i] : "");
+            if (!f->keep[i]) {
+                for (size_t k = 0; k < i; k++)
+                    free(f->keep[k]);
+                free(f->keep);
+                f->keep = NULL;
+                nm_connection_close(conn);
+                free(f);
+                return NULL;
+            }
+        }
+        f->n_keep = n_keep;
+    }
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
      * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
@@ -1581,10 +1619,47 @@ NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
     if (nm_request_queue(conn, method, path, hdrs, nh, body, body_len) !=
         NM_TRANSPORT_OK) {
         nm_connection_close(conn);
+        for (size_t i = 0; i < f->n_keep; i++)
+            free(f->keep[i]);
+        free(f->keep);
         free(f);
         return NULL;
     }
     return f;
+}
+
+NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
+                              const char *path, const char *auth_header,
+                              const char *api_key,
+                              const NmExtraHeader *extra, size_t n_extra,
+                              const char *body)
+{
+    return fetch_begin_common(base_url, method, path, auth_header, api_key,
+                              extra, n_extra, body, 0, NULL, 0);
+}
+
+/* The catalog DOCUMENT fetch: a big JSON document of which only a few
+ * top-level members are wanted (the model catalog document: 5.9 MB,
+ * 230 providers, two of them ours).
+ *
+ * Two things make it its own shape rather than a catalog list:
+ *
+ *  - the KEEP SET: the body is parsed with only the named members
+ *    built, so the tree is the two members and not 230 — the whole
+ *    document is ~50 MB of tree (measured), the kept two are ~1 MB;
+ *  - the BODY CAP: the document is bigger than the 4 MiB default, and
+ *    it grows with every provider it lists, so the cap is the
+ *    caller's (a backstop against a runaway peer, not a budget).
+ *
+ * The request is tokenless (the document is public) and carries no
+ * provider headers: it is another vendor's document, not this
+ * provider's API. */
+NmFetchStream *nm_fetch_begin_document(const char *base_url, const char *path,
+                                       const char *const *keep,
+                                       size_t n_keep, size_t max_body)
+{
+    return fetch_begin_common(base_url, "GET", path, NULL, NULL, NULL, 0,
+                              NULL, max_body, keep, n_keep);
 }
 
 NmCatalogStatus nm_fetch_step(NmFetchStream *f)
@@ -1621,7 +1696,7 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     }
 
     for (;;) {
-        if (f->len >= NM_FETCH_BODY_MAX) {
+        if (f->len >= (f->max_body ? f->max_body : NM_FETCH_BODY_MAX)) {
             fetch_fail(f);
             return NM_CATALOG_ERR;
         }
@@ -1673,7 +1748,13 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     nm_wire_tap_response(f->conn, f->body, f->len);
 
     const char *jerr = NULL;
-    f->doc = nm_json_parse(f->body, f->len, &jerr);
+    /* The parse: the whole body, or — when the fetch carries a keep
+     * set — only the named top-level members (the catalog document:
+     * 5.9 MB of which two members are wanted). */
+    f->doc = f->n_keep ? nm_json_parse_kept(f->body, f->len,
+                                            (const char *const *)f->keep,
+                                            f->n_keep, &jerr)
+                       : nm_json_parse(f->body, f->len, &jerr);
     if (!f->doc) {
         nm_wire_tap_error(f->conn, "fetch",
                           jerr ? jerr : "the response body is not JSON");
@@ -1710,6 +1791,9 @@ void nm_fetch_end(NmFetchStream *f)
         nm_connection_close(f->conn);
     if (f->doc)
         nm_json_free(f->doc);
+    for (size_t i = 0; i < f->n_keep; i++)
+        free(f->keep[i]);
+    free(f->keep);
     free(f->body);
     free(f);
 }

@@ -24,6 +24,20 @@ extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
  * this is the auth rule they both point at. */
 int nm_opencode_needs_auth(const NmProvider *p, const char *base_url);
 
+/* The OpenCode CATALOG: the tier's live list (the membership) and,
+ * when the generated table cannot cover it, the catalog document (the
+ * coverage). The two-stage machine is the tiers' own (the chat half
+ * stays on the shared OpenAI-compatible surface), so the vtable slots
+ * below are the OpenCode ones. */
+const NmModel *nm_opencode_models(const NmProvider *p, const char *base_url,
+                                  const char *api_key, size_t *n_out);
+const NmModel *nm_opencode_models_cached(const NmProvider *p, size_t *n_out);
+int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
+                             const char *api_key);
+NmCatalogStatus nm_opencode_models_step(const NmProvider *p);
+NmSource nm_opencode_models_source(const NmProvider *p);
+void nm_opencode_models_end(const NmProvider *p);
+
 /* Shared Ollama wire surface (provider_ollama.c): the cloud vtable
  * and the local daemon vtable (provider_ollama_local.c) sit on the
  * same OpenAI-compatible client + native /api catalog; only the

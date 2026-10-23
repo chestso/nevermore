@@ -168,6 +168,26 @@ NmFetchStream *nm_fetch_begin(const char *base_url, const char *method,
                               const NmExtraHeader *extra, size_t n_extra,
                               const char *body);
 
+/* The catalog DOCUMENT fetch: a big JSON document of which only a few
+ * top-level members are wanted (the model catalog document: 5.9 MB,
+ * 230 providers, two of them ours).
+ *
+ *  - `keep` names the members worth BUILDING; the rest of the document
+ *    is scanned and dropped, so the tree is the wanted members and not
+ *    the whole document (~50 MB of tree when built whole, measured).
+ *    The names are copied: the caller's array need not outlive the
+ *    fetch.
+ *  - `max_body` is the response body cap in bytes (0 = the 4 MiB
+ *    default). The document is bigger than the default and grows with
+ *    every provider it lists, so the cap is the caller's — a backstop
+ *    against a runaway peer, not a budget.
+ *
+ * The request is tokenless and carries no provider headers: the
+ * document is public and belongs to another vendor. */
+NmFetchStream *nm_fetch_begin_document(const char *base_url, const char *path,
+                                       const char *const *keep,
+                                       size_t n_keep, size_t max_body);
+
 /* One non-blocking pump: connect -> send -> read head+body -> parse. */
 NmCatalogStatus nm_fetch_step(NmFetchStream *f);
 

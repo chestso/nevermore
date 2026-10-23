@@ -274,11 +274,13 @@ static char last_request[4096];
 static size_t last_request_len;
 
 /* Drain until the request looks complete: headers + (POST) a body
- * ending in '}', or (GET) the blank line. Bounded. */
-static void drain_request(int cfd)
+ * ending in '}', or (GET) the blank line. Bounded. The bytes land in
+ * the caller's buffer: a test with TWO servers (the tier's list and
+ * the catalog document) needs to see each request separately. */
+static void drain_request_into(char *buf, size_t cap, int cfd)
 {
     size_t got = 0;
-    while (got < sizeof(last_request) - 1) {
+    while (got < cap - 1) {
         /* Bounded poll-recv: a closed/EOF peer reads as 0. */
         fd_set r;
         FD_ZERO(&r);
@@ -291,18 +293,22 @@ static void drain_request(int cfd)
         if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
             break;
 #endif
-        long n = recv(cfd, last_request + got, sizeof(last_request) - 1 - got,
-                      0);
+        long n = recv(cfd, buf + got, cap - 1 - got, 0);
         if (n <= 0)
             break;
         got += (size_t)n;
-        if (strstr(last_request, "\r\n\r\n") &&
-            (last_request[got - 1] == '}' || last_request[got - 4] == '\r' ||
-             last_request[got - 3] == '\n'))
+        if (strstr(buf, "\r\n\r\n") &&
+            (buf[got - 1] == '}' || buf[got - 4] == '\r' ||
+             buf[got - 3] == '\n'))
             break;
     }
-    last_request[got] = '\0';
-    last_request_len = got;
+    buf[got] = '\0';
+}
+
+static void drain_request(int cfd)
+{
+    drain_request_into(last_request, sizeof(last_request), cfd);
+    last_request_len = strlen(last_request);
 }
 
 /* Chat server: two content deltas then [DONE], chunked. Chunk sizes
@@ -1742,8 +1748,13 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
 
 /* Catalog: the wire is ids-only ({"object":"list","data":[{"id"}]}),
  * so a live fetch takes membership from the wire and METADATA from the
- * shipped models.dev table by id; non-empty session header on the
- * request, tokenless. */
+ * coverage (the catalog document, the shipped table); non-empty
+ * session header on the request, tokenless.
+ *
+ * The list carries three ids on purpose: one the shipped table covers
+ * ("glm-5.3"), one only the DOCUMENT covers ("future-model-9" — the
+ * drift the runtime resolution exists for), and one NO source covers
+ * ("future-model-10" — the coverage rule drops it). */
 static void *opencode_models_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -1755,7 +1766,8 @@ static void *opencode_models_server_thread(void *arg)
     const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
-        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+        "{\"id\":\"future-model-10\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
         "]}";
     char head[256];
     snprintf(head, sizeof(head),
@@ -1770,7 +1782,63 @@ static void *opencode_models_server_thread(void *arg)
     return NULL;
 }
 
-static void test_opencode_models_fetch_maps_ids(void)
+/* The catalog document's request — its own buffer: the test runs two
+ * servers (the tier's list and the document), and the shared one
+ * holds the list's request. */
+static char document_request[4096];
+
+/* The catalog DOCUMENT server: the shape models.dev serves (the same
+ * document OpenCode's own domain serves). The kept-parse reads only
+ * the two entries the tiers want, so the third provider here is the
+ * one that proves the skip: it is never built.
+ *
+ * "glm-5.3" is in the shipped table AND here, with DIFFERENT values:
+ * the document is the live truth and wins over the snapshot. */
+static void *opencode_document_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    drain_request_into(document_request, sizeof(document_request), cfd);
+
+    const char body[] =
+        "{"
+        "\"opencode\":{\"models\":{"
+        "\"big-pickle\":{\"name\":\"Big Pickle\","
+        "\"limit\":{\"context\":200000},"
+        "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
+        "\"tool_call\":true}}},"
+        "\"opencode-go\":{\"models\":{"
+        "\"glm-5.3\":{\"name\":\"GLM 5.3 live\","
+        "\"limit\":{\"context\":999000},"
+        "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
+        "\"tool_call\":true},"
+        "\"future-model-9\":{\"name\":\"Future Model 9\","
+        "\"limit\":{\"context\":640000},"
+        "\"modalities\":{\"input\":[\"text\",\"image\"],\"output\":[\"image\"]},"
+        "\"tool_call\":true}}},"
+        "\"other-provider\":{\"models\":{\"never-read\":{\"name\":\"Nope\"}}}"
+        "}";
+    char head[256];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             sizeof(body) - 1);
+    send(cfd, head, strlen(head), 0);
+    send(cfd, body, sizeof(body) - 1, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+/* The runtime COVERAGE: the tier's live list carries a model the
+ * shipped table has never heard of, and the catalog document resolves
+ * it. The document is a SECOND fetch on ANOTHER host, so the seam is
+ * the env override — and an override is an explicit request, so the
+ * live-catalog knob does not suppress it. */
+static void test_opencode_models_fetch_resolves_the_drift(void)
 {
     int port;
     int lfd = server_listen(&port);
@@ -1778,6 +1846,17 @@ static void test_opencode_models_fetch_maps_ids(void)
     pthread_t th;
     pthread_create(&th, NULL, opencode_models_server_thread,
                    (void *)(intptr_t)lfd);
+
+    int doc_port;
+    int dlfd = server_listen(&doc_port);
+    ASSERT_TRUE(dlfd >= 0);
+    pthread_t dth;
+    pthread_create(&dth, NULL, opencode_document_server_thread,
+                   (void *)(intptr_t)dlfd);
+    char docurl[128];
+    snprintf(docurl, sizeof(docurl), "http://127.0.0.1:%d/api.json",
+             doc_port);
+    test_setenv("NEVERMORE_OPENCODE_CATALOG_URL", docurl);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
@@ -1787,36 +1866,54 @@ static void test_opencode_models_fetch_maps_ids(void)
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
-    /* The COVERAGE rule: the served list carries "future-model-9", which
-     * no catalog covers - and an uncovered model is NOT offered (an
-     * id-only row shows a `-` window and no badges). One covered id
-     * survives. */
-    ASSERT_EQ(n, 1);
+    /* The document resolved the drift: "future-model-9" is a model the
+     * shipped table has never heard of, and it is now OFFERED with its
+     * full coverage (the label, the window, the claims) — the whole
+     * point of the runtime resolution. */
+    ASSERT_EQ(n, 2);
     ASSERT_STR_EQ(models[0].id, "glm-5.3");
-    /* Enriched from the generated catalog, NOT id-only: this is the
-     * whole point (the ids-only wire carries no context/vision).
-     * EVERY table field is copied — tools and image_gen included, or a
-     * live row would read 0 while the table claimed otherwise (the
-     * silent drop the badges made visible). */
-    ASSERT_STR_EQ(models[0].label, "GLM-5.3");
+    ASSERT_STR_EQ(models[1].id, "future-model-9");
+    /* The document is the LIVE truth and wins over the shipped
+     * snapshot: the table says "GLM-5.3" / 1000000, the document says
+     * "GLM 5.3 live" / 999000. */
+    ASSERT_STR_EQ(models[0].label, "GLM 5.3 live");
+    ASSERT_EQ(models[0].context_length, 999000);
     ASSERT_EQ(models[0].vision, 0);
-    ASSERT_EQ(models[0].context_length, 1000000);
-    ASSERT_EQ(models[0].tools, 1); /* models.dev tool_call, via the table */
+    ASSERT_EQ(models[0].tools, 1); /* the document's tool_call */
     ASSERT_EQ(models[0].image_gen, 0);
-    /* An id no catalog covers is NOT offered: the row would be id-only
+    /* The new model's four facts, from the document. */
+    ASSERT_STR_EQ(models[1].label, "Future Model 9");
+    ASSERT_EQ(models[1].context_length, 640000);
+    ASSERT_EQ(models[1].vision, 1);    /* "image" in modalities.input */
+    ASSERT_EQ(models[1].image_gen, 1); /* "image" in modalities.output */
+    ASSERT_EQ(models[1].tools, 1);
+    /* An id NO source covers is NOT offered: the row would be id-only
      * with an unknown context and no capability claim - a half-row the
      * picker cannot say anything about. The coverage rule drops it. */
     pthread_join(th, NULL);
+    pthread_join(dth, NULL);
     close(lfd);
+    close(dlfd);
+    test_unsetenv("NEVERMORE_OPENCODE_CATALOG_URL");
 
     ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
     /* Catalog sends the session header too (consistency; harmless). */
     ASSERT_TRUE(strstr(last_request, "x-opencode-session: ") != NULL);
     ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
+    /* The document is a request of its own: another host, another
+     * path, and no provider's credentials (it is a public document). */
+    ASSERT_TRUE(strstr(document_request, "GET /api.json") != NULL);
+    ASSERT_TRUE(strstr(document_request, "Authorization:") == NULL);
 }
 
 /* Zen's ids-only catalog round (the per-tier isolation test below): a
- * DIFFERENT id set than Go's, so the two slots cannot be confused. */
+ * DIFFERENT id set than Go's, so the two slots cannot be confused.
+ *
+ * The list carries an id no source covers ("uncovered-zen-id"): the
+ * drift that would ask for the catalog document. The live-catalog knob
+ * is pinned in this binary, so the document is NOT fetched — the
+ * suite never reaches the network — and the uncovered id is dropped by
+ * the coverage rule. */
 static void *opencode_zen_models_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
@@ -1827,7 +1924,8 @@ static void *opencode_zen_models_server_thread(void *arg)
 
     const char body[] =
         "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+        "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+        "{\"id\":\"uncovered-zen-id\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
         "]}";
     char head[256];
     snprintf(head, sizeof(head),
@@ -1874,14 +1972,15 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     close(lfd);
 
     /* Go's committed slot is still Go's (id set, and the label from
-     * the GO table — the fetch test's row, not Zen's). */
+     * the GO coverage — the fetch test's row, not Zen's). */
     size_t gn = 0;
     const NmModel *g = go->models(go, NULL, NULL, &gn);
     ASSERT_NOT_NULL(g);
-    ASSERT_EQ(gn, 1);
+    ASSERT_EQ(gn, 2);
     ASSERT_STR_EQ(g[0].id, "glm-5.3");
-    ASSERT_STR_EQ(g[0].label, "GLM-5.3");
-    ASSERT_EQ(g[0].context_length, 1000000);
+    ASSERT_STR_EQ(g[0].label, "GLM 5.3 live"); /* the document's label */
+    ASSERT_EQ(g[0].context_length, 999000);
+    ASSERT_STR_EQ(g[1].id, "future-model-9");
 }
 
 /* The static fallback is per-tier: Zen's differs from Go's, and both
@@ -1991,7 +2090,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_opencode_chat_without_done_is_complete);
     RUN_TEST(test_opencode_chat_null_conversation_id_still_sends_header);
     RUN_TEST(test_opencode_models_static_fallback_per_tier);
-    RUN_TEST(test_opencode_models_fetch_maps_ids);
+    RUN_TEST(test_opencode_models_fetch_resolves_the_drift);
     RUN_TEST(test_opencode_live_catalogs_are_per_tier);
     TEST_SUMMARY();
 }

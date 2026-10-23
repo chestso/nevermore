@@ -410,16 +410,74 @@ first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
   table and the model ids, and is the long-term authority if
   models.dev drifts.
 
+### 5.1 The runtime coverage: the document as a SECOND fetch
+
+The tier's `/models` list is the MEMBERSHIP; the coverage (the label,
+the window, the claims) comes from the catalog document. nevermore
+reads it at RUNTIME, as a second fetch, when the shipped table cannot
+cover the live list — the drift (a tier serves a model the shipped
+table has never heard of).
+
+- **The document's URL**: `https://models.opencode.ai/api.json` —
+  OpenCode's OWN domain, serving the byte-identical document
+  models.dev serves (both probed 2026-10-23: 5 880 175 bytes, the
+  same bytes). It is what OpenCode's own client fetches at startup
+  (`packages/core/src/models-dev.ts`).
+- **There is no smaller path.** Probed 2026-10-23: `?provider=` is
+  ignored (the whole document comes back), and every other path 302s
+  to the marketing site (`/api/opencode-go`, `/opencode-go.json`,
+  `/providers/opencode-go.json`, `/api/providers.json`).
+- **The cost** (measured, this box): 5.9 MB, 2.6 s (1.2 s to the
+  first byte, 2.1 s for the body at ~2.7 MB/s — the server generates
+  the document per request; gzip would make it 602 KB, but the
+  transport has no inflate). Parsed whole it is a **50 MB** tree
+  (36 ms); parsed with only the two entries we want (`opencode` and
+  `opencode-go`) it is **~1 MB** (8 ms) — hence the kept parse
+  (`nm_json_parse_kept`): the unwanted members are SCANNED, not built.
+- **The seam**: `NEVERMORE_OPENCODE_CATALOG_URL` points the fetch at
+  another URL (the canned-wire test's own server). Env-only, the
+  `NEVERMORE_BASE_URL` precedent: the document lives on another host
+  than the inference API, so the base-URL override cannot carry it.
+  An OVERRIDE is an explicit request and is never gated; the default
+  URL is live-catalog traffic like any other, so `NM_NO_LIVE_CATALOG`
+  governs it (the suite pins that knob and never reaches the
+  network).
+- **The join**: the tier's own entry first, the SIBLING tier's entry
+  for the ids the tier's own entry does not carry (the filing moves),
+  and the tier's own window always wins (minimax-m3: 1M on Go, 512k
+  on Zen). The generated table fills the ids the document does not
+  carry, and is the offline fallback.
+- **The drift, measured 2026-10-23**: the Go tier serves 36 ids, the
+  Zen tier 85; the document knows 34 and 81 of them. The ids it does
+  NOT know are OpenCode's own newest (Go: `omen-alpha`,
+  `qwen3.7-max`; Zen: `claude-opus-5-5-backup`, `jev-1.13`,
+  `jev-1.13-free`, `test`) — models.dev lags OpenCode's list by
+  hours to days. So the runtime resolution buys the window between
+  "models.dev indexed it" and "the next release regenerated the
+  table", and NOT the models neither source knows.
+- **The console API** (`GET https://opencode.ai/console/api/providers/opencode`,
+  126 KB, 1.7 s, **200 with the API key** — `Authorization: Bearer`,
+  not `x-api-key`) carries the same four facts per model
+  (`limits.context`, `capabilities.inputTypes` / `outputTypes` /
+  `toolCall`, `name`) — but it is the ACCOUNT's view of the **Zen**
+  tier only: 84 models, covering 83 of the 85 live Zen ids (it knows
+  `jev-1.13` and `jev-1.13-free`, which the document does not) and
+  21 of the 36 live Go ids. It is an undocumented console surface, so
+  nevermore does not depend on it; it is recorded here as the fast
+  alternative (46× smaller) and as the measurement behind that
+  decision.
+
 Practical shape for a static fallback: id + label (a title-cased id
 is fine) + vision/context from models.dev, exactly the four `NmModel`
 fields. nevermore ships that as a generated table
-(`src/opencode_models_data.h`, produced by
-`tools/generate-opencode-models.sh`; the JSON record beside it in
-`data/`), and a live fetch does **not** replace it with bare ids:
-the wire supplies **membership** and every id is **enriched from the
-table by id**, so the context window and vision the picker and the
-context gauge read survive the fetch. An id models.dev has not seen
-yet still lands id-only with `-1` context. Model
+(`src/catalog_data.h`, produced by `tools/generate-catalogs.py`; the
+JSON record beside it in `data/nm-catalog-opencode-*.json`), and a
+live fetch does **not** replace it with bare ids: the wire supplies
+**membership** and every id is **enriched by id** — from the
+document first (the live truth), the shipped table second — so the
+context window and vision the picker and the context gauge read
+survive the fetch. An id NO source covers is **not offered** at all
+(the coverage rule: an id-only row is a half-row). Model
 ids are expected to drift quickly — the live fetch is the source of
 truth for membership; the embedded list is both the metadata source
 and the offline fallback.

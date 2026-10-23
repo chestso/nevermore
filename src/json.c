@@ -481,6 +481,207 @@ static char *parse_string_raw(Parser *p)
     return out;
 }
 
+/* ---------------------------------------------------------------- */
+/* The skipper: a value's bytes, scanned but not built              */
+/* ---------------------------------------------------------------- */
+
+/* The number token's end (exclusive) when the bytes at start spell a
+ * number under RFC 8259's grammar; 0 when they do not. The reader
+ * (parse_number) and the skipper share it, so the two cannot disagree
+ * about what a number is. */
+static size_t scan_number(const char *s, size_t len, size_t start)
+{
+    size_t i = start;
+    if (i < len && s[i] == '-')
+        i++;
+    if (i >= len)
+        return 0;
+    if (s[i] == '0') {
+        i++; /* a leading zero may not be followed by more digits */
+    } else if (s[i] >= '1' && s[i] <= '9') {
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    } else {
+        return 0;
+    }
+    if (i < len && s[i] == '.') {
+        i++;
+        if (i >= len || s[i] < '0' || s[i] > '9')
+            return 0;
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    }
+    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
+        i++;
+        if (i < len && (s[i] == '+' || s[i] == '-'))
+            i++;
+        if (i >= len || s[i] < '0' || s[i] > '9')
+            return 0;
+        do
+            i++;
+        while (i < len && s[i] >= '0' && s[i] <= '9');
+    }
+    return i;
+}
+
+/* Skip a JSON string (with quotes), advancing past it. The escapes
+ * are checked (a document with a broken escape is malformed), the
+ * string's BYTES are not: the skipper never copies them out, so the
+ * reader's UTF-8 strictness has nothing to say about them. */
+static int skip_string(Parser *p)
+{
+    if (p->pos >= p->len || p->s[p->pos] != '"')
+        return -1;
+    p->pos++;
+    while (p->pos < p->len) {
+        unsigned char c = (unsigned char)p->s[p->pos];
+        if (c == '"') {
+            p->pos++;
+            return 0;
+        }
+        if (c == '\\') {
+            p->pos++;
+            if (p->pos >= p->len)
+                return -1;
+            char e = p->s[p->pos];
+            if (e == 'u') {
+                if (p->pos + 4 >= p->len)
+                    return -1;
+                for (int k = 1; k <= 4; k++)
+                    if (hexval(p->s[p->pos + k]) < 0)
+                        return -1;
+                p->pos += 5;
+                continue;
+            }
+            if (!strchr("\"\\/bfnrt", e))
+                return -1;
+            p->pos++;
+            continue;
+        }
+        if (c < 0x20)
+            return -1; /* a raw control byte is not allowed in a string */
+        p->pos++;
+    }
+    return -1; /* unterminated */
+}
+
+/* Skip one JSON value, advancing p->pos past it. NO node is built.
+ *
+ * This is the reader's SKIP half, and it exists for one shape: a big
+ * document of which only a few members are wanted. The model catalog
+ * document is 5.9 MB and 230 providers; building all of them is ~50 MB
+ * of tree (measured) for the two that are ours, and the skipper turns
+ * that into the two alone.
+ *
+ * The skipper is a SCANNER, not a validator: it holds the structure
+ * (the strings' escapes, the numbers' grammar, the brackets) so a
+ * truncated or malformed document is refused rather than half-read,
+ * but the bytes inside a skipped string are not UTF-8-validated and a
+ * skipped number is not range-checked — the reader's strictness is
+ * about the values it BUILDS, and a value nobody reads cannot poison
+ * a document. */
+static int skip_value(Parser *p)
+{
+    skip_ws(p);
+    if (p->pos >= p->len)
+        return -1;
+    char c = p->s[p->pos];
+    if (c == '"')
+        return skip_string(p);
+    if (c == '{' || c == '[') {
+        char close = (c == '{') ? '}' : ']';
+        p->pos++;
+        skip_ws(p);
+        if (p->pos < p->len && p->s[p->pos] == close) {
+            p->pos++;
+            return 0;
+        }
+        for (;;) {
+            if (c == '{') {
+                /* A member: the key, the colon, the value. */
+                skip_ws(p);
+                if (skip_string(p) != 0)
+                    return -1;
+                skip_ws(p);
+                if (p->pos >= p->len || p->s[p->pos] != ':')
+                    return -1;
+                p->pos++;
+            }
+            if (skip_value(p) != 0)
+                return -1;
+            skip_ws(p);
+            if (p->pos >= p->len)
+                return -1;
+            if (p->s[p->pos] == ',') {
+                p->pos++;
+                continue;
+            }
+            if (p->s[p->pos] == close) {
+                p->pos++;
+                return 0;
+            }
+            return -1;
+        }
+    }
+    if (c == 't') {
+        if (p->len - p->pos < 4 || memcmp(p->s + p->pos, "true", 4) != 0)
+            return -1;
+        p->pos += 4;
+        return 0;
+    }
+    if (c == 'f') {
+        if (p->len - p->pos < 5 || memcmp(p->s + p->pos, "false", 5) != 0)
+            return -1;
+        p->pos += 5;
+        return 0;
+    }
+    if (c == 'n') {
+        if (p->len - p->pos < 4 || memcmp(p->s + p->pos, "null", 4) != 0)
+            return -1;
+        p->pos += 4;
+        return 0;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) {
+        size_t i = scan_number(p->s, p->len, p->pos);
+        if (i == 0 || i - p->pos >= 64)
+            return -1; /* not a number, or longer than the reader takes */
+        p->pos = i;
+        return 0;
+    }
+    return -1;
+}
+
+/* Is the member's key one of the kept names? */
+static int key_is_kept(const char *const *keys, size_t n_keys, const char *key)
+{
+    for (size_t i = 0; i < n_keys; i++)
+        if (keys[i] && strcmp(keys[i], key) == 0)
+            return 1;
+    return 0;
+}
+
+/* Append one member to an object node. The member array grows
+ * geometrically inside the document's arena (one free at the end). */
+static int obj_add(NmJson *v, Parser *p, char *key, NmJson *val)
+{
+    if (v->u.obj.len == v->u.obj.cap) {
+        size_t nc = v->u.obj.cap ? v->u.obj.cap * 2 : 8;
+        NmJsonMember *nm = arena_alloc(p->arena, nc * sizeof(NmJsonMember));
+        if (!nm)
+            return -1;
+        if (v->u.obj.len)
+            memcpy(nm, v->u.obj.members, v->u.obj.len * sizeof(NmJsonMember));
+        v->u.obj.members = nm;
+        v->u.obj.cap = nc;
+    }
+    v->u.obj.members[v->u.obj.len].key = key;
+    v->u.obj.members[v->u.obj.len].val = val;
+    v->u.obj.len++;
+    return 0;
+}
+
 static NmJson *parse_object(Parser *p)
 {
     NmJson *v = new_node(p, NM_JSON_OBJECT);
@@ -508,19 +709,75 @@ static NmJson *parse_object(Parser *p)
         NmJson *val = parse_value(p);
         if (!val)
             return NULL;
-        if (v->u.obj.len == v->u.obj.cap) {
-            size_t nc = v->u.obj.cap ? v->u.obj.cap * 2 : 8;
-            NmJsonMember *nm = arena_alloc(p->arena, nc * sizeof(NmJsonMember));
-            if (!nm)
-                return NULL;
-            if (v->u.obj.len)
-                memcpy(nm, v->u.obj.members, v->u.obj.len * sizeof(NmJsonMember));
-            v->u.obj.members = nm;
-            v->u.obj.cap = nc;
+        if (obj_add(v, p, key, val) != 0)
+            return NULL;
+        skip_ws(p);
+        if (p->pos >= p->len) {
+            if (p->err)
+                *p->err = "unterminated object";
+            return NULL;
         }
-        v->u.obj.members[v->u.obj.len].key = key;
-        v->u.obj.members[v->u.obj.len].val = val;
-        v->u.obj.len++;
+        if (p->s[p->pos] == ',') {
+            p->pos++;
+            continue;
+        }
+        if (p->s[p->pos] == '}') {
+            p->pos++;
+            return v;
+        }
+        if (p->err)
+            *p->err = "expected ',' or '}'";
+        return NULL;
+    }
+}
+
+/* Parse an object, keeping ONLY the named members: the other
+ * members' values are SKIPPED (scanned, not built). The kept-parse's
+ * reason to exist is a document where a few members matter and the
+ * rest is bulk — the model catalog document (230 providers, two of
+ * them ours) is 5.9 MB and ~50 MB of tree when built whole. */
+static NmJson *parse_object_kept(Parser *p, const char *const *keys,
+                                 size_t n_keys)
+{
+    NmJson *v = new_node(p, NM_JSON_OBJECT);
+    if (!v)
+        return NULL;
+    p->pos++; /* { */
+    skip_ws(p);
+    if (p->pos < p->len && p->s[p->pos] == '}') {
+        p->pos++;
+        return v;
+    }
+    for (;;) {
+        skip_ws(p);
+        char *key = parse_string_raw(p);
+        if (!key)
+            return NULL;
+        skip_ws(p);
+        if (p->pos >= p->len || p->s[p->pos] != ':') {
+            if (p->err)
+                *p->err = "expected ':'";
+            return NULL;
+        }
+        p->pos++;
+        skip_ws(p);
+        if (key_is_kept(keys, n_keys, key)) {
+            NmJson *val = parse_value(p);
+            if (!val)
+                return NULL;
+            if (obj_add(v, p, key, val) != 0)
+                return NULL;
+        } else {
+            /* Not wanted: the member's bytes are scanned, not built.
+             * The key stays in the arena (a few bytes per skipped
+             * member) — the arena is one free at the end, and a
+             * per-member free would cost more than it saves. */
+            if (skip_value(p) != 0) {
+                if (p->err)
+                    *p->err = "malformed value";
+                return NULL;
+            }
+        }
         skip_ws(p);
         if (p->pos >= p->len) {
             if (p->err)
@@ -673,39 +930,10 @@ static NmJson *parse_number(Parser *p)
     const char *s = p->s;
     size_t len = p->len;
     size_t start = p->pos;
-    size_t i = start;
 
-    if (i < len && s[i] == '-')
-        i++;
-    if (i >= len)
+    size_t i = scan_number(s, len, start);
+    if (i == 0)
         goto bad;
-    if (s[i] == '0') {
-        i++; /* a leading zero may not be followed by more digits */
-    } else if (s[i] >= '1' && s[i] <= '9') {
-        do
-            i++;
-        while (i < len && s[i] >= '0' && s[i] <= '9');
-    } else {
-        goto bad;
-    }
-    if (i < len && s[i] == '.') {
-        i++;
-        if (i >= len || s[i] < '0' || s[i] > '9')
-            goto bad;
-        do
-            i++;
-        while (i < len && s[i] >= '0' && s[i] <= '9');
-    }
-    if (i < len && (s[i] == 'e' || s[i] == 'E')) {
-        i++;
-        if (i < len && (s[i] == '+' || s[i] == '-'))
-            i++;
-        if (i >= len || s[i] < '0' || s[i] > '9')
-            goto bad;
-        do
-            i++;
-        while (i < len && s[i] >= '0' && s[i] <= '9');
-    }
 
     /* 63 bytes of token, plus room for a multibyte locale decimal
      * point (the grammar allows a single '.', so a handful of spare
@@ -839,6 +1067,53 @@ NmJson *nm_json_parse(const char *text, size_t len, const char **err)
         return NULL;
     }
     /* The root node IS the arena owner: fold the arena descriptor in. */
+    root->arena = *arena;
+    free(arena);
+    return root;
+}
+
+/* The KEPT parse: an object of which only the named members are
+ * built. The other members' values are scanned and dropped (see
+ * skip_value), so a document with a lot of bulk costs only what is
+ * asked for. A NULL/empty keep set means "keep everything", which is
+ * nm_json_parse. The root must be an OBJECT.
+ *
+ * The kept members are the only ones the reader's strictness covers
+ * in full: a skipped member's strings are not UTF-8-validated and its
+ * numbers are not range-checked (the skipper is a scanner — see
+ * skip_value). The STRUCTURE is strict everywhere: a malformed
+ * document is refused, not half-read. */
+NmJson *nm_json_parse_kept(const char *text, size_t len,
+                           const char *const *keys, size_t n_keys,
+                           const char **err)
+{
+    if (err)
+        *err = NULL;
+    if (!text || len == 0) {
+        if (err)
+            *err = "empty input";
+        return NULL;
+    }
+    if (!keys || n_keys == 0)
+        return nm_json_parse(text, len, err); /* keep everything */
+    Arena *arena = calloc(1, sizeof(Arena));
+    if (!arena)
+        return NULL;
+    Parser p = { text, 0, len, err, arena };
+    NmJson *root = parse_object_kept(&p, keys, n_keys);
+    if (root) {
+        skip_ws(&p);
+        if (p.pos != p.len) {
+            if (err)
+                *err = "trailing characters after JSON value";
+            root = NULL;
+        }
+    }
+    if (!root) {
+        arena_free(arena);
+        free(arena);
+        return NULL;
+    }
     root->arena = *arena;
     free(arena);
     return root;

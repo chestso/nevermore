@@ -757,6 +757,95 @@ static void test_json_raw_node_borrows_the_bytes(void)
     nm_json_free(doc);
 }
 
+/* The KEPT parse: only the named members are built, the rest is
+ * scanned and dropped. The model catalog document is the reason: 230
+ * providers, two of them ours. */
+static void test_json_kept_parse_keeps_only_the_named_members(void)
+{
+    const char *err = NULL;
+    const char *s = "{\"ours\":{\"models\":{\"m1\":{\"limit\":{\"context\":10}}}},"
+                    "\"theirs\":{\"models\":{\"m2\":{\"limit\":{\"context\":20}}}}}";
+    const char *keys[] = { "ours" };
+    NmJson *v = nm_json_parse_kept(s, strlen(s), keys, 1, &err);
+    ASSERT_NOT_NULL(v);
+    ASSERT_EQ(nm_json_type(v), NM_JSON_OBJECT);
+    /* One member, not two. */
+    ASSERT_EQ(nm_json_len(v), 1);
+    ASSERT_NOT_NULL(nm_json_get(v, "ours"));
+    ASSERT_NULL(nm_json_get(v, "theirs"));
+    /* The kept member is a full tree, not a stub. */
+    NmJson *m = nm_json_get(nm_json_get(v, "ours"), "models");
+    ASSERT_NOT_NULL(m);
+    ASSERT_EQ(nm_json_num(nm_json_get(nm_json_get(nm_json_get(m, "m1"),
+                                                  "limit"),
+                                      "context")),
+              10);
+    nm_json_free(v);
+}
+
+/* The skipped member's bulk is scanned, not built: a document whose
+ * unwanted half is a megabyte of text must not become a tree (the
+ * catalog document is 5.9 MB, and building it whole is ~50 MB). */
+static void test_json_kept_parse_skips_the_bulk(void)
+{
+    size_t cap = 200000;
+    char *s = malloc(cap);
+    ASSERT_NOT_NULL(s);
+    const char *head = "{\"ours\":{\"v\":1},\"bulk\":\"";
+    const char *tail = "\"}";
+    size_t n = strlen(head);
+    memcpy(s, head, n);
+    size_t bulk = cap - n - strlen(tail) - 1;
+    memset(s + n, 'x', bulk);
+    n += bulk;
+    memcpy(s + n, tail, strlen(tail));
+    n += strlen(tail);
+    s[n] = 0;
+    const char *err = NULL;
+    const char *keys[] = { "ours" };
+    NmJson *v = nm_json_parse_kept(s, n, keys, 1, &err);
+    ASSERT_NOT_NULL(v);
+    ASSERT_EQ(nm_json_len(v), 1);
+    ASSERT_EQ(nm_json_num(nm_json_get(nm_json_get(v, "ours"), "v")), 1);
+    ASSERT_NULL(nm_json_get(v, "bulk"));
+    nm_json_free(v);
+    free(s);
+}
+
+/* The skipper holds the STRUCTURE: a truncated document is refused,
+ * not half-read. A malformed value inside a skipped member stops the
+ * parse like any other. */
+static void test_json_kept_parse_rejects_malformed(void)
+{
+    const char *err = NULL;
+    const char *keys[] = { "ours" };
+    const char *truncated = "{\"ours\":{\"v\":1},\"bulk\":{\"a\":[1,2,";
+    ASSERT_NULL(nm_json_parse_kept(truncated, strlen(truncated), keys, 1,
+                                   &err));
+    ASSERT_NOT_NULL(err);
+    const char *bad_escape = "{\"ours\":{\"v\":1},\"bulk\":\"a\\q\"}";
+    ASSERT_NULL(nm_json_parse_kept(bad_escape, strlen(bad_escape), keys, 1,
+                                   &err));
+    ASSERT_NOT_NULL(err);
+    /* A trailing garbage tail is refused too (the whole parse does). */
+    const char *trailing = "{\"ours\":{\"v\":1}} x";
+    ASSERT_NULL(nm_json_parse_kept(trailing, strlen(trailing), keys, 1,
+                                   &err));
+    ASSERT_NOT_NULL(err);
+}
+
+/* No keep set = keep everything: that is the whole parse. */
+static void test_json_kept_parse_without_keys_keeps_everything(void)
+{
+    const char *err = NULL;
+    const char *s = "{\"a\":1,\"b\":2}";
+    NmJson *v = nm_json_parse_kept(s, strlen(s), NULL, 0, &err);
+    ASSERT_NOT_NULL(v);
+    ASSERT_EQ(nm_json_len(v), 2);
+    ASSERT_EQ(nm_json_num(nm_json_get(v, "b")), 2);
+    nm_json_free(v);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -791,5 +880,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_raw_node_is_not_escaped);
     RUN_TEST(test_json_raw_node_empty);
     RUN_TEST(test_json_raw_node_borrows_the_bytes);
+    RUN_TEST(test_json_kept_parse_keeps_only_the_named_members);
+    RUN_TEST(test_json_kept_parse_skips_the_bulk);
+    RUN_TEST(test_json_kept_parse_rejects_malformed);
+    RUN_TEST(test_json_kept_parse_without_keys_keeps_everything);
     TEST_SUMMARY();
 }

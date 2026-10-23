@@ -37,6 +37,21 @@ NmJsonType nm_json_type(const NmJson *v);
  * control characters must be escaped, numbers follow the number
  * grammar, and only whitespace may follow the value. */
 NmJson *nm_json_parse(const char *text, size_t len, const char **err);
+
+/* The KEPT parse: an object of which only the named members are
+ * built — the other members' values are scanned and dropped. For a
+ * document whose bulk is not wanted: the model catalog document is
+ * 5.9 MB and ~50 MB of tree when built whole, and two members of it
+ * are ours. The root must be an OBJECT; a NULL/empty keep set keeps
+ * everything (that is nm_json_parse).
+ *
+ * The kept members are the only ones the reader's strictness covers
+ * in full (a skipped member's strings are not UTF-8-validated and its
+ * numbers are not range-checked); the STRUCTURE is strict everywhere,
+ * so a malformed document is refused, not half-read. */
+NmJson *nm_json_parse_kept(const char *text, size_t len,
+                           const char *const *keys, size_t n_keys,
+                           const char **err);
 void nm_json_free(NmJson *v);
 
 /* Object/array access; NULL when absent. */

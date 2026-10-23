@@ -194,7 +194,8 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   wins (a tier may serve the same model with a different one).
   One parse per provider, two drives: every provider wires the seam —
   the shared one (`provider_openaicompat.c`) for the OpenAI-shaped
-  catalogs, ollama's own machine for the two Ollama tiers. The engine
+  catalogs, ollama's own machine for the two Ollama tiers, and the
+  OpenCode tiers' own TWO-STAGE machine (the next bullet). The engine
   is `NmFetchStream` (`openai_client.c`), an async
   one-shot JSON fetch with a per-REQUEST INACTIVITY budget (5 s of
   silence) — per request,
@@ -285,6 +286,32 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   first prompt byte for byte), `test_agent_model_reset_is_not_a_change`
   (a re-set with the cache moved under it must not churn) and
   `test_model_exact_id_never_fetches_on_the_ui_thread`.
+- **The OpenCode tiers' catalog is a TWO-STAGE machine**
+  (`provider_opencode.c`) — because their inference API is ids-only:
+  the membership comes from the tier's own list (`GET {base}/models`,
+  tokenless, ~3 KB) and the COVERAGE (the label, the window, the
+  capability claims) from the catalog document
+  (`https://models.opencode.ai/api.json` — OpenCode's own domain;
+  models.dev serves the identical document). Stage two is
+  **CONDITIONAL**: it runs only when the shipped table cannot cover
+  the live list, i.e. when the tier serves a model the table has never
+  heard of — the drift. In the steady state the app pays one small
+  request; when the tier has moved, the document resolves the new id.
+  The document is fetched at most ONCE per process and is shared by
+  the two tiers (it carries both entries); the join is the tier's own
+  entry first, the SIBLING tier's entry for the ids the tier's own
+  entry does not carry (the filing moves), the tier's own window
+  always winning — and the shipped table filling the ids the document
+  does not carry, and standing as the offline fallback.
+  The document is expensive (5.9 MB, 2.6 s, measured), so two rules
+  keep it affordable: the fetch keeps only the two members we want
+  (**the kept parse**: `nm_json_parse_kept` scans the unwanted members
+  instead of building them — the whole document is a 50 MB tree, the
+  kept two are ~1 MB), and the fetch happens only when the snapshot
+  cannot answer. The seam is `NEVERMORE_OPENCODE_CATALOG_URL` (an
+  override is an explicit request and is never gated; the default URL
+  is live-catalog traffic like any other, so `NM_NO_LIVE_CATALOG`
+  governs it). Wire truth: `docs/OPENCODE-API.md` §5.1.
 - **openai_client.c** — shared OpenAI-compatible wire client
   (hyper/ollama/openrouter/opencode all reuse it; only
   endpoint/auth/catalog differ). Port of quoth-openai-client.el. Wire truth:
