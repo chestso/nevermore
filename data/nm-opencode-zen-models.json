@@ -1,14 +1,30 @@
-# Generated from models.dev api.json entry "opencode" on 2026-10-06 by
+# Generated from models.dev api.json entry "opencode" on 2026-10-23 by
 # tools/generate-opencode-models.sh. Do not edit by hand;
 # regenerate and commit. Never fetched at runtime.
 # 
 [
+  {
+    "id": "beam-free",
+    "label": "Beam Free",
+    "vision": 0,
+    "image_gen": 0,
+    "context_length": 1048576,
+    "tools": 1
+  },
   {
     "id": "big-pickle",
     "label": "Big Pickle",
     "vision": 0,
     "image_gen": 0,
     "context_length": 200000,
+    "tools": 1
+  },
+  {
+    "id": "cat-jam-free",
+    "label": "Cat Jam Free",
+    "vision": 0,
+    "image_gen": 0,
+    "context_length": 1048576,
     "tools": 1
   },
   {
@@ -41,6 +57,14 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 200000,
+    "tools": 1
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "label": "Claude Haiku 5.5",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
     "tools": 1
   },
   {
@@ -180,11 +204,35 @@
     "tools": 1
   },
   {
+    "id": "deepseek-v4.1-flash-free",
+    "label": "DeepSeek V4.1 Flash Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 200000,
+    "tools": 1
+  },
+  {
+    "id": "exo-free",
+    "label": "Exo Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1048576,
+    "tools": 1
+  },
+  {
     "id": "fledge-alpha-free",
     "label": "Fledge Alpha Free",
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
+    "tools": 1
+  },
+  {
+    "id": "flint-40b-free",
+    "label": "Flint 40B Free",
+    "vision": 0,
+    "image_gen": 0,
+    "context_length": 262144,
     "tools": 1
   },
   {
@@ -246,6 +294,14 @@
   {
     "id": "gemini-3.8-flash",
     "label": "Gemini 3.8 Flash",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1048576,
+    "tools": 1
+  },
+  {
+    "id": "gemini-4-argon",
+    "label": "Gemini 4 Argon",
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
@@ -321,6 +377,14 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
+    "tools": 1
+  },
+  {
+    "id": "glm-5.3-flash-free",
+    "label": "GLM-5.3-Flash Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 200000,
     "tools": 1
   },
   {
@@ -676,6 +740,14 @@
     "tools": 1
   },
   {
+    "id": "ll-alpha-free",
+    "label": "LL Alpha Free",
+    "vision": 0,
+    "image_gen": 0,
+    "context_length": 262144,
+    "tools": 1
+  },
+  {
     "id": "longcat-2.0-free",
     "label": "LongCat-2.0 Free",
     "vision": 0,
@@ -788,6 +860,22 @@
     "tools": 1
   },
   {
+    "id": "minimax-m3.1-flash-free",
+    "label": "MiniMax M3.1 Flash Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
+    "tools": 1
+  },
+  {
+    "id": "mistral-large-4",
+    "label": "Mistral Large 4",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 524288,
+    "tools": 1
+  },
+  {
     "id": "muse-spark-1.2",
     "label": "Muse Spark 1.2",
     "vision": 1,
@@ -820,6 +908,14 @@
     "tools": 1
   },
   {
+    "id": "muse-wonder-1.0",
+    "label": "Muse Wonder",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1048576,
+    "tools": 1
+  },
+  {
     "id": "nemotron-3-super-free",
     "label": "Nemotron 3 Super Free",
     "vision": 0,
@@ -841,6 +937,14 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 262144,
+    "tools": 1
+  },
+  {
+    "id": "nemotron-3.5-super-vl-free",
+    "label": "Nemotron 3.5 Super VL Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1048576,
     "tools": 1
   },
   {
@@ -913,6 +1017,14 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
+    "tools": 1
+  },
+  {
+    "id": "step-5-preview-free",
+    "label": "Step 5 Preview Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
     "tools": 1
   },
   {

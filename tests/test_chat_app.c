@@ -7086,7 +7086,8 @@ static void test_img_submit_sends_parts_and_echoes(void)
  * carries text-only ids; the offline pin keeps the lookup static. */
 static void test_img_text_only_model_warns(void)
 {
-    AppHarness *h = harness_new("opencode:go", "deepseek-v4-flash", NULL);
+    /* glm-5.2: the shipped (models.dev) table says text-only. */
+    AppHarness *h = harness_new("opencode:go", "glm-5.2", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("chat-img-warn.png");
@@ -7094,7 +7095,7 @@ static void test_img_text_only_model_warns(void)
     const char *out = harness_read(h);
     /* attached all the same — the warning is a note, not a refusal */
     ASSERT_TRUE(strstr(out, "image: chat-img-warn.png — PNG 64x32") != NULL);
-    ASSERT_TRUE(strstr(out, "note: deepseek-v4-flash is text-only — the "
+    ASSERT_TRUE(strstr(out, "note: glm-5.2 is text-only — the "
                             "provider strips image content") != NULL);
 
     /* the /model twin: the conversation already carries an image, and
@@ -7435,8 +7436,10 @@ static void test_tool_read_file_image_text_only_model_warns(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    /* deepseek-v4-flash: the offline catalog says text-only. */
-    AppHarness *h = harness_new("opencode:go", "deepseek-v4-flash", base);
+    /* deepseek-v4-pro: the offline catalog says text-only (the
+     * shipped table is models.dev's snapshot — the model is picked
+     * from the ones it carries today). */
+    AppHarness *h = harness_new("opencode:go", "deepseek-v4-pro", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "look at this");
@@ -7446,7 +7449,7 @@ static void test_tool_read_file_image_text_only_model_warns(void)
     tui_runtime_flush(h->rt);
 
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "note: deepseek-v4-flash is text-only — the "
+    ASSERT_TRUE(strstr(out, "note: deepseek-v4-pro is text-only — the "
                             "provider strips the image read_file attached") !=
                 NULL);
 
@@ -7996,7 +7999,7 @@ static void test_model_picker_tool_badge_for_hyper_and_opencode(void)
     harness_free(h);
 
     /* opencode:go: the generated table claims tools on every row. */
-    h = harness_new("opencode:go", "deepseek-v4-flash", NULL);
+    h = harness_new("opencode:go", "deepseek-v4.1-flash", NULL);
     ASSERT_NOT_NULL(h);
     harness_type(h, "/model");
     harness_enter(h);

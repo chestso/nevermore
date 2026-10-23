@@ -1,19 +1,27 @@
-# Generated from models.dev api.json entry "opencode-go" on 2026-10-06 by
+# Generated from models.dev api.json entry "opencode-go" on 2026-10-23 by
 # tools/generate-opencode-models.sh. Do not edit by hand;
 # regenerate and commit. Never fetched at runtime.
 # 
 [
   {
-    "id": "deepseek-v4-flash",
-    "label": "DeepSeek V4 Flash",
+    "id": "beam-free",
+    "label": "Beam Free",
     "vision": 0,
     "image_gen": 0,
-    "context_length": 1000000,
+    "context_length": 1048576,
     "tools": 1
   },
   {
-    "id": "deepseek-v4-flash-vision-exp",
-    "label": "DeepSeek V4 Flash Vision Exp",
+    "id": "cat-jam-free",
+    "label": "Cat Jam Free",
+    "vision": 0,
+    "image_gen": 0,
+    "context_length": 1048576,
+    "tools": 1
+  },
+  {
+    "id": "claude-haiku-5-5",
+    "label": "Claude Haiku 5.5",
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
@@ -33,6 +41,14 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1000000,
+    "tools": 1
+  },
+  {
+    "id": "gemini-4-argon-contributor",
+    "label": "Gemini 4 Argon Contributor",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1048576,
     "tools": 1
   },
   {
@@ -76,22 +92,6 @@
     "tools": 1
   },
   {
-    "id": "grok-4.5",
-    "label": "Grok 4.5",
-    "vision": 1,
-    "image_gen": 0,
-    "context_length": 500000,
-    "tools": 1
-  },
-  {
-    "id": "grok-4.6",
-    "label": "Grok 4.6",
-    "vision": 1,
-    "image_gen": 0,
-    "context_length": 500000,
-    "tools": 1
-  },
-  {
     "id": "grok-4.7",
     "label": "Grok 4.7",
     "vision": 1,
@@ -113,14 +113,6 @@
     "vision": 0,
     "image_gen": 0,
     "context_length": 1024000,
-    "tools": 1
-  },
-  {
-    "id": "kimi-k2.6",
-    "label": "Kimi K2.6",
-    "vision": 1,
-    "image_gen": 0,
-    "context_length": 262144,
     "tools": 1
   },
   {
@@ -204,6 +196,22 @@
     "tools": 1
   },
   {
+    "id": "minimax-m3.1-flash",
+    "label": "MiniMax M3.1 Flash",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
+    "tools": 1
+  },
+  {
+    "id": "minimax-m3.1-flash-free",
+    "label": "MiniMax M3.1 Flash Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
+    "tools": 1
+  },
+  {
     "id": "muse-spark-1.2-contributor",
     "label": "Muse Spark 1.2 Contributor",
     "vision": 1,
@@ -217,22 +225,6 @@
     "vision": 1,
     "image_gen": 0,
     "context_length": 1048576,
-    "tools": 1
-  },
-  {
-    "id": "qwen3.6-plus",
-    "label": "Qwen3.6 Plus",
-    "vision": 1,
-    "image_gen": 0,
-    "context_length": 1000000,
-    "tools": 1
-  },
-  {
-    "id": "qwen3.7-max",
-    "label": "Qwen3.7 Max",
-    "vision": 0,
-    "image_gen": 0,
-    "context_length": 1000000,
     "tools": 1
   },
   {
@@ -268,11 +260,19 @@
     "tools": 1
   },
   {
-    "id": "space-bunny-free",
-    "label": "Space Bunny Free",
+    "id": "step-5-preview",
+    "label": "Step 5 Preview",
     "vision": 1,
     "image_gen": 0,
-    "context_length": 1048576,
+    "context_length": 1000000,
+    "tools": 1
+  },
+  {
+    "id": "step-5-preview-free",
+    "label": "Step 5 Preview Free",
+    "vision": 1,
+    "image_gen": 0,
+    "context_length": 1000000,
     "tools": 1
   }
 ]

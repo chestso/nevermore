@@ -1909,13 +1909,22 @@ static void test_opencode_models_static_fallback_per_tier(void)
     ASSERT_NOT_NULL(z);
     ASSERT_TRUE(gn > 0);
     ASSERT_TRUE(zn > 0);
-    /* Different lists (tiers have different catalogs). */
-    ASSERT_TRUE(strcmp(g[0].id, z[0].id) != 0);
+    /* Different lists (tiers have different catalogs): each table
+     * carries models the other does not. (The FIRST rows can coincide
+     * — the tables are sorted by id, and the two tiers share some
+     * models — so the claim is made on the contents, not on row 0.) */
+    ASSERT_EQ(opencode_meta_context(z, zn, "hy3"), -2);
+    ASSERT_EQ(opencode_meta_context(g, gn, "big-pickle"), -2);
     /* Real metadata, not id-only rows: this is what the generated
      * tables are for (context sizes and vision the wire omits). */
     ASSERT_EQ(opencode_meta_context(g, gn, "glm-5.3"), 1000000);
-    ASSERT_EQ(opencode_meta_context(g, gn, "grok-4.5"), 500000);
+    ASSERT_EQ(opencode_meta_context(g, gn, "grok-4.7"), 500000);
     ASSERT_EQ(opencode_meta_context(z, zn, "big-pickle"), 200000);
+    /* A model the live Go catalog serves and the SHIPPED table used to
+     * miss (the reported "the picker does not know this model"): the
+     * table is models.dev's snapshot, and the snapshot carries it
+     * now. */
+    ASSERT_EQ(opencode_meta_context(g, gn, "minimax-m3.1-flash"), 1000000);
     /* Tools: models.dev's tool_call is true for EVERY opencode row
      * (probed 2026-10-06: 116/116 Zen, 34/34 Go — OpenCode only lists
      * models it can drive with tools), so the whole tier claims it and

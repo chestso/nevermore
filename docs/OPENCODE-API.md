@@ -360,28 +360,30 @@ says which one that was — the same conversation retried may 200.
 "data":[{"id","object":"model","created","owned_by":"opencode"}]}`.
 Only `id` is useful; there is no label, context, or modality field.
 
-- **Zen**: 70 ids live (`/zen/v1/models`, 5895 bytes). Includes
+- **Zen**: 85 ids live (`/zen/v1/models`, 2026-10-23). Includes
   paid models and seven `*-free` ids (`deepseek-v4-flash-free`,
   `mimo-v2.5-free`, `ling-3.0-flash-fin-free`,
   `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`,
   `muse-spark-1.2-contributor-free`,
   `muse-spark-1.3-contributor-free`).
-- **Go**: 37 ids live (`/zen/go/v1/models`, 3063 bytes); list
-  changes as models are tested/added.
+- **Go**: 36 ids live (`/zen/go/v1/models`, 2995 bytes, 2026-10-23);
+  list changes as models are tested/added.
 
 **The live list is membership only.** For metadata (context
 limits, vision, tool support) there is no unauthenticated
 first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
 (probed). Two external, derivable sources were checked:
 
-- **models.dev** (`https://models.dev/api.json`, 4.4 MB, probed):
+- **models.dev** (`https://models.dev/api.json`, 5.9 MB, probed):
   provider entries `opencode` (name "OpenCode Zen",
-  `api:https://opencode.ai/zen/v1`, env `OPENCODE_API_KEY`, 102
-  models) and `opencode-go` (36 models). Per model:
+  `api:https://opencode.ai/zen/v1`, env `OPENCODE_API_KEY`, 130
+  models) and `opencode-go` (34 models). Per model:
   `limit.context`, `limit.output`, `modalities.input`
   (`"image"` ⇒ vision), `tool_call`, `reasoning`, `cost`.
-  Covers every live catalog id except Go's `omen-alpha` (the
-  mixed-case `glm-5`…`glm-5.3` variants are present).
+  Covers every live catalog id except seven on the Go tier
+  (`glm-5.1`, `grok-4.6`, `omen-alpha`, `kimi-k2.6`, `minimax-m2.5`,
+  `qwen3.6-plus`, `qwen3.7-max`) and four on Zen (`jev-1.13`,
+  `jev-1.13-free`, `test`, `claude-opus-5-5-backup`).
 
   **models.dev is OpenCode's own model database** (its README: "We
   also use it internally in opencode"; OpenCode's docs: "OpenCode uses
@@ -390,7 +392,7 @@ first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
   `/models` — is nevermore's metadata authority. `tool_call` **is**
   read (`tools`, 1/0, never -1: the endpoint takes a toolset whatever
   the catalog says, so omitting is never warranted); probed
-  2026-10-06 it is `true` for **every** row (116/116 Zen, 34/34 Go —
+  2026-10-23 it is `true` for **every** row (130/130 Zen, 34/34 Go —
   OpenCode only lists models it can drive with tools), so the whole
   tier claims tools and the picker badges every row. models.dev also
   carries fields nevermore does not use: `structured_output`,
@@ -398,9 +400,9 @@ first-party endpoint; `GET /zen/v1/models/{id}` → 404 html
   `open_weights`, `cost` (incl. `cache_read` and tiers),
   `limit.output`, `canonical_model_id`, `family`, `description`,
   `release_date`, `last_updated`. It is served as one monolithic
-  `/api.json` (5.3 MB, 226 providers); there is no per-provider path
-  (302). It drifts too: 10 live Go ids and 2 live Zen ids were absent
-  from the 2026-10-06 snapshot (`omen-alpha` among them), so the live
+  `/api.json` (5.9 MB, 226 providers); there is no per-provider path
+  (302). It drifts too: 7 live Go ids and 4 live Zen ids were absent
+  from the 2026-10-23 snapshot (`omen-alpha` among them), so the live
   `/models` list stays the authority for membership.
 
 - **OpenCode's own source** (`packages/web/src/content/docs/…` and
