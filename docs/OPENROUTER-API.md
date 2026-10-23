@@ -1,10 +1,11 @@
 # OpenRouter API Reference (live-verified 2026-09-12)
 
 > Status: verified against the live wire (unauthenticated catalog +
-> authenticated chat probes, Sep 2026). Every claim below was probed
-> on the real endpoint unless marked otherwise. nevermore consumes
-> OpenRouter through the shared OpenAI-compatible client
-> (`src/openai_client.c`) exactly as quoth does.
+> authenticated chat probes, Sep 2026; the batch surface in §6 on
+> 2026-10-23). Every claim below was probed on the real endpoint
+> unless marked otherwise. nevermore consumes OpenRouter through the
+> shared OpenAI-compatible client (`src/openai_client.c`) exactly as
+> quoth does.
 
 ## 1. Overview
 
@@ -177,7 +178,86 @@ string "url" (got undefined)`. So an aged-out assistant image
   message's content-parts array, by contrast, accepts a text part in
   place of the image part (the swap is legal, 200).
 
-## 6. Provider notes for the nevermore side
+## 6. The batch model variants (live test, 2026-10-23)
+
+Two different things share the name "batch" on OpenRouter: the
+`:batch` model variants in the catalog, and the Batch API that serves
+them. Probed live (authenticated key) on 2026-10-23.
+
+### 6.1 The `:batch` variants
+
+The catalog carries **75 `:batch` entries of 468** (Oct 2026): the
+batch-adapter twin of a base model, priced at exactly half of it
+(`anthropic/claude-haiku-5.5` = $0.10/$0.50 per M tokens,
+`anthropic/claude-haiku-5.5:batch` = $0.05/$0.25). Vendors: OpenAI 39,
+Anthropic 15, Google 9, Mistral 6, the rest one or two each.
+
+**A `:batch` id is not a sync model.** `POST /v1/chat/completions`
+naming one fails with **404**:
+
+```json
+{
+  "error": {
+    "message": "anthropic/claude-haiku-5.5:batch cannot be used with the chat/completions endpoint (adapter AnthropicBatchAdapter).",
+    "code": 404
+  },
+  "user_id": "…"
+}
+```
+
+The other suffix variants are NOT like this: `:free` ids serve the
+sync endpoint normally and stay in the catalog.
+
+### 6.2 The Batch API (the only surface that serves them)
+
+| Step     | Wire                                                                                                  |
+| -------- | ----------------------------------------------------------------------------------------------------- |
+| Submit   | `POST /api/v1/batches` — `endpoint` + `model` + `requests` (inline; no JSONL upload) → **202**        |
+| Wait     | `GET /api/v1/batches/{id}` (once a minute is enough) or a `callback_url` webhook (HMAC-SHA256 signed) |
+| Read     | `results` inline on the GET: one entry per request, each with a `response` **or** an `error`          |
+| Match    | by `custom_id` — the results are **not** in request order                                             |
+| Clean up | `DELETE /api/v1/batches/{id}` (a RUNNING batch is `409`; there is no cancel)                          |
+
+- One model and one endpoint per batch (`/v1/chat/completions`,
+  `/v1/responses`, `/v1/messages`, `/v1/embeddings`); `endpoint`,
+  `model`, `provider`, `completion_window` and `callback_url` must come
+  BEFORE `requests` (the body is stream-parsed — `requests` first is a
+  400).
+- Status progression: `validating` → `in_progress` → `finalizing` →
+  `completed` (or `failed` / `expired` / `cancelled`). A 202 only means
+  OpenRouter STORED the batch; a request that fails its check moves the
+  whole batch to `failed` and `error.message` names the `custom_id`.
+- The submit takes the NORMAL slug (`anthropic/claude-haiku-5.5`); the
+  `:batch` slug also submits (202) and resolves to the same model. A
+  model with no batch variant is a **400**: "Model 'X' does not have a
+  :batch endpoint."
+- Turnaround: minutes usually, 24 h promised (`completion_window:
+"24h"` is the only accepted value; Google Vertex may take 96 h).
+  Retention: 30 days, then `GET` is `410`.
+- Half price; the completed batch reports `usage.cost` (a 23-token
+  Haiku round: `3.75e-06`).
+- NOT supported in a batch: streaming, image/audio output, base64
+  images, OpenRouter web search, Zero Data Retention, cancel;
+  `provider.order`/`provider.sort` are rejected (`provider.only` and
+  `provider.allow_fallbacks` are honored).
+
+### 6.3 The nevermore side
+
+- **The `:batch` rows are VETOED**: they never become catalog rows, so
+  neither the picker nor `nevermore models` offers a model that can
+  only fail. The veto is the shared OpenAI-compatible seam's
+  `skip_entry` hook (`provider_openaicompat.h`), asked before the row
+  is built; OpenRouter's own rule is the id's `:batch` suffix
+  (`provider_openrouter.c`).
+- **The Batch API is NOT implemented** (no submit, no poll, no
+  collect, no `custom_id` mapping): nevermore speaks the sync API
+  only, and its round blocks on a live SSE stream — a batch result
+  lands minutes-to-hours later with nothing to stream.
+- An explicitly typed `-m "<id>:batch"` still goes out on the sync
+  path and comes back with the provider's own 404 above (the message
+  names the reason, so it is not a mystery).
+
+## 7. Provider notes for the nevermore side
 
 - `provider_openrouter.c` only supplies base URL, auth, and the
   model catalog; all wire logic lives in openai_client.c (verified:
@@ -192,5 +272,6 @@ string "url" (got undefined)`. So an aged-out assistant image
   image), assistant replays go out message-level, and
   `architecture.output_modalities` maps to `NmModel.image_gen` (the
   picker's 🖼 marker).
+  The `:batch` variants are dropped on the way in (§6.3).
 - Keys live in `~/.authinfo` (`machine openrouter.ai user apikey
 password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.

@@ -133,6 +133,12 @@ static int openaicompat_parse(const NmJson *doc, void *ud)
         const char *id = nm_json_str(nm_json_get(e, "id"));
         if (!id || !*id)
             continue;
+        /* The provider's own veto on the entry, asked BEFORE the id
+         * copy: a vetoed entry never becomes a row, so it never
+         * reaches the picker or the agent's capability lookup
+         * (openrouter's ":batch" variants — OPENROUTER-API.md §6). */
+        if (c->skip_entry && c->skip_entry(e, c->row_ud))
+            continue;
         /* Strings belong to the parsed document (freed by the caller):
          * copy into the cache. One-time per process. */
         char *row_id = strdup(id);

@@ -13,7 +13,10 @@
  * "name" (not display_name), context is TOP-LEVEL context_length
  * (not context_window), vision is architecture.input_modalities
  * containing "image" (not capabilities.vision). GET /models/{id} 404s
- * even for valid ids — always the full list.
+ * even for valid ids — always the full list. The ":batch" model
+ * variants are VETOED (never become rows): only the Batch API can
+ * serve them, and nevermore speaks the sync API — OPENROUTER-API.md
+ * §6.
  *
  * The endpoint, the live cache and the fetch seam are the shared
  * surface (provider_openaicompat.h); the entry dialect below is this
@@ -67,6 +70,32 @@ static int array_has(NmJson *arr, const char *want)
     return 0;
 }
 
+/* The ":batch" model variants — the batch-adapter twins of their base
+ * models (75 of the 468 catalog entries, Oct 2026), priced at half the
+ * base model's rate. They are served ONLY by the Batch API: a sync
+ * chat/completions request naming one fails with
+ *   404 {"error":{"message":"<id> cannot be used with the
+ *   chat/completions endpoint (adapter AnthropicBatchAdapter)"}}
+ * (live-verified 2026-10-23 — OPENROUTER-API.md §6). nevermore speaks
+ * the sync API, so these rows must not reach the catalog: a picker
+ * entry that can only fail is a footgun. The other suffix variants
+ * (":free") DO serve the sync endpoint and stay in the catalog.
+ *
+ * The veto is on the id's suffix, not on the whole id: a base model
+ * whose NAME ends in ":batch" is not a thing, and a vendor prefix
+ * ("anthropic/", "~openai/") never carries the suffix on its own. */
+static int openrouter_skip_entry(NmJson *entry, void *ud)
+{
+    (void)ud;
+    const char *id = nm_json_str(nm_json_get(entry, "id"));
+    if (!id)
+        return 0;
+    static const char suffix[] = ":batch";
+    size_t n = strlen(id);
+    size_t s = sizeof(suffix) - 1;
+    return n >= s && strcmp(id + n - s, suffix) == 0;
+}
+
 /* One /v1/models entry -> one row (the dialect in the header comment). */
 static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
 {
@@ -98,7 +127,8 @@ const NmOpenaiCompat nm_openrouter_compat = {
     nm_openaicompat_anon_catalog_endpoint, /* public catalog: tokenless */
     openrouter_static_models,
     openrouter_row,
-    NULL, /* one tier: the row needs no context */
+    NULL,                  /* one tier: the row needs no context */
+    openrouter_skip_entry, /* the ":batch" variants (OPENROUTER-API.md §6) */
 };
 
 static int openrouter_needs_auth(const NmProvider *p, const char *base_url)

@@ -1300,8 +1300,14 @@ static void *openrouter_models_server_thread(void *arg)
         "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]},"
         /* No "name": the label falls back to the id. */
         "{\"id\":\"vendor/unnamed\",\"context_length\":4096,"
+        "\"architecture\":{\"input_modalities\":[\"text\"]}},"
+        /* A ":batch" variant: vetoed, so it never becomes a row
+         * (OPENROUTER-API.md §6 — only the Batch API can serve it). */
+        "{\"id\":\"anthropic/claude-haiku-5.5:batch\","
+        "\"name\":\"Claude Haiku 5.5 (batch)\","
+        "\"context_length\":1000000,"
         "\"architecture\":{\"input_modalities\":[\"text\"]}}"
-        "],\"total_count\":4}";
+        "],\"total_count\":5}";
     char head[256];
     snprintf(head, sizeof(head),
              "HTTP/1.1 200 OK\r\n"
@@ -1421,6 +1427,13 @@ static void test_openrouter_models_fetch(void)
     ASSERT_EQ(models[3].image_gen, 0);
     ASSERT_EQ(models[3].context_length, 4096);
     ASSERT_EQ(models[3].tools, 0); /* no supported_parameters: says nothing */
+    /* The ":batch" variants are VETOED: the wire sent 5 entries, the
+     * catalog keeps 4 — a batch variant is served only by the Batch
+     * API, and a sync chat request naming one 404s, so it must not
+     * reach the picker (OPENROUTER-API.md §6). */
+    ASSERT_EQ(n, 4);
+    for (size_t i = 0; i < n; i++)
+        ASSERT_TRUE(strstr(models[i].id, ":batch") == NULL);
     pthread_join(th, NULL);
 
     /* Tokenless catalog (public — OPENROUTER-API.md §1). */

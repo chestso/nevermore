@@ -79,6 +79,19 @@ typedef void (*NmOpenaiCompatCatalogEndpoint)(
 typedef const char *(*NmOpenaiCompatRow)(NmJson *entry, NmModel *out,
                                          void *ud);
 
+/* Entry veto: one wire catalog entry -> keep it or drop it. Return
+ * nonzero to DROP the entry: it never becomes a row, so it never
+ * reaches the picker or the agent's capability lookup. NULL = keep
+ * every entry.
+ *
+ * The provider's own wire truth, asked BEFORE the row is built — the
+ * case is a catalog entry that is real but UNREACHABLE through the
+ * surface this provider speaks: openrouter's ":batch" model variants
+ * (docs/OPENROUTER-API.md §6) are served only by the Batch API, and
+ * a sync chat request naming one 404s. A picker entry that can only
+ * fail is a footgun, so the row never appears. */
+typedef int (*NmOpenaiCompatSkipEntry)(NmJson *entry, void *ud);
+
 struct NmOpenaiCompat
 {
     NmOpenaiCompatChatEndpoint chat_endpoint;       /* required */
@@ -94,6 +107,9 @@ struct NmOpenaiCompat
     NmOpenaiCompatRow row;
     void *row_ud; /* the row's own context (a two-tier provider: the
                    * tier's metadata table) */
+    /* The entry veto (NULL = keep every entry). Same context as the
+     * row mapper's. */
+    NmOpenaiCompatSkipEntry skip_entry;
 };
 
 /* One descriptor per provider, defined in that provider's file. */
