@@ -30,6 +30,7 @@
 
 #include "nevermore.h"
 #include "agent.h"
+#include "banner.h"
 #include "image_bytes.h"
 #include "proc.h"
 #include "provider.h"
@@ -443,17 +444,17 @@ static int run_interactive(const char *provider_name, const char *model,
 
     nm_history_load(nm_chat_app_textinput(app));
 
-    /* The banner stays a printf (D11): it is emitted before the first
-     * flush, i.e. before any frame or transcript byte, so it is outside
-     * the transcript seam's jurisdiction. Routing it through the system
-     * stream would need a runtime handle before the transcript attaches
-     * and would make it a repaintable unit for no benefit. The identity
-     * is the whole banner — the UA verbatim, so what the user reads is
-     * exactly what the providers receive; `provider · model` lives in
-     * the status row (nm_chat_app_identity) and is not repeated here. */
-    printf("%s\n"
-           "Type a prompt; %s/help%s for commands, %s/quit%s to leave.\n\n",
-           NM_USER_AGENT, "\033[1m", "\033[1m", "\033[1m", "\033[0m");
+    /* The banner stays a plain write (D11): it is emitted before the
+     * first flush, i.e. before any frame or transcript byte, so it is
+     * outside the transcript seam's jurisdiction. Routing it through the
+     * system stream would need a runtime handle before the transcript
+     * attaches and would make it a repaintable unit for no benefit.
+     * What it SAYS is banner.c's: the identity (the UA verbatim, so
+     * what the user reads is exactly what the providers receive), the
+     * width model in force, and the help line. `provider · model` lives
+     * in the status row (nm_chat_app_identity) and is not repeated
+     * here. */
+    nm_banner_write(stdout);
 
     int rc = tui_runtime_run(rt);
 

@@ -945,8 +945,8 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   buffers and `strcmp` are gone. The identity is `<provider> · <label>`
   (U+00B7; `nm_chat_app_model_label` is the ONE `(no model)` spelling)
   and it is the row's alone: the startup banner prints the version
-  only, so the pair is stated in exactly one place. The composer owns
-  the frame: it paints the row (and its
+  and the width model, so the pair is stated in exactly one place. The
+  composer owns the frame: it paints the row (and its
   `"\r\n"`) between the transcript and the input, adds the chrome row
   to the cursor row the view declares (boba's `cursor_pos` returns the
   INPUT's rows now), and `app->submitting` means "declare no row" —
@@ -1428,8 +1428,16 @@ stream messages; boba is the only caller of
   said CONTINUES would ride inside its bytes and fail the measure, so a
   non-blank line after an image line opens its own block (the explicit
   route gets the same boundary by resetting `prev`).
-- The banner stays a plain `printf` before the first flush —
-  outside the seam's jurisdiction.
+- The banner stays a plain write before the first flush —
+  outside the seam's jurisdiction. It says three things (`src/banner.c`):
+  the identity (the User-Agent verbatim), the WIDTH MODEL in force, and
+  the TERM that named the terminal. The width model is boba's, resolved
+  from the environment at startup and pinned for the session (boba's
+  `unicode.h`): it is the rule the TERMINAL applies to a cluster, and
+  the status row's columns are the terminal's. A session that measures
+  with another terminal's rule reserves a column the terminal does not
+  draw, and the row wraps — so the banner states the model, and the
+  TERM that decided it, where a bug report can read them off.
 
 ## Platform contract: the async connect
 

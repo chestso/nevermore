@@ -46,6 +46,7 @@ EXTRA_DIST = \
     addr_cache.h \
     args.h \
     agent.h \
+    banner.h \
     chat_app.h \
     colors.h \
     conf.h \
@@ -128,6 +129,8 @@ nevermore_SOURCES = \
     provider_opencode.c \
     provider_opencode_zen.c \
     identity.h \
+    banner.h \
+    banner.c \
     openai_client.h \
     openai_client.c \
     transport_internal.h \

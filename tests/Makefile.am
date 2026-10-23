@@ -9,6 +9,7 @@ check_PROGRAMS = \
     test_authinfo \
     test_config \
     test_args \
+    test_banner \
     test_version \
     test_provider \
     test_source \
@@ -144,6 +145,13 @@ test_config_CFLAGS = $(TEST_CFLAGS)
 # (main.c owns the printing and the exit status).
 test_args_SOURCES = test_args.c ../src/args.c
 test_args_CFLAGS = $(TEST_CFLAGS)
+
+# The startup banner (src/banner.c): the identity line, the width model
+# in force, and the TERM that named the terminal. Links boba (the width
+# model the banner prints) and nothing else — no terminal, no provider.
+test_banner_SOURCES = test_banner.c ../src/banner.c
+test_banner_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
+test_banner_LDADD = $(BOBA_LIBS)
 
 # The generated version header (nevermore_version.h): the version string
 # and the numeric quad src/nevermore.rc embeds as the .exe's

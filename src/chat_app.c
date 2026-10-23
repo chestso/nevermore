@@ -4151,10 +4151,17 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
          * one-cell text glyph instead of the two-cell colour emoji the
          * bare codepoint presents. The selector is load-bearing and must
          * not be "cleaned up": without it the terminal is asked for the
-         * emoji presentation. The width tables agree with it — boba and
-         * coffer narrow a VS15 cluster to one cell wherever UTS #51
-         * defines a text glyph for the base (U+26A1 is one), so the row
-         * reserves exactly the one column the terminal draws. */
+         * emoji presentation.
+         *
+         * The WIDTH of the cluster is the TERMINAL's rule, not a
+         * constant — boba's width model, which the startup banner names.
+         * Under UTS #51 (portty, kitty) the cluster is the one-cell
+         * text glyph; under the grid rule (xterm) the selector picks
+         * the glyph but not the cell count, and the base's two cells
+         * stand. Both agree with what those terminals draw, so the row
+         * reserves exactly the columns the terminal draws — as long as
+         * the model is the terminal's, which is why the banner states
+         * it. */
         snprintf(dst + n, cap - (size_t)n,
                  " \xe2\x9a\xa1\xef\xb8\x8e%.1f%%",
                  (double)read * 100.0 / (double)base);
