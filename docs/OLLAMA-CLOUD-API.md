@@ -13,7 +13,10 @@ streaming, vision content-parts) through the shared client
 `quoth-openai-client.el`, and the **native `/api` surface** for exactly one
 thing the OpenAI protocol cannot do: the model catalog, assembled from
 `GET /api/tags` (membership) plus a parallel `POST /api/show` fan-out
-(capabilities, context length). See [ARCHITECTURE.md](ARCHITECTURE.md) for the
+(capabilities, context length). The cloud's
+`GET /v1/models?verbose=true` carries the same facts in ONE request
+(section 6.16), and that is the shape nevermore reads first. See
+[ARCHITECTURE.md](ARCHITECTURE.md) for the
 provider wiring and `test/ollama-server.py` for the wire-test fixture.
 
 Every claim marked "live test" or "verified" below was probed against the live
@@ -533,6 +536,15 @@ curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
 > (`family`/`parameter_size`/`quantization_level` are empty strings, and `size`
 > is 0 for many models). Real per-model metadata lives in `/api/show` (section
 > 6.4). 19 models listed as of Sep 2026.
+>
+> **Update (live-verified 2026-10-23):** the cloud's `/api/tags` entries now
+> ALSO carry a `capabilities` array (`completion`, `thinking`, `tools`,
+> `vision`, and subsets of them — probed on 23 models: `clef:27b` answers
+> `decision` and `vision`, `minimax-m3.1-flash` answers `completion`,
+> `tools`, `thinking` and `vision`). The `details` stub and the
+> missing context length are unchanged: the context window still needs
+> `/api/show` (or the verbose `/v1/models` shape, section 6.16). 23 models
+> listed as of Oct 2026.
 
 ---
 
@@ -1155,6 +1167,68 @@ curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
 > cloud lists 19 models. On a free key several of them are gated behind a
 > subscription (see the 402 note in section 6.16); the catalog listing itself is
 > tier-independent — a paid Pro key sees the identical bare list.
+
+#### GET /v1/models?verbose=true — the catalog in ONE request (live-verified 2026-10-23)
+
+The bare list above is the OpenAI-shaped half. The cloud's
+`/v1/models` also answers a **verbose** half: the same document
+carries a parallel `"models"` array whose rows carry the id, the
+display name, the context window and the input modalities — everything
+the native `/api/tags` + `/api/show` fan-out assembles, in ONE round
+trip.
+
+```bash
+curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
+  "https://ollama.com/v1/models?verbose=true"
+```
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "beam",
+      "object": "model",
+      "created": 1764633600,
+      "owned_by": "ollama"
+    }
+  ],
+  "models": [
+    {
+      "slug": "beam",
+      "display_name": "beam",
+      "context_window": 1048576,
+      "max_context_window": 1048576,
+      "input_modalities": ["text"],
+      "experimental_supported_tools": [],
+      "default_reasoning_level": "max",
+      "supported_reasoning_levels": [{ "effort": "low" }, { "effort": "max" }],
+      "truncation_policy": { "mode": "tokens", "limit": 10000 }
+    }
+  ]
+}
+```
+
+**The facts the two shapes agree on** (probed 2026-10-23, five
+models): `context_window` is the `/api/show` `model_info`'s
+architecture-prefixed `context_length` (minimax-m2.7 196608,
+minimax-m3 512000, gemma4:31b 262144, kimi-k3 1048576,
+minimax-m3.1-flash 1000000), and an `"image"` in `input_modalities` is
+the `/api/show` `capabilities`' `"vision"`.
+
+**Two traps, both live-verified:**
+
+- **The two arrays are in DIFFERENT orders** (same set, different
+  order). A merge by index attributes one model's window to another;
+  the join key is `slug`.
+- **The verbose half is optional.** A peer that answers the bare list
+  (the local daemon does) has no `"models"` array at all — the shape
+  is only usable when it carries a `context_window`.
+
+**The cost difference is the reason this shape exists:** the native
+fan-out is N+1 round trips (one `/api/tags` plus one `/api/show` per
+model), and the cloud charges 0.6-1.4 s each — **29.9 s for 23
+models**, measured. The one request answers the same facts in ~1.2 s.
 
 #### GET /v1/models/{model}
 

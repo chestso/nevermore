@@ -122,14 +122,20 @@ static int caps_has_vision(NmJson *capabilities)
  * ("gptoss.context_length", "gemma4.context_length", ...) — match
  * the ".context_length" SUFFIX, never a fixed key (cloud §6.4,
  * verified on five families). model_info is an OBJECT: iterate
- * with nm_json_key + nm_json_get (nm_json_at is array-only). */
+ * with nm_json_key + nm_json_get (nm_json_at is array-only).
+ *
+ * The suffix match accepts the key with an EMPTY architecture prefix
+ * (".context_length", 15 bytes — nemotron-3-ultra's live /api/show
+ * carries exactly that): the suffix IS the rule, and a length floor
+ * that skipped the unprefixed spelling dropped that model's window
+ * without a word. */
 static long model_info_context(NmJson *model_info)
 {
     size_t n = nm_json_len(model_info);
     for (size_t i = 0; i < n; i++) {
         const char *k = nm_json_key(model_info, i);
         size_t kl = k ? strlen(k) : 0;
-        if (kl > 15 && strcmp(k + kl - 15, ".context_length") == 0) {
+        if (kl >= 15 && strcmp(k + kl - 15, ".context_length") == 0) {
             double v = nm_json_num(nm_json_get(model_info, k));
             if (v > 0)
                 return (long)v;
@@ -176,6 +182,7 @@ static NmFetchStream *show_begin(const char *root, const char *api_key,
 typedef enum
 {
     OC_IDLE = 0, /* nothing in flight (the zero value) */
+    OC_VERBOSE,  /* the cloud's one-request catalog (see below) */
     OC_TAGS,     /* fetching /api/tags */
     OC_SHOW,     /* fetching /api/show for models[i] */
 } OllamaStage;
@@ -185,6 +192,7 @@ typedef struct
     OllamaStage stage;
     NmFetchStream *f; /* the request in flight */
     char root[256];
+    char base[256]; /* the CHAT base (the verbose path's own) */
     char api_key[512];
     NmModel *models; /* being built */
     size_t n, i;
@@ -262,6 +270,127 @@ static void ollama_commit(size_t slot, OllamaFetch *o)
     o->stage = OC_IDLE;
 }
 
+/* ---------------------------------------------------------------- */
+/* The cloud's ONE-request catalog                                    */
+/* ---------------------------------------------------------------- */
+
+/* GET {chat_base}/models?verbose=true answers the OpenAI-shaped list
+ * AND a parallel "models" array (live-verified 2026-10-23): every row
+ * carries slug, display_name, context_window and input_modalities —
+ * the id, the label, the context window and the vision claim, which is
+ * exactly what the native machine assembles from GET /api/tags plus one
+ * POST /api/show per model.
+ *
+ * The native machine needs N+1 round trips and the cloud charges
+ * 0.6-1.4 s each: 23 models took 29.9 s (measured), and the picker
+ * waited for every one of them. The one-request shape answers the same
+ * facts in ~1.2 s.
+ *
+ * The two shapes AGREE where both speak: the context_window of every
+ * probed model (minimax-m2.7 196608, minimax-m3 512000, gemma4:31b
+ * 262144, kimi-k3 1048576, minimax-m3.1-flash 1000000) is the
+ * /api/show context_length, and an "image" in input_modalities is the
+ * /api/show capabilities' "vision".
+ *
+ * The LOCAL daemon keeps the native machine: its /v1/models is the
+ * OpenAI list without the verbose half, and its round trips are
+ * milliseconds, so there is nothing to win there. */
+static const char *base_path_prefix(const char *url)
+{
+    const char *p = strstr(url, "://");
+    if (!p)
+        return "";
+    p = strchr(p + 3, '/');
+    return p ? p : "";
+}
+
+/* The verbose request: {chat_base} + {prefix}/models?verbose=true. */
+static NmFetchStream *verbose_begin(const char *base, const char *api_key)
+{
+    char path[512];
+    snprintf(path, sizeof(path), "%s/models?verbose=true",
+             base_path_prefix(base));
+    return nm_fetch_begin(base, "GET", path, "Bearer %s", api_key, NULL, 0,
+                          NULL);
+}
+
+/* input_modalities contains "image"? (the verbose shape's vision
+ * claim — the twin of caps_has_vision above). */
+static int mods_has_image(NmJson *mods)
+{
+    size_t n = nm_json_len(mods);
+    for (size_t i = 0; i < n; i++) {
+        const char *s = nm_json_str(nm_json_at(mods, i));
+        if (s && strcmp(s, "image") == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* The verbose "models" array -> the rows; 1 on success.
+ *
+ * The rows are keyed by "slug" (the model's id), NOT by the position:
+ * the "data" and "models" arrays of the same document are in
+ * DIFFERENT orders (same set, different order — live-verified), so an
+ * index-based merge would attribute one model's window to another. */
+static int ollama_verbose_parse(OllamaFetch *o, const NmJson *doc)
+{
+    NmJson *list = nm_json_get(doc, "models");
+    size_t count = nm_json_len(list);
+    if (count == 0)
+        return 0;
+    NmModel *models = calloc(count + 1, sizeof(NmModel));
+    if (!models)
+        return 0;
+    size_t out = 0;
+    long with_ctx = 0;
+    for (size_t i = 0; i < count; i++) {
+        NmJson *e = nm_json_at(list, i);
+        const char *slug = nm_json_str(nm_json_get(e, "slug"));
+        if (!slug || !*slug)
+            continue;
+        /* Strings are owned by the parsed document (freed by the
+         * caller), so copy into the cache. One-time per process. */
+        models[out].id = strdup(slug);
+        const char *name = nm_json_str(nm_json_get(e, "display_name"));
+        models[out].label = strdup((name && *name) ? name : slug);
+        models[out].vision = mods_has_image(nm_json_get(e, "input_modalities"));
+        double ctx = nm_json_num(nm_json_get(e, "context_window"));
+        models[out].context_length = ctx > 0 ? (long)ctx : -1;
+        if (models[out].context_length > 0)
+            with_ctx++;
+        /* tools stays 0 ("the catalog says nothing"): the verbose
+         * shape's experimental_supported_tools is empty for every
+         * probed model, and an empty list is not a claim. The native
+         * machine claims nothing either, so the two agree. */
+        if (!models[out].id || !models[out].label) {
+            free((void *)models[out].id);
+            free((void *)models[out].label);
+            continue;
+        }
+        out++;
+    }
+    if (out == 0) {
+        free(models);
+        return 0;
+    }
+    /* The shape is only USEFUL if it carries the context window: a
+     * peer that answers the OpenAI list without the verbose half (the
+     * local daemon) must fall through to the native machine, which
+     * knows the window. */
+    if (with_ctx == 0) {
+        for (size_t i = 0; i < out; i++) {
+            free((void *)models[i].id);
+            free((void *)models[i].label);
+        }
+        free(models);
+        return 0;
+    }
+    o->models = models;
+    o->n = out;
+    return 1;
+}
+
 /* The async seam (the /model popup's non-blocking drive). */
 int nm_ollama_models_begin(const NmProvider *p, const char *base_url,
                            const char *api_key)
@@ -276,9 +405,21 @@ int nm_ollama_models_begin(const NmProvider *p, const char *base_url,
     memset(o, 0, sizeof(*o));
     /* The API root derives from the CHAT base (which defaults by
      * provider: the local daemon or the cloud). */
-    ollama_api_root(ollama_base(p, base_url, api_key), o->root,
-                    sizeof(o->root));
+    snprintf(o->base, sizeof(o->base), "%s",
+             ollama_base(p, base_url, api_key));
+    ollama_api_root(o->base, o->root, sizeof(o->root));
     snprintf(o->api_key, sizeof(o->api_key), "%s", api_key ? api_key : "");
+    /* The ONE-request verbose shape comes first; a peer that does not
+     * answer it falls through to the native machine (see
+     * nm_ollama_models_step). One machine for both tiers: the local
+     * daemon's /v1/models is the plain OpenAI list today, so it pays
+     * one extra (localhost, millisecond) round and then takes the
+     * native path it always took. */
+    o->stage = OC_VERBOSE;
+    o->f = verbose_begin(o->base, api_key);
+    if (o->f)
+        return 1;
+    o->stage = OC_IDLE; /* the verbose request could not start */
     o->stage = OC_TAGS;
     o->f = nm_fetch_begin(o->root, "GET", "/api/tags", "Bearer %s", api_key,
                           NULL, 0, NULL);
@@ -307,6 +448,28 @@ NmCatalogStatus nm_ollama_models_step(const NmProvider *p)
         NmJson *doc = nm_fetch_take(o->f);
         nm_fetch_end(o->f);
         o->f = NULL;
+
+        if (o->stage == OC_VERBOSE) {
+            /* The one-request shape: the whole catalog in one round
+             * trip. A peer that does not speak it (no "models" array,
+             * or one without a context window) falls through to the
+             * native machine, which is the documented path. */
+            int ok = doc ? ollama_verbose_parse(o, doc) : 0;
+            nm_json_free(doc);
+            if (ok) {
+                ollama_commit(slot, o);
+                return NM_CATALOG_OK;
+            }
+            o->stage = OC_TAGS;
+            o->f = nm_fetch_begin(o->root, "GET", "/api/tags", "Bearer %s",
+                                  o->api_key, NULL, 0, NULL);
+            if (!o->f) {
+                ollama_fetch_clear(o);
+                o->failed = 1;
+                return NM_CATALOG_ERR;
+            }
+            continue;
+        }
 
         if (o->stage == OC_TAGS) {
             int ok = doc ? ollama_tags_parse(o, doc) : 0;

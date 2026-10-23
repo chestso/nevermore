@@ -93,8 +93,12 @@ architecture "the right way"**: fix a design flaw at its root
   its endpoint builders, its static table and a row mapper for one
   catalog entry — and points its vtable's chat/catalog slots at the
   shared functions. A provider whose wire diverges beyond the
-  descriptor keeps its own slots (ollama's native `/api` catalog is the
-  precedent).
+  descriptor keeps its own slots (ollama's own catalog machine is the
+  precedent: the cloud's `GET /v1/models?verbose=true` answers the
+  WHOLE catalog in ONE request — the id, the label, the context window
+  and the vision claim — and the native machine (`/api/tags` plus one
+  `/api/show` per model) is the fallback for a peer that does not
+  speak it; the native fan-out cost the cloud 29.9 s for 23 models).
   **Auth preflight**: a provider that `needs_auth` and has no key
   configured is announced BEFORE the turn (`warn_missing_key`, at
   startup and on a `/provider` switch) — the preflight twin of agent.c's

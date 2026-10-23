@@ -523,17 +523,45 @@ static void *hyper_models_server_thread(void *arg)
     return NULL;
 }
 
-/* Ollama native catalog: round 1 = GET /api/tags (membership, details
- * are an empty stub on the cloud — OLLAMA-CLOUD-API.md §6.3), then
- * one POST /api/show round per tagged model with real metadata
- * (capabilities, architecture-prefixed model_info context length,
- * §6.4). Sequential connections on one listener. */
+/* Ollama catalog server. The cloud's catalog starts with the
+ * ONE-request verbose shape (GET /v1/models?verbose=true), and falls
+ * through to the NATIVE machine (GET /api/tags for membership, then
+ * one POST /api/show per tagged model with the real metadata —
+ * OLLAMA-CLOUD-API.md §6.3/§6.4) when the peer does not answer the
+ * verbose half. The rounds are dispatched by the request's PATH, not
+ * by their order: the machine's shape is the code under test, and a
+ * round counter would have pinned the order instead.
+ *
+ * The mode picks what the verbose request answers:
+ *   0 = the plain OpenAI list (no "models" array) -> the native
+ *       machine runs (the local daemon's shape);
+ *   1 = the verbose shape (slug / display_name / context_window /
+ *       input_modalities) -> the whole catalog in ONE round trip. */
+static int ollama_server_verbose_mode;
+
+/* The verbose document: the OpenAI list AND the parallel "models"
+ * array. The two arrays are in DIFFERENT orders (same set) — the live
+ * document has them that way, and a merge by index would attribute
+ * one model's window to another. */
+static const char *ollama_verbose_body(void)
+{
+    return "{\"object\":\"list\",\"data\":["
+           "{\"id\":\"gemma4:31b\",\"object\":\"model\"},"
+           "{\"id\":\"gpt-oss:20b\",\"object\":\"model\"}],"
+           "\"models\":["
+           "{\"slug\":\"gpt-oss:20b\",\"display_name\":\"GPT OSS 20b\","
+           "\"context_window\":131072,\"input_modalities\":[\"text\"]},"
+           "{\"slug\":\"gemma4:31b\",\"display_name\":\"Gemma 4 31b\","
+           "\"context_window\":262144,"
+           "\"input_modalities\":[\"text\",\"image\"]}]}";
+}
+
 static void *ollama_catalog_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
-    /* Bound the rounds: 1 tags + up to N shows; accept with a
-     * timeout so the thread exits when the client stops connecting
-     * (the stall-drain below handles per-connection EOF). */
+    /* Bound the rounds: 1 verbose + 1 tags + up to N shows; accept
+     * with a timeout so the thread exits when the client stops
+     * connecting (the stall-drain below handles per-connection EOF). */
     for (int round = 0; round < 16; round++) {
         fd_set r;
         FD_ZERO(&r);
@@ -553,17 +581,19 @@ static void *ollama_catalog_server_thread(void *arg)
 
         char head[256];
         const char *body = NULL;
-        if (round == 0) {
+        if (strstr(last_request, "GET /v1/models?verbose=true")) {
+            /* The cloud's one-request shape. */
+            body = ollama_server_verbose_mode
+                       ? ollama_verbose_body()
+                       : "{\"object\":\"list\",\"data\":["
+                         "{\"id\":\"gpt-oss:20b\"},"
+                         "{\"id\":\"gemma4:31b\"}]}";
+        } else if (strstr(last_request, "GET /api/tags")) {
             body =
                 "{\"models\":["
                 "{\"name\":\"gpt-oss:20b\",\"model\":\"gpt-oss:20b\"},"
                 "{\"name\":\"gemma4:31b\",\"model\":\"gemma4:31b\"}"
                 "]}";
-            snprintf(head, sizeof(head),
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: application/json\r\n"
-                     "Content-Length: %zu\r\n\r\n",
-                     strlen(body));
         } else {
             /* /api/show per model: the request body named it. */
             const char *is_gemma =
@@ -575,12 +605,12 @@ static void *ollama_catalog_server_thread(void *arg)
                        : "{\"capabilities\":[\"completion\",\"tools\",\"thinking\"],"
                          "\"model_info\":{\"gptoss.embedding_length\":2880,"
                          "\"gptoss.context_length\":131072}}";
-            snprintf(head, sizeof(head),
-                     "HTTP/1.1 200 OK\r\n"
-                     "Content-Type: application/json\r\n"
-                     "Content-Length: %zu\r\n\r\n",
-                     strlen(body));
         }
+        snprintf(head, sizeof(head),
+                 "HTTP/1.1 200 OK\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: %zu\r\n\r\n",
+                 strlen(body));
         size_t off = 0;
         while (off < strlen(head)) {
             long n = send(cfd, head + off, strlen(head) - off, 0);
@@ -1043,14 +1073,23 @@ static void test_hyper_needs_auth(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Ollama native catalog (real provider code, canned wire)           */
+/* Ollama catalog (real provider code, canned wire)                  */
 /* ---------------------------------------------------------------- */
 
+/* The NATIVE machine, and the fall-through into it: the peer answers
+ * the one-request verbose shape with the plain OpenAI list (no
+ * "models" array), so the catalog falls back to GET /api/tags for
+ * membership plus one POST /api/show per tagged model.
+ *
+ * The tier is the LOCAL one: the live catalog is cached per provider
+ * for the process lifetime, and the cloud slot is spent by the verbose
+ * test below (one catalog per slot, ever). */
 static void test_ollama_models_tags_and_show(void)
 {
     int port;
     int lfd = server_listen(&port);
     ASSERT_TRUE(lfd >= 0);
+    ollama_server_verbose_mode = 0; /* the plain list: the fallback */
     pthread_t th;
     pthread_create(&th, NULL, ollama_catalog_server_thread,
                    (void *)(intptr_t)lfd);
@@ -1059,7 +1098,7 @@ static void test_ollama_models_tags_and_show(void)
      * API root by stripping it — /api/tags is at the host root. */
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("ollama:cloud");
+    const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
     size_t n = 0;
@@ -1088,6 +1127,52 @@ static void test_ollama_models_tags_and_show(void)
     /* The tags round hit the host root, not /v1 (OLLAMA-CLOUD-API.md
      * §6: native endpoints are not under the OpenAI prefix). */
     (void)0;
+}
+
+/* The ONE-request catalog: GET /v1/models?verbose=true answers the
+ * OpenAI list AND a parallel "models" array (slug, display_name,
+ * context_window, input_modalities) — the whole catalog in ONE round
+ * trip, where the native machine needs N+1 (the cloud charged 29.9 s
+ * for 23 models, live-measured; the one request takes 1.6 s).
+ *
+ * The rows are keyed by "slug", never by the position: the live
+ * document's "data" and "models" arrays are in DIFFERENT orders, and
+ * an index merge would hand one model another's window. */
+static void test_ollama_models_verbose_catalog(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    ollama_server_verbose_mode = 1; /* the verbose shape */
+    pthread_t th;
+    pthread_create(&th, NULL, ollama_catalog_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("ollama:cloud");
+    ASSERT_NOT_NULL(p);
+
+    size_t n = 0;
+    const NmModel *models = p->models(p, base, NULL, &n);
+    ASSERT_NOT_NULL(models);
+    ASSERT_EQ(n, 2);
+    ASSERT_STR_EQ(models[0].id, "gpt-oss:20b");
+    ASSERT_STR_EQ(models[0].label, "GPT OSS 20b"); /* display_name */
+    ASSERT_EQ(models[0].vision, 0);                /* text only */
+    ASSERT_EQ(models[0].image_gen, 0);             /* never claimed */
+    ASSERT_EQ(models[0].context_length, 131072);   /* context_window */
+    ASSERT_EQ(models[0].tools, 0);                 /* the wire says nothing */
+    ASSERT_STR_EQ(models[1].id, "gemma4:31b");
+    ASSERT_STR_EQ(models[1].label, "Gemma 4 31b");
+    ASSERT_EQ(models[1].vision, 1); /* input_modalities carries "image" */
+    ASSERT_EQ(models[1].image_gen, 0);
+    ASSERT_EQ(models[1].context_length, 262144);
+    ASSERT_EQ(models[1].tools, 0);
+
+    pthread_join(th, NULL);
+    close(lfd);
+    ollama_server_verbose_mode = 0;
 }
 
 static void test_ollama_needs_auth_local_vs_cloud(void)
@@ -1885,6 +1970,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_affinity_stable_across_paths);
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
+    RUN_TEST(test_ollama_models_verbose_catalog);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
     RUN_TEST(test_ollama_local_chat_never_carries_a_key);
     RUN_TEST(test_ollama_cloud_chat_carries_the_key);
