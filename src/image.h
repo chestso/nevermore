@@ -129,8 +129,10 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
 
 /* TuiTranscriptConfig.render_image: emit the measured unit through
  * tui_row_image (borrowing the slot's buffer for the call's
- * duration) and end the reserved rows. Only reached when measure
- * returned 1. */
+ * duration) and close its row — boba writes the terminators the
+ * transport needs (a sixel or an iTerm2 row closes with none: the
+ * terminal lands the cursor below the picture). Only reached when
+ * measure returned 1. */
 void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
                      int col_span, int rows, TuiRowSink *sink,
                      void *user_data);

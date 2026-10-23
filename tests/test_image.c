@@ -871,9 +871,10 @@ static void test_integration_kitty_transcodes_jpeg(void)
 }
 
 /* sixel: the commit carries one DCS (boba framing the app's quantized
- * payload) and exactly ONE row terminator. The VT340 spec lands the text
- * cursor on the image's last row, so one break leaves the image;
- * disp_rows terminators would leave a gap. */
+ * payload) and NO row terminator of its own: the terminal lands the
+ * text cursor BELOW the picture, so the row closes without a break (one
+ * would leave a blank line under the image). The ONE CRLF that follows
+ * the ST is the blank row the block carried. */
 static void test_integration_sixel_commits_dcs(void)
 {
     IH *h = ih_new_sixel();
@@ -892,18 +893,68 @@ static void test_integration_sixel_commits_dcs(void)
     ASSERT_TRUE(strstr(out, "\x1bP0;1;0q\"1;1;20;18") != NULL);
     /* a palette definition in the spec's 0-100 range */
     ASSERT_TRUE(strstr(out, ";2;") != NULL);
-    /* the ST, then the image's ONE row terminator (the spec lands the
-     * cursor on the image's last row, so disp_rows breaks would leave a
-     * gap) and the blank row the block carried — never a third */
+    /* the ST, then the blank row the block carried — ONE CRLF, never
+     * two: the image's own row closed without a terminator */
     const char *st = strstr(out, "\x1b\\");
     ASSERT_NOT_NULL(st);
-    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n", 4) == 0);
-    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n\r\n", 6) != 0);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n", 2) == 0);
+    ASSERT_TRUE(strncmp(st + 2, "\r\n\r\n", 4) != 0);
     const char *after = strstr(out, "after");
     ASSERT_TRUE(after && after > st);
     /* never the source payload, never a marker */
     ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) == NULL);
     ASSERT_TRUE(strstr(out, "undecodable") == NULL);
+
+    ih_free(h);
+}
+
+/* The image row closes WITHOUT a terminator on the transports whose
+ * terminal lands the cursor below the picture (sixel, iTerm2): the next
+ * unit's bytes follow the image's own terminator right away — a break
+ * would leave a blank line under the image. The block here carries NO
+ * trailing blank, so the ONE CRLF the old framing wrote would be the
+ * image's, and its absence is the whole difference. */
+static void test_integration_sixel_row_closes_without_terminator(void)
+{
+    IH *h = ih_new_sixel();
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line), "![pic](%s)\n", FIX_JPEG_REAL_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    ih_flush(h);
+
+    const char *out = ih_read(h);
+    const char *st = strstr(out, "\x1b\\");
+    ASSERT_NOT_NULL(st);
+    /* the next unit's bytes come right after the ST — no CRLF */
+    ASSERT_TRUE(strncmp(st + 2, "\r\n", 2) != 0);
+    const char *after = strstr(out, "after");
+    ASSERT_TRUE(after && after > st);
+
+    ih_free(h);
+}
+
+/* The same rule on the iTerm2 lane: the BEL that ends the 1337 payload
+ * is followed by the next unit's bytes, with no terminator between. */
+static void test_integration_iterm2_row_closes_without_terminator(void)
+{
+    IH *h = ih_new_prof(0, 1);
+    ASSERT_NOT_NULL(h);
+
+    char line[2048];
+    snprintf(line, sizeof(line), "![pic](%s)\n", FIX_JPEG_REAL_URI);
+    ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
+    ih_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
+    ih_flush(h);
+
+    const char *out = ih_read(h);
+    const char *bel = strstr(out, "\x07");
+    ASSERT_NOT_NULL(bel);
+    ASSERT_TRUE(strncmp(bel + 1, "\r\n", 2) != 0);
+    const char *after = strstr(out, "after");
+    ASSERT_TRUE(after && after > bel);
 
     ih_free(h);
 }
@@ -1476,6 +1527,8 @@ int main(void)
     RUN_TEST(test_integration_kitty_transcodes_jpeg);
     RUN_TEST(test_integration_iterm2_carries_jpeg_source);
     RUN_TEST(test_integration_sixel_commits_dcs);
+    RUN_TEST(test_integration_sixel_row_closes_without_terminator);
+    RUN_TEST(test_integration_iterm2_row_closes_without_terminator);
     RUN_TEST(test_integration_dumb_terminal_gets_marker);
     RUN_TEST(test_integration_remote_url_marker);
     RUN_TEST(test_integration_marker_size_is_the_source_size);

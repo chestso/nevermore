@@ -967,6 +967,12 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   lie. UI: `/image` (which displays the image at the attach when the
   terminal renders it — `nm_image_supported` is the tier table's front
   door) + `-i`.
+  **The image's row is the TERMINAL's**: kitty reserves the picture's
+  rows, while a sixel or an iTerm2 row closes with NO terminator (the
+  terminal lands the cursor below the picture, so a break would leave
+  a blank line under it) — the model's own trailing blank line is the
+  one CRLF that follows the image, and the unit's row count is the
+  picture's height, never a count of the CRLFs.
   **ONE command, both directions**: `/img` and `/save`
   were folded into `/image` — bare = the pending set, `<path>` =
   attach, `-<n>` = drop, `list` = every image the CONVERSATION holds,

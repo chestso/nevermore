@@ -486,12 +486,16 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
     }
 
     if (out_rows) {
-        /* the rows the committed unit occupies: the picture's (sixel
-         * lands the cursor on its last row, so boba reserves ONE break
-         * for it) plus the block's own trailing blank line, when the
-         * model wrote one — the render call emits exactly this many */
-        int rows = s->transport == (int)TUI_IMAGE_SIXEL ? 1 : s->disp_rows;
-        *out_rows = rows + (nm_markdown_trailing_blank(text, len) ? 1 : 0);
+        /* The rows the committed unit occupies: the picture's own cells
+         * (the terminal advances past it) plus the block's own trailing
+         * blank line, when the model wrote one. The BREAKS are boba's
+         * framing, not ours: a sixel or an iTerm2 row closes WITHOUT a
+         * terminator (the terminal lands the cursor below the picture),
+         * so the unit's rows are the picture's height, never a count of
+         * the CRLFs. Never 0 — boba degrades an image unit that
+         * reports no rows to its marker. */
+        *out_rows =
+            s->disp_rows + (nm_markdown_trailing_blank(text, len) ? 1 : 0);
     }
     return 1;
 }
@@ -530,6 +534,10 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
     }
     (void)col_span; /* the display size was fixed at measure time */
     tui_row_image(sink, &spec);
+    /* the image's row closes here, and boba writes the terminators its
+     * transport needs: kitty reserves the picture's rows, while a sixel
+     * or an iTerm2 row closes with NO terminator (the terminal lands
+     * the cursor below the picture) */
     tui_row_end(sink);
     /* the blank line the block carries after the picture: measure
      * counted this row, and without it the next block glues to the

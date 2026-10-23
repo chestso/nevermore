@@ -65,9 +65,10 @@ jobs:
           # kitty transport (a=T with s/v, without which an IMAGE unit
           # reserves its rows and places nothing) and its sixel
           # transport (TUI_IMAGE_SIXEL + TUI_IMAGE_INDEXED8, the spec's
-          # DCS framed from the app's quantized payload, which reserves
-          # ONE row — the terminal lands the cursor on the image's last
-          # row), the explicit image
+          # DCS framed from the app's quantized payload, whose row
+          # closes WITHOUT a terminator — the terminal lands the cursor
+          # below the picture, so a break would leave a blank line under
+          # it), the explicit image
           # unit message
           # (tui_msg_stream_image), the display-column metrics fix that
           # lands the cursor on the right cell when a prompt is two
@@ -92,13 +93,18 @@ jobs:
           # hide/show-cursor pair. The chat-app tests replay the
           # capture as a screen and read the committed scrollback above
           # the live region.
+          # And, at this pin, the image row framing: a sixel or an
+          # iTerm2 image closes its row WITHOUT a terminator (the
+          # terminal lands the cursor below the picture, so a break
+          # would leave a blank line under it); kitty still reserves
+          # the image's rows.
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it. It also names the
           # version the packaged binaries print (git describe reads
-          # v0.5.0; nevermore reports boba 0.5.0). Bump it in all three
+          # v0.5.1; nevermore reports boba 0.5.1). Bump it in all three
           # platform workflows at once.
-          ref: v0.5.0
+          ref: v0.5.1
           path: boba
           fetch-depth: 0
 
