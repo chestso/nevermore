@@ -48,6 +48,24 @@ Per-model entry (verified keys):
 both `id` and `canonical_slug`) — the per-model endpoint is not
 usable; always consume the full `/models` list.
 
+**The list PAGES, and nevermore asks for the whole page**
+(live-verified 2026-10-23): `/api/v1/models` documents `limit`
+(default **500**, max 1000) and `offset`; its prose says that
+omitting BOTH returns the full list, but the parameter's default
+decides otherwise — the catalog carries **468** entries today
+(393 after nevermore's `:batch` veto), so the default has not bitten
+yet. nevermore sends `?limit=1000` (the documented max) and compares
+the rows that came back against the response's own `total_count`: a
+list that came back SHORT is a fact, not a shrug (nevermore cannot
+see a model it never fetched), and the wire log says so.
+
+**The catalog is SLOW to generate** (measured 2026-10-23): ~790 KB in
+2.0-2.7 s, ten runs, while the link itself does 2 MB/s (models.dev's
+5.9 MB in 2.9 s) — the server generates the list per request. A
+fetch budget that counts the WHOLE transfer therefore lands exactly
+on that wire: nevermore's per-request budget is an INACTIVITY one (it
+resets on every body byte), so a slow-but-alive catalog is never cut.
+
 Vision detection: `architecture.input_modalities` contains `"image"`
 (64+ models incl. video/audio/file modalities, Sep 2026).
 

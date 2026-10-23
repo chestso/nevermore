@@ -96,6 +96,26 @@ static int openrouter_skip_entry(NmJson *entry, void *ud)
     return n >= s && strcmp(id + n - s, suffix) == 0;
 }
 
+/* The catalog endpoint: the shared tokenless one, plus the query that
+ * asks for the WHOLE list.
+ *
+ * /v1/models documents `limit` (default 500, max 1000) and nevermore
+ * sends neither `offset` nor `limit` — so the list it gets is whatever
+ * the default decides, and the day the catalog crosses 500 the list
+ * truncates SILENTLY: the same failure shape as the budget, one class
+ * over (nevermore cannot see a model it never fetched). ?limit=1000 is
+ * the documented max, and the response's own `total_count` says how
+ * many there are (the shared merge loop compares it — the count is a
+ * fact, not a shrug). */
+static void openrouter_catalog_endpoint(const NmProvider *p,
+                                        const char *api_key,
+                                        NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                        NmOpenaiEndpoint *ep)
+{
+    nm_openaicompat_anon_catalog_endpoint(p, api_key, hdrs, ep);
+    ep->catalog_query = "?limit=1000";
+}
+
 /* One /v1/models entry -> one row (the dialect in the header comment). */
 static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
 {
@@ -124,7 +144,7 @@ static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
 
 const NmOpenaiCompat nm_openrouter_compat = {
     nm_openaicompat_bearer_chat_endpoint,
-    nm_openaicompat_anon_catalog_endpoint, /* public catalog: tokenless */
+    openrouter_catalog_endpoint, /* public catalog: tokenless, whole list */
     openrouter_static_models,
     openrouter_row,
     NULL,                  /* one tier: the row needs no context */

@@ -124,6 +124,19 @@ static int openaicompat_parse(const NmJson *doc, void *ud)
     size_t count = nm_json_len(data);
     if (count == 0)
         return 0;
+    /* The document's own count, when it carries one (OpenRouter's
+     * "total_count"): a list that came back SHORT is a fact, not a
+     * shrug. nevermore cannot see a model it never fetched, and the
+     * wire log is where that shows — the rows are still shown (a
+     * short list beats no list), but the gap is on the record. */
+    double total = nm_json_num(nm_json_get(doc, "total_count"));
+    if (total > 0 && (size_t)total != count) {
+        char detail[128];
+        snprintf(detail, sizeof(detail),
+                 "the catalog list is short: %zu rows of %d", count,
+                 (int)total);
+        nm_wire_tap_error(NULL, "catalog", detail);
+    }
     NmModel *models = calloc(count + 1, sizeof(NmModel));
     if (!models)
         return 0;

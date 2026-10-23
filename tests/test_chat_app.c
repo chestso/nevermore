@@ -5283,9 +5283,10 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
     }
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT Astra") == NULL);
 
-    /* The peer never answers: the fetch's own deadline (2 s on the fake
-     * clock) ends it, and the popup opens with the built-in list. */
-    nm_test_clock_advance_ms(2100);
+    /* The peer never answers: the fetch's own INACTIVITY budget (5 s
+     * of silence on the fake clock) ends it, and the popup opens with
+     * the built-in list. */
+    nm_test_clock_advance_ms(5100);
     nm_chat_app_tick(h->app);
     tui_runtime_flush(h->rt);
     ASSERT_EQ(harness_pump_catalog(h, 50), 0);
@@ -5771,9 +5772,9 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "loading the hyper") != NULL);
 
-    /* The clock crosses the fetch's response deadline (2 s) while the
-     * fetch is still CONNECTING. */
-    nm_test_clock_advance_ms(2100);
+    /* The clock crosses the fetch's own INACTIVITY budget (5 s) while
+     * the fetch is still CONNECTING. */
+    nm_test_clock_advance_ms(5100);
     nm_chat_app_tick(h->app);
     tui_runtime_flush(h->rt);
 
@@ -5786,6 +5787,125 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
     nm_config_free(cfg);
     harness_free(h);
     store_clear(NM_CFG_KEY_CONNECT_TIMEOUT);
+}
+
+/* ---------------------------------------------------------------- */
+/* The fetch's budget is an IDLE one, not a total one                */
+/* ---------------------------------------------------------------- */
+
+/* The catalog's body arrives in TWO chunks with a virtual-clock gap
+ * between them: the fetch's budget is the SILENCE between bytes, so a
+ * body that keeps arriving is never cut, however long the transfer
+ * takes.
+ *
+ * The budget used to be a TOTAL one (2 s from the request to the last
+ * byte), which made a peer that was merely SLOW indistinguishable from
+ * a peer that was HUNG: the OpenRouter catalog (~790 KB, 2.0-2.7 s on
+ * the wire) landed exactly on that line, and the live catalog
+ * degraded to the three-row static table in 3 of 20 live runs —
+ * silently. The gap here is 3 s of virtual time: over the old total
+ * budget, under the idle one. */
+static const char slow_catalog_body[] =
+    "{\"object\":\"list\",\"data\":[{\"id\":\"vendor/slow\","
+    "\"object\":\"model\",\"created\":0,\"owned_by\":\"opencode\"}]}";
+
+struct SlowCatalogServer
+{
+    int lfd;
+    volatile int first_sent; /* the head + the first chunk are out */
+    volatile int go;         /* the test released the second chunk */
+};
+
+static void *slow_catalog_server_thread(void *arg)
+{
+    struct SlowCatalogServer *ss = arg;
+    int cfd = accept(ss->lfd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    /* Drain the request (a GET's head is all it has). */
+    char req[2048];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        req[got] = '\0';
+        if (strstr(req, "\r\n\r\n"))
+            break;
+    }
+    char head[160];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %zu\r\n\r\n",
+                      strlen(slow_catalog_body));
+    size_t half = strlen(slow_catalog_body) / 2;
+    send(cfd, head, (size_t)hl, 0);
+    send(cfd, slow_catalog_body, half, 0);
+    ss->first_sent = 1;
+    /* The gap: the test moves the virtual clock while the body waits. */
+    while (!ss->go)
+        usleep(1000);
+    send(cfd, slow_catalog_body + half, strlen(slow_catalog_body) - half, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_catalog_fetch_budget_is_idle_not_total(void)
+{
+    pin_cfg_paths("catidle");
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    struct SlowCatalogServer ss;
+    memset(&ss, 0, sizeof(ss));
+    ss.lfd = lfd;
+    pthread_t th;
+    pthread_create(&th, NULL, slow_catalog_server_thread, &ss);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    /* opencode:go: its live catalog slot is still clean here (the
+     * tests before it read the shipped table, and the warm test that
+     * commits a live one runs LAST). The active model is a STATIC row:
+     * the live row ("vendor/slow") is the only thing that can put it
+     * on the screen, so the assertion cannot pass on the static
+     * fallback. */
+    AppHarness *h = harness_new("opencode:go", "deepseek-v4.1-flash", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "loading the opencode:go") != NULL);
+
+    /* Pump until the server has the first half of the body out (the
+     * connect and the send need the event loop too). */
+    for (int i = 0; i < 500 && !ss.first_sent; i++) {
+        NmSource s = nm_chat_app_source(h->app);
+        if (s.handle >= 0 && s.flags) {
+            app_wait_src(&s, 10);
+            nm_chat_app_external_ready(h->app, s.handle, s.flags);
+        }
+        tui_runtime_flush(h->rt);
+        usleep(1000);
+    }
+    ASSERT_TRUE(ss.first_sent);
+
+    /* The clock jumps PAST the old total budget while the body is
+     * still arriving: a slow peer is not a hung peer. */
+    nm_test_clock_advance_ms(3000);
+    ss.go = 1;
+
+    /* The fetch lands: the LIVE row, and no degradation note. */
+    ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "could not load the live opencode:go") == NULL);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "vendor/slow") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(lfd);
 }
 
 /* /config lists the provider-scoped keys that are set, after the plain
@@ -9106,6 +9226,7 @@ int main(void)
     RUN_TEST(test_exec_command_spinner_tier);
 #endif
     RUN_TEST(test_catalog_fetch_deadline_does_not_bound_the_connect);
+    RUN_TEST(test_catalog_fetch_budget_is_idle_not_total);
     RUN_TEST(test_tool_runs_while_a_catalog_fetch_is_in_flight);
     /* LAST on purpose: this one commits a live hyper catalog, and the
      * provider catalogs are process-global — every test after it would

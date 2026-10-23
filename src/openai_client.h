@@ -78,6 +78,16 @@ typedef struct NmOpenaiEndpoint
      * savings arrive as chunked trailers (docs/HYPER-API.md §3.5.2).
      * The connection is borrowed, valid only for the call. */
     void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
+    /* The catalog request's query string ("?limit=1000"), or NULL for
+     * none. A provider whose catalog endpoint PAGES its list sets it
+     * here: the default page size is the provider's own, and a list
+     * that truncates silently is a model nevermore cannot see
+     * (OpenRouter's /v1/models documents `limit`, default 500, max
+     * 1000). The endpoint is the provider's wire fact, so the query
+     * rides with it. LAST in the struct: the endpoint's initializers
+     * are positional, and a field in the middle of them would shift
+     * every one. */
+    const char *catalog_query;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

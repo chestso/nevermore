@@ -164,12 +164,18 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   **already in flight**, which is what makes `models()` safe mid-fetch.
   One parse per provider, two drives: every provider wires the seam —
   the shared one (`provider_openaicompat.c`) for the OpenAI-shaped
-  catalogs, ollama's own (`/api/tags` + `/api/show`) for the two
-  Ollama tiers. The engine is `NmFetchStream` (`openai_client.c`), an async
-  one-shot JSON fetch with a per-REQUEST deadline (2 s) — per request,
-  not per fetch, so ollama's `/api/tags` + one `/api/show` per model
-  each get their own budget and a wedged peer fails a request instead
-  of stalling its caller. `nm_fetch_json`/`nm_openai_models` are gone
+  catalogs, ollama's own machine for the two Ollama tiers. The engine
+  is `NmFetchStream` (`openai_client.c`), an async
+  one-shot JSON fetch with a per-REQUEST INACTIVITY budget (5 s of
+  silence) — per request,
+  not per fetch, so every request gets its own budget and a wedged peer
+  fails a request instead
+  of stalling its caller. The budget is the SILENCE between bytes, not
+  the transfer: a total budget made a slow peer indistinguishable from
+  a hung one (the OpenRouter catalog is ~790 KB and takes 2.0-2.7 s, so
+  the 2 s total budget degraded the live catalog to the three-row
+  built-in list in 3 of 20 runs, silently).
+  `nm_fetch_json`/`nm_openai_models` are gone
   (no production caller once every provider moved onto the seam). A
   third event-loop source slot would need a boba change
   (`TUI_IO_SOURCE_MAX` is exactly full: 32 = 31 jobs + the agent), so

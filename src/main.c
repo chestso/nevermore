@@ -33,6 +33,7 @@
 #include "image_bytes.h"
 #include "proc.h"
 #include "provider.h"
+#include "openai_client.h" /* nm_catalog_run (the blocking catalog drive) */
 #include "session.h"
 #include "tools.h"
 #include "history.h"
@@ -551,11 +552,29 @@ int main(int argc, char *argv[])
     wire_debug_startup(provider_name, model);
 
     if (args.mode == NM_ARG_MODE_MODELS) {
+        /* The catalog drive, spelled out instead of through the
+         * provider's blocking helper: the CLI is the one place that
+         * may block, and it is the one place where a FAILED live
+         * catalog must SAY so. "nevermore models" printing the
+         * three-row built-in list with no hint is the silent
+         * degradation the fetch's total budget used to cause (the
+         * OpenRouter catalog landed exactly on it, and the live
+         * catalog degraded in 3 of 20 runs). */
+        const char *api_key = nm_provider_api_key(provider);
+        int began = provider->models_begin
+                        ? provider->models_begin(provider, base_url, api_key)
+                        : 0;
+        NmCatalogStatus st = began ? nm_catalog_run(provider) : NM_CATALOG_OK;
         size_t n = 0;
-        const NmModel *models = provider->models(provider, NULL, NULL, &n);
+        const NmModel *models = provider->models_cached(provider, &n);
         for (size_t i = 0; i < n; i++)
             printf("%-40s %s\n", models[i].id,
                    models[i].label ? models[i].label : "");
+        if (began && st != NM_CATALOG_OK)
+            fprintf(stderr,
+                    "nevermore: the live %s catalog did not load — "
+                    "showing the built-in list\n",
+                    provider->name);
         nm_provider_free_models(provider, models);
         nm_config_free(cfg);
         return 0;

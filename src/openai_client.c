@@ -1463,22 +1463,41 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
 /* The blocking pump's readiness slice: short enough that a silent peer
  * is re-checked against the request's deadline promptly. */
 #define NM_FETCH_SLICE_MS 50
-/* Per-REQUEST RESPONSE bound (the old recv timeout's role): a peer that
- * answers the connection and then never sends the response fails this
- * request instead of stalling its caller. Per request, not per fetch —
- * ollama's catalog is one GET plus one POST per model, and each of those
- * is entitled to its own budget.
+/* Per-request INACTIVITY bound (the old recv timeout's role): a peer
+ * that answers the connection and then goes SILENT fails this request
+ * instead of stalling its caller. Per request, not per fetch — ollama's
+ * catalog is one GET plus one POST per model, and each of those is
+ * entitled to its own budget.
  *
  * It bounds the RESPONSE, not the connection: the clock starts when the
  * request goes on the wire (nm_fetch_step). The connect walk and the TLS
  * handshake that precede it have their own budgets (the per-address
- * `connect_timeout`, the `handshake_timeout`), and arming this 2 s
- * constant at nm_fetch_begin silently OVERRODE them: a cold connect that
- * spent an address budget on a black-holed address, or a slow handshake,
- * failed the fetch before the peer had been asked anything. The
- * background catalog warm has no retry, so that failure was permanent —
- * the gauge's denominator read `-` for the whole session. */
-#define NM_FETCH_TIMEOUT_MS 2000
+ * `connect_timeout`, the `handshake_timeout`), and arming this constant
+ * at nm_fetch_begin silently OVERRODE them: a cold connect that spent an
+ * address budget on a black-holed address, or a slow handshake, failed
+ * the fetch before the peer had been asked anything. The background
+ * catalog warm has no retry, so that failure was permanent — the gauge's
+ * denominator read `-` for the whole session.
+ *
+ * It is an INACTIVITY budget, not a total one — the same rule the chat
+ * stream's `timeout` follows ("a stream that keeps producing deltas is
+ * never cut"). It used to be a TOTAL response budget: the clock ran
+ * from the request to the last body byte, so a peer that was merely
+ * SLOW was indistinguishable from a peer that was HUNG. The OpenRouter
+ * catalog is ~790 KB and takes 2.0-2.7 s to arrive (the server
+ * generates it per request; the link is not the limit), so the 2 s total
+ * budget landed the fetch exactly ON the line: the live catalog
+ * degraded to the three-row static table in 3 of 20 live runs, SILENTLY
+ * (no error, no hint — the gauge's denominator read `-` and every
+ * capability claim read "unknown"). The clock now RESETS on progress
+ * (every body byte), so a body that keeps arriving is never cut, and
+ * only a peer that goes quiet for the whole window is given up on.
+ *
+ * The window is the silence budget, so it is sized for the slowest
+ * observed peer rather than the fastest: the ollama cloud answers
+ * /api/show with ~1.1 s of think time before its first byte, and the
+ * catalog's peers are all "one response, then silence". */
+#define NM_FETCH_IDLE_TIMEOUT_MS 5000
 
 struct NmFetchStream
 {
@@ -1578,8 +1597,8 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     /* Connect + send phases first (idempotent, PENDING while in
      * flight), then the resumable head/body read. These phases are the
      * transport's to bound (the per-address connect budget, the
-     * handshake budget); the fetch's own deadline is the RESPONSE bound
-     * and is armed here, the moment the request is on the wire. */
+     * handshake budget); the fetch's own deadline is the INACTIVITY
+     * bound and is armed here, the moment the request is on the wire. */
     NmTransportStatus ts = nm_connection_step(f->conn);
     if (ts == NM_TRANSPORT_PENDING)
         return NM_CATALOG_PENDING;
@@ -1588,9 +1607,15 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
         return NM_CATALOG_ERR;
     }
     if (f->deadline == 0)
-        f->deadline =
-            nm_monotonic_seconds() + (double)NM_FETCH_TIMEOUT_MS / 1000.0;
+        f->deadline = nm_monotonic_seconds() +
+                      (double)NM_FETCH_IDLE_TIMEOUT_MS / 1000.0;
     if (nm_monotonic_seconds() >= f->deadline) {
+        /* The degradation is on the record: the wire log says the
+         * catalog fetch gave up, so a session that fell back to the
+         * built-in list is not a mystery. */
+        nm_wire_tap_error(f->conn, "fetch",
+                          "the response budget expired (no bytes for the "
+                          "whole window)");
         fetch_fail(f);
         return NM_CATALOG_ERR;
     }
@@ -1623,6 +1648,11 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
         if (n == 0)
             break; /* body complete */
         f->len += (size_t)n;
+        /* PROGRESS re-arms the inactivity clock: a body that keeps
+         * arriving is not a hung peer, however long it takes. The
+         * budget is the silence between bytes, not the transfer. */
+        f->deadline = nm_monotonic_seconds() +
+                      (double)NM_FETCH_IDLE_TIMEOUT_MS / 1000.0;
     }
 
     /* Head + body are in: status, then parse. */
@@ -1633,6 +1663,7 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
         return NM_CATALOG_ERR;
     }
     if (f->len == 0) {
+        nm_wire_tap_error(f->conn, "fetch", "the response body is empty");
         fetch_fail(f);
         return NM_CATALOG_ERR;
     }
@@ -1644,6 +1675,8 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     const char *jerr = NULL;
     f->doc = nm_json_parse(f->body, f->len, &jerr);
     if (!f->doc) {
+        nm_wire_tap_error(f->conn, "fetch",
+                          jerr ? jerr : "the response body is not JSON");
         fetch_fail(f);
         return NM_CATALOG_ERR;
     }
@@ -1739,7 +1772,8 @@ NmFetchStream *nm_openai_models_begin(const NmOpenaiEndpoint *ep)
     if (!ep || !ep->base_url || !*ep->base_url)
         return NULL;
     char path[512];
-    snprintf(path, sizeof(path), "%s/models", url_path_prefix(ep->base_url));
+    snprintf(path, sizeof(path), "%s/models%s", url_path_prefix(ep->base_url),
+             ep->catalog_query ? ep->catalog_query : "");
     return nm_fetch_begin(ep->base_url, "GET", path, ep->auth_header,
                           ep->api_key, ep->extra_headers, ep->n_extra_headers,
                           NULL);
