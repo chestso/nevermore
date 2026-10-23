@@ -78,7 +78,10 @@ static int tls_server_hold_ms;
  * while it is mid-request. */
 static unsigned char *tls_server_recv;
 static size_t tls_server_recv_cap;
-static size_t tls_server_recv_len;
+/* Published as the server reads it: the client half polls the count
+ * before it closes (a close with the peer's bytes still unread is an
+ * RST, and the RST discards what the kernel still holds). */
+static volatile size_t tls_server_recv_len;
 static int tls_server_defer_ms;
 
 /* The committed fixture lives in the SOURCE tests/ tree: `make check`
@@ -167,6 +170,7 @@ static void *tls_server_thread(void *arg)
                     if (r <= 0)
                         break;
                     total += (size_t)r;
+                    tls_server_recv_len = total;
                     continue;
                 }
                 int r = SSL_read(ssl, tls_server_recv + total,
@@ -174,6 +178,7 @@ static void *tls_server_thread(void *arg)
                 if (r <= 0)
                     break;
                 total += (size_t)r;
+                tls_server_recv_len = total;
             }
             tls_server_recv_len = total;
         } else {
@@ -308,6 +313,7 @@ static void *tls_server_thread(void *arg)
                             if (r <= 0)
                                 break;
                             total += (size_t)r;
+                            tls_server_recv_len = total;
                             continue;
                         }
                         int r = mbedtls_ssl_read(&ssl, tls_server_recv + total,
@@ -315,6 +321,7 @@ static void *tls_server_thread(void *arg)
                         if (r <= 0)
                             break;
                         total += (size_t)r;
+                        tls_server_recv_len = total;
                     }
                     tls_server_recv_len = total;
                 } else {
@@ -548,16 +555,23 @@ static int tls_large_write_child(void)
                                           (const char *)body, sizeof(body));
     if (s != NM_TRANSPORT_OK)
         fprintf(stderr, "  child: send: %s\n", nm_connection_last_error(c));
-    /* The last bytes are only queued locally; let the server drain them
-     * before the close, or the close discards them (RST). */
-    usleep(TLS_HOLD_MS * 1000);
+    /* Wait for the COLLECTOR, not for a guessed interval: the request
+     * is on the wire, but the peer may not have read it yet, and the
+     * close is what discards the rest (a close with unread data in the
+     * receive queue is an RST, and the RST drops what the peer had not
+     * read). The collector publishes its count as it reads, so the
+     * signal that the data is there is the data. Bounded, or the test
+     * hangs; a truncated request never reaches the count, so the
+     * assertion below still fails. */
+    size_t expect = (size_t)head_len + sizeof(body);
+    for (int i = 0; i < 500 && tls_server_recv_len < expect; i++)
+        usleep(10 * 1000);
     nm_connection_close(c);
     pthread_join(th, NULL);
     tls_server_stop();
 
     if (s != NM_TRANSPORT_OK)
         return 6;
-    size_t expect = (size_t)head_len + sizeof(body);
     if (tls_server_recv_len != expect) {
         fprintf(stderr,
                 "  child: server captured %zu bytes, expected %zu "
