@@ -166,6 +166,32 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `models_begin` returns 0 when there is nothing to fetch: already
   cached, gated off (`!base_url && !nm_live_catalog_enabled()`), or
   **already in flight**, which is what makes `models()` safe mid-fetch.
+  **The catalogs are GENERATED, one generator for every provider**
+  (`tools/generate-catalogs.py`, `make catalogs` — a release-time
+  step): it resolves each provider's catalog with FULL COVERAGE and
+  writes the per-provider records (`data/nm-catalog-*.json`) plus the
+  generated tables (`src/catalog_data.h`) that the app FALLS BACK to
+  until the runtime resolution lands. No provider hand-writes a model
+  table any more, and no hand-written table can drift from the wire.
+  **FULL COVERAGE, OR NOTHING**: a model is in the catalog only when
+  its label, its context window and its capability claims are known —
+  a model the provider serves but that no source covers is NOT
+  offered (an id-only row is a half-row: a `-` window, no badges, a
+  silent gauge), and a model nobody serves is not offered either (a
+  footgun, like OpenRouter's ":batch" variants). The sources per
+  provider are the same documents the runtime reads: OpenRouter's
+  `/api/v1/models?limit=1000`, the ollama cloud's
+  `/v1/models?verbose=true` (the whole catalog in ONE request — the
+  native `/api/tags` + one `/api/show` per model cost 29.9 s for 23
+  models), hyper's `/v1/models`, and the OpenCode catalog document
+  (`https://models.opencode.ai/api.json` — OpenCode's OWN domain;
+  models.dev serves the identical document) intersected with the tier's
+  serving list. The OpenCode tiers' inference API is ids-only, so
+  their rows come from the catalog document by id — the tier's own
+  entry first, the SIBLING tier's entry for the ids the tier's entry
+  does not carry (the catalog files a model under the tier(s) that
+  offer it and the filing moves), and the tier's own window always
+  wins (a tier may serve the same model with a different one).
   One parse per provider, two drives: every provider wires the seam —
   the shared one (`provider_openaicompat.c`) for the OpenAI-shaped
   catalogs, ollama's own machine for the two Ollama tiers. The engine

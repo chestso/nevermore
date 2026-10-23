@@ -2432,15 +2432,15 @@ static void test_model_command_sets_model(void)
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
 
     /* Arg form sets an exact catalog id. */
-    harness_type(h, "/model llama3.2");
+    harness_type(h, "/model gemma4:31b");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
-    ASSERT_TRUE(strstr(harness_read(h), "llama3.2") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
+    ASSERT_TRUE(strstr(harness_read(h), "gemma4:31b") != NULL);
 
     /* A second identical submit does not wedge. */
-    harness_type(h, "/model qwen3-coder");
+    harness_type(h, "/model kimi-k3");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "qwen3-coder");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "kimi-k3");
 
     harness_free(h);
 }
@@ -2449,32 +2449,32 @@ static void test_model_command_sets_model(void)
  * and is pre-selected, so Enter-then-submit leaves it unchanged. */
 static void test_model_picker_active_first(void)
 {
-    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gemma4:31b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "llama3.2") != NULL);
-    ASSERT_TRUE(strstr(frame, "gpt-oss:20b") != NULL);
+    ASSERT_TRUE(strstr(frame, "gemma4:31b") != NULL);
+    ASSERT_TRUE(strstr(frame, "beam") != NULL);
 
     /* Enter COMPOSES the command, never applies it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     const char *text = tui_textinput_text(nm_chat_app_textinput(h->app));
     ASSERT_NOT_NULL(text);
-    ASSERT_STR_EQ(text, "/model llama3.2");
+    ASSERT_STR_EQ(text, "/model gemma4:31b");
     /* The picker composes; the agent keeps the model until submit. */
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
 
     /* Submit re-applies the same model. */
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
 
     /* Escape during a later /model leaves the model alone. */
     harness_type(h, "/model");
     harness_enter(h);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
 
     harness_free(h);
@@ -2482,21 +2482,22 @@ static void test_model_picker_active_first(void)
 
 static void test_model_picker_selects_and_commits(void)
 {
-    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gemma4:31b", NULL);
     ASSERT_NOT_NULL(h);
 
     /* Bare /model: active model first, catalog after. Down to the
-     * next entry (gpt-oss:20b), Enter composes, submit commits. */
+     * next entry (the generated catalog's first row), Enter composes,
+     * submit commits. */
     harness_type(h, "/model");
     harness_enter(h);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "/model gpt-oss:20b");
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2"); /* not yet */
+                  "/model beam");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b"); /* not yet */
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
-    ASSERT_TRUE(strstr(harness_read(h), "gpt-oss:20b") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "beam");
+    ASSERT_TRUE(strstr(harness_read(h), "beam") != NULL);
 
     harness_free(h);
 }
@@ -2508,13 +2509,13 @@ static void test_model_picker_pre_filters_by_query(void)
 
     /* /model with a query that is not an exact id: the popup opens
      * pre-filtered (boba's filter-as-view; the query is the stable
-     * interface). "gpt" filters out llama3.2; the active model is
+     * interface). "gpt" filters out gemma4:31b; the active model is
      * prepended and matches, so it stays first. */
     harness_type(h, "/model gpt-oss:120");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "gpt-oss:120b") != NULL);
-    ASSERT_TRUE(strstr(frame, "llama3.2") == NULL);        /* filtered out */
+    ASSERT_TRUE(strstr(frame, "gemma4:31b") == NULL);      /* filtered out */
     ASSERT_TRUE(strstr(frame, "\"gpt-oss:120\"") != NULL); /* query in title */
 
     /* Escape dismisses; model untouched. */
@@ -2529,15 +2530,15 @@ static void test_model_picker_enter_composes_first_match(void)
     AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model llama");
+    harness_type(h, "/model kimi");
     harness_enter(h);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "/model llama3.2");
+                  "/model kimi-k2.6");
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gpt-oss:20b");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
-    ASSERT_TRUE(strstr(harness_read(h), "llama3.2") != NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "kimi-k2.6");
+    ASSERT_TRUE(strstr(harness_read(h), "kimi-k2.6") != NULL);
 
     harness_free(h);
 }
@@ -2644,9 +2645,9 @@ static void test_model_validation_refuses_unknown_id(void)
     ASSERT_TRUE(strstr(harness_read(h), "no models match 'zzz-no-such'") != NULL);
 
     /* In the catalog: set. */
-    harness_type(h, "/model qwen3-coder");
+    harness_type(h, "/model kimi-k3");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "qwen3-coder");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "kimi-k3");
 
     harness_free(h);
 }
@@ -5293,7 +5294,7 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
     ASSERT_TRUE(strstr(harness_read(h),
                        "could not load the live openrouter catalog") != NULL);
     const char *frame = tui_runtime_render(h->rt);
-    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
+    ASSERT_TRUE(strstr(frame, "aion-labs/aion-2.0") != NULL);
 
     harness_free(h);
     close(lfd);
@@ -5806,7 +5807,7 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
  * silently. The gap here is 3 s of virtual time: over the old total
  * budget, under the idle one. */
 static const char slow_catalog_body[] =
-    "{\"object\":\"list\",\"data\":[{\"id\":\"vendor/slow\","
+    "{\"object\":\"list\",\"data\":[{\"id\":\"glm-5.3\","
     "\"object\":\"model\",\"created\":0,\"owned_by\":\"opencode\"}]}";
 
 struct SlowCatalogServer
@@ -5869,7 +5870,7 @@ static void test_catalog_fetch_budget_is_idle_not_total(void)
     /* opencode:go: its live catalog slot is still clean here (the
      * tests before it read the shipped table, and the warm test that
      * commits a live one runs LAST). The active model is a STATIC row:
-     * the live row ("vendor/slow") is the only thing that can put it
+     * the live row ("glm-5.3") is the only thing that can put it
      * on the screen, so the assertion cannot pass on the static
      * fallback. */
     AppHarness *h = harness_new("opencode:go", "deepseek-v4.1-flash", base);
@@ -5901,7 +5902,7 @@ static void test_catalog_fetch_budget_is_idle_not_total(void)
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     ASSERT_TRUE(strstr(harness_read(h),
                        "could not load the live opencode:go") == NULL);
-    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "vendor/slow") != NULL);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "glm-5.3") != NULL);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -7874,9 +7875,10 @@ static void test_session_without_a_transcript(void)
  * compose yields the wire id unchanged. */
 static void test_model_picker_shows_capability_metadata(void)
 {
-    /* openrouter's static catalog: a vision model (1050000 → 1M ctx),
-     * an image_gen model, and a tool-capable one (tools == 1). */
-    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    /* openrouter's GENERATED catalog: the active row is an image
+     * generator that also claims vision and tools (the three badges at
+     * once). The active row is PREPENDED, so it is always visible. */
+    AppHarness *h = harness_new("openrouter", "google/gemini-3-pro-image", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model");
@@ -7886,21 +7888,18 @@ static void test_model_picker_shows_capability_metadata(void)
     /* imagegen badge, VS16 included: the selector is what the width
      * table reads as two cells (see format_model_meta). */
     ASSERT_TRUE(strstr(frame, "🖼️") != NULL);
-    /* tool badge (tools == 1, VS16 included): only the model whose
-     * catalog claims tool use carries it — the vision model (tools ==
-     * 0, "says nothing") and the image model (tools == -1) do not. */
+    /* tool badge (tools == 1, VS16 included). */
     ASSERT_TRUE(strstr(frame, "🔧️") != NULL);
-    ASSERT_TRUE(strstr(frame, "1M") != NULL); /* context window */
+    ASSERT_TRUE(strstr(frame, "131k") != NULL); /* context window */
 
-    /* Down to the image row, Enter composes the BARE id (the meta is a
+    /* Down to the next row, Enter composes the BARE id (the meta is a
      * separate column, never part of the value). */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_DOWN, 0, 0));
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "/model google/gemini-3.1-flash-lite-image");
+                  "/model aion-labs/aion-2.0");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app),
-                  "google/gemini-3.1-flash-lite-image");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "aion-labs/aion-2.0");
 
     harness_free(h);
 }
@@ -7919,16 +7918,16 @@ static void test_model_picker_capability_query_image(void)
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
-    ASSERT_TRUE(strstr(frame, "google/gemini-3.1-flash-lite-image") != NULL);
+    ASSERT_TRUE(strstr(frame, "google/gemini-2.5-flash-image") != NULL);
     /* Not in the LIST: the identity block names the active model, so the
      * absence is asserted on the popup region. */
     ASSERT_TRUE(strstr(popup, "~openai/gpt-astra-latest") == NULL);
     free(prompt);
 
-    /* The sole match: Enter composes it. */
+    /* The first match: Enter composes it. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "/model google/gemini-3.1-flash-lite-image");
+                  "/model google/gemini-2.5-flash-image");
 
     harness_free(h);
 }
@@ -7940,27 +7939,30 @@ static void test_model_picker_capability_query_image(void)
  * neither is a "no tools" answer either (a query answers with claims). */
 static void test_model_picker_capability_query_tools(void)
 {
-    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    /* The active model claims NO tools (the catalog lists its
+     * parameters without "tools"), so the filter drops it and the
+     * popup lists only the tool-claiming rows. */
+    AppHarness *h = harness_new("openrouter", "aion-labs/aion-rp-llama-3.1-8b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @tools");
+    harness_type(h, "/model @tools aion-labs");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
-    ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
+    ASSERT_TRUE(strstr(frame, "aion-labs/aion-2.0") != NULL);
     ASSERT_TRUE(strstr(frame, "🔧️") != NULL);
     /* The identity block names the active model: assert the absences on
      * the popup region (what the picker LISTS). */
-    ASSERT_TRUE(strstr(popup, "~openai/gpt-astra-latest") == NULL);
-    ASSERT_TRUE(strstr(popup, "google/gemini-3.1-flash-lite-image") == NULL);
+    ASSERT_TRUE(strstr(popup, "aion-labs/aion-rp-llama-3.1-8b") == NULL);
     free(prompt);
 
-    /* The sole match: Enter composes the bare id (no meta in the value). */
+    /* The first match: Enter composes the bare id (no meta in the
+     * value). */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "/model meta-llama/llama-3.3-70b-instruct");
+                  "/model aion-labs/aion-2.0");
 
     harness_free(h);
 }
@@ -7971,13 +7973,13 @@ static void test_model_picker_capability_query_tools_empty(void)
 {
     /* ollama's static catalog claims no tools (all 0 = "says
      * nothing"), so the tool filter finds nothing. */
-    AppHarness *h = harness_new("ollama:cloud", "llama3.2", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "gemma4:31b", NULL);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "/model @tools");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "no tool-capable models") != NULL);
-    ASSERT_STR_EQ(nm_chat_app_model(h->app), "llama3.2");
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
 
     harness_free(h);
 }
@@ -8086,7 +8088,7 @@ static void test_model_picker_grammar_ctx_range(void)
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model ctx:>64k ctx:<1M");
+    harness_type(h, "/model ctx:>64k ctx:<1M meta-llama");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
@@ -8117,7 +8119,8 @@ static void test_model_picker_grammar_combines(void)
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") == NULL);
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
-    harness_type(h, "/model tag:vision @image");
+    /* Three filters, no match: the image generators are all small. */
+    harness_type(h, "/model tag:vision @image ctx:>2000000");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "no models match the filter") != NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");

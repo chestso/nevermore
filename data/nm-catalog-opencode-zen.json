@@ -1,0 +1,654 @@
+{
+  "provider": "opencode-zen",
+  "source": "https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models",
+  "models": [
+    {
+      "id": "beam-free",
+      "label": "Beam Free",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "big-pickle",
+      "label": "Big Pickle",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "claude-fable-5",
+      "label": "Claude Fable 5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-fable-5-1",
+      "label": "Claude Fable 5.1",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "label": "Claude Haiku 4.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "label": "Claude Haiku 5.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-4-5",
+      "label": "Claude Opus 4.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-4-6",
+      "label": "Claude Opus 4.6",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-4-7",
+      "label": "Claude Opus 4.7",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-4-8",
+      "label": "Claude Opus 4.8",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-5",
+      "label": "Claude Opus 5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-opus-5-5",
+      "label": "Claude Opus 5.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-sonnet-4-5",
+      "label": "Claude Sonnet 4.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "label": "Claude Sonnet 4.6",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-sonnet-5",
+      "label": "Claude Sonnet 5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "label": "Claude Sonnet 5.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "deepseek-v4-flash",
+      "label": "DeepSeek V4 Flash",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "deepseek-v4-pro",
+      "label": "DeepSeek V4 Pro",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "label": "DeepSeek V4.1 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "deepseek-v4.1-flash-free",
+      "label": "DeepSeek V4.1 Flash Free",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "flint-40b-free",
+      "label": "Flint 40B Free",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3-flash",
+      "label": "Gemini 3 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "label": "Gemini 3.1 Pro Preview",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "label": "Gemini 3.5 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "label": "Gemini 3.5 Flash Lite",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "label": "Gemini 3.6 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "label": "Gemini 3.7 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "label": "Gemini 3.8 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "gemini-4-argon",
+      "label": "Gemini 4 Argon",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "glm-5",
+      "label": "GLM-5",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 204800,
+      "tools": 1
+    },
+    {
+      "id": "glm-5.1",
+      "label": "GLM-5.1",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 204800,
+      "tools": 1
+    },
+    {
+      "id": "glm-5.2",
+      "label": "GLM-5.2",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "glm-5.3",
+      "label": "GLM-5.3",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "glm-5.3-flash",
+      "label": "GLM-5.3-Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "glm-5.3-flash-free",
+      "label": "GLM-5.3-Flash Free",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5",
+      "label": "GPT-5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5-codex",
+      "label": "GPT-5 Codex",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5-nano",
+      "label": "GPT-5 Nano",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.1",
+      "label": "GPT-5.1",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.1-codex",
+      "label": "GPT-5.1 Codex",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.1-codex-max",
+      "label": "GPT-5.1 Codex Max",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.1-codex-mini",
+      "label": "GPT-5.1 Codex Mini",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.2",
+      "label": "GPT-5.2",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.2-codex",
+      "label": "GPT-5.2 Codex",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.3-codex",
+      "label": "GPT-5.3 Codex",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.3-codex-spark",
+      "label": "GPT-5.3 Codex Spark",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 128000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.4",
+      "label": "GPT-5.4",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "label": "GPT-5.4 Mini",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "label": "GPT-5.4 Nano",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 400000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.4-pro",
+      "label": "GPT-5.4 Pro",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.5",
+      "label": "GPT-5.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.5-pro",
+      "label": "GPT-5.5 Pro",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "label": "GPT-5.6 Luna",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "label": "GPT-5.6 Sol",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "label": "GPT-5.6 Terra",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-6-astra",
+      "label": "GPT-6 Astra",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-6-luna",
+      "label": "GPT-6 Luna",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-6-sol",
+      "label": "GPT-6 Sol",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "label": "GPT-6.1 Sol",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1050000,
+      "tools": 1
+    },
+    {
+      "id": "grok-4.5",
+      "label": "Grok 4.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 500000,
+      "tools": 1
+    },
+    {
+      "id": "grok-4.6",
+      "label": "Grok 4.6",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 500000,
+      "tools": 1
+    },
+    {
+      "id": "grok-4.7",
+      "label": "Grok 4.7",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 500000,
+      "tools": 1
+    },
+    {
+      "id": "grok-build-0.1",
+      "label": "Grok Build 0.1",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 256000,
+      "tools": 1
+    },
+    {
+      "id": "kimi-k2.5",
+      "label": "Kimi K2.5",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "kimi-k2.6",
+      "label": "Kimi K2.6",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "label": "Kimi K2.7 Code",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "kimi-k3",
+      "label": "Kimi K3",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "mimo-v2.6-flash-free",
+      "label": "MiMo-V2.6-Flash Free",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 200000,
+      "tools": 1
+    },
+    {
+      "id": "minimax-m2.5",
+      "label": "MiniMax-M2.5",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 204800,
+      "tools": 1
+    },
+    {
+      "id": "minimax-m2.7",
+      "label": "MiniMax-M2.7",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 204800,
+      "tools": 1
+    },
+    {
+      "id": "minimax-m3",
+      "label": "MiniMax-M3",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 512000,
+      "tools": 1
+    },
+    {
+      "id": "mistral-large-4",
+      "label": "Mistral Large 4",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 524288,
+      "tools": 1
+    },
+    {
+      "id": "muse-spark-1.2",
+      "label": "Muse Spark 1.2",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "muse-spark-1.3",
+      "label": "Muse Spark 1.3",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "muse-wonder-1.0",
+      "label": "Muse Wonder",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "nemotron-3.5-lightning-free",
+      "label": "Nemotron 3.5 Lightning Free",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "nemotron-3.5-super-vl-free",
+      "label": "Nemotron 3.5 Super VL Free",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 1
+    },
+    {
+      "id": "qwen3.5-plus",
+      "label": "Qwen3.5 Plus",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "qwen3.6-plus",
+      "label": "Qwen3.6 Plus",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    },
+    {
+      "id": "qwen3.8-flash",
+      "label": "Qwen3.8 Flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 1
+    },
+    {
+      "id": "qwen3.8-max",
+      "label": "Qwen3.8 Max",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 1
+    }
+  ]
+}

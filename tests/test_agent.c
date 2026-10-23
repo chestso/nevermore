@@ -2656,7 +2656,7 @@ static void test_agent_context_usage_accessors(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
+    const NmProvider *p = nm_provider_by_name("ollama:cloud");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
@@ -2670,7 +2670,7 @@ static void test_agent_context_usage_accessors(void)
 
     /* The window is a CATALOG fact, resolved at the point of use: no
      * push, and /model switches it on the live agent. */
-    nm_agent_set_model(agent, "qwen3-coder");
+    nm_agent_set_model(agent, "gemma4:31b");
     ASSERT_EQ(nm_agent_context_limit(agent), 262144);
 
     int rc = nm_agent_turn(agent, "hi", NULL, 0);
@@ -4935,7 +4935,7 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
 
     /* Three turns; every round reports the same 223000-token prompt, so
      * the gauge sits at tier 1 (85.06 % of 262144 — the catalog window
-     * of ollama:local's qwen3-coder, resolved at the point of use) from
+     * of ollama:cloud's gemma4:31b, resolved at the point of use) from
      * turn 2 on. */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
@@ -4953,9 +4953,9 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
+    const NmProvider *p = nm_provider_by_name("ollama:cloud");
     NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "qwen3-coder", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "gemma4:31b", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);

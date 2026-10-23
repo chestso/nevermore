@@ -24,20 +24,18 @@
 #include "openai_client.h"
 #include "provider_internal.h" /* nm_live_catalog_enabled */
 #include "provider_openaicompat.h"
+#include "catalog_data.h" /* the generated fallback catalog (every provider) */
 #include "json.h"
 
 #define OLLAMA_LOCAL_DEFAULT "http://localhost:11434/v1"
 #define OLLAMA_CLOUD_DEFAULT "https://ollama.com/v1"
 
-/* Static fallback catalog (subset of data/nm-ollama-models.json;
- * used when the daemon/cloud is unreachable). */
-static const NmModel ollama_static_models[] = {
-    { "gpt-oss:20b", "GPT-OSS 20b", 0, 0, 131072, 0 },
-    { "gpt-oss:120b", "GPT-OSS 120b", 0, 0, 131072, 0 },
-    { "llama3.2", "Llama 3.2", 0, 0, 131072, 0 },
-    { "qwen3-coder", "Qwen3 Coder", 0, 0, 262144, 0 },
-    { 0 }
-};
+/* The fallback catalog is GENERATED (tools/generate-catalogs.py): the
+ * cloud's whole verbose list with full coverage - the label, the
+ * context window and the vision claim. It is the CLOUD's catalog: the
+ * local daemon's models are the user's own (whatever it has
+ * installed), and no source can know them, so the local tier starts
+ * empty and the daemon answers at runtime. */
 
 /* The API root (no /v1): the native catalog endpoints /api/tags and
  * /api/show live at the host root, not under the OpenAI /v1 prefix
@@ -523,14 +521,21 @@ const NmModel *nm_ollama_models_cached(const NmProvider *p, size_t *n_out)
             *n_out = c->n;
         return c->models;
     }
-    /* Daemon down / offline: the static fallback. */
+    /* Not resolved yet (or the peer is down): the generated fallback.
+     * The CLOUD has one; the LOCAL tier has none - its models are the
+     * user's own, and no source can know them, so the daemon answers
+     * at runtime and an empty list is the honest floor. */
+    const NmModel *fallback = (p->id == NM_PROVIDER_OLLAMA_LOCAL)
+                                  ? NULL
+                                  : nm_catalog_ollama;
     if (n_out) {
         size_t n = 0;
-        while (ollama_static_models[n].id)
-            n++;
+        if (fallback)
+            while (fallback[n].id)
+                n++;
         *n_out = n;
     }
-    return ollama_static_models;
+    return fallback;
 }
 
 const NmModel *nm_ollama_models(const NmProvider *p, const char *base_url,

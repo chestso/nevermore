@@ -58,6 +58,7 @@
 #include "openai_client.h"
 #include "provider_internal.h" /* nm_conversation_id_new (affinity fallback) */
 #include "provider_openaicompat.h"
+#include "catalog_data.h" /* the generated fallback catalog */
 #include "json.h"
 #include "xxh3.h"
 
@@ -65,20 +66,17 @@
 
 /* Hyper exposes NO per-model tool-use claim, so its catalog carries a
  * PROVIDER-level rule instead of a read field: every hyper model takes
- * tools, hence `tools = 1` on every row (the static table below and the
- * live scanner). Evidence (probed 2026-10-06): /v1/models' `capabilities`
- * is `{"vision": bool}` only, /v1/provider (Crush's catalog) has
- * `supports_attachments`/`can_reason` but nothing about tools, and no
- * per-model endpoint exists; the gateway is a coding gateway where Crush
- * announces its tool catalogue on EVERY request (HYPER-API.md §3.3); and
- * all 23 live models accepted a toolset on the wire (23/23, one of them
- * returning a real tool_call). `1` still means "send", so the rule
- * changes no wire behavior — it is the picker's claim, and the honest
- * one: hyper is never a model you cannot use tools with. */
-static const NmModel hyper_static_models[] = {
-    { "gpt-oss-120b", "GPT OSS 120b", 0, 0, 131072, 1 },
-    { 0 }
-};
+ * tools, hence `tools = 1` on every row (the generated fallback table
+ * below and the live scanner). Evidence (probed 2026-10-06): /v1/models'
+ * `capabilities` is `{"vision": bool}` only, /v1/provider (Crush's
+ * catalog) has `supports_attachments`/`can_reason` but nothing about
+ * tools, and no per-model endpoint exists; the gateway is a coding
+ * gateway where Crush announces its tool catalogue on EVERY request
+ * (HYPER-API.md §3.3); and all 23 live models accepted a toolset on the
+ * wire (23/23, one of them returning a real tool_call). `1` still means
+ * "send", so the rule changes no wire behavior — it is the picker's
+ * claim, and the honest one: hyper is never a model you cannot use
+ * tools with. */
 
 /* ---------------------------------------------------------------- */
 /* Cache affinity (HYPER-API.md §3.1)                                */
@@ -255,7 +253,7 @@ static const char *hyper_row(NmJson *entry, NmModel *out, void *ud)
         nm_json_get(nm_json_get(entry, "capabilities"), "vision"));
     double ctx = nm_json_num(nm_json_get(entry, "context_window"));
     out->context_length = ctx > 0 ? (long)ctx : -1;
-    /* The provider-level rule (see hyper_static_models): the wire
+    /* The provider-level rule (see the note above): the wire
      * carries no tool-use claim, and every model takes tools. */
     out->tools = 1;
     /* No display_name on the wire: the merge loop falls back to the id. */
@@ -265,7 +263,7 @@ static const char *hyper_row(NmJson *entry, NmModel *out, void *ud)
 const NmOpenaiCompat nm_hyper_compat = {
     hyper_chat_endpoint,
     hyper_catalog_endpoint,
-    hyper_static_models,
+    nm_catalog_hyper, /* the generated fallback catalog */
     hyper_row,
     NULL, /* one tier: the row needs no context */
 };

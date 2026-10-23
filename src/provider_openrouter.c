@@ -27,31 +27,17 @@
 
 #include "openai_client.h"
 #include "provider_openaicompat.h"
+#include "catalog_data.h" /* the generated fallback catalog (every provider) */
 
 #define OPENROUTER_DEFAULT_BASE "https://openrouter.ai/api/v1"
 
-/* Static fallback catalog (subset of data/nm-openrouter-models.json).
- * The three rows are the picker's own fixture for NmModel.tools'
- * tri-state (1 / 0 / -1), so a badge or a `/model @tools` answer can be
- * asserted offline:
- *   - GPT Astra (vision, 1M ctx) is the tools == 0 row: the catalog
- *     says nothing, so the agent keeps the toolset and the picker shows
- *     no 🔧.
- *   - The image row is the imagegen probe model (docs/OPENROUTER-API.md
- *     §5.1): image_gen = output_modalities contains "image"; its input
- *     modalities are unprobed, so vision stays 0 (no capability claim).
- *     Its tools claim is -1 (the catalog's supported_parameters lists no
- *     "tools"): a request carrying a toolset 404s ("no endpoints found
- *     that support tool use"), so the agent must send none.
- *   - Llama is the tools == 1 row: supported_parameters carries
- *     "tools", so the agent sends the toolset and the picker badges it
- *     with the 🔧. */
-static const NmModel openrouter_static_models[] = {
-    { "~openai/gpt-astra-latest", "GPT Astra", 1, 0, 1050000, 0 },
-    { "google/gemini-3.1-flash-lite-image", "Gemini 3.1 Flash Lite Image", 0, 1, -1, -1 },
-    { "meta-llama/llama-3.3-70b-instruct", "Llama 3.3 70B Instruct", 0, 0, 131072, 1 },
-    { 0 }
-};
+/* The fallback catalog is GENERATED (tools/generate-catalogs.py): the
+ * whole /v1/models list with full coverage - the label, the context
+ * window, the vision and image-generation claims and the tool-use
+ * claim (the tri-state: 1 = the parameters list carries "tools", -1 =
+ * the list is there WITHOUT it, 0 = the catalog says nothing). The
+ * generator applies the ":batch" veto below too, so the fallback and
+ * the runtime resolution offer the same models. */
 
 /* Does the string array at `arr` carry `want`? The row's one
  * membership test — architecture.<key>_modalities carrying "image"
@@ -145,7 +131,7 @@ static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
 const NmOpenaiCompat nm_openrouter_compat = {
     nm_openaicompat_bearer_chat_endpoint,
     openrouter_catalog_endpoint, /* public catalog: tokenless, whole list */
-    openrouter_static_models,
+    nm_catalog_openrouter,       /* the generated fallback catalog */
     openrouter_row,
     NULL,                  /* one tier: the row needs no context */
     openrouter_skip_entry, /* the ":batch" variants (OPENROUTER-API.md §6) */

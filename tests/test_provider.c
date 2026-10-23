@@ -1787,10 +1787,14 @@ static void test_opencode_models_fetch_maps_ids(void)
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 2);
+    /* The COVERAGE rule: the served list carries "future-model-9", which
+     * no catalog covers - and an uncovered model is NOT offered (an
+     * id-only row shows a `-` window and no badges). One covered id
+     * survives. */
+    ASSERT_EQ(n, 1);
     ASSERT_STR_EQ(models[0].id, "glm-5.3");
-    /* Enriched from the shipped models.dev table, NOT id-only: this is
-     * the whole point (the ids-only wire carries no context/vision).
+    /* Enriched from the generated catalog, NOT id-only: this is the
+     * whole point (the ids-only wire carries no context/vision).
      * EVERY table field is copied — tools and image_gen included, or a
      * live row would read 0 while the table claimed otherwise (the
      * silent drop the badges made visible). */
@@ -1799,14 +1803,9 @@ static void test_opencode_models_fetch_maps_ids(void)
     ASSERT_EQ(models[0].context_length, 1000000);
     ASSERT_EQ(models[0].tools, 1); /* models.dev tool_call, via the table */
     ASSERT_EQ(models[0].image_gen, 0);
-    /* An id models.dev does not know: id-only, unknown context, no
-     * capability claim (0 = "says nothing", not a negative). */
-    ASSERT_STR_EQ(models[1].id, "future-model-9");
-    ASSERT_STR_EQ(models[1].label, "future-model-9");
-    ASSERT_EQ(models[1].vision, 0);
-    ASSERT_EQ(models[1].context_length, -1);
-    ASSERT_EQ(models[1].tools, 0);
-    ASSERT_EQ(models[1].image_gen, 0);
+    /* An id no catalog covers is NOT offered: the row would be id-only
+     * with an unknown context and no capability claim - a half-row the
+     * picker cannot say anything about. The coverage rule drops it. */
     pthread_join(th, NULL);
     close(lfd);
 
@@ -1879,7 +1878,7 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     size_t gn = 0;
     const NmModel *g = go->models(go, NULL, NULL, &gn);
     ASSERT_NOT_NULL(g);
-    ASSERT_EQ(gn, 2);
+    ASSERT_EQ(gn, 1);
     ASSERT_STR_EQ(g[0].id, "glm-5.3");
     ASSERT_STR_EQ(g[0].label, "GLM-5.3");
     ASSERT_EQ(g[0].context_length, 1000000);

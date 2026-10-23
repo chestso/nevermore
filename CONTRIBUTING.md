@@ -10,6 +10,18 @@ conventions, and the traps that are not obvious from any single file.
 
 - `make check` — the full test suite, **canned loopback servers only:
   no test ever hits a real API**. The gate for every commit.
+- `make catalogs` — **regenerate the model catalogs** (one generator
+  for every provider: `tools/generate-catalogs.py`). It resolves each
+  provider's catalog with FULL COVERAGE (a model with no known
+  label/window/capabilities is not offered) and writes the
+  per-provider records (`data/nm-catalog-*.json`) plus the generated
+  tables (`src/catalog_data.h`) the app falls back to until the
+  runtime resolution lands. **A release-time step**, not a build-time
+  one: the shipped binary must not depend on a third-party wire
+  document, and the suite never hits the network. Run it before a
+  release (the catalogs are the fallback a fresh install starts from)
+  and commit the result. `make catalogs-check` compares instead of
+  writing — the gate that says the committed catalogs are current.
 - `make check-wire` — the wire tests (dummy localhost servers, one
   scripted round per connection).
 - `make format` — clang-format (src/tests C), shfmt (scripts), black

@@ -1,0 +1,190 @@
+{
+  "provider": "ollama",
+  "source": "GET https://ollama.com/v1/models?verbose=true",
+  "models": [
+    {
+      "id": "beam",
+      "label": "beam",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "clef:27b",
+      "label": "clef:27b",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 65536,
+      "tools": 0
+    },
+    {
+      "id": "deepseek-v4-pro:0813",
+      "label": "deepseek-v4-pro:0813",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "deepseek-v4.1-flash",
+      "label": "deepseek-v4.1-flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "deepseek-v4.1-flash:1017",
+      "label": "deepseek-v4.1-flash:1017",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "gemma4:31b",
+      "label": "gemma4:31b",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "glm-5.2",
+      "label": "glm-5.2",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "glm-5.3",
+      "label": "glm-5.3",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "glm-5.3-flash",
+      "label": "glm-5.3-flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "gpt-oss:120b",
+      "label": "gpt-oss:120b",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 131072,
+      "tools": 0
+    },
+    {
+      "id": "gpt-oss:20b",
+      "label": "gpt-oss:20b",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 131072,
+      "tools": 0
+    },
+    {
+      "id": "kimi-k2.6",
+      "label": "kimi-k2.6",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "kimi-k2.7-code",
+      "label": "kimi-k2.7-code",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "kimi-k3",
+      "label": "kimi-k3",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "minimax-m2.7",
+      "label": "minimax-m2.7",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 196608,
+      "tools": 0
+    },
+    {
+      "id": "minimax-m3",
+      "label": "minimax-m3",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 512000,
+      "tools": 0
+    },
+    {
+      "id": "minimax-m3.1-flash",
+      "label": "minimax-m3.1-flash",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1000000,
+      "tools": 0
+    },
+    {
+      "id": "mistral-large-3:675b",
+      "label": "mistral-large-3:675b",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "mistral-large-4",
+      "label": "mistral-large-4",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "muse-spark-open",
+      "label": "muse-spark-open",
+      "vision": 1,
+      "image_gen": 0,
+      "context_length": 1048576,
+      "tools": 0
+    },
+    {
+      "id": "nemotron-3-nano:30b",
+      "label": "nemotron-3-nano:30b",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "nemotron-3-super",
+      "label": "nemotron-3-super",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    },
+    {
+      "id": "nemotron-3-ultra",
+      "label": "nemotron-3-ultra",
+      "vision": 0,
+      "image_gen": 0,
+      "context_length": 262144,
+      "tools": 0
+    }
+  ]
+}

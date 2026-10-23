@@ -63,6 +63,24 @@ format:
         echo "prettier not found - skipping Markdown formatting." >&2; \
     fi
 
+# The catalogs — ONE generator for every provider (tools/generate-catalogs.py).
+# It resolves each provider's catalog with FULL COVERAGE and writes the
+# per-provider records (data/nm-catalog-*.json) plus the generated tables
+# (src/catalog_data.h) that the app falls back to until the RUNTIME
+# resolution lands. A RELEASE-time step, never a build-time one: the
+# shipped binary must not depend on a third-party wire document, and the
+# suite never hits the network.
+#
+# `--check` compares instead of writing: the release gate that says the
+# committed catalogs are current.
+.PHONY: catalogs
+catalogs:
+	@python3 "$(top_srcdir)/tools/generate-catalogs.py" --out "$(top_srcdir)"
+
+.PHONY: catalogs-check
+catalogs-check:
+	@python3 "$(top_srcdir)/tools/generate-catalogs.py" --out "$(top_srcdir)" --check
+
 # Portable ZIP — a self-contained folder for macOS or Windows: the binary,
 # the runtime libraries it needs that the OS does not ship, the docs, and a
 # README-PORTABLE.txt. GNU/Linux is deliberately not packaged: the source

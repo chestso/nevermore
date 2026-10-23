@@ -65,7 +65,7 @@ EXTRA_DIST = \
     proc.h \
     proc_internal.h \
     size.h \
-    opencode_models_data.h \
+    catalog_data.h \
     openai_client.h \
     provider.h \
     provider_internal.h \

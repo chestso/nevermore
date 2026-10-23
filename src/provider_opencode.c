@@ -42,17 +42,18 @@
 #include "provider_internal.h" /* nm_conversation_id_new */
 #include "provider_openaicompat.h"
 
-/* The shipped catalogs (generated, committed): full models.dev
- * metadata per tier. Included AFTER provider_openaicompat.h so NmModel
- * is in scope. */
-#include "opencode_models_data.h"
+/* The fallback catalogs (generated, committed): the full metadata per
+ * tier, with FULL COVERAGE - a model nobody covers is not in the
+ * table. Included AFTER provider_openaicompat.h so NmModel is in
+ * scope. */
+#include "catalog_data.h"
 
 #define OPENCODE_GO_DEFAULT  "https://opencode.ai/zen/go/v1"
 #define OPENCODE_ZEN_DEFAULT "https://opencode.ai/zen/v1"
 
-/* Metadata row for a live id, or NULL for an id models.dev has not
- * seen yet (a brand-new model). The table is the row mapper's context,
- * so each tier's descriptor carries its own. */
+/* Metadata row for a live id, or NULL for an id the catalog does not
+ * cover. The table is the row mapper's context, so each tier's
+ * descriptor carries its own. */
 static const NmModel *opencode_meta_find(const NmModel *table, const char *id)
 {
     for (size_t i = 0; table[i].id; i++) {
@@ -139,7 +140,7 @@ static const char *opencode_row(NmJson *entry, NmModel *out, void *ud)
     (void)entry;
     const NmModel *meta = opencode_meta_find((const NmModel *)ud, out->id);
     if (!meta)
-        return NULL; /* id-only: the label falls back to the id */
+        return NULL; /* no coverage: the entry is vetoed (see below) */
     out->vision = meta->vision;
     out->context_length = meta->context_length;
     /* EVERY table field the picker/agent read must be copied here:
@@ -151,23 +152,41 @@ static const char *opencode_row(NmJson *entry, NmModel *out, void *ud)
     return meta->label;
 }
 
+/* The COVERAGE rule: a model the tier serves but that no catalog
+ * covers is NOT offered. An id-only row shows a `-` window, no badges
+ * and a silent context gauge - a picker full of half-rows is worse
+ * than a picker that is honest about what it knows (and a model with
+ * no window is a model nevermore cannot reason about). The catalog
+ * files a model under the tier(s) that offer it, and the filing moves,
+ * so the generated table carries the sibling tier's rows for the ids
+ * the tier's own entry lacks (the generator's rule). */
+static int opencode_skip_uncovered(NmJson *entry, void *ud)
+{
+    const char *id = nm_json_str(nm_json_get(entry, "id"));
+    if (!id)
+        return 1;
+    return opencode_meta_find((const NmModel *)ud, id) ? 0 : 1;
+}
+
 /* One descriptor per tier: same wire, same session header, different
- * shipped table (which is both the offline catalog and the row's
+ * generated table (which is both the offline catalog and the row's
  * enrichment source). */
 const NmOpenaiCompat nm_opencode_compat = {
     opencode_chat_endpoint,
     opencode_catalog_endpoint,
-    opencode_go_models,
+    nm_catalog_opencode_go, /* the generated fallback catalog */
     opencode_row,
-    (void *)opencode_go_models,
+    (void *)nm_catalog_opencode_go,
+    opencode_skip_uncovered,
 };
 
 const NmOpenaiCompat nm_opencode_zen_compat = {
     opencode_chat_endpoint,
     opencode_catalog_endpoint,
-    opencode_zen_models,
+    nm_catalog_opencode_zen, /* the generated fallback catalog */
     opencode_row,
-    (void *)opencode_zen_models,
+    (void *)nm_catalog_opencode_zen,
+    opencode_skip_uncovered,
 };
 
 int nm_opencode_needs_auth(const NmProvider *p, const char *base_url)
