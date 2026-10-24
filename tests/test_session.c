@@ -1464,6 +1464,7 @@ static void test_session_image_marker(void)
         nm_json_free(parsed);
     }
 
+    remove(shot); /* the scratch file is ours to take away */
     nm_session_free(s);
 }
 
@@ -1535,6 +1536,7 @@ static void test_session_image_age_rule(void)
     ASSERT_NULL(nm_session_image_part(s, 99, 1, &len));
     ASSERT_NULL(nm_session_image_marker_text(s, 99));
 
+    remove(shot); /* the scratch file is ours to take away */
     nm_session_free(s);
     nm_session_free(s2);
     nm_session_free(s3);
