@@ -14,7 +14,9 @@
 
 #include "provider.h"
 
-/* openrouter: 394 models. */
+/* openrouter: 394 models.
+ * Source: GET https://openrouter.ai/api/v1/models?limit=1000
+ */
 static const NmModel nm_catalog_openrouter[] = {
     { "aion-labs/aion-2.0", "AionLabs: Aion-2.0", 0, 0, 131072, 1 },
     { "aion-labs/aion-3.0", "AionLabs: Aion-3.0", 0, 0, 131072, 1 },
@@ -413,7 +415,9 @@ static const NmModel nm_catalog_openrouter[] = {
     { 0 }
 };
 
-/* ollama: 23 models. */
+/* ollama: 23 models.
+ * Source: GET https://ollama.com/v1/models?verbose=true
+ */
 static const NmModel nm_catalog_ollama[] = {
     { "beam", "beam", 0, 0, 1048576, 0 },
     { "clef:27b", "clef:27b", 1, 0, 65536, 0 },
@@ -441,7 +445,9 @@ static const NmModel nm_catalog_ollama[] = {
     { 0 }
 };
 
-/* hyper: 23 models. */
+/* hyper: 23 models.
+ * Source: GET https://hyper.charm.land/v1/models
+ */
 static const NmModel nm_catalog_hyper[] = {
     { "deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731", 0, 0, 1000000, 1 },
     { "deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813", 0, 0, 1000000, 1 },
@@ -469,7 +475,9 @@ static const NmModel nm_catalog_hyper[] = {
     { 0 }
 };
 
-/* opencode-go: 35 models. */
+/* opencode-go: 35 models.
+ * Source: https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models
+ */
 static const NmModel nm_catalog_opencode_go[] = {
     { "beam-free", "Beam Free", 0, 0, 1048576, 1 },
     { "claude-haiku-5-5", "Claude Haiku 5.5", 1, 0, 1000000, 1 },
@@ -509,7 +517,9 @@ static const NmModel nm_catalog_opencode_go[] = {
     { 0 }
 };
 
-/* opencode-zen: 81 models. */
+/* opencode-zen: 81 models.
+ * Source: https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models
+ */
 static const NmModel nm_catalog_opencode_zen[] = {
     { "beam-free", "Beam Free", 0, 0, 1048576, 1 },
     { "big-pickle", "Big Pickle", 0, 0, 200000, 1 },

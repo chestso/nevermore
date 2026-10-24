@@ -745,7 +745,6 @@ src/                the nevermore binary: entry point, config, providers,
 tests/              standalone test binaries (RUN_TEST/TEST_SUMMARY pattern)
 tools/wire-replay/  replay server for captured wire dumps (Python)
 docs/               wire specs + platform notes
-data/               static model catalogs
 ```
 
 See [docs/PORTTY.md](docs/PORTTY.md) for the terminal-feature matrix,

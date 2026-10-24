@@ -169,10 +169,10 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   **The catalogs are GENERATED, one generator for every provider**
   (`tools/generate-catalogs.py`, `make catalogs` — a release-time
   step): it resolves each provider's catalog with FULL COVERAGE and
-  writes the per-provider records (`data/nm-catalog-*.json`) plus the
-  generated tables (`src/catalog_data.h`) that the app FALLS BACK to
-  until the runtime resolution lands. No provider hand-writes a model
-  table any more, and no hand-written table can drift from the wire.
+  writes the generated tables (`src/catalog_data.h`) that the app
+  FALLS BACK to until the runtime resolution lands. No provider
+  hand-writes a model table any more, and no hand-written table can
+  drift from the wire.
   **FULL COVERAGE, OR NOTHING**: a model is in the catalog only when
   its label, its context window and its capability claims are known —
   a model the provider serves but that no source covers is NOT

@@ -16,7 +16,6 @@ EXTRA_DIST = \
     scripts \
     tools \
     docs \
-    data \
     icons \
     third_party/stb/stb_image.h \
     third_party/stb/stb_image_write.h
@@ -65,11 +64,10 @@ format:
 
 # The catalogs — ONE generator for every provider (tools/generate-catalogs.py).
 # It resolves each provider's catalog with FULL COVERAGE and writes the
-# per-provider records (data/nm-catalog-*.json) plus the generated tables
-# (src/catalog_data.h) that the app falls back to until the RUNTIME
-# resolution lands. A RELEASE-time step, never a build-time one: the
-# shipped binary must not depend on a third-party wire document, and the
-# suite never hits the network.
+# generated tables (src/catalog_data.h) that the app falls back to until
+# the RUNTIME resolution lands. A RELEASE-time step, never a build-time
+# one: the shipped binary must not depend on a third-party wire document,
+# and the suite never hits the network.
 #
 # `--check` compares instead of writing: the release gate that says the
 # committed catalogs are current.

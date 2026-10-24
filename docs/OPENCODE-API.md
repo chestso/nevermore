@@ -470,8 +470,7 @@ table has never heard of).
 Practical shape for a static fallback: id + label (a title-cased id
 is fine) + vision/context from models.dev, exactly the four `NmModel`
 fields. nevermore ships that as a generated table
-(`src/catalog_data.h`, produced by `tools/generate-catalogs.py`; the
-JSON record beside it in `data/nm-catalog-opencode-*.json`), and a
+(`src/catalog_data.h`, produced by `tools/generate-catalogs.py`), and a
 live fetch does **not** replace it with bare ids: the wire supplies
 **membership** and every id is **enriched by id** — from the
 document first (the live truth), the shipped table second — so the

@@ -282,7 +282,8 @@ sync endpoint normally and stay in the catalog.
   the SSE tool-call framing is byte-identical, so no client changes
   are needed).
 - Catalog: `GET /v1/models` at runtime via `nm_openai_models`
-  (tokenless), static `data/nm-openrouter-models.json` as fallback.
+  (tokenless), the generated table in `src/catalog_data.h` as the
+  offline fallback.
   Vision from `architecture.input_modalities`; context from
   top-level `context_length`; label from `name`.
   Image GENERATION (§5.1) is consumed too: `delta.images` events ride

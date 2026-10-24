@@ -4,14 +4,16 @@
 WHAT IT IS
     nevermore's model catalogs are RESOLVED, never hand-written. This
     script resolves every provider's catalog with FULL COVERAGE and
-    writes two artifacts per provider:
+    writes ONE artifact:
 
-      data/nm-catalog-<slug>.json   the record (the human-readable
-                                    regeneration source, shipped in
-                                    the dist)
       src/catalog_data.h            the generated tables (the compiled-in
                                     FALLBACK: what the app shows until
                                     the RUNTIME resolution lands)
+
+    The tables carry the source document each provider was resolved
+    from, so the provenance ships with the rows it belongs to. There is
+    no second copy of the catalog in the tree: a record nobody reads
+    is a record that drifts.
 
     Regenerate with `make catalogs` - a release-time step, like the
     release recipe itself. Never run by `make` or `make check`: the
@@ -44,9 +46,10 @@ THE SOURCES (per provider, the same documents the runtime reads)
 USAGE
     tools/generate-catalogs.py [--out DIR] [--check]
 
-      --out DIR    where to write the artifacts (default: the repo root)
+      --out DIR    where to write the tables (default: the repo root)
       --check      resolve everything and compare against the committed
-                   artifacts; exit 1 when they differ (a release gate)
+                   tables; exit 1 when they differ (a release gate —
+                   it never writes)
 
     Keys: the OpenCode catalog is public; the ollama cloud's catalog
     answers with or without a key (a key may list more models - set
@@ -267,21 +270,19 @@ def resolve_opencode(slug):
 # --------------------------------------------------------------------
 
 
-def write_json(path, slug, rows):
-    body = {
-        "provider": slug,
-        "source": SOURCE_NOTE[slug],
-        "models": rows,
-    }
-    text = json.dumps(body, indent=2, ensure_ascii=False) + "\n"
-    if os.path.exists(path) and open(path, encoding="utf-8").read() == text:
-        return False
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    return True
+# Where each provider's catalog came from - the document the runtime
+# reads too. The tables carry the note, so the provenance ships with
+# the rows it belongs to.
+SOURCE_NOTE = {
+    "openrouter": "GET https://openrouter.ai/api/v1/models?limit=1000",
+    "ollama": "GET https://ollama.com/v1/models?verbose=true",
+    "hyper": "GET https://hyper.charm.land/v1/models",
+    "opencode-go": "https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models",
+    "opencode-zen": "https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models",
+}
 
 
-def write_header(path, tables):
+def header_text(tables):
     """The generated tables: the compiled-in fallback.
 
     One table per provider, sorted by id, in the row shape the app
@@ -305,7 +306,9 @@ def write_header(path, tables):
     out.append('#include "provider.h"')
     out.append("")
     for slug, rows in tables:
-        out.append("/* %s: %d models. */" % (slug, len(rows)))
+        out.append("/* %s: %d models." % (slug, len(rows)))
+        out.append(" * Source: %s" % SOURCE_NOTE[slug])
+        out.append(" */")
         out.append("static const NmModel nm_catalog_%s[] = {" % slug.replace("-", "_"))
         for r in rows:
             out.append(
@@ -324,21 +327,8 @@ def write_header(path, tables):
         out.append("")
     out.append("#endif /* NM_CATALOG_DATA_H */")
     out.append("")
-    text = "\n".join(out)
-    if os.path.exists(path) and open(path, encoding="utf-8").read() == text:
-        return False
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
-    return True
+    return "\n".join(out)
 
-
-SOURCE_NOTE = {
-    "openrouter": "GET https://openrouter.ai/api/v1/models?limit=1000",
-    "ollama": "GET https://ollama.com/v1/models?verbose=true",
-    "hyper": "GET https://hyper.charm.land/v1/models",
-    "opencode-go": "https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models",
-    "opencode-zen": "https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models",
-}
 
 PROVIDERS = [
     ("openrouter", "openrouter", resolve_openrouter),
@@ -358,9 +348,7 @@ def main():
     args = ap.parse_args()
 
     out = os.path.abspath(args.out)
-    data_dir = os.path.join(out, "data")
     tables = []
-    changed = False
     for slug, _name, resolve in PROVIDERS:
         try:
             rows = resolve()
@@ -370,24 +358,26 @@ def main():
         rows.sort(key=lambda r: r["id"])
         covered = sum(1 for r in rows if r["context_length"] > 0)
         print("%-14s %4d models (%d with a window)" % (slug, len(rows), covered))
-        changed |= write_json(
-            os.path.join(data_dir, "nm-catalog-%s.json" % slug), slug, rows
-        )
         tables.append((slug, rows))
 
-    changed |= write_header(os.path.join(out, "src", "catalog_data.h"), tables)
+    path = os.path.join(out, "src", "catalog_data.h")
+    text = header_text(tables)
+    current = open(path, encoding="utf-8").read() if os.path.exists(path) else ""
     if args.check:
-        if changed:
+        # A GATE reads the tree; it never writes it.
+        if current != text:
             print(
                 "generate-catalogs: the committed catalogs are STALE", file=sys.stderr
             )
             return 1
         print("generate-catalogs: the committed catalogs are current")
         return 0
-    print(
-        "generate-catalogs: %s"
-        % ("wrote the catalogs" if changed else "the catalogs are current")
-    )
+    if current == text:
+        print("generate-catalogs: the catalogs are current")
+        return 0
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print("generate-catalogs: wrote the catalogs")
     return 0
 
 
