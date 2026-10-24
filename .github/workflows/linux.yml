@@ -109,13 +109,18 @@ jobs:
           # terminal lands the cursor below the picture, so a break
           # would leave a blank line under it); kitty still reserves
           # the image's rows.
+          # And, at this pin, the width model's resolution: TERM decides
+          # before the identity markers, so the INNERMOST terminal owns
+          # the grid (an xterm inside portty measures with the grid rule,
+          # not portty's) — the rule the startup banner names, and the
+          # one the status row's columns are measured with.
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it. It also names the
           # version the packaged binaries print (git describe reads
-          # v0.5.1; nevermore reports boba 0.5.1). Bump it in all three
+          # v0.5.2; nevermore reports boba 0.5.2). Bump it in all three
           # platform workflows at once.
-          ref: v0.5.1
+          ref: v0.5.2
           path: boba
           fetch-depth: 0
 
@@ -217,7 +222,7 @@ jobs:
           # configure resolves boba through pkg-config, and a missing
           # boba.pc is a hard error, so a tarball job cannot skip the
           # dependency it does not compile.
-          ref: v0.5.1
+          ref: v0.5.2
           path: boba
           fetch-depth: 0
 
