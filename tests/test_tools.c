@@ -2856,6 +2856,50 @@ static void test_run_command_async(void)
     nm_toolset_free(ts);
 }
 
+/* A command that produces NO output reports the structural "(empty)"
+ * marker — never the bytes the allocator handed back. The async capture
+ * buffer is malloc'ed and only written when the child speaks, so a
+ * silent child left it unterminated and the report carried stale heap
+ * as the command's output (the sync path terminates its buffer; the
+ * async one did not). The heap is dirtied first, so the failure is a
+ * fact and not luck. */
+static void test_run_command_async_silent_reports_empty(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(t->begin);
+
+    /* Dirty the capture buffer's size class with a known pattern, then
+     * hand the chunks back: a buffer the tool never writes comes back
+     * holding exactly this. */
+    enum
+    {
+        DIRT_CHUNKS = 64
+    };
+    char *dirt[DIRT_CHUNKS];
+    for (int i = 0; i < DIRT_CHUNKS; i++) {
+        dirt[i] = malloc(4096);
+        ASSERT_NOT_NULL(dirt[i]);
+        memset(dirt[i], 'X', 4096);
+    }
+    for (int i = 0; i < DIRT_CHUNKS; i++)
+        free(dirt[i]);
+
+    NmToolExec *e = t->begin(t, "{\"cmd\":\"exit 0\"}", NULL);
+    ASSERT_NOT_NULL(e);
+    NmToolResult r = { 0 };
+    ASSERT_EQ(drive_until_done(t, e, &r, 10000), 0);
+    t->end(e);
+
+    ASSERT_EQ(r.status, NM_TOOL_OK);
+    ASSERT_NOT_NULL(r.output);
+    /* The report says what happened: the exit code, and an empty body. */
+    ASSERT_STR_EQ(r.output, "Process exited with code 0\nOutput: (empty)\n");
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 /* A bad/empty cmd makes begin decline (NULL), so the agent falls back
  * to execute, which reports the error. */
 static void test_run_command_async_bad_args(void)
@@ -5067,6 +5111,7 @@ int main(void)
     RUN_TEST(test_tool_plan_degenerate_args);
 #ifndef _WIN32
     RUN_TEST(test_run_command_async);
+    RUN_TEST(test_run_command_async_silent_reports_empty);
     RUN_TEST(test_run_command_async_bad_args);
     RUN_TEST(test_run_command_output_is_clamped);
     RUN_TEST(test_run_command_cancel_is_prompt);

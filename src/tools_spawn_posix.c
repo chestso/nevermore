@@ -273,6 +273,12 @@ static int exec_reserve(NmToolExec *e, size_t extra)
         return -1;
     e->buf = nb;
     e->cap = ncap;
+    /* Terminate the buffer HERE, not only after a read: a child that
+     * produces NOTHING leaves len at 0, and the buffer is then a
+     * malloc'ed block nobody ever wrote — the report would carry
+     * whatever the allocator handed back (stale heap) as the command's
+     * output. The empty case must read as empty. */
+    e->buf[e->len] = '\0';
     return 0;
 }
 

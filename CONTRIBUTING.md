@@ -520,6 +520,12 @@ list` / `gh run watch <id> --exit-status` / `gh run view <id>
 - **`snprintf` truncates silently** (and raises `-Wformat-truncation`):
   for token buffers, `memcpy` + explicit NUL and skip what does not fit
   — a truncated key or secret is never useful.
+- **Terminate a capture buffer where it is ALLOCATED, not only after a
+  read**: a child that prints nothing leaves the length at 0, so a buffer
+  that is only terminated once bytes arrive hands the report
+  uninitialized heap — the command's "output" is then whatever the
+  allocator returned (the async capture path had this; the sync one
+  terminated its buffer).
 - **va_list into a variadic function is UB** — route through a
   `vsnprintf` helper.
 - **A closed stdin reports POLLHUP, not POLLIN** — a stdin wait loop
