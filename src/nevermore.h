@@ -1,7 +1,7 @@
 /* nevermore.h - umbrella header for the nevermore library
  *
- * nevermore: an interactive coding agent in pure C. Seven providers
- * (Charm Hyper, Ollama local + Cloud, OpenAI, OpenRouter, OpenCode Go +
+ * nevermore: an interactive coding agent in pure C. Six providers
+ * (Charm Hyper, Ollama local + Cloud, OpenRouter, OpenCode Go +
  * Zen) over a pluggable, OS-native-TLS transport; boba TUI front-end;
  * first-class citizen of the portty terminal.
  */

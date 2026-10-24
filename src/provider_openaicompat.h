@@ -1,6 +1,6 @@
 /* provider_openaicompat.h - the shared OpenAI-compatible provider surface
  *
- * Seven of the eight providers speak the same wire (openai_client.h):
+ * All six providers speak the same wire (openai_client.h):
  * only the base URL, the auth headers, a few extra headers, and the
  * model catalogs differ. This is where the plumbing every one of them
  * needs lives — the endpoint pair, the process-lifetime live-catalog
