@@ -1,5 +1,7 @@
 # nevermore
 
+**Homepage:** <https://chest.so/nevermore/>
+
 An interactive coding agent in pure C.
 
 nevermore chats with AI models (Charm Hyper, Ollama local daemon and
