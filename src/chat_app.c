@@ -3990,6 +3990,19 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
     NmAgentState st = nm_agent_state(app->agent);
     int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
 
+    /* Escape interrupts the turn — the second interrupt key, next to
+     * Ctrl+C — and NOTHING else: it cancels the round (the stream, or
+     * the running tool, so the agent walks back to IDLE and the next
+     * prompt can be typed) but never aborts the edit and never quits.
+     * The popup above keeps its own Escape (close the popup), and a
+     * release is not a press: a kitty terminal that reports event
+     * types would otherwise cancel on the key's release. */
+    if (key->key == TUI_KEY_ESCAPE && key->action == TUI_KEY_ACTION_PRESS &&
+        busy) {
+        nm_agent_cancel(app->agent); /* on_state(IDLE) prints the marker */
+        return;
+    }
+
     if (key->key == TUI_KEY_ENTER && !(key->mods & TUI_MOD_SHIFT)) {
         /* Enter submits when idle; while a turn is in flight it is a
          * silent no-op — type ahead and the send happens when the turn

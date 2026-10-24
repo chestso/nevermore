@@ -2765,6 +2765,74 @@ static void test_cancel_midstream_returns_to_idle(void)
     close(sc.fd);
 }
 
+/* Escape interrupts the turn: the second interrupt key, next to
+ * Ctrl+C. It cancels the round and NOTHING else — the stream closes,
+ * the agent walks back to IDLE (so the next prompt can be typed), and
+ * the interrupt marker is printed. The kitty tier reports Escape
+ * unambiguously (CSI 27u), so it arrives as a plain key press. */
+static void test_escape_cancels_the_streaming_turn(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] = ""; /* stalls: no bytes, so we can interrupt */
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "stall please");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_EQ(app_fd(h->app), -1);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "🛑 interrupted") != NULL);
+
+    /* The cancel is a cancel of the TURN only: the app is still up and
+     * the prompt is live again (the next message can be typed). */
+    ASSERT_FALSE(tui_runtime_should_quit(h->rt));
+    harness_type(h, "next one");
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "next one");
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Escape at the prompt is NOT an interrupt: it does not clear the
+ * input and it does not quit — that ladder belongs to Ctrl+C alone.
+ * The key still reaches the input (which spends it on clearing a
+ * selection mark), so the text the user typed is intact. */
+static void test_escape_at_the_prompt_keeps_the_text(void)
+{
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "half a thought");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "half a thought");
+    ASSERT_FALSE(tui_runtime_should_quit(h->rt));
+
+    /* And a second Escape: still the prompt, still no quit. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "half a thought");
+    ASSERT_FALSE(tui_runtime_should_quit(h->rt));
+
+    harness_free(h);
+}
+
 /* One real turn driven to completion against a canned one-round server,
  * so a test can assert a PROMPT behavior in the state the user's next
  * prompt is actually in: a finished turn rests in NM_AGENT_DONE (only a
@@ -3740,6 +3808,74 @@ static void test_cancel_during_tool_closes_the_block(void)
     ASSERT_NOT_NULL(mark);
     ASSERT_TRUE(plan < mark);
     ASSERT_TRUE(has_blank_row(plan, mark)); /* the open block was closed */
+    free(clean);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Escape interrupts a RUNNING TOOL, not just a stream: the child is
+ * killed and the agent walks back to IDLE, so the user is not stuck
+ * behind a long command. The marker is the same one Ctrl+C prints. */
+static void test_escape_cancels_the_running_tool(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_c\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"run_command\",\"arguments\":"
+        "\"{\\\"cmd\\\":\\\"sleep 5; echo never\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "run it");
+    harness_enter(h);
+
+    /* Step until the command is running (RUNNING_TOOL with a live fd). */
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            app_fd(h->app) >= 0)
+            break;
+        int fd = app_fd(h->app);
+        unsigned in = app_interest(h->app);
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(app_fd(h->app) >= 0);
+
+    /* Escape, not the interrupt message: the key is the whole path. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_FALSE(tui_runtime_should_quit(h->rt));
+
+    const char *out = harness_read(h);
+    char *clean = strip_frames(out);
+    ASSERT_NOT_NULL(clean);
+    ASSERT_TRUE(strstr(clean, "🛑 interrupted") != NULL);
     free(clean);
 
     harness_free(h);
@@ -9146,6 +9282,8 @@ int main(void)
     RUN_TEST(test_tab_single_match_inserts_completion);
     RUN_TEST(test_tab_on_plain_word_is_a_noop);
     RUN_TEST(test_cancel_midstream_returns_to_idle);
+    RUN_TEST(test_escape_cancels_the_streaming_turn);
+    RUN_TEST(test_escape_at_the_prompt_keeps_the_text);
     RUN_TEST(test_ctrl_d_quits_after_a_turn);
     RUN_TEST(test_ctrl_d_deletes_at_a_nonempty_prompt_after_a_turn);
     RUN_TEST(test_tick_fires_stream_inactivity_timeout);
@@ -9168,6 +9306,7 @@ int main(void)
     RUN_TEST(test_open_json_fence_before_tool_call_commits);
 #ifndef _WIN32
     RUN_TEST(test_cancel_during_tool_closes_the_block);
+    RUN_TEST(test_escape_cancels_the_running_tool);
     RUN_TEST(test_tool_runs_async_and_spinner_ticks);
 #endif
     RUN_TEST(test_streaming_multiline_no_duplicate_transcript);

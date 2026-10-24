@@ -902,12 +902,30 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   nevermore's markdown grammar (`markdown.c` /
   `markdown_render.c`). See "The chat transcript protocol" below —
   the one design that is NOT obvious from the code.
+- **The interrupt keys** (`src/chat_app.c`'s `handle_key` and
+  `chat_interrupt`) — TWO keys interrupt, and they are not the same
+  gesture. **Ctrl+C** is the ladder: a busy agent cancels the round, an
+  idle prompt holding text aborts the edit, an idle empty prompt
+  quits. **Esc** cancels the round and NOTHING else — the input keeps
+  its text and the app does not quit — so Esc at the prompt is inert
+  (the key reaches the input, which spends it on clearing a selection
+  mark). The cancel is `nm_agent_cancel`: the stream closes, a live
+  async tool is reaped, the round's tool-call group is closed with a
+  synthetic "cancelled: …" result, and the agent walks back to
+  `NM_AGENT_IDLE`, where the app prints the `🛑 interrupted` marker.
+  A TOOL RUN is busy too, so Esc kills a long `run_command` and
+  returns to IDLE, ready for the next prompt. The popups keep their
+  own Esc (close the picker): the popup branch runs first, so Esc over
+  a popup closes it and the NEXT Esc interrupts. A key RELEASE is not
+  a press, so a kitty terminal that reports event types does not
+  cancel on the key's release.
 - **The keyboard tier** (`src/chat_app.c`'s `kbd_declaration`) — the
   terminal's kitty keyboard protocol is DECLARED per frame from the
   `kbd` key resolved at the point of use: `auto` (default) declares it
   only once the startup probe's answer proves the terminal speaks it,
   `on` declares it without waiting, `off` never does. The declared tier
-  is the protocol's full flag set (1|8|16): an unambiguous Esc and
+  is the protocol's full flag set (1|8|16): an unambiguous Esc (the key
+  that interrupts a turn) and
   Ctrl+keys, **Shift+Enter as the newline key** (`CSI 13;2u` — flag 8 is
   what makes a shifted Enter tellable from Enter, which no legacy
   encoding can express), and the text each key produced, so a capital or
