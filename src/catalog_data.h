@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 393 models. */
+/* openrouter: 394 models. */
 static const NmModel nm_catalog_openrouter[] = {
     { "aion-labs/aion-2.0", "AionLabs: Aion-2.0", 0, 0, 131072, 1 },
     { "aion-labs/aion-3.0", "AionLabs: Aion-3.0", 0, 0, 131072, 1 },
@@ -177,6 +177,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "moonshotai/kimi-k2.6", "MoonshotAI: Kimi K2.6", 1, 0, 262144, 1 },
     { "moonshotai/kimi-k2.7-code", "MoonshotAI: Kimi K2.7 Code", 1, 0, 262144, 1 },
     { "moonshotai/kimi-k3", "MoonshotAI: Kimi K3", 1, 0, 1048576, 1 },
+    { "moonshotai/kimi-k3.1-pro", "MoonshotAI: Kimi K3.1 Pro", 1, 0, 1048576, 1 },
     { "morph/morph-v3-fast", "Morph: Morph V3 Fast", 0, 0, 262144, -1 },
     { "morph/morph-v3-large", "Morph: Morph V3 Large", 0, 0, 262144, -1 },
     { "nex-agi/nex-n2.5-mini", "Nex AGI: Nex-N2.5-Mini", 1, 0, 262144, -1 },
@@ -468,7 +469,7 @@ static const NmModel nm_catalog_hyper[] = {
     { 0 }
 };
 
-/* opencode-go: 34 models. */
+/* opencode-go: 35 models. */
 static const NmModel nm_catalog_opencode_go[] = {
     { "beam-free", "Beam Free", 0, 0, 1048576, 1 },
     { "claude-haiku-5-5", "Claude Haiku 5.5", 1, 0, 1000000, 1 },
@@ -488,6 +489,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { "kimi-k2.6", "Kimi K2.6", 1, 0, 262144, 1 },
     { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 262144, 1 },
     { "kimi-k3", "Kimi K3", 1, 0, 1048576, 1 },
+    { "kimi-k3.1-pro", "Kimi K3.1 Pro", 1, 0, 1048576, 1 },
     { "longcat-2.0", "LongCat-2.0", 0, 0, 1000000, 1 },
     { "mimo-v2.5", "MiMo V2.5", 1, 0, 1000000, 1 },
     { "mimo-v2.5-pro", "MiMo V2.5 Pro", 0, 0, 1048576, 1 },
