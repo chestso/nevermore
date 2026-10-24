@@ -2,10 +2,10 @@
 
 > Status: verified against the live wire (unauthenticated catalog +
 > authenticated chat probes, Sep 2026; the batch surface in §6 on
-> 2026-10-23). Every claim below was probed on the real endpoint
-> unless marked otherwise. nevermore consumes OpenRouter through the
-> shared OpenAI-compatible client (`src/openai_client.c`) exactly as
-> quoth does.
+> 2026-10-23; the routing surface in §7 on 2026-10-24). Every claim
+> below was probed on the real endpoint unless marked otherwise.
+> nevermore consumes OpenRouter through the shared OpenAI-compatible
+> client (`src/openai_client.c`) exactly as quoth does.
 
 ## 1. Overview
 
@@ -52,12 +52,13 @@ usable; always consume the full `/models` list.
 (live-verified 2026-10-23): `/api/v1/models` documents `limit`
 (default **500**, max 1000) and `offset`; its prose says that
 omitting BOTH returns the full list, but the parameter's default
-decides otherwise — the catalog carries **468** entries today
-(393 after nevermore's `:batch` veto), so the default has not bitten
-yet. nevermore sends `?limit=1000` (the documented max) and compares
-the rows that came back against the response's own `total_count`: a
-list that came back SHORT is a fact, not a shrug (nevermore cannot
-see a model it never fetched), and the wire log says so.
+decides otherwise — the catalog carries **469** entries today
+(394 after nevermore's `:batch` veto; re-counted 2026-10-24), so the
+default has not bitten yet. nevermore sends `?limit=1000` (the
+documented max) and compares the rows that came back against the
+response's own `total_count`: a list that came back SHORT is a fact,
+not a shrug (nevermore cannot see a model it never fetched), and the
+wire log says so.
 
 **The catalog is SLOW to generate** (measured 2026-10-23): ~790 KB in
 2.0-2.7 s, ten runs, while the link itself does 2 MB/s (models.dev's
@@ -275,7 +276,199 @@ sync endpoint normally and stay in the catalog.
   path and comes back with the provider's own 404 above (the message
   names the reason, so it is not a mystery).
 
-## 7. Provider notes for the nevermore side
+## 7. Provider routing and service tiers (live test, 2026-10-24)
+
+OpenRouter hosts one model on many upstreams and routes every request
+to one of them. THREE levers sit over that choice, and they are not
+the same thing: the routing variant in the model id, the pinned
+service tier, and the provider preferences object.
+
+### 7.1 The three levers
+
+| lever                | where it rides                      | what it does                                                               |
+| -------------------- | ----------------------------------- | -------------------------------------------------------------------------- |
+| routing variant      | the model id (`vendor/model:nitro`) | sorts the candidate upstreams and admits that tier's endpoints into it     |
+| service tier         | top-level body field `service_tier` | pins a tier: `default` / `flex` / `priority` (a.k.a. `fast`) / `ultrafast` |
+| provider preferences | body object `provider`              | steers WHICH upstream serves the request                                   |
+
+Probed with a real key on `openai/gpt-4o-mini` (non-streamed, two
+runs each; `upstream` is the response's own `provider` field, `tier`
+its `service_tier`):
+
+```
+case                       upstream   tier      cost
+default                    Azure      default   7.35e-06
+provider.only=[azure]      Azure      default   7.35e-06
+provider.sort=price        Azure      default   7.35e-06
+provider.sort=throughput   OpenAI     default   7.35e-06
+model "…:nitro"            OpenAI     default   7.35e-06
+model "…:floor"            Azure      default   7.35e-06
+```
+
+The SORT visibly moves the pick (throughput → OpenAI, price → Azure),
+and `only` pins it. The pick is a weighted share, not a rule — an
+earlier run of the same day served the default case from OpenAI — so a
+single probe is a sample, not a contract.
+
+`only` naming an upstream the model has is a 404 whose message names
+the preference and the alternatives:
+
+```json
+{
+  "error": {
+    "message": "No allowed providers are available for the selected model. Providers serving openai/gpt-4o-mini: azure, openai, but your request's provider.only preference permits only: nosuchprovider.",
+    "code": 404
+  }
+}
+```
+
+The alternatives are named in SLUGS (`azure`, `openai`) — the same
+vocabulary `only` takes — while the response's `provider` field names
+the upstream in its own NAME (`OpenAI`, `Azure`).
+
+### 7.2 The routing variants
+
+- `:nitro` — sorts the model's providers by THROUGHPUT and admits the
+  **priority** tier endpoints into that sort;
+- `:floor` — sorts by PRICE and admits the **flex** tier endpoints;
+- `:exacto` — sorts by quality signals tuned for tool-calling
+  reliability;
+- `:online` — deprecated (web search is a server tool now).
+
+A routing variant is accepted on ANY model id and changes only the
+routing: "the model's metadata is the base model's" (§7.5).
+
+`provider.sort` is NOT the same thing: `provider.sort: "throughput"`
+sorts, but it does not admit the priority tier endpoints, so a tier
+endpoint never serves the request. The docs are explicit that `:nitro`
+is "a superset of setting `provider.sort` to `throughput` (which only
+sorts)"; the same holds for `:floor` vs `provider.sort: "price"` and
+the flex tier.
+
+Two sorting variants can sit in one id ("the last one in the ID
+determines the sort"), and a catalog variant combines with a routing
+variant (`poolside/laguna-s-2.1:free:nitro`).
+
+### 7.3 The provider preferences object
+
+The request body's `provider` object (Chat Completions):
+
+| field                      | type            | default | meaning                                                        |
+| -------------------------- | --------------- | ------- | -------------------------------------------------------------- |
+| `order`                    | string[]        | -       | provider slugs to try in order                                 |
+| `only`                     | string[]        | -       | provider slugs allowed for this request                        |
+| `ignore`                   | string[]        | -       | provider slugs skipped for this request                        |
+| `allow_fallbacks`          | boolean         | true    | whether a backup provider may serve the request                |
+| `require_parameters`       | boolean         | false   | only providers supporting every parameter in request           |
+| `data_collection`          | "allow"/"deny"  | "allow" | whether providers that may store data are eligible             |
+| `zdr`                      | boolean         | -       | restrict routing to zero-data-retention endpoints              |
+| `enforce_distillable_text` | boolean         | -       | restrict routing to models allowing text distillation          |
+| `quantizations`            | string[]        | -       | quantization levels to filter by                               |
+| `sort`                     | string / object | -       | "price" / "throughput" / "latency", or `{by, partition}`       |
+| `preferred_min_throughput` | number / object | -       | preferred minimum throughput (tokens/s), or percentile cutoffs |
+| `preferred_max_latency`    | number / object | -       | preferred maximum latency (s), or percentile cutoffs           |
+| `max_price`                | object          | -       | the most the request may cost                                  |
+
+`order` and `sort` DISABLE the load balancing: the router then tries
+the endpoints in that order instead of weighting them.
+
+### 7.4 The default routing (when the client says nothing)
+
+Without a preferences object, OpenRouter routes by its own weighted
+share: every endpoint gets a share computed from its ADJUSTED PRICE
+(cache-adjusted, plus the time to first token), its reliability and
+quality, its 429 rate and its end-to-end speed. The best endpoints get
+the most traffic, a degraded one is paused by a breaker, and a 429
+triggers a traffic cap and a short backoff. (The provider-selection
+page describes the same thing as inverse-square-price weighting. Both
+agree: the client cannot see or steer this without the preferences
+object.)
+
+Routing is also FEATURE-AWARE: a request carrying `tools` is routed to
+providers known to support tool use, and a `max_tokens` narrows the
+pool to providers that can serve that length — the same rule that
+makes a `tools` request to a model without the claim a 404 (§2).
+
+### 7.5 Catalog variants vs routing variants
+
+Two kinds of suffix live on a model id, and they behave differently in
+the models API:
+
+- **catalog variants** (`:free`, `:batch`, `:thinking`, `:extended`) are
+  separate entries in `GET /api/v1/models`, with their own pricing,
+  window and endpoints. nevermore's `:batch` veto (§6) is about this
+  kind;
+- **routing variants** (`:nitro`, `:floor`, `:exacto`, `:online`) are
+  NOT entries: any id accepts them, and the metadata is the base
+  model's.
+
+Measured on the live catalog (2026-10-24, `?limit=1000`): **469** rows,
+17 `:free`, 75 `:batch`, and **zero** `:nitro`/`:floor`/`:exacto` — the
+routing variants are not listed, exactly as documented.
+
+To resolve an id to its catalog entry: split on `:`, KEEP the catalog
+variant, DROP the routing ones —
+`openai/gpt-5.2:nitro` → `openai/gpt-5.2`,
+`poolside/laguna-s-2.1:free:nitro` → `poolside/laguna-s-2.1:free`.
+"Do not strip every suffix": dropping `:free` resolves to the PAID
+entry, whose window and price are not what the free entry serves.
+
+A picker built from the models API therefore shows no routing variants:
+they have to be DERIVED from the base entries.
+
+### 7.6 The service tiers
+
+| tier        | also       | tradeoff                                  |
+| ----------- | ---------- | ----------------------------------------- |
+| `default`   | `standard` | the provider's regular capacity and price |
+| `flex`      |            | lower price, lower processing priority    |
+| `priority`  | `fast`     | priority processing, higher price         |
+| `ultrafast` |            | above priority, on select OpenAI models   |
+
+`service_tier` is a TOP-LEVEL request field (not a `provider` member)
+and PINS the tier; the routing variants only ADMIT tier endpoints into
+the sort. The response reports the tier that ACTUALLY served the
+request, and the request is billed at that endpoint's rate.
+
+A pinned tier the model cannot serve is not an error: probed on
+`openai/gpt-4o-mini`, `service_tier: "flex"` and `service_tier:
+"priority"` were both served on the default tier (`service_tier:
+"default"` in the response, no error) — the pin is a preference the
+router satisfies when it can.
+
+### 7.7 What the response says about the routing
+
+- **every chunk** carries `provider` — the upstream that served it;
+- the final chunk carries `service_tier` — the tier that served it;
+- the request header `X-OpenRouter-Metadata: enabled` adds an
+  `openrouter_metadata` object to the response (on the FINAL chunk of a
+  stream). Probed:
+
+```json
+{
+  "requested": "openai/gpt-4o-mini",
+  "strategy": "direct",
+  "region": "SJC",
+  "summary": "available=2, selected=OpenAI",
+  "attempt": 1,
+  "is_byok": false,
+  "endpoints": {
+    "total": 3,
+    "available": [
+      { "provider": "OpenAI", "model": "openai/gpt-4o-mini", "selected": true },
+      { "provider": "Azure", "model": "openai/gpt-4o-mini", "selected": false }
+    ]
+  },
+  "generation_time": 478
+}
+```
+
+`attempt` is the 1-indexed attempt that succeeded (greater than 1
+means earlier upstreams failed and the router fell back), and the
+endpoints' `selected` flag names the winner. The legacy header name
+`X-OpenRouter-Experimental-Metadata` is still accepted.
+
+## 8. Provider notes for the nevermore side
 
 - `provider_openrouter.c` only supplies base URL, auth, and the
   model catalog; all wire logic lives in openai_client.c (verified:
@@ -294,3 +487,25 @@ sync endpoint normally and stay in the catalog.
   The `:batch` variants are dropped on the way in (§6.3).
 - Keys live in `~/.authinfo` (`machine openrouter.ai user apikey
 password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
+- **The request body has no seam for a provider's own fields.** It is
+  a fixed OpenAI-shaped set (`model`, `messages`, `stream`,
+  `stream_options`, `temperature`, `max_tokens`, `tools`,
+  `tool_choice`), and `NmOpenaiEndpoint` carries no slot for more. So
+  the preferences object and `service_tier` cannot ride (§7): every
+  round gets OpenRouter's own routing (§7.4), with no `only`/`order`/
+  `ignore`/`sort`, no `max_price`, no `zdr` and no pinned tier.
+- **A hand-typed routing variant DOES ride the wire** — the model id
+  is passed through as typed, so `vendor/model:nitro` reaches
+  OpenRouter as a routing variant (probed live through nevermore:
+  `nevermore ask --model 'openai/gpt-4o-mini:nitro'` answered, and the
+  stream's chunks named the upstream that served it). It is offered
+  nowhere, though: the picker and `nevermore models` list catalog rows
+  only, and the routing variants are not catalog rows (§7.5).
+- **A suffixed id misses the catalog.** nevermore's lookup is an exact
+  match, so `vendor/model:nitro` has no row: no context window, no
+  vision claim, and the toolset KEPT (the catalog says nothing about
+  an unknown model, and an unknown model keeps its tools).
+- **The upstream that answered is not read.** Every chunk carries
+  `provider` (§7.7) and nevermore does not parse it, so the transcript
+  cannot name the upstream that served the round — the Prism-style
+  notice Hyper has does not exist here.
