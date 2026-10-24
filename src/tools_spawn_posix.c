@@ -27,6 +27,13 @@
 
 #define SPAWN_CAPTURE_MAX (256 * 1024) /* hard cap; clamped result body */
 
+/* How long the tool waits for the child's OWN exit after the child's
+ * output ended, before it stops the child. The child's exit path is
+ * microseconds, so this is only slop for a loaded machine — and the
+ * bound for a child that closed its output and kept working (`exec
+ * 1>&- 2>&-; sleep 300`). */
+#define EXIT_GRACE_MS 100
+
 /* Resolve a bare argv[0] through PATH (posix_spawn's own search is not
  * reliable across platforms: some glibc/SELinux combinations execve the
  * bare name and yield ENOENT). Returns the program to exec — buf when
@@ -259,6 +266,13 @@ struct NmToolExec
      * every read, so a slow-but-printing command is never cut off. */
     double deadline;
     int budget_ms; /* the budget the deadline was armed with (report text) */
+    /* The grace after the OUTPUT ended: the child's own exit is a
+     * separate fact from the pipe's EOF, and the two do not arrive
+     * together (the pipe closes while the child is still in its exit
+     * path). The tool waits this long for the child's own exit before
+     * it stops it — a stopped child has no status of its own, so that
+     * is reported as a note, never as a code. 0 = not armed. */
+    double exit_grace;
 };
 
 static int exec_reserve(NmToolExec *e, size_t extra)
@@ -410,6 +424,39 @@ static void reap_child(NmToolExec *e)
     e->reaped = 1;
 }
 
+/* The child's OWN exit, if it has happened: waitpid(WNOHANG) never
+ * blocks and never waits for a child that is still running. Returns 1
+ * when the child was reaped (its status is in e->code), 0 when it is
+ * still there. */
+static int try_reap(NmToolExec *e)
+{
+    if (e->reaped)
+        return 1;
+    int st = 0;
+    pid_t r;
+    do {
+        r = waitpid((pid_t)e->pid, &st, WNOHANG);
+    } while (r < 0 && errno == EINTR);
+    if (r == (pid_t)e->pid) {
+        if (WIFEXITED(st))
+            e->code = WEXITSTATUS(st);
+        else if (WIFSIGNALED(st))
+            e->code = 128 + WTERMSIG(st);
+        else
+            e->code = -1;
+        e->reaped = 1;
+        return 1;
+    }
+    if (r < 0 && errno == ECHILD) {
+        /* Gone, and nobody left to report it: the status is unknown
+         * (the same -1 the blocking reap leaves behind). */
+        e->code = -1;
+        e->reaped = 1;
+        return 1;
+    }
+    return 0; /* still running */
+}
+
 static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
 {
     while (!e->eof && e->fd >= 0) {
@@ -477,15 +524,37 @@ static NmToolStatus run_command_step(NmToolExec *e, NmToolResult *out)
         return NM_TOOL_RUNNING;
 
     if (!e->reaped) {
-        /* Output is finished (EOF, the capture cap, OOM stopped the
-         * read, or the inactivity deadline closed it), but the child
-         * need not be gone: it can close stdout and keep working
-         * (`exec 1>&-; sleep 300`) or ignore EPIPE after the cap. There
-         * is no fd left to wait on and no timer to poll from, so a
-         * blocking wait here would wedge the event loop. Stop it, then
-         * reap what we stopped. */
-        kill_child(e);
-        reap_child(e);
+        if (timeout_note) {
+            /* The inactivity stop: the tool's own kill, and the note
+             * above IS the status line (the child's own status would
+             * read as the command's). */
+            kill_child(e);
+            reap_child(e);
+        } else if (!try_reap(e)) {
+            /* The pipe's EOF says the OUTPUT is done — the child's own
+             * exit is a separate fact, and the two do not arrive
+             * together: the pipe closes while the child is still in its
+             * exit path. A SIGKILL delivered there turns a normal exit
+             * into a signal death, and the command's own code (0) would
+             * read as 137. So wait the child's exit out (it is
+             * microseconds away) and report ITS status; stop a child
+             * that is still there after the grace — a stopped child has
+             * no status of its own, so that is a note, never a code. */
+            if (e->exit_grace == 0.0) {
+                e->exit_grace = nm_monotonic_seconds() +
+                                (double)EXIT_GRACE_MS / 1000.0;
+                return NM_TOOL_RUNNING; /* the deadline seam re-steps us */
+            }
+            if (nm_monotonic_seconds() < e->exit_grace)
+                return NM_TOOL_RUNNING;
+            kill_child(e);
+            reap_child(e);
+            snprintf(note, sizeof(note),
+                     "Command closed its output but kept running; stopped it "
+                     "after %d ms (use exec_command for long-lived commands)",
+                     EXIT_GRACE_MS);
+            timeout_note = note;
+        }
     }
     *out = nm_tool_result_run(e->code, timeout_note, e->buf);
     return out->status;
@@ -506,10 +575,25 @@ static int run_command_source(NmToolExec *e, NmSource *out)
 /* The inactivity deadline on the NmTool.deadline_ms seam: with no
  * output the socket is never readable, so without this the loop would
  * never re-step the tool (see tools.h's budget note). -1 when there is
- * no deadline (disabled) or nothing left to wait for. */
+ * no deadline (disabled) or nothing left to wait for.
+ *
+ * The exit grace rides the same seam: the output is over but the
+ * child's own exit is not yet a fact, and the pipe that would wake us
+ * is closed — so the grace is what tells the loop to come back and
+ * look again. */
 static int run_command_deadline_ms(const NmToolExec *e)
 {
-    if (!e || e->fd < 0 || e->budget_ms <= 0)
+    if (!e)
+        return -1;
+    if (e->exit_grace > 0.0) {
+        double left = (e->exit_grace - nm_monotonic_seconds()) * 1000.0;
+        if (left <= 0.0)
+            return 0; /* due now: the step stops the child */
+        if (left >= 2147483000.0)
+            return 2147483000;
+        return (int)left;
+    }
+    if (e->fd < 0 || e->budget_ms <= 0)
         return -1;
     double left = (e->deadline - nm_monotonic_seconds()) * 1000.0;
     if (left <= 0.0)

@@ -1197,6 +1197,16 @@ such file or directory`) instead of a bare 127 that a legitimate
   self-referential dev-harness task, which is not enough to reverse the
   split — it stays the escalation if a real task ever shows the
   foreground-server hang.
+  **`run_command` waits for the CHILD'S OWN exit, not for the pipe's
+  EOF**: the two are separate facts and they do not arrive together —
+  the pipe closes while the child is still in its exit path, so a
+  SIGKILL delivered there turns a normal exit into a signal death and
+  the command's own code would read as 137. The tool therefore reaps
+  the child without blocking (`waitpid(WNOHANG)`) and reports ITS
+  status; a child that closed its output and kept working
+  (`exec 1>&- 2>&-; sleep 300`) is stopped after a short grace, and
+  that stop rides the note — the tool's kill is never the command's
+  exit status.
 - **The job-pair gotcha (`src/tools_exec.c`)** — `exec_command` /
   `write_stdin` / `kill_job` are a PAIR, and the job outlives the call
   that made it: `exec_command` reports either the exit or, once the

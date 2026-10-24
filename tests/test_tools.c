@@ -3427,6 +3427,61 @@ static void test_run_command_silent_child_is_stopped(void)
     nm_tool_result_free(&r);
 }
 
+/* A child that closed its output and kept working is stopped — and the
+ * stop is the TOOL's doing, so it rides the note, never a code: a
+ * `Process exited with code 137` line would report the tool's SIGKILL
+ * as the command's own exit status (the same rule the inactivity
+ * timeout follows).
+ *
+ * The pipe's EOF and the child's exit are two facts, and they do not
+ * arrive together: the EOF says the OUTPUT is over, and the child may
+ * still be running (`exec 1>&- 2>&-; sleep 30`) or still in its exit
+ * path. So the tool waits the child's own exit out before it stops
+ * it, and what it reports is the child's status. */
+static void test_run_command_lingering_child_is_stopped(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const NmTool *t = nm_toolset_find(ts, "run_command");
+    ASSERT_NOT_NULL(t);
+
+    /* The silence budget OFF: this child is not silent (it spoke, then
+     * closed its output), and the window under test is the EXIT grace,
+     * not the inactivity budget. */
+    rc_set_budget("off");
+
+    NmJson *j = nm_json_new_object();
+    nm_json_set(j, "cmd",
+                nm_json_new_string("printf 'x\\n'; exec 1>&- 2>&-; sleep 30"));
+    char *args = nm_json_dump(j);
+    nm_json_free(j);
+
+    NmToolExec *e = t->begin(t, args, NULL);
+    free(args);
+    ASSERT_NOT_NULL(e);
+
+    NmToolResult r = { 0 };
+    /* Drive it: the pipe is closed, so the only thing that can close
+     * the exit grace is the clock — the test's own (fake) one, moved
+     * the way the tool declares the window. */
+    long long t0 = wall_ms();
+    while (t->step(e, &r) == NM_TOOL_RUNNING) {
+        int dl = t->deadline_ms ? t->deadline_ms(e) : -1;
+        nm_test_clock_advance_ms(dl > 0 ? dl : 1);
+        ASSERT_TRUE(wall_ms() - t0 < 10000);
+    }
+    t->end(e);
+    rc_set_budget(NULL); /* restore the default */
+
+    ASSERT_EQ(r.status, NM_TOOL_ERR);
+    ASSERT_NOT_NULL(r.output);
+    ASSERT_TRUE(strstr(r.output, "closed its output but kept running") !=
+                NULL);
+    /* The stop is the tool's doing: it rides the note, never a code. */
+    ASSERT_TRUE(strstr(r.output, "Process exited with code") == NULL);
+    nm_tool_result_free(&r);
+    nm_toolset_free(ts);
+}
+
 /* ...and a child that keeps printing is NOT cut off: every read pushes
  * the deadline out, so a slow-but-noisy command runs to completion. */
 static void test_run_command_output_resets_the_deadline(void)
@@ -5120,6 +5175,7 @@ int main(void)
     RUN_TEST(test_run_command_stdin_is_dev_null);
     RUN_TEST(test_run_command_async_stdin_is_dev_null);
     RUN_TEST(test_run_command_silent_child_is_stopped);
+    RUN_TEST(test_run_command_lingering_child_is_stopped);
     RUN_TEST(test_run_command_output_resets_the_deadline);
     RUN_TEST(test_run_command_deadline_can_be_disabled);
     RUN_TEST(test_exec_command_exits_within_window);
