@@ -19,6 +19,13 @@ the tier distinct.
 
 Pre-alpha. No backwards-compatibility constraint.
 
+## Documentation
+
+- [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/chestso/nevermore) — AI-generated wiki and searchable code index for this repository
+- [ARCHITECTURE.md](ARCHITECTURE.md) — what each module is, why it is shaped that way, and the principles behind it
+- [docs/PORTTY.md](docs/PORTTY.md) — the terminal-feature matrix
+- [CONTRIBUTING.md](CONTRIBUTING.md) — the contributor's checklist: gates, test conventions, and traps
+
 ## Download
 
 The [releases](https://github.com/chestso/nevermore/releases) page carries a
