@@ -26,6 +26,7 @@
 
 #include <boba/stream.h>
 
+#include "colors.h" /* NmColorDepth — the tier the roles resolve in */
 #include "highlight.h"
 #include "image.h"
 
@@ -57,6 +58,13 @@ typedef struct NmMarkdownRenderState
     NmHighlight hl[NM_STREAM_COUNT];
     NmImageSlot img;
     int width; /* terminal width for the image display math */
+
+    /* The terminal's color tier: which of the spec's two published
+     * tables every role this renderer names resolves in (nm_attr_*).
+     * The APP sets it (from its own tier resolution) alongside `width`;
+     * a state nobody configured keeps the 16-color floor, because a
+     * renderer must never claim 24-bit it cannot know. */
+    NmColorDepth depth;
 } NmMarkdownRenderState;
 
 /* Zero-initialize `rs` (every stream idle; the image slot reset keeps

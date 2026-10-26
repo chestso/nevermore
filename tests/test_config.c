@@ -458,6 +458,76 @@ static void test_kbd_mode_vocabulary(void)
     ASSERT_EQ(nm_config_kbd_mode(NULL), NM_KBD_AUTO);
 }
 
+/* The `color` key's value space: which of Dracula's two published
+ * tables the app paints from. `16` and `rgb` are the tier names; the
+ * terminal's own words for the same choice (`ansi`/`ansi16`,
+ * `truecolor`/`24bit`) fold in, every layer normalizes to the canonical
+ * spelling, and the resolver agrees. */
+static void test_color_mode_vocabulary(void)
+{
+    char out[16];
+    /* auto — the default: the probe's env-derived hint decides */
+    ASSERT_TRUE(nm_config_color_canon("auto", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "auto");
+    ASSERT_TRUE(nm_config_color_canon("DEFAULT", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "auto");
+    /* 16 — force the ANSI slots (also how the suite pins the tier
+     * without env games) */
+    ASSERT_TRUE(nm_config_color_canon("16", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "16");
+    ASSERT_TRUE(nm_config_color_canon("ansi", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "16");
+    ASSERT_TRUE(nm_config_color_canon("ANSI16", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "16");
+    /* rgb — force 24-bit: the escape hatch for a capable terminal that
+     * never advertises COLORTERM */
+    ASSERT_TRUE(nm_config_color_canon("rgb", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "rgb");
+    ASSERT_TRUE(nm_config_color_canon("truecolor", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "rgb");
+    ASSERT_TRUE(nm_config_color_canon("24BIT", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "rgb");
+    /* nothing else: there is no third table to ask for */
+    ASSERT_FALSE(nm_config_color_canon("256", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_color_canon("mono", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_color_canon("", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_valid_color("16 ")); /* no trimming */
+
+    ASSERT_STR_EQ(nm_config_color_name(NM_COLOR_MODE_AUTO), "auto");
+    ASSERT_STR_EQ(nm_config_color_name(NM_COLOR_MODE_16), "16");
+    ASSERT_STR_EQ(nm_config_color_name(NM_COLOR_MODE_RGB), "rgb");
+
+    /* A file value normalizes on the way in... */
+    pin_paths("color-modes");
+    write_file_at(g_user, "color = TrueColor\n");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_COLOR), "rgb");
+    ASSERT_EQ(nm_config_color_mode(c), NM_COLOR_MODE_RGB);
+
+    /* ...the env outranks it... */
+    test_setenv("NEVERMORE_COLOR", "ansi16");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_COLOR), "16");
+    ASSERT_EQ(nm_config_color_mode(c), NM_COLOR_MODE_16);
+
+    /* ...garbage is dropped (the layer below stands), and the shadow
+     * write-back refuses it too. */
+    test_setenv("NEVERMORE_COLOR", "sepia");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_COLOR), NM_CFG_USER);
+    ASSERT_EQ(nm_config_color_mode(c), NM_COLOR_MODE_RGB);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_COLOR, "sepia"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_COLOR, "auto"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "color = auto\n");
+    ASSERT_EQ(nm_config_color_mode(c), NM_COLOR_MODE_AUTO);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_COLOR");
+
+    /* No config at all: auto, never a stale value. */
+    ASSERT_EQ(nm_config_color_mode(NULL), NM_COLOR_MODE_AUTO);
+}
+
 /* ---------------------------------------------------------------- */
 /* Shadow write-back                                                 */
 /* ---------------------------------------------------------------- */
@@ -649,13 +719,14 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_POLL_TIMEOUT);
     ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_LOGIN_SHELL);
     ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
-    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_SPINNER_RAMP);
-    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SKILLS);
-    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_TEMPERATURE);
-    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_NULL(nm_config_key_at(23));
+    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_COLOR);
+    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_SPINNER_RAMP);
+    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_PRISM_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SKILLS);
+    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_NULL(nm_config_key_at(24));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -1491,6 +1562,7 @@ int main(void)
     RUN_TEST(test_boolean_normalization);
     RUN_TEST(test_reasoning_mode_vocabulary);
     RUN_TEST(test_kbd_mode_vocabulary);
+    RUN_TEST(test_color_mode_vocabulary);
     RUN_TEST(test_shadow_write_and_reload);
     RUN_TEST(test_shadow_write_leaves_user_file_alone);
     RUN_TEST(test_shadow_reset_key_and_all);

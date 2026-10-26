@@ -44,13 +44,15 @@ static void test_unsetenv(const char *name)
 #endif
 }
 
-/* The banner, captured into a buffer the caller frees. */
-static char *banner_text(void)
+/* The banner, captured into a buffer the caller frees. The tier is
+ * passed in (the app resolves it; the banner only names it), so the
+ * caller pins the one it is asserting about. */
+static char *banner_text(NmColorDepth depth)
 {
     FILE *f = tmpfile();
     if (!f)
         return NULL;
-    nm_banner_write(f);
+    nm_banner_write(f, depth);
     fflush(f);
     rewind(f);
     size_t cap = 4096;
@@ -70,13 +72,13 @@ static char *banner_text(void)
 static void test_banner_names_the_width_model_in_force(void)
 {
     ASSERT_EQ(tui_width_model_set(TUI_WIDTH_MODEL_UTS51), 1);
-    char *text = banner_text();
+    char *text = banner_text(NM_COLOR_16);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strstr(text, "Width model: uts51") != NULL);
     free(text);
 
     ASSERT_EQ(tui_width_model_set(TUI_WIDTH_MODEL_GRID), 1);
-    text = banner_text();
+    text = banner_text(NM_COLOR_16);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strstr(text, "Width model: grid") != NULL);
     free(text);
@@ -89,14 +91,14 @@ static void test_banner_names_the_width_model_in_force(void)
 static void test_banner_names_the_term(void)
 {
     test_setenv("TERM", "xterm-256color");
-    char *text = banner_text();
+    char *text = banner_text(NM_COLOR_16);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strstr(text, "(TERM=xterm-256color)") != NULL);
     free(text);
 
     /* No TERM at all is stated, never printed as an empty hole. */
     test_unsetenv("TERM");
-    text = banner_text();
+    text = banner_text(NM_COLOR_16);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strstr(text, "(TERM=(unset))") != NULL);
     free(text);
@@ -107,10 +109,27 @@ static void test_banner_names_the_term(void)
  * exactly what the providers receive (identity.h owns that string). */
 static void test_banner_carries_the_user_agent(void)
 {
-    char *text = banner_text();
+    char *text = banner_text(NM_COLOR_16);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(strstr(text, NM_USER_AGENT) != NULL);
     ASSERT_TRUE(strstr(text, NM_USER_AGENT) == text); /* the first line */
+    free(text);
+}
+
+/* The banner names the color tier it is handed — the tier the APP
+ * resolved (the `color` key over the probe's hint), which decides which
+ * of the spec's two tables every role paints from. A user who cannot
+ * see the difference in the colors can read it here. */
+static void test_banner_names_the_color_tier(void)
+{
+    char *text = banner_text(NM_COLOR_16);
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(strstr(text, "Color tier: 16 (ANSI palette)") != NULL);
+    free(text);
+
+    text = banner_text(NM_COLOR_RGB);
+    ASSERT_NOT_NULL(text);
+    ASSERT_TRUE(strstr(text, "Color tier: rgb (24-bit)") != NULL);
     free(text);
 }
 
@@ -120,5 +139,6 @@ int main(void)
     RUN_TEST(test_banner_names_the_width_model_in_force);
     RUN_TEST(test_banner_names_the_term);
     RUN_TEST(test_banner_carries_the_user_agent);
+    RUN_TEST(test_banner_names_the_color_tier);
     TEST_SUMMARY();
 }

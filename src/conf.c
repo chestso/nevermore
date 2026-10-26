@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 23
+#define NM_CFG_NKEYS 24
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -147,6 +147,7 @@ static const struct
       NM_STR(NM_POLL_TIMEOUT_MS_DEFAULT) },
     { NM_CFG_KEY_LOGIN_SHELL, "NEVERMORE_LOGIN_SHELL", "off" },
     { NM_CFG_KEY_KBD, "NEVERMORE_KBD", "auto" },
+    { NM_CFG_KEY_COLOR, "NEVERMORE_COLOR", "auto" },
     { NM_CFG_KEY_SPINNER_RAMP, "NEVERMORE_SPINNER_RAMP", "on" },
     { NM_CFG_KEY_PRISM_NOTICE, "NEVERMORE_PRISM_NOTICE", "on" },
     { NM_CFG_KEY_SKILLS, "NEVERMORE_SKILLS", "on" },
@@ -755,6 +756,65 @@ NmKbdMode nm_config_kbd_mode(const NmConfig *c)
                                        : NM_KBD_AUTO;
 }
 
+/* ---------------------------------------------------------------- */
+/* The `color` value space                                           */
+/* ---------------------------------------------------------------- */
+
+/* Three modes. `16` and `rgb` are the tier names; the spellings beside
+ * them are the ones a terminal's own environment uses for the same
+ * choice (`ansi`/`ansi16` are what a 16-color terminal calls itself,
+ * `truecolor`/`24bit` are COLORTERM's two values), so a user who knows
+ * COLORTERM can spell the override the same way. */
+static const char *const COLOR_AUTO[] = { "auto", "default", NULL };
+static const char *const COLOR_16[] = { "16", "ansi", "ansi16", "ansi-16",
+                                        NULL };
+static const char *const COLOR_RGB[] = { "rgb", "truecolor", "true-color",
+                                         "24bit", "24-bit", "direct", NULL };
+
+int nm_config_color_canon(const char *value, char *out, size_t cap)
+{
+    if (!value || !*value)
+        return 0;
+    const char *canon = token_in(value, COLOR_AUTO)  ? "auto"
+                        : token_in(value, COLOR_16)  ? "16"
+                        : token_in(value, COLOR_RGB) ? "rgb"
+                                                     : NULL;
+    if (!canon)
+        return 0;
+    snprintf(out, cap, "%s", canon);
+    return 1;
+}
+
+int nm_config_valid_color(const char *value)
+{
+    char tmp[16];
+    return nm_config_color_canon(value, tmp, sizeof(tmp));
+}
+
+const char *nm_config_color_name(NmColorMode mode)
+{
+    switch (mode) {
+    case NM_COLOR_MODE_16:
+        return "16";
+    case NM_COLOR_MODE_RGB:
+        return "rgb";
+    case NM_COLOR_MODE_AUTO:
+        break;
+    }
+    return "auto";
+}
+
+NmColorMode nm_config_color_mode(const NmConfig *c)
+{
+    const char *v = c ? nm_config_resolve(c, NM_CFG_KEY_COLOR, NULL) : NULL;
+    char canon[16];
+    if (!v || !nm_config_color_canon(v, canon, sizeof(canon)))
+        return NM_COLOR_MODE_AUTO;
+    return strcmp(canon, "16") == 0    ? NM_COLOR_MODE_16
+           : strcmp(canon, "rgb") == 0 ? NM_COLOR_MODE_RGB
+                                       : NM_COLOR_MODE_AUTO;
+}
+
 /* Validate + normalize ONE key's raw value into `out` (capped at
  * NM_CONFIG_VAL): 1 = accepted, 0 = rejected. The single place the
  * file layer, the environment layer and the shadow write-back all
@@ -788,6 +848,9 @@ static int normalize_value(const char *key, const char *raw, char *out,
     } else if (strcmp(key, NM_CFG_KEY_KBD) == 0) {
         /* auto / on / off (bool spellings and kitty/legacy folded in). */
         return nm_config_kbd_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_COLOR) == 0) {
+        /* auto / 16 / rgb (ansi and truecolor folded in). */
+        return nm_config_color_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0) {

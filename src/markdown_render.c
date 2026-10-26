@@ -46,7 +46,10 @@
 /* ---------------------------------------------------------------- */
 
 /* OR a span's fields onto the row's base attr (D4: spans compose by
- * OR-ing, never by nesting SGR). */
+ * OR-ing, never by nesting SGR). A color composes when the span HAS one
+ * (TUI_COLOR_NONE is "inherit"), which is what the old has_fg flag
+ * meant — and it copies the TuiColor whole, so the tier the span was
+ * built with rides along. */
 static TuiAttr attr_or(TuiAttr base, TuiAttr span)
 {
     if (span.bold)
@@ -59,18 +62,10 @@ static TuiAttr attr_or(TuiAttr base, TuiAttr span)
         base.underline = 1;
     if (span.strikethrough)
         base.strikethrough = 1;
-    if (span.has_fg) {
-        base.has_fg = 1;
-        base.fg_r = span.fg_r;
-        base.fg_g = span.fg_g;
-        base.fg_b = span.fg_b;
-    }
-    if (span.has_bg) {
-        base.has_bg = 1;
-        base.bg_r = span.bg_r;
-        base.bg_g = span.bg_g;
-        base.bg_b = span.bg_b;
-    }
+    if (span.fg.type != TUI_COLOR_NONE)
+        base.fg = span.fg;
+    if (span.bg.type != TUI_COLOR_NONE)
+        base.bg = span.bg;
     return base;
 }
 
@@ -82,20 +77,44 @@ static TuiAttr stream_base_attr(const TuiBlock *blk)
     return nm_attr_plain(); /* no attrs */
 }
 
+/* The color tier every role in this render resolves in: the state's,
+ * or the 16-COLOR FLOOR when there is no state. The floor is the safe
+ * default on purpose — a standalone renderer (no app to ask) must never
+ * claim 24-bit it cannot know, and the app always sets the real one. */
+static NmColorDepth render_depth(void *user_data)
+{
+    const NmMarkdownRenderState *rs = user_data;
+    return rs ? rs->depth : NM_COLOR_16;
+}
+
+/* One color's identity. Type first — an ANSI slot and an RGB triple are
+ * never equal, even when the terminal's palette makes them the same
+ * pixel — then the payload of whichever type it is. */
+static int color_eq(TuiColor a, TuiColor b)
+{
+    if (a.type != b.type)
+        return 0;
+    if (a.type == TUI_COLOR_NONE)
+        return 1;
+    if (a.type == TUI_COLOR_RGB)
+        return a.v.rgb.r == b.v.rgb.r && a.v.rgb.g == b.v.rgb.g &&
+               a.v.rgb.b == b.v.rgb.b;
+    return a.v.ansi == b.v.ansi;
+}
+
 static int attr_is_plain(TuiAttr a)
 {
     return !a.bold && !a.dim && !a.italic && !a.underline &&
-           !a.strikethrough && !a.has_fg && !a.has_bg;
+           !a.strikethrough && a.fg.type == TUI_COLOR_NONE &&
+           a.bg.type == TUI_COLOR_NONE;
 }
 
 static int attr_eq(TuiAttr a, TuiAttr b)
 {
     return a.bold == b.bold && a.dim == b.dim && a.italic == b.italic &&
            a.underline == b.underline &&
-           a.strikethrough == b.strikethrough && a.has_fg == b.has_fg &&
-           a.fg_r == b.fg_r && a.fg_g == b.fg_g && a.fg_b == b.fg_b &&
-           a.has_bg == b.has_bg && a.bg_r == b.bg_r && a.bg_g == b.bg_g &&
-           a.bg_b == b.bg_b;
+           a.strikethrough == b.strikethrough && color_eq(a.fg, b.fg) &&
+           color_eq(a.bg, b.bg);
 }
 
 /* Emit text under `attr`, then restore `base`. The base is considered
@@ -246,7 +265,7 @@ static size_t find_closer(const char *s, size_t len, size_t from, char c,
 }
 
 static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
-                             TuiAttr base);
+                             TuiAttr base, NmColorDepth depth);
 
 /* Emit a span's content under `composed`. Non-verbatim spans recurse
  * (nested spans compose onto one SGR run — never nested SGR); a code
@@ -257,7 +276,8 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
  * emit_styled contract), so `composed` is applied before the call and
  * `base` restored after. */
 static void emit_span_content(TuiRowSink *sink, const char *s, size_t len,
-                              TuiAttr composed, TuiAttr base, int verbatim)
+                              TuiAttr composed, TuiAttr base, int verbatim,
+                              NmColorDepth depth)
 {
     if (len == 0)
         return;
@@ -268,7 +288,7 @@ static void emit_span_content(TuiRowSink *sink, const char *s, size_t len,
     int pushed = !attr_is_plain(composed) && !attr_eq(composed, base);
     if (pushed)
         tui_row_attr(sink, composed);
-    emit_inline_runs(sink, s, len, composed);
+    emit_inline_runs(sink, s, len, composed, depth);
     if (pushed) {
         if (attr_is_plain(base))
             tui_row_attr_reset(sink);
@@ -280,7 +300,7 @@ static void emit_span_content(TuiRowSink *sink, const char *s, size_t len,
 /* Emit one line's text with inline spans styled. `base` is the row's
  * base attr (heading/list/quote); a span reset restores it. */
 static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
-                             TuiAttr base)
+                             TuiAttr base, NmColorDepth depth)
 {
     size_t i = 0;
     size_t plain = 0; /* start of the current unstyled run */
@@ -300,7 +320,7 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                 span_len = close + 1 - i;
                 content_at = i + 1;
                 content_len = close - (i + 1);
-                span = nm_attr_code();
+                span = nm_attr_code(depth);
                 verbatim = 1;
             }
         } else if (c == '~') {
@@ -366,10 +386,10 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                      * `(url)` dim */
                     if (plain < i)
                         emit_styled(sink, s + plain, i - plain, base, base);
-                    TuiAttr link = attr_or(base, nm_attr_code());
+                    TuiAttr link = attr_or(base, nm_attr_code(depth));
                     link.underline = 1;
                     emit_span_content(sink, s + i + 1, close - (i + 1), link,
-                                      base, 0);
+                                      base, 0, depth);
                     TuiAttr url = attr_or(base, nm_attr_link_url());
                     /* include the closing `)`: from `(` to `)` end */
                     emit_styled(sink, s + close + 1, paren_end - close,
@@ -386,7 +406,7 @@ static void emit_inline_runs(TuiRowSink *sink, const char *s, size_t len,
                 emit_styled(sink, s + plain, span_start - plain, base, base);
             TuiAttr composed = attr_or(base, span);
             emit_span_content(sink, s + content_at, content_len, composed,
-                              base, verbatim);
+                              base, verbatim, depth);
             i = span_start + span_len;
             plain = i;
             continue;
@@ -418,14 +438,15 @@ static int heading_level(const char *s, size_t len)
 }
 
 /* The heading's base attr from its level. */
-static TuiAttr heading_attr(int level)
+static TuiAttr heading_attr(int level, NmColorDepth depth)
 {
-    return level <= 2 ? nm_attr_heading_major() : nm_attr_heading_minor();
+    return level <= 2 ? nm_attr_heading_major(depth)
+                      : nm_attr_heading_minor(depth);
 }
 
 /* Emit `text` as one row per embedded line, each under `attr`. */
 static void emit_lines(const char *text, size_t len, TuiRowSink *sink,
-                       TuiAttr attr, int inline_spans)
+                       TuiAttr attr, int inline_spans, NmColorDepth depth)
 {
     size_t start = 0;
     for (size_t i = 0; i <= len; i++) {
@@ -433,7 +454,8 @@ static void emit_lines(const char *text, size_t len, TuiRowSink *sink,
             begin_row(sink, attr);
             if (i > start) {
                 if (inline_spans)
-                    emit_inline_runs(sink, text + start, i - start, attr);
+                    emit_inline_runs(sink, text + start, i - start, attr,
+                                     depth);
                 else
                     emit_styled(sink, text + start, i - start, attr, attr);
             }
@@ -448,18 +470,19 @@ static void emit_lines(const char *text, size_t len, TuiRowSink *sink,
  * text stays — the source line is what the user typed, and the
  * scrollback should read as written. */
 static void emit_heading_line(const char *s, size_t len, TuiRowSink *sink,
-                              TuiAttr base)
+                              TuiAttr base, NmColorDepth depth)
 {
     begin_row(sink, base);
     if (len)
-        emit_inline_runs(sink, s, len, base);
+        emit_inline_runs(sink, s, len, base, depth);
     end_row(sink, base);
 }
 
 /* List item: the marker (`-`, `*`, `+`, `1.`) is Pink, the content
  * plain (or the row's base) with inline spans. */
 static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
-                           TuiAttr base, TuiAttr marker_attr)
+                           TuiAttr base, TuiAttr marker_attr,
+                           NmColorDepth depth)
 {
     size_t i = 0;
     while (i < len && i < 4 && s[i] == ' ')
@@ -496,9 +519,9 @@ static void emit_list_line(const char *s, size_t len, TuiRowSink *sink,
         while (rest < len && is_space(s[rest]))
             rest++;
         if (rest < len)
-            emit_inline_runs(sink, s + rest, len - rest, base);
+            emit_inline_runs(sink, s + rest, len - rest, base, depth);
     } else if (len) {
-        emit_inline_runs(sink, s, len, base);
+        emit_inline_runs(sink, s, len, base, depth);
     }
     end_row(sink, base);
 }
@@ -527,10 +550,10 @@ static size_t quote_body_start(const char *s, size_t len)
  * The source's own marker is dropped per line (quote_body_start): the
  * gutter replaces it. */
 static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
-                             TuiAttr base)
+                             TuiAttr base, NmColorDepth depth)
 {
-    TuiAttr gutter = attr_or(base, nm_attr_quote_gutter());
-    TuiAttr body = attr_or(base, nm_attr_quote_text());
+    TuiAttr gutter = attr_or(base, nm_attr_quote_gutter(depth));
+    TuiAttr body = attr_or(base, nm_attr_quote_text(depth));
     size_t start = 0;
     for (size_t i = 0; i <= len; i++) {
         if (i == len || text[i] == '\n') {
@@ -538,7 +561,7 @@ static void emit_quote_lines(const char *text, size_t len, TuiRowSink *sink,
             begin_row(sink, body);
             emit_styled(sink, "\xe2\x94\x82 ", 4, gutter, body);
             if (i > b)
-                emit_inline_runs(sink, text + b, i - b, body);
+                emit_inline_runs(sink, text + b, i - b, body, depth);
             end_row(sink, base);
             start = i + 1;
         }
@@ -576,21 +599,22 @@ typedef struct
 {
     TuiRowSink *sink;
     const char *line;
-    TuiAttr base; /* the row's base attr (dim on reasoning) */
-    TuiAttr body; /* the fence body tint, composed onto base */
+    TuiAttr base;       /* the row's base attr (dim on reasoning) */
+    TuiAttr body;       /* the fence body tint, composed onto base */
+    NmColorDepth depth; /* the tier the token roles resolve in */
 } HlCtx;
 
-static TuiAttr hl_attr_for(NmHighlightKind kind)
+static TuiAttr hl_attr_for(NmHighlightKind kind, NmColorDepth depth)
 {
     switch (kind) {
     case NM_HL_KEYWORD:
-        return nm_attr_hl_keyword();
+        return nm_attr_hl_keyword(depth);
     case NM_HL_STRING:
-        return nm_attr_hl_string();
+        return nm_attr_hl_string(depth);
     case NM_HL_COMMENT:
-        return nm_attr_hl_comment();
+        return nm_attr_hl_comment(depth);
     case NM_HL_NUMBER:
-        return nm_attr_hl_number();
+        return nm_attr_hl_number(depth);
     case NM_HL_PLAIN:
     default:
         return nm_attr_plain();
@@ -600,7 +624,7 @@ static TuiAttr hl_attr_for(NmHighlightKind kind)
 static void hl_emit(void *ud, size_t off, size_t len, NmHighlightKind kind)
 {
     HlCtx *c = ud;
-    TuiAttr a = attr_or(c->body, hl_attr_for(kind));
+    TuiAttr a = attr_or(c->body, hl_attr_for(kind, c->depth));
     emit_styled(c->sink, c->line + off, len, a, c->base);
 }
 
@@ -610,11 +634,12 @@ static void hl_emit(void *ud, size_t off, size_t len, NmHighlightKind kind)
  * accepted caveat); a delimiter line (re)starts the highlighter from
  * its info string, so a close (empty info) leaves it idle. */
 static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
-                            TuiAttr base, NmHighlight *hl)
+                            TuiAttr base, NmHighlight *hl,
+                            NmColorDepth depth)
 {
     size_t run = fence_run_len(s, len);
     if (run) {
-        TuiAttr delim = attr_or(base, nm_attr_fence_delim());
+        TuiAttr delim = attr_or(base, nm_attr_fence_delim(depth));
         size_t i = 0;
         while (i < len && i < 4 && s[i] == ' ')
             i++;
@@ -629,16 +654,16 @@ static void emit_fence_line(const char *s, size_t len, TuiRowSink *sink,
         begin_row(sink, base);
         emit_styled(sink, s, i + run, delim, base);
         if (rest < len) {
-            TuiAttr info = attr_or(base, nm_attr_fence_info());
+            TuiAttr info = attr_or(base, nm_attr_fence_info(depth));
             emit_styled(sink, s + rest, len - rest, info, base);
         }
         end_row(sink, base);
         return;
     }
-    TuiAttr body = attr_or(base, nm_attr_fence_body());
+    TuiAttr body = attr_or(base, nm_attr_fence_body(depth));
     begin_row(sink, base);
     if (nm_highlight_active(hl)) {
-        HlCtx ctx = { sink, s, base, body };
+        HlCtx ctx = { sink, s, base, body, depth };
         nm_highlight_line(hl, s, len, hl_emit, &ctx);
     } else {
         emit_styled(sink, s, len, body, base);
@@ -845,9 +870,9 @@ static void emit_spaces(TuiRowSink *sink, int n, TuiAttr cell, TuiAttr base)
  * (composed with the row's base attr, i.e. dim on reasoning). */
 static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
                         const char *left, const char *mid, const char *right,
-                        TuiAttr base)
+                        TuiAttr base, NmColorDepth depth)
 {
-    TuiAttr border = attr_or(base, nm_attr_table_border());
+    TuiAttr border = attr_or(base, nm_attr_table_border(depth));
     begin_row(sink, base);
     emit_styled(sink, left, strlen(left), border, base);
     for (int c = 0; c < t->ncols; c++) {
@@ -864,9 +889,10 @@ static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
  * cells plain (no spans inside cells — D5: the width math counts SGR
  * bytes as glyphs). */
 static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,
-                           const TableRow *r, int is_header, TuiAttr base)
+                           const TableRow *r, int is_header, TuiAttr base,
+                           NmColorDepth depth)
 {
-    TuiAttr border = attr_or(base, nm_attr_table_border());
+    TuiAttr border = attr_or(base, nm_attr_table_border(depth));
     TuiAttr cell = is_header ? attr_or(base, nm_attr_table_header()) : base;
     begin_row(sink, base);
     for (int c = 0; c < t->ncols; c++) {
@@ -911,7 +937,8 @@ static void emit_empty_row(TuiRowSink *sink, TuiAttr base)
  * the blank line that ended it renders that blank as its own row, so
  * the separator the model wrote survives into the scrollback. */
 static void table_render(const Table *t, int width, int rows_cap,
-                         TuiRowSink *sink, TuiAttr base)
+                         TuiRowSink *sink, TuiAttr base,
+                         NmColorDepth depth)
 {
     if (t->nrows <= 0 || t->ncols <= 0)
         return;
@@ -925,19 +952,19 @@ static void table_render(const Table *t, int width, int rows_cap,
 
     if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x8c", "\xe2\x94\xac",
-                    "\xe2\x94\x90", base); /* ┌ ┬ ┐ */
+                    "\xe2\x94\x90", base, depth); /* ┌ ┬ ┐ */
     if (idx++ >= skip)
-        emit_table_row(sink, t, w, &t->rows[0], 1, base); /* header */
+        emit_table_row(sink, t, w, &t->rows[0], 1, base, depth); /* header */
     if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x9c", "\xe2\x94\xbc",
-                    "\xe2\x94\xa4", base); /* ├ ┼ ┤ */
+                    "\xe2\x94\xa4", base, depth); /* ├ ┼ ┤ */
     for (int r = 1; r < t->nrows; r++, idx++) {
         if (idx >= skip)
-            emit_table_row(sink, t, w, &t->rows[r], 0, base);
+            emit_table_row(sink, t, w, &t->rows[r], 0, base, depth);
     }
     if (idx++ >= skip)
         emit_border(sink, t, w, "\xe2\x94\x94", "\xe2\x94\xb4",
-                    "\xe2\x94\x98", base); /* └ ┴ ┘ */
+                    "\xe2\x94\x98", base, depth); /* └ ┴ ┘ */
     if (t->trailing_blank && idx >= skip)
         emit_empty_row(sink, base);
 }
@@ -958,7 +985,10 @@ void nm_markdown_render_state_init(NmMarkdownRenderState *rs)
     for (int i = 0; i < NM_STREAM_COUNT; i++)
         nm_highlight_init(&rs->hl[i]);
     /* the slot's buffer is kept (it is the reuse); the unit is
-     * dropped, and `width` is layout input, not stream state */
+     * dropped, and `width` and `depth` are INPUTS, not stream state —
+     * a transcript clear must not reset either (the caller re-asserts
+     * them, and a re-init that zeroed `depth` would silently drop the
+     * renderer to the 16-color floor) */
     nm_image_slot_reset(&rs->img);
 }
 
@@ -993,6 +1023,7 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
 {
     (void)width;
     NmMarkdownRenderState *rs = user_data;
+    NmColorDepth depth = render_depth(user_data);
     const NmImageSlot *slot =
         (rs && rs->img.image_id == blk->image_id) ? &rs->img : NULL;
 
@@ -1023,19 +1054,41 @@ static void render_image_marker(const TuiBlock *blk, const char *text,
     const char *reason = slot && slot->reason[0] ? slot->reason
                                                  : "not rendered";
 
-    char line[200];
+    /* Sized for the worst the parts can produce, not for the values
+     * seen in practice: the glyph run (5), alt (63), and three
+     * separators + dims (39) + size (23) + reason (47), plus a NUL —
+     * 190 bytes, and 200 was close enough to look fine until a long
+     * alt met a long reason. A marker that truncates silently is the
+     * one row a terminal without graphics shows instead of the image,
+     * so it is worth the four bytes of slack. */
+    char line[224];
     int n = snprintf(line, sizeof(line), "\xe2\x96\x92 %s", alt);
     if (n < 0)
         return;
-    if (dims[0] && n < (int)sizeof(line))
-        n += snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s", dims);
-    if (size[0] && n < (int)sizeof(line))
-        n += snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s",
-                      size);
-    if (n < (int)sizeof(line))
+    /* Each append needs its separator plus that part's own worst case:
+     * " · " (5) + dims (39), " · " (5) + size (23), " — " (6) +
+     * reason (47). The guards say so exactly, which is also what lets
+     * the compiler see that `line` (224) always has the room — the
+     * parts are bounded by construction, but a `%s` hides that from
+     * range analysis. What still does not fit is dropped: the marker is
+     * ONE row, never a wrapped one. */
+    if (n <= (int)sizeof(line) - (5 + 39 + 1)) {
+        int m = snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s",
+                         dims);
+        if (m > 0)
+            n += m;
+    }
+    if (n <= (int)sizeof(line) - (5 + 23 + 1)) {
+        int m = snprintf(line + n, sizeof(line) - (size_t)n, " \xc2\xb7 %s",
+                         size);
+        if (m > 0)
+            n += m;
+    }
+    if (n <= (int)sizeof(line) - (6 + 47 + 1))
         snprintf(line + n, sizeof(line) - (size_t)n, " \xe2\x80\x94 %s",
                  reason);
-    emit_lines(line, strlen(line), sink, nm_attr_image_marker(), 0);
+    emit_lines(line, strlen(line), sink, nm_attr_image_marker(depth), 0,
+               depth);
     /* the block carries the blank line that ended it: draw that row
      * too, or the next block glues to the marker */
     if (nm_markdown_trailing_blank(text, len))
@@ -1064,7 +1117,7 @@ static void render_image_placeholder(const TuiBlock *live, const char *text,
     char line[128];
     snprintf(line, sizeof(line), "\xe2\x96\x92 %s \xe2\x80\x94 %s so far",
              alt_len ? alt : "image", size);
-    emit_lines(line, strlen(line), sink, nm_attr_dim(), 0);
+    emit_lines(line, strlen(line), sink, nm_attr_dim(), 0, NM_COLOR_16);
 }
 
 void nm_markdown_render_block(const TuiBlock *blk, const char *text,
@@ -1074,18 +1127,19 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     if (!blk || !sink)
         return;
     TuiAttr base = stream_base_attr(blk);
+    NmColorDepth depth = render_depth(user_data);
     switch (blk->kind) {
     case TUI_BLOCK_TABLE:
     {
         Table t;
         if (table_parse(text, len, &t))
-            table_render(&t, width, 0, sink, base);
+            table_render(&t, width, 0, sink, base, depth);
         else
-            emit_lines(text, len, sink, base, 1);
+            emit_lines(text, len, sink, base, 1, depth);
         break;
     }
     case TUI_BLOCK_QUOTE:
-        emit_quote_lines(text, len, sink, base);
+        emit_quote_lines(text, len, sink, base, depth);
         break;
     case TUI_BLOCK_HEADING:
     {
@@ -1095,10 +1149,11 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
         for (size_t i = 0; i <= len; i++) {
             if (i == len || text[i] == '\n') {
                 if (i > start) {
-                    TuiAttr ha = attr_or(base, heading_attr(
-                                                   heading_level(text + start,
-                                                                 i - start)));
-                    emit_heading_line(text + start, i - start, sink, ha);
+                    TuiAttr ha = attr_or(
+                        base, heading_attr(heading_level(text + start,
+                                                         i - start),
+                                           depth));
+                    emit_heading_line(text + start, i - start, sink, ha, depth);
                 } else {
                     end_row(sink, base);
                 }
@@ -1109,13 +1164,13 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     }
     case TUI_BLOCK_LIST:
     {
-        TuiAttr marker = nm_attr_list_bullet();
+        TuiAttr marker = nm_attr_list_bullet(depth);
         size_t start = 0;
         for (size_t i = 0; i <= len; i++) {
             if (i == len || text[i] == '\n') {
                 if (i > start)
                     emit_list_line(text + start, i - start, sink, base,
-                                   marker);
+                                   marker, depth);
                 else
                     end_row(sink, base);
                 start = i + 1;
@@ -1130,7 +1185,8 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
         for (size_t i = 0; i <= len; i++) {
             if (i == len || text[i] == '\n') {
                 if (i > start)
-                    emit_fence_line(text + start, i - start, sink, base, hl);
+                    emit_fence_line(text + start, i - start, sink, base, hl,
+                                    depth);
                 else
                     end_row(sink, base);
                 start = i + 1;
@@ -1142,7 +1198,7 @@ void nm_markdown_render_block(const TuiBlock *blk, const char *text,
     case TUI_BLOCK_FENCE_PLAIN:
     case TUI_BLOCK_RAW:
     default:
-        emit_lines(text, len, sink, base, 1);
+        emit_lines(text, len, sink, base, 1, depth);
         break;
     case TUI_BLOCK_IMAGE:
         render_image_marker(blk, text, len, width, sink, user_data);
@@ -1154,7 +1210,6 @@ void nm_markdown_render_live(const TuiBlock *live, const char *text,
                              size_t len, int width, int rows_cap,
                              TuiRowSink *sink, void *user_data)
 {
-    (void)user_data;
     if (!live || !sink)
         return;
     /* Only block-granular kinds have a LIVE block; line/byte kinds are
@@ -1167,5 +1222,6 @@ void nm_markdown_render_live(const TuiBlock *live, const char *text,
         return;
     Table t;
     if (table_parse(text, len, &t))
-        table_render(&t, width, rows_cap, sink, stream_base_attr(live));
+        table_render(&t, width, rows_cap, sink, stream_base_attr(live),
+                     render_depth(user_data));
 }

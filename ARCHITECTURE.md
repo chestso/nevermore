@@ -1004,15 +1004,44 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   it BLINKS instead, and the dark phase declares its columns as spaces
   so the row behind it never moves. The tier is the terminal profile's
   env-derived `truecolor` hint (`COLORTERM`, or a direct-color `TERM`),
-  read at the point of use and passed INTO the tick: the model knows
-  nothing of boba, and the app owns the policy (which agent state shows
-  which style). `NmColorDepth` itself lives in `src/colors.h` — a color
-  tier is a color fact, and the status row's output marker
-  (`nm_color_gauge_output`) is its second consumer: a 16-color terminal
-  gets the spec's ANSI palette INDEX, a truecolor one the spec's hex.
-  The frame comes back BY VALUE — no static frame string,
+  overridden by the `color` key, and read at the point of use and passed
+  INTO the tick: the model knows nothing of boba, and the app owns the
+  policy (which agent state shows which style). The frame comes back BY
+  VALUE — no static frame string,
   so no consumer can lean on pointer identity over a frame whose color
   changes while its glyph does not.
+- **The color tier is a principle, not a per-role habit**
+  (`src/colors.{h,c}` + boba). Dracula's spec publishes TWO tables
+  (`spec.draculatheme.com` §1.2.1 Standard, §1.2.2 ANSI), and the app
+  must paint from whichever the terminal can show — a 24-bit sequence on
+  a 16-color terminal is the thing the second table exists to avoid.
+  `NmColorDepth` lives in `colors.h` (a color tier is a color FACT, so
+  it is not the spinner's private notion), and **every** role goes
+  through one tier-aware constructor: `nm_color_pick()` for the
+  `TuiColor` roles, `nm_sgr()` for the raw-SGR byte writers (whose
+  compile-time macros could never reach the tier, which is why they are
+  an enum + a function now), and `nm_attr_*()` taking a depth for the
+  markdown renderer's `TuiAttr`s. boba holds up its end: `TuiAttr`
+  carries a `TuiColor` rather than raw components, so an attribute can
+  BE a palette slot, and the row sink never downsamples — a downsample
+  would be a guess at a palette the app already knows exactly.
+  The slots are the spec's own: for every role named in both tables the
+  two AGREE (`AnsiCyan` IS Cyan's `#8BE9FD`), so 16 colors is an exact
+  rendering and not a nearest-neighbour approximation. The two roles the
+  spec leaves OUT of its ANSI table are handled explicitly rather than
+  invented: Orange (the amber) BORROWS `AnsiBrightYellow` — not
+  `AnsiYellow`, or it would collide with Yellow's own role — and
+  Selection gets **reverse video** instead of a slot, because the spec
+  and the official terminal themes both keep it a surface the terminal
+  owns. The tier is resolved in ONE place (`chat_app.c`'s
+  `color_depth`: the `color` key over the hint), applied to the chrome
+  on the frame where it CHANGES (`apply_chrome_colors` — the prompt and
+  popup styles are built before the runtime exists, so a one-shot
+  application at construction would freeze a truecolor terminal at the
+  16-color floor), handed to the renderer through
+  `NmMarkdownRenderState.depth`, and NAMED by the banner. The floor is
+  16 everywhere a tier is unknown: a renderer or a state nobody
+  configured must never claim 24-bit it cannot know.
 - **Images** — two halves, one sniffer. `src/image_bytes.{h,c}` is
   the BYTE half (pure C, no boba): the container sniffer (headers only
   — a pixel decode is the OTHER half's job), base64 both ways, the

@@ -83,7 +83,14 @@ HOME=$tmp
 XDG_CONFIG_HOME=$tmp/config
 XDG_STATE_HOME=$tmp/state
 NEVERMORE_AUTHINFO=/dev/null
-export HOME XDG_CONFIG_HOME XDG_STATE_HOME NEVERMORE_AUTHINFO
+# The COLOR TIER is pinned, not inherited: the wire-level pin below
+# asserts the prompt's 24-bit pink, and the tier decides which of the
+# spec's two tables the app paints from. The runner's own environment
+# would otherwise decide it (a runner without COLORTERM resolves as
+# 16-color, and the assertion would be a coin flip that happens to pass
+# on the machine that wrote it).
+COLORTERM=truecolor
+export HOME XDG_CONFIG_HOME XDG_STATE_HOME NEVERMORE_AUTHINFO COLORTERM
 
 # --- the canned provider on an ephemeral port ------------------------
 tools=${NM_E2E_TOOLS:-$dir/../../tools}
@@ -158,7 +165,9 @@ fi
 
 # One wire-level pin: the focused prompt's pink (colors.h's app accent)
 # must have reached the terminal, proving the transcript's BYTES end to
-# end. Everything else asserts on coffer's parse of the grid.
+# end. Everything else asserts on coffer's parse of the grid. The
+# 24-bit spelling is the one COLORTERM (pinned above) asks for; the
+# 16-color tier's palette index is what test_chat_app pins.
 grep -q '38;2;255;121;198' "$raw" ||
 	fail "$scenario: the prompt's accent SGR never reached the terminal"
 

@@ -77,7 +77,9 @@
 /* Output colors are semantic roles (src/colors.h, the Dracula palette):
  * NM_SGR_TOOL is the Comment accent for the panel/separator,
  * NM_SGR_RESULT the Foreground tool result line, NM_SGR_ERROR the Red
- * error body. */
+ * error body — and every one of them is resolved through nm_sgr() for
+ * the terminal's color TIER, so a 16-color terminal is handed the
+ * spec's palette slot instead of a 24-bit sequence it cannot show. */
 
 /* The reasoning stream's live-region attr, declared once and borrowed
  * by the transcript spec (chat_app.c is its owner for the app's
@@ -96,6 +98,12 @@ static const TuiAttr NM_DIM = { .dim = 1 };
  * local buffers that hold a whole value (the /config reply, the notice
  * text) can never be smaller than what a writer will actually emit. */
 #define SYS_LINE_BUF NM_SYSOUT_LINE_MAX
+
+/* The terminal's color tier (defined with the rest of the tier plumbing
+ * below, next to the spinner's use of it). sys_role needs it, and
+ * sys_role sits with the other stream writers — before the tier helper
+ * — so the declaration comes first. */
+static NmColorDepth color_depth(const NmChatApp *app);
 
 /* Popup flavors. */
 typedef enum
@@ -234,6 +242,23 @@ struct NmChatApp
      * in the scrollback above the echoed prompt. Held across the flush
      * whose view would otherwise re-install the line. */
     int submitting;
+
+    /* The color tier the chrome's colors were last applied under
+     * (apply_chrome_colors). The prompt and popup styles are set at
+     * construction — before the runtime, and so before the truecolor
+     * probe can answer — so the view re-applies them the first time the
+     * answer CHANGES. The guard matters: boba's setters relayout, and
+     * re-applying every frame would be per-frame churn. */
+    NmColorDepth applied_depth;
+
+    /* The environment's truecolor answer, captured ONCE at
+     * construction. It is a STARTUP fact, like the width model boba
+     * resolves and pins for the same reason: the probe's own copy of it
+     * is applied at the first flush, so the frames before that (and the
+     * banner) would otherwise read a zeroed profile as 16-color. Read
+     * once, never again — a later getenv would see whatever the process
+     * environment has become, which is not the session's terminal. */
+    NmColorDepth color_hint;
 
     /* Pending image attachments: ids into the agent's
      * session image store, consumed by the next submit. Turn-scoped,
@@ -392,6 +417,27 @@ static void sys_text(NmChatApp *app, const char *s)
     nm_sysout_text(&app->sysout, s);
 }
 
+/* One system line in a role's color: the shape almost every byte writer
+ * wants (the role's SGR, the formatted text, the reset). The tier is
+ * resolved HERE, so no call site can forget it — which is the whole
+ * reason this exists rather than a macro: a compile-time SGR literal
+ * cannot know what the terminal can show.
+ *
+ * `body` is sized for the worst format in the file (the provider list
+ * and the /model refusal are the long ones, and both interpolate a
+ * provider's own text); vsnprintf truncates rather than overruns, and a
+ * system line cut short is visible, not silent. */
+static void sys_role(NmChatApp *app, NmSgrRole role, const char *fmt, ...)
+{
+    char body[4096];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(body, sizeof(body), fmt, ap);
+    va_end(ap);
+    sys_line(app, "%s%s%s", nm_sgr(role, color_depth(app)), body,
+             NM_SGR_RESET);
+}
+
 /* One blank transcript row: the separator that follows content/reasoning
  * streaming (the "blank line following" invariant). */
 static void sys_blank(NmChatApp *app)
@@ -411,7 +457,7 @@ static void no_model_notice(NmChatApp *app)
     char hint[512];
     nm_config_no_model_hint(app->provider ? app->provider->name : NULL, hint,
                             sizeof(hint));
-    sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, hint);
+    sys_role(app, NM_SGR_ERROR, "%s", hint);
 }
 
 /* Separator, once per content/reasoning run. pending_sep is the "owed"
@@ -615,10 +661,10 @@ static void sys_tool_plan(NmChatApp *app, const NmTool *tool,
         const char *nl = strchr(p, '\n');
         size_t len = nl ? (size_t)(nl - p) : strlen(p);
         if (first)
-            sys_line(app, NM_SGR_TOOL "%s %.*s" NM_SGR_RESET, emoji, (int)len,
+            sys_role(app, NM_SGR_TOOL, "%s %.*s", emoji, (int)len,
                      p);
         else
-            sys_line(app, NM_SGR_RESULT "%.*s" NM_SGR_RESET, (int)len, p);
+            sys_role(app, NM_SGR_RESULT, "%.*s", (int)len, p);
         first = 0;
         if (!nl)
             break;
@@ -664,11 +710,17 @@ static void sys_tool_result(NmChatApp *app, const char *output,
                        strncmp(p, NM_REMINDER_END, len) == 0;
         if (is_open)
             in_reminder = 1;
-        const char *role = in_reminder ? NM_SGR_REMINDER : NM_SGR_RESULT;
+        const char *role = nm_sgr(in_reminder ? NM_SGR_REMINDER
+                                              : NM_SGR_RESULT,
+                                  color_depth(app));
         /* "  ╰─ " and "     " are both 5 display columns. */
-        if (first)
-            dynamic_buffer_append_str(b, NM_SGR_TOOL_ELBOW "  ╰─ " NM_SGR_RESET);
-        else
+        if (first) {
+            /* Two appends: a function call is not a string literal, so
+             * the elbow's SGR cannot be concatenated onto the glyphs. */
+            dynamic_buffer_append_str(
+                b, nm_sgr(NM_SGR_TOOL_ELBOW, color_depth(app)));
+            dynamic_buffer_append_str(b, "  ╰─ " NM_SGR_RESET);
+        } else
             dynamic_buffer_append_str(b, "     ");
         dynamic_buffer_append_str(b, role);
         if (first && status != NM_TOOL_OK)
@@ -757,19 +809,79 @@ static int spinner_ramp_on(const NmChatApp *app)
                     : 1;
 }
 
-/* The terminal's color tier, from the probe's env-derived hint: 24-bit
- * where the environment advertises it (COLORTERM, or a direct-color
- * TERM), 16-color otherwise — which is where the dot blinks instead of
- * pulsing, and where a depth-aware role (nm_color_gauge_output) asks for
- * a palette index instead of a hex. Read at the point of use, like the
- * keyboard tier: the hint lands when the probe starts, so there is
- * nothing to cache. */
+/* The terminal's color tier — which of Dracula's two published tables
+ * the app paints from. The `color` key decides it: `16` and `rgb` force
+ * one, and `auto` (the default) takes the terminal's own answer — the
+ * probe's env-derived truecolor hint once the runtime exists, and the
+ * SAME answer resolved from the environment before that (the profile's
+ * env hints are applied at the first flush, and the chrome is painted
+ * before it — see nm_color_env_hint). Read at the point of use, like
+ * the keyboard tier: there is nothing to cache.
+ *
+ * The hint is the de-facto signal and NOT a verdict — a capable terminal
+ * that never sets COLORTERM reads as 16-color here, which is the safe
+ * direction to be wrong in and exactly what `color = rgb` is for. */
 static NmColorDepth color_depth(const NmChatApp *app)
 {
-    if (!app->rt)
-        return NM_COLOR_16;
-    const TuiTerminalProfile *p = tui_runtime_terminal_profile(app->rt);
-    return (p && p->truecolor) ? NM_COLOR_RGB : NM_COLOR_16;
+    NmColorMode mode = app->cfg ? nm_config_color_mode(app->cfg)
+                                : NM_COLOR_MODE_AUTO;
+    /* The construction-time snapshot of the environment's answer — the
+     * profile's truecolor is the SAME fact (boba applies the same env
+     * hints at the probe's start), so this is the value until the probe
+     * has actually resolved, and the profile's after that. Reading the
+     * environment HERE instead would make the tier depend on whatever
+     * the process environment has become since startup. */
+    NmColorDepth hint = app->color_hint;
+    if (app->rt) {
+        const TuiTerminalProfile *p = tui_runtime_terminal_profile(app->rt);
+        if (p && p->resolved)
+            hint = p->truecolor ? NM_COLOR_RGB : NM_COLOR_16;
+    }
+    return nm_color_resolve(mode, hint);
+}
+
+/* Apply the tier-dependent chrome colors: the input's accent prompt and
+ * the popup's whole palette. Called once at construction (the 16-color
+ * floor, since there is no runtime to ask yet) and again from the view
+ * whenever color_depth() CHANGES — which is the one moment a truecolor
+ * terminal's hexes can replace the floor. Records the tier it applied
+ * so the view's guard costs a compare per frame, not a relayout. */
+static void apply_chrome_colors(NmChatApp *app)
+{
+    if (!app)
+        return;
+    NmColorDepth depth = color_depth(app);
+    if (app->input) {
+        /* Accent prompt (the D5 role): a TuiStyle on the textinput, not
+         * an SGR literal — the input is a boba frame element. */
+        tui_textinput_set_focused_prompt_style(
+            app->input,
+            tui_style_foreground(tui_style_new(), nm_color_prompt(depth)));
+        tui_textinput_set_blurred_prompt_style(
+            app->input,
+            tui_style_foreground(tui_style_new(), nm_color_prompt(depth)));
+    }
+    if (app->popup) {
+        tui_list_popup_set_colors(
+            app->popup, nm_color_popup_border(depth), /* border */
+            nm_color_popup_title(depth),              /* title */
+            nm_color_popup_selected_bg(depth),        /* sel bg */
+            nm_color_popup_selected_fg(depth),        /* sel fg */
+            nm_color_popup_marker(depth),             /* marker */
+            nm_color_popup_item(depth));              /* item */
+        tui_list_popup_set_meta_color(app->popup, nm_color_popup_meta(depth));
+        /* At 16 colors the selected row is REVERSE VIDEO instead of a
+         * Selection background: the spec gives Selection no ANSI slot
+         * (see nm_color_popup_selected_bg), and reverse is the highlight
+         * a 16-color terminal already has. */
+        tui_list_popup_set_selected_reverse(app->popup,
+                                            nm_popup_selected_reverse(depth));
+    }
+    /* The renderer's roles resolve in the same tier, so it follows the
+     * chrome: a transcript committed after this point paints in the
+     * tier the terminal actually has. */
+    app->render_state.depth = depth;
+    app->applied_depth = depth;
 }
 
 /* The agent's state, as the spinner sees it: streaming and tool-running
@@ -831,14 +943,14 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
         break;
     case NM_AGENT_ERROR:
         stream_end_all(app);
-        sys_line(app, NM_SGR_ERROR "nevermore: %s" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "nevermore: %s",
                  nm_agent_last_error(app->agent) ? nm_agent_last_error(app->agent)
                                                  : "turn failed");
         break;
     case NM_AGENT_IDLE:
         /* Cancel path: a partial answer still commits (it was spoken). */
         stream_end_all(app);
-        sys_line(app, NM_SGR_TOOL "🛑 interrupted" NM_SGR_RESET);
+        sys_role(app, NM_SGR_TOOL, "🛑 interrupted");
         break;
     default: /* STREAMING / RUNNING_TOOL: no transcript output */
         break;
@@ -1105,12 +1217,12 @@ static void image_attach(NmChatApp *app, const char *arg)
     char reason[64];
     long id = nm_agent_attach_image(app->agent, path, reason, sizeof(reason));
     if (id < 0) {
-        sys_line(app, NM_SGR_ERROR "image: %s — not attached: %s" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "image: %s — not attached: %s",
                  path, reason);
         return;
     }
     if (pending_push(app, (size_t)id) != 0) {
-        sys_line(app, NM_SGR_ERROR "image: out of memory" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "image: out of memory");
         return;
     }
     const NmImage *img = nm_agent_image(app->agent, (size_t)id);
@@ -1135,8 +1247,8 @@ static void image_drop(NmChatApp *app, const char *arg)
     long n = strtol(arg + 1, &end, 10);
     if (end == arg + 1 || (end && *end != '\0') || n < 1 ||
         (size_t)n > app->n_pending) {
-        sys_line(app, NM_SGR_ERROR "image: '-%s' is not a pending image "
-                                   "(1..%zu; bare /image lists them)" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "image: '-%s' is not a pending image "
+                                    "(1..%zu; bare /image lists them)",
                  arg + 1, app->n_pending);
         return;
     }
@@ -1189,8 +1301,7 @@ static void image_save(NmChatApp *app, const char *arg)
         p++;
     size_t count = nm_agent_image_count(app->agent);
     if (count == 0) {
-        sys_line(app, NM_SGR_ERROR
-                 "image: no images in this conversation" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "image: no images in this conversation");
         return;
     }
     size_t id = count; /* bare: the newest image */
@@ -1202,8 +1313,8 @@ static void image_save(NmChatApp *app, const char *arg)
             q++;
         }
         if (v < 1 || v > count) {
-            sys_line(app, NM_SGR_ERROR "image: '%.*s' is not an image in this "
-                                       "chat (1..%zu; /image list names them)" NM_SGR_RESET,
+            sys_role(app, NM_SGR_ERROR, "image: '%.*s' is not an image in this "
+                                        "chat (1..%zu; /image list names them)",
                      (int)(q - p), p, count);
             return;
         }
@@ -1214,7 +1325,7 @@ static void image_save(NmChatApp *app, const char *arg)
     }
     const NmImage *img = nm_agent_image(app->agent, id - 1);
     if (!img) {
-        sys_line(app, NM_SGR_ERROR "image: no image #%zu" NM_SGR_RESET, id);
+        sys_role(app, NM_SGR_ERROR, "image: no image #%zu", id);
         return;
     }
     char path[1024];
@@ -1226,7 +1337,7 @@ static void image_save(NmChatApp *app, const char *arg)
     char err[48];
     if (nm_image_write_data_url(img->data_url, img->data_url_len, path, err,
                                 sizeof(err)) < 0) {
-        sys_line(app, NM_SGR_ERROR "image: %s — %s" NM_SGR_RESET, path, err);
+        sys_role(app, NM_SGR_ERROR, "image: %s — %s", path, err);
         return;
     }
     sys_line(app, "saved image #%zu → %s", id, path);
@@ -1395,6 +1506,10 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     app->term_w = 80;
     app->term_h = 24;
     app->popup_kind = POPUP_NONE;
+    /* The color tier's startup input, snapshotted here because the
+     * chrome is painted before the runtime (and so before the probe)
+     * exists — see the field's comment. */
+    app->color_hint = nm_color_env_hint();
 
     app->tools = nm_toolset_new_defaults();
     app->spinner = nm_spinner_new(NM_SPINNER_PULSE_DOT);
@@ -1412,9 +1527,13 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     }
     nm_markdown_render_state_init(&app->render_state);
     /* The image tier's display math reads the layout width from the
-     * render state (the measure seam carries no width); kept current
-     * on every resize below. */
+     * render state (the measure seam carries no width), and the
+     * renderer's color roles read the TIER from it — both are inputs
+     * the state preserves across a transcript clear, and both are
+     * re-asserted whenever they change (the resize path, and
+     * apply_chrome_colors for the tier). */
     app->render_state.width = app->term_w;
+    app->render_state.depth = color_depth(app);
     app->streams[0].name = "content";
     app->streams[1].name = "reasoning";
     /* The reasoning stream dims in the live region too: boba paints
@@ -1445,14 +1564,6 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         goto oom;
     tui_textinput_set_prompt(app->input, PROMPT);
     tui_textinput_set_continuation_prompt(app->input, CONTINUATION_PROMPT);
-    /* Accent prompt (the D5 role): a TuiStyle on the textinput, not an
-     * SGR literal — the input is a boba frame element. */
-    tui_textinput_set_focused_prompt_style(
-        app->input,
-        tui_style_foreground(tui_style_new(), nm_color_prompt()));
-    tui_textinput_set_blurred_prompt_style(
-        app->input,
-        tui_style_foreground(tui_style_new(), nm_color_prompt()));
     tui_textinput_set_terminal_width(app->input, app->term_w);
     tui_textinput_set_soft_wrap(app->input, 1);
     tui_textinput_set_history_size(app->input, 500);
@@ -1464,13 +1575,12 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     if (!app->popup)
         goto oom;
     tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
-    tui_list_popup_set_colors(app->popup, nm_color_popup_border(), /* border */
-                              nm_color_popup_title(),              /* title */
-                              nm_color_popup_selected_bg(),        /* sel bg */
-                              nm_color_popup_selected_fg(),        /* sel fg */
-                              nm_color_popup_marker(),             /* marker */
-                              nm_color_popup_item());              /* item */
-    tui_list_popup_set_meta_color(app->popup, nm_color_popup_meta());
+    /* The tier-dependent colors: applied here for the first paint and
+     * RE-applied by apply_chrome_colors once the probe answers. The
+     * runtime does not exist yet at construction, so color_depth() reads
+     * the 16-color floor — a truecolor terminal gets its hexes on the
+     * first frame, not here. */
+    apply_chrome_colors(app);
 
     /* The status row: boba's component, declared from the app's live
      * state on every frame (compose_status) and laid out by boba against
@@ -1631,10 +1741,8 @@ static void report_family_skips(NmChatApp *app)
      * too. The walk's OWN notice (nm_chat_app_on_notice, agent.c at
      * connect time, before any byte of the round streams) has no such
      * hazard and is a notice. */
-    sys_line(app,
-             NM_SGR_TOOL
-             "connect: %s did not answer — skipping it for this session "
-             "(skip_families)" NM_SGR_RESET,
+    sys_role(app, NM_SGR_TOOL, "connect: %s did not answer — skipping it for this session "
+                               "(skip_families)",
              nm_family_name(fresh));
 }
 
@@ -1653,7 +1761,9 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     NmChatApp *app = s_app;
     if (!app || !msg || !*msg)
         return;
-    nm_sysout_notice(&app->sysout, NM_SGR_TOOL "%s" NM_SGR_RESET, msg);
+    nm_sysout_notice(&app->sysout, "%s%s%s",
+                     nm_sgr(NM_SGR_TOOL, color_depth(app)), msg,
+                     NM_SGR_RESET);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1688,7 +1798,9 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
     char line[SYS_LINE_BUF];
     if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
         return;
-    nm_sysout_notice(&app->sysout, NM_SGR_TOOL "%s" NM_SGR_RESET, line);
+    nm_sysout_notice(&app->sysout, "%s%s%s",
+                     nm_sgr(NM_SGR_TOOL, color_depth(app)), line,
+                     NM_SGR_RESET);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1710,8 +1822,9 @@ void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
         return;
     if (channel != NM_REMINDER_CHANNEL_USER)
         return;
-    nm_sysout_notice(&app->sysout, NM_SGR_REMINDER "reminder (%s): %s" NM_SGR_RESET,
-                     name ? name : "?", text);
+    nm_sysout_notice(&app->sysout, "%sreminder (%s): %s%s",
+                     nm_sgr(NM_SGR_REMINDER, color_depth(app)),
+                     name ? name : "?", text, NM_SGR_RESET);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1728,7 +1841,9 @@ void nm_chat_app_on_warning(const char *msg, void *userdata)
     NmChatApp *app = s_app;
     if (!app || !msg || !*msg)
         return;
-    nm_sysout_notice(&app->sysout, NM_SGR_ERROR "%s" NM_SGR_RESET, msg);
+    nm_sysout_notice(&app->sysout, "%s%s%s",
+                     nm_sgr(NM_SGR_ERROR, color_depth(app)), msg,
+                     NM_SGR_RESET);
     tui_runtime_wakeup(app->rt);
 }
 
@@ -1952,6 +2067,15 @@ void nm_chat_app_identity(const NmChatApp *app, char *buf, size_t cap)
 NmAgent *nm_chat_app_agent(const NmChatApp *app)
 {
     return app ? app->agent : NULL;
+}
+
+/* The tier resolution, for callers that paint or report outside the
+ * frame (main.c's banner). Never NULL-safe-by-accident: a NULL app
+ * answers the 16-color floor, the same answer a state nobody
+ * configured gives. */
+NmColorDepth nm_chat_app_color_depth(const NmChatApp *app)
+{
+    return app ? color_depth(app) : NM_COLOR_16;
 }
 
 /* The prompt's textinput — for main.c's history load/save wiring. */
@@ -2239,7 +2363,7 @@ static int popup_show_with_active(NmChatApp *app, PopupKind kind,
     const char **seen_meta;
     char *block = malloc(slots * 2 * sizeof *seen);
     if (!block) {
-        sys_line(app, NM_SGR_ERROR "out of memory" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "out of memory");
         return 1; /* reported; the caller has nothing to add */
     }
     seen = (const char **)block;
@@ -2763,7 +2887,7 @@ static void show_models_popup(NmChatApp *app, NmListSource *s,
     char (*metas)[40];
     char *block = malloc(n * (2 * sizeof *rows + sizeof *metas));
     if (!block) {
-        sys_line(app, NM_SGR_ERROR "out of memory" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "out of memory");
         return;
     }
     rows = (const char **)block;
@@ -2834,8 +2958,9 @@ static int switch_provider(NmChatApp *app, const char *name)
         nm_provider_list(providers, &n);
         char buf[512];
         int off = snprintf(buf, sizeof(buf),
-                           NM_SGR_ERROR "nevermore: unknown provider '%s' — one of:" NM_SGR_RESET,
-                           name);
+                           "%s"
+                           "nevermore: unknown provider '%s' — one of:",
+                           nm_sgr(NM_SGR_ERROR, color_depth(app)), name);
         for (size_t i = 0; i < n && i < NM_PROVIDER_MAX && off > 0 &&
                            (size_t)off < sizeof(buf);
              i++) {
@@ -3081,13 +3206,12 @@ static void config_reset(NmChatApp *app, const char *key)
         return;
     }
     if (key && !nm_config_env_name(key) && !nm_config_scoped_key_ok(key)) {
-        sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "config: unknown key '%s'",
                  key);
         return;
     }
     if (!config_apply_reset(app, key)) {
-        sys_line(app, NM_SGR_ERROR
-                 "config: could not write the shadow file" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "config: could not write the shadow file");
         return;
     }
     if (key)
@@ -3108,26 +3232,26 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
         return;
     }
     if (!nm_config_env_name(key)) {
-        sys_line(app, NM_SGR_ERROR "config: unknown key '%s'" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "config: unknown key '%s'",
                  key);
         return;
     }
     if (strcmp(key, NM_CFG_KEY_PROVIDER) == 0 ||
         strcmp(key, NM_CFG_KEY_MODEL) == 0) {
-        sys_line(app, NM_SGR_ERROR "config: use /provider or /model for "
-                                   "'%s'" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "config: use /provider or /model for "
+                                    "'%s'",
                  key);
         return;
     }
     if (!*value) {
-        sys_line(app, NM_SGR_ERROR "config: set %s needs a value" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "config: set %s needs a value",
                  key);
         return;
     }
     /* Validate + persist first: an invalid value must not disturb the
      * runtime layer (the machinery's value stands). */
     if (nm_config_shadow_set(app->cfg, key, value) != 0) {
-        sys_line(app, NM_SGR_ERROR "config: %s: invalid value '%s'" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "config: %s: invalid value '%s'",
                  key, value);
         return;
     }
@@ -3268,7 +3392,9 @@ static void print_jobs(NmChatApp *app)
         /* The state carries the color (activity yellow while running,
          * muted Comment once exited); the id and command stay plain. */
         sys_line(app, "%2d  %s%-9s" NM_SGR_RESET " %s  (%s buffered)",
-                 nm_proc_id(p), code >= 0 ? NM_SGR_TOOL : NM_SGR_ACTIVITY,
+                 nm_proc_id(p),
+                 nm_sgr(code >= 0 ? NM_SGR_TOOL : NM_SGR_ACTIVITY,
+                        color_depth(app)),
                  state, cmd, size);
     }
 }
@@ -3283,8 +3409,7 @@ static void kill_job_command(NmChatApp *app, const char *arg)
     while (*p == ' ' || *p == '\t')
         p++;
     if (*p < '0' || *p > '9') {
-        sys_line(app, NM_SGR_ERROR
-                 "kill: expected a job id (see /ps)" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "kill: expected a job id (see /ps)");
         return;
     }
     int id = 0;
@@ -3299,14 +3424,13 @@ static void kill_job_command(NmChatApp *app, const char *arg)
     while (*p == ' ' || *p == '\t')
         p++;
     if (id <= 0 || *p) {
-        sys_line(app, NM_SGR_ERROR
-                 "kill: expected a positive job id (see /ps)" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "kill: expected a positive job id (see /ps)");
         return;
     }
 
     NmProc *s = nm_proc_find(id);
     if (!s) {
-        sys_line(app, NM_SGR_ERROR "kill: no job %d — /ps lists them" NM_SGR_RESET, id);
+        sys_role(app, NM_SGR_ERROR, "kill: no job %d — /ps lists them", id);
         return;
     }
     char cmd[NM_PS_CMD_CAP];
@@ -3466,8 +3590,8 @@ static void session_save(NmChatApp *app, const char *arg)
 {
     const NmSession *s = nm_agent_session(app->agent);
     if (!s || nm_session_len(s) == 0) {
-        sys_line(app, NM_SGR_ERROR "session: nothing to save — no turn has "
-                                   "run in this chat" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "session: nothing to save — no turn has "
+                                    "run in this chat");
         return;
     }
     char path[1024];
@@ -3483,7 +3607,7 @@ static void session_save(NmChatApp *app, const char *arg)
         snprintf(path, sizeof(path), "%s", session_default_path);
     }
     if (nm_session_save(s, path) != 0) {
-        sys_line(app, NM_SGR_ERROR "session: cannot write %s" NM_SGR_RESET,
+        sys_role(app, NM_SGR_ERROR, "session: cannot write %s",
                  path);
         return;
     }
@@ -3510,8 +3634,8 @@ static void session_command(NmChatApp *app, const char *arg)
         session_save(app, p + 4);
         return;
     }
-    sys_line(app, NM_SGR_ERROR "session: expected nothing, 'list', or "
-                               "'save [path]'" NM_SGR_RESET);
+    sys_role(app, NM_SGR_ERROR, "session: expected nothing, 'list', or "
+                                "'save [path]'");
 }
 
 static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
@@ -3567,7 +3691,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         ModelQuery q = { 0 };
         char err[128];
         if (model_query_parse(arg, &q, err, sizeof(err)) != 0) {
-            sys_line(app, NM_SGR_ERROR "%s" NM_SGR_RESET, err);
+            sys_role(app, NM_SGR_ERROR, "%s", err);
             return;
         }
         /* A plain text argument that names an exact catalog id still
@@ -3656,8 +3780,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             while (*sp && *sp != ' ' && *sp != '\t')
                 sp++;
             if (!*sp) {
-                sys_line(app, NM_SGR_ERROR
-                         "config: set expects '<key> <value>'" NM_SGR_RESET);
+                sys_role(app, NM_SGR_ERROR, "config: set expects '<key> <value>'");
                 return;
             }
             char kbuf[32];
@@ -3677,8 +3800,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             config_set(app, kbuf, vbuf);
             return;
         }
-        sys_line(app, NM_SGR_ERROR
-                 "config: expected 'set <key> <value>' or 'reset [key|all]'" NM_SGR_RESET);
+        sys_role(app, NM_SGR_ERROR, "config: expected 'set <key> <value>' or 'reset [key|all]'");
         return;
     }
     if (NAME_IS("context")) {
@@ -3705,8 +3827,8 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         kill_job_command(app, arg);
         return;
     }
-    sys_line(app, NM_SGR_ERROR "unknown command '%.*s' — /help lists "
-                               "commands" NM_SGR_RESET,
+    sys_role(app, NM_SGR_ERROR, "unknown command '%.*s' — /help lists "
+                                "commands",
              (int)name_len, rest);
 #undef NAME_IS
 }
@@ -4051,7 +4173,8 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         tui_textinput_set_terminal_width(app->input, app->term_w);
         tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
         tui_statusline_set_terminal_width(app->status, app->term_w);
-        app->render_state.width = app->term_w; /* image display math */
+        app->render_state.width = app->term_w;      /* image display math */
+        app->render_state.depth = color_depth(app); /* renderer roles */
         tui_transcript_update(app->transcript, msg);
         return tui_update_result_none();
 
@@ -4228,17 +4351,18 @@ static void compose_gauge(const NmChatApp *app, NmGaugeFields *f)
  * so the nudge and the colour change together. */
 static TuiColor gauge_color(const NmChatApp *app)
 {
+    NmColorDepth depth = color_depth(app);
     switch (nm_agent_context_tier(app->agent)) {
     case 2:
-        return nm_color_gutter_warn_hot();
+        return nm_color_gutter_warn_hot(depth);
     case 1:
-        return nm_color_gutter_warn();
+        return nm_color_gutter_warn(depth);
     default:
-        return nm_color_gutter();
+        return nm_color_gutter(depth);
     }
 }
 
-/* One declared segment, spelled once so the four below read as the row
+/* One declared segment, spelled once so the six below read as the row
  * they compose. */
 static TuiSegment status_segment(const char *text, TuiSegmentAlign align,
                                  int priority, int min_cols, int pad_left,
@@ -4334,9 +4458,9 @@ static void compose_status(NmChatApp *app)
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
     segs[n++] =
         status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
-                       nm_color_gutter());
+                       nm_color_gutter(color_depth(app)));
     segs[n++] = status_segment(identity, TUI_SEGMENT_RIGHT, 2, 1, 1,
-                               nm_color_status_identity());
+                               nm_color_status_identity(color_depth(app)));
 
     tui_statusline_set_segments(app->status, segs, n);
 }
@@ -4369,6 +4493,15 @@ static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)
     NmChatApp *app = (NmChatApp *)model;
     if (!app || !out)
         return tui_view_default(out);
+
+    /* The chrome's colors are tier-dependent, and the tier is not known
+     * at construction (the runtime — and so the probe — does not exist
+     * yet). Re-apply them the first frame the answer CHANGES, which is
+     * the one moment a truecolor terminal's hexes replace the 16-color
+     * floor. The guard is a compare per frame: boba's setters relayout,
+     * so re-applying unconditionally would be per-frame churn. */
+    if (color_depth(app) != app->applied_depth)
+        apply_chrome_colors(app);
 
     /* Live-region budget (D8): the transcript takes the terminal height
      * minus the input's rows (status line + input rows) and one slack row;

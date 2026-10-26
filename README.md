@@ -124,7 +124,7 @@ prompt the provider last reported and the limit the active model's
 catalog window, `↓<out>` is the output the conversation has accumulated
 (every completed round's `completion_tokens`, summed) — the row's one
 Cyan field, the spec's own color for a marker, in whichever spelling the
-terminal can show (see `spinner_ramp` below) — and `⚡<pct>` is
+terminal can show (see `color` below) — and `⚡<pct>` is
 the session's cache rate — the share of this conversation's input that
 came from the provider's prefix cache, accumulated over every completed
 round that reported a read count (a round that omits the field is left
@@ -378,6 +378,32 @@ a plain Enter.
 (`terminal: kitty protocol` / `terminal: legacy encodings`), since the
 store alone cannot say whether the protocol is in use.
 
+`color` (`$NEVERMORE_COLOR`, default `auto`) is which of Dracula's two
+published tables the app paints from. The spec publishes both — its
+Standard hexes and its ANSI palette — and `auto` picks between them from
+the terminal's own answer: 24-bit where the environment advertises it
+(`COLORTERM`, or a direct-color `TERM`), the ANSI slots otherwise. `16`
+forces the slots and `rgb` forces 24-bit; `ansi`/`ansi16` and
+`truecolor`/`24bit` are accepted spellings of the same two.
+
+The two tables agree for every role the spec names in both, so the
+16-color rendering is **exact, not an approximation**: `AnsiCyan` _is_
+`#8BE9FD`, `AnsiBrightBlack` _is_ `#6272A4`, and so on — a terminal
+running Dracula's own palette draws the identical color. Two roles have
+no ANSI entry at all (the amber and the selection bar), and the app
+borrows a slot for the first and uses **reverse video** for the second
+rather than inventing a palette entry the spec does not give it. This
+assumes the terminal's palette is Dracula's; on some other palette a
+slot renders that palette's color instead, which is what asking for a
+slot means.
+
+`auto` is right almost always, and it is a hint rather than a verdict:
+the de-facto signal is `COLORTERM`, and plenty of capable terminals
+never set it — so a terminal that can show 24-bit but does not say so
+resolves as 16-color, and `color = rgb` is the escape hatch. The startup
+banner names the tier in force (`Color tier: rgb (24-bit)` /
+`Color tier: 16 (ANSI palette)`), so the answer is never a guess.
+
 `spinner_ramp` (a bool, default `on`) is the thinking dot's size ramp:
 while the model streams, the glyph breathes through `· • ● •`, and
 turning it `off` holds a single `●`. It changes nothing about the
@@ -387,13 +413,16 @@ back, rather than dipping to a dark green — and on a terminal without
 truecolor (no `COLORTERM`, no direct-color `TERM`) it blinks instead:
 the same animation, told in the color the terminal can actually show.
 The star set that rotates while a tool runs is unaffected either way.
+The `color` key above decides which of the two that is; the dot's own
+green is the same Green in both, and only the animation differs.
 
-The same tier governs the status row's output marker: `↓<n>` is Dracula's
-Cyan — the spec's own color for a marker — asked for as the 16-color
-palette's `AnsiCyan` slot on a terminal that cannot show 24-bit, and as
-the hex otherwise. The two are the SAME color under Dracula's terminal
-palette (the spec's AnsiCyan _is_ Cyan's `#8BE9FD`), so nothing is
-approximated: a 16-color terminal draws exactly what a 24-bit one does.
+That one tier governs **every** color the app paints, not just the dot:
+the prompt, the popup (whose selected row is reverse video at 16
+colors, since the spec gives Selection no ANSI slot), the status row's
+gauge and identity, the tool panels and errors on the system stream,
+and the markdown transcript's headings, code, quotes, tables and fence
+tokens. Each role names one spec color and the tier picks its spelling,
+so no role can be left 24-bit-only by accident.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation

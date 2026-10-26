@@ -51,6 +51,11 @@
 
 #include <stddef.h>
 
+/* NmColorMode — the `color` key's value space — is a COLOR fact (which
+ * of the spec's two tables to paint from), so it is declared beside
+ * NmColorDepth in colors.h rather than here. */
+#include "colors.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -233,6 +238,26 @@ extern "C" {
  * is not expressible and Ctrl+J inserts the newline. Env spelling:
  * NEVERMORE_KBD. */
 #define NM_CFG_KEY_KBD "kbd"
+
+/* Which of Dracula's two published tables to paint from (the spec's
+ * §1.2.1 Standard hexes, or §1.2.2's 16 ANSI slots): `auto` (the
+ * default) takes the terminal's own answer — the env-derived truecolor
+ * hint — `16` forces the ANSI slots, `rgb` forces 24-bit.
+ *
+ * `auto` is right almost always, and it is a HINT, not a verdict: the
+ * de-facto signal is COLORTERM, and plenty of capable terminals never
+ * set it, so `rgb` is the escape hatch for a terminal that can show
+ * 24-bit but does not say so. `16` is the other direction — it is also
+ * how the suite pins the tier without env games.
+ *
+ * A 16-color tier ASSUMES the terminal's palette is Dracula's own: the
+ * spec's ANSI table IS the palette (AnsiBrightBlack is #6272A4, and so
+ * on), so a slot renders the spec's color exactly. On a terminal
+ * running some other palette it renders that palette's color instead —
+ * which is what "ask the terminal for a slot" means, and why the
+ * legacy `xresources` generation is not a target. Env spelling:
+ * NEVERMORE_COLOR. */
+#define NM_CFG_KEY_COLOR "color"
 
 /* The spinner's size ramp (the "ping-pong"): `on` (the default) lets
  * the thinking dot breathe through · • ● • while it works, `off` holds
@@ -603,6 +628,26 @@ const char *nm_config_kbd_name(NmKbdMode mode);
  * mode. NM_KBD_AUTO when the key is unset, and for a NULL config. This
  * is what the view reads at the point of use. */
 NmKbdMode nm_config_kbd_mode(const NmConfig *c);
+
+/* Is `value` a `color` mode: `auto` / `16` / `rgb` (case-insensitive;
+ * the terminal spellings `ansi`, `ansi16`, `truecolor` and `24bit` are
+ * accepted and folded — see nm_config_color_canon). */
+int nm_config_valid_color(const char *value);
+
+/* Normalize a `color` value (validated first) into its canonical
+ * spelling (`auto` / `16` / `rgb`), so every layer stores one form.
+ * `ansi` and `ansi16` fold to `16`; `truecolor` and `24bit` fold to
+ * `rgb` — the words a terminal's own environment uses for the same
+ * choice, so a user who knows COLORTERM can spell it here too. */
+int nm_config_color_canon(const char *value, char *out, size_t cap);
+
+/* The canonical name of a mode, for /config and for diagnostics. */
+const char *nm_config_color_name(NmColorMode mode);
+
+/* The `color` key resolved and parsed: the winning layer's value as a
+ * mode. NM_COLOR_MODE_AUTO when the key is unset, and for a NULL
+ * config. This is what the view reads at the point of use. */
+NmColorMode nm_config_color_mode(const NmConfig *c);
 
 /* Is `value` a family set: `none`, or one or both families joined by
  * '+' (`IPv4`, `IPv6`, `IPv4+IPv6`)? The tokens are the nm_family_name

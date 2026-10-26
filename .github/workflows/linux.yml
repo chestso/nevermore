@@ -114,13 +114,19 @@ jobs:
           # the grid (an xterm inside portty measures with the grid rule,
           # not portty's) — the rule the startup banner names, and the
           # one the status row's columns are measured with.
+          # And, at this pin, the color tier: TuiAttr carries a TuiColor
+          # (so a row attribute can be an ANSI palette slot, not only a
+          # 24-bit triple) and the list popup can draw its selected row
+          # in reverse video — the two things a 16-color terminal needs
+          # from boba, since the app owns the tier DECISION and boba
+          # owns emitting it.
           # A floating master would let boba churn break this repo's CI
           # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it. It also names the
           # version the packaged binaries print (git describe reads
-          # v0.5.2; nevermore reports boba 0.5.2). Bump it in all three
+          # v0.5.3; nevermore reports boba 0.5.3). Bump it in all three
           # platform workflows at once.
-          ref: v0.5.2
+          ref: v0.5.3
           path: boba
           fetch-depth: 0
 
@@ -222,7 +228,7 @@ jobs:
           # configure resolves boba through pkg-config, and a missing
           # boba.pc is a hard error, so a tarball job cannot skip the
           # dependency it does not compile.
-          ref: v0.5.2
+          ref: v0.5.3
           path: boba
           fetch-depth: 0
 

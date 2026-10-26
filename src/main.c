@@ -454,7 +454,7 @@ static int run_interactive(const char *provider_name, const char *model,
      * width model in force, and the help line. `provider · model` lives
      * in the status row (nm_chat_app_identity) and is not repeated
      * here. */
-    nm_banner_write(stdout);
+    nm_banner_write(stdout, nm_chat_app_color_depth(app));
 
     int rc = tui_runtime_run(rt);
 

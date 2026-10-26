@@ -38,6 +38,7 @@
 #include <boba/runtime.h>
 
 #include "agent.h"
+#include "colors.h" /* NmColorDepth — the tier the app resolves */
 #include "provider.h"
 #include "tools.h"
 #include "transport.h"
@@ -187,6 +188,14 @@ const char *nm_chat_app_model_label(const NmChatApp *app);
  * right-aligned block and the startup banner's one spelling of the same
  * tuple. Truncated at `cap` rather than overflowed. */
 void nm_chat_app_identity(const NmChatApp *app, char *buf, size_t cap);
+
+/* The color tier the app resolves: the `color` key over the probe's
+ * env-derived truecolor hint. The ONE place that resolution lives — the
+ * frame paints from it (every role, the popup's selected row, the
+ * markdown renderer's attrs) and the banner NAMES it, so a user who
+ * cannot see the difference between the spec's two tables can read
+ * which one is in force. */
+NmColorDepth nm_chat_app_color_depth(const NmChatApp *app);
 
 /* The prompt's textinput (main.c wires history load/save to it). */
 TuiTextInput *nm_chat_app_textinput(NmChatApp *app);

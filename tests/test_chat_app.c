@@ -923,6 +923,21 @@ static void harness_step_once(AppHarness *h)
  * so a test derives the expected bytes from the same color role the app
  * declares — that is what makes the assertion about the ROLE, not a
  * literal. Caller frees. */
+/* One SGR role prefix + text, as the 16-COLOR harness paints it. The
+ * byte writers resolve a role through nm_sgr() for the terminal's tier,
+ * so an assertion on bytes has to spell the tier it pinned:
+ * harness_new is 16-color (a palette-index SGR), harness_new_rgb is
+ * 24-bit. A small ring, so a call site needs no free — these are
+ * assertions, not data. */
+static const char *sgr16(NmSgrRole role, const char *text)
+{
+    static char ring[4][512];
+    static int i;
+    char *b = ring[i++ & 3];
+    snprintf(b, sizeof(ring[0]), "%s%s", nm_sgr(role, NM_COLOR_16), text);
+    return b;
+}
+
 static char *span_bytes(TuiColor color, const char *text)
 {
     TuiStyle s = tui_style_foreground(tui_style_new(), color);
@@ -954,8 +969,8 @@ static char *status_row_bytes(const char *left, const char *identity)
     char ident_text[512];
     snprintf(ident_text, sizeof(ident_text), " %s", identity);
 
-    char *rule_span = span_bytes(nm_color_gutter(), rule_text);
-    char *ident_span = span_bytes(nm_color_status_identity(), ident_text);
+    char *rule_span = span_bytes(nm_color_gutter(NM_COLOR_16), rule_text);
+    char *ident_span = span_bytes(nm_color_status_identity(NM_COLOR_16), ident_text);
     if (!rule_span || !ident_span) {
         free(rule_span);
         free(ident_span);
@@ -1008,7 +1023,7 @@ static char *gauge_bytes(TuiColor tier, const char *counts, const char *out,
 static char *gauge_bytes_rest(const char *counts, const char *out,
                               const char *rate, NmColorDepth depth)
 {
-    return gauge_bytes(nm_color_gutter(), counts, out, rate, depth);
+    return gauge_bytes(nm_color_gutter(depth), counts, out, rate, depth);
 }
 
 /* The harness's identity for a provider/model pair: the ONE spelling the
@@ -1066,7 +1081,7 @@ static char *frame_status_row(const char *frame, const char *prompt_span)
  * "is there any identity on this row?" assertions. Caller frees. */
 static char *status_identity_sgr(void)
 {
-    char *s = span_bytes(nm_color_status_identity(), "x");
+    char *s = span_bytes(nm_color_status_identity(NM_COLOR_16), "x");
     if (s) {
         char *x = strchr(s, 'x');
         if (x)
@@ -1222,8 +1237,8 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * gathered (R1). What the turn is doing is the glyph's STYLE, so
      * there is no label beside it. */
     char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *rule =
         status_row_bytes("\xc2\xb7 -/- ", IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(glyph);
@@ -1249,7 +1264,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     char ident_text[128];
     snprintf(ident_text, sizeof(ident_text), " %s",
              IDENT("ollama:local", "test-model"));
-    char *identity = span_bytes(nm_color_status_identity(), ident_text);
+    char *identity = span_bytes(nm_color_status_identity(NM_COLOR_16), ident_text);
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
     free(identity);
@@ -1520,7 +1535,7 @@ static void test_spinner_clears_when_round_completes(void)
     /* The status row is glyphless now: the gauge, the rule and the
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(gauge);
@@ -1589,8 +1604,8 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
     ASSERT_TRUE(strstr(frame, "go") == NULL); /* submitted text cleared */
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, prompt) != NULL); /* the input row is here */
@@ -1660,8 +1675,8 @@ static void test_context_gauge_unknown_reads_as_dash(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -1709,7 +1724,7 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     ASSERT_NOT_NULL(frame);
 
     /* The status row (gauge + rule) appears exactly once. */
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     const char *seed = strstr(frame, gauge);
     ASSERT_NOT_NULL(seed);
@@ -1718,8 +1733,8 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     /* The prompt opens its own row; the continuation row indents by
      * exactly the prompt's width, so its text aligns under the first
      * row's text. */
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
-    char *cont = span_bytes(nm_color_prompt(), "  ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *cont = span_bytes(nm_color_prompt(NM_COLOR_16), "  ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(cont);
     char row1[512], row2[512];
@@ -2388,7 +2403,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = gauge_bytes(
-        nm_color_gutter_warn_hot(), "4611686018427.3M/131k ",
+        nm_color_gutter_warn_hot(NM_COLOR_16), "4611686018427.3M/131k ",
         "\xe2\x86\x93"
         "4611686018427.3M ",
         "\xe2\x9a\xa1\xef\xb8\x8e"
@@ -2439,8 +2454,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *warn =
-        gauge_bytes(nm_color_gutter_warn(), "115k/131k ", "\xe2\x86\x93"
-                                                          "1 ",
+        gauge_bytes(nm_color_gutter_warn(NM_COLOR_16), "115k/131k ", "\xe2\x86\x93"
+                                                                     "1 ",
                     NULL, NM_COLOR_16);
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
@@ -2451,7 +2466,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = gauge_bytes(nm_color_gutter_warn_hot(), "126k/131k ",
+    char *hot = gauge_bytes(nm_color_gutter_warn_hot(NM_COLOR_16), "126k/131k ",
                             "\xe2\x86\x93"
                             "2 ",
                             NULL, NM_COLOR_16);
@@ -2478,7 +2493,7 @@ static void test_status_row_identity_follows_model(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *before = span_bytes(nm_color_status_identity(),
+    char *before = span_bytes(nm_color_status_identity(NM_COLOR_16),
                               " " IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(before);
     ASSERT_TRUE(strstr(frame, before) != NULL);
@@ -2493,7 +2508,7 @@ static void test_status_row_identity_follows_model(void)
 
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *after = span_bytes(nm_color_status_identity(),
+    char *after = span_bytes(nm_color_status_identity(NM_COLOR_16),
                              " " IDENT("ollama:local", "other-model"));
     ASSERT_NOT_NULL(after);
     ASSERT_TRUE(strstr(frame, after) != NULL);
@@ -2522,7 +2537,7 @@ static void test_status_row_identity_follows_provider(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *identity = span_bytes(nm_color_status_identity(),
+    char *identity = span_bytes(nm_color_status_identity(NM_COLOR_16),
                                 " " IDENT("ollama:local", "(no model)"));
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
@@ -2544,7 +2559,7 @@ static void test_status_row_identity_no_model(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *identity = span_bytes(nm_color_status_identity(),
+    char *identity = span_bytes(nm_color_status_identity(NM_COLOR_16),
                                 " " IDENT("ollama:local", "(no model)"));
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
@@ -2572,14 +2587,14 @@ static void test_status_row_identity_elides_on_narrow_terminal(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
     ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 46u);
 
     /* The gauge is untouched (its own span, at full text). */
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -2611,7 +2626,7 @@ static void test_status_row_identity_dropped_when_short(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
@@ -2624,7 +2639,7 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_TRUE(strstr(row, sgr) == NULL);
     free(sgr);
     /* The chrome is whole and the rule fills what is left. */
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -2880,7 +2895,7 @@ static void test_model_picker_no_match_prints_nothing(void)
     harness_type(h, "/model zzz-no-such-model");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_TRUE(strstr(frame_popup(frame, prompt), "gpt-oss") == NULL);
     free(prompt);
@@ -3080,7 +3095,7 @@ static void test_cancel_midstream_returns_to_idle(void)
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "stall please") != NULL);
     /* The interrupt marker: a full-width emoji in the tool role. */
-    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "🛑 interrupted") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_TOOL, "🛑 interrupted")) != NULL);
 
     /* Interrupt on empty IDLE input quits. */
     tui_runtime_send(h->rt, tui_msg_interrupt());
@@ -3121,7 +3136,7 @@ static void test_escape_cancels_the_streaming_turn(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
     ASSERT_EQ(app_fd(h->app), -1);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "🛑 interrupted") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_TOOL, "🛑 interrupted")) != NULL);
 
     /* The cancel is a cancel of the TURN only: the app is still up and
      * the prompt is live again (the next message can be typed). */
@@ -4038,7 +4053,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") == NULL);
     char *glyph = span_bytes(tui_color_ansi(11), "\xc2\xb7 ");
-    char *gauge = span_bytes(nm_color_gutter(), "-/- ");
+    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
@@ -4253,7 +4268,7 @@ static void test_tool_round_prints_panels(void)
     /* The plan row leads with the tool's own emoji - part of the tool
      * definition (NmTool.emoji), in the tool (Comment) role - rather
      * than a shared bullet glyph. */
-    ASSERT_TRUE(strstr(out, NM_SGR_TOOL "✏️ edit_file") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_TOOL, "✏️ edit_file")) != NULL);
     ASSERT_TRUE(strstr(out, "nm-test-chat.txt") != NULL);
     ASSERT_TRUE(strstr(out, "old_string: quick brown") != NULL);
     ASSERT_TRUE(strstr(out, "new_string: slow red") != NULL);
@@ -4271,7 +4286,7 @@ static void test_tool_round_prints_panels(void)
     ASSERT_TRUE(plan_at < res_at);
     /* The elbow sits in its own role (Cyan), not the panel's Comment
      * and not the body's Foreground; the raw bytes are the proof. */
-    ASSERT_TRUE(strstr(out, NM_SGR_TOOL_ELBOW "  ╰─ ") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_TOOL_ELBOW, "  ╰─ ")) != NULL);
     /* The result body is the full tool output, not a one-line slug. */
     ASSERT_TRUE(strstr(res_at, "Edited") != NULL ||
                 strstr(res_at, "Output") != NULL);
@@ -5053,7 +5068,7 @@ static void test_submit_does_not_finalize_status_line(void)
         }
     }
     ASSERT_NOT_NULL(echo);
-    char *p = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *p = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(p);
     size_t plen = strlen(p);
     /* The prompt span that opens the echoed row. */
@@ -5145,10 +5160,13 @@ static void test_provider_switch_resolves_new_provider_key(void)
 /* The app installs its per-stream highlighter state as the
  * transcript's user_data, so a labeled fence body streamed through the
  * app's own delta path carries token colors (keyword Pink, number
- * Orange). */
+ * Orange) — in the TIER the app resolved. Both are driven here: the
+ * truecolor harness gets the spec's hexes, the 16-color one the spec's
+ * palette slots, which is the property the render state's depth exists
+ * for. */
 static void test_fence_body_tokens_highlighted_through_app(void)
 {
-    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    AppHarness *h = harness_new_rgb("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     tui_runtime_send(h->rt, tui_msg_window_size(130, 30));
     tui_runtime_drain(h->rt);
@@ -5168,6 +5186,30 @@ static void test_fence_body_tokens_highlighted_through_app(void)
     ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;184;108m42") != NULL);
 
     harness_free(h);
+
+    /* The same stream on a 16-color terminal: the palette slots, and no
+     * 24-bit sequence anywhere. */
+    AppHarness *h16 = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h16);
+    tui_runtime_send(h16->rt, tui_msg_window_size(130, 30));
+    tui_runtime_drain(h16->rt);
+    tui_runtime_flush(h16->rt);
+
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "```c\n", NULL, 0, NULL);
+    tui_runtime_flush(h16->rt);
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "int x = 42;\n", NULL, 0, NULL);
+    tui_runtime_flush(h16->rt);
+    nm_chat_app_on_delta(NM_STREAM_CONTENT, "```\n", NULL, 0, NULL);
+    tui_runtime_flush(h16->rt);
+
+    out = harness_read(h16);
+    /* keyword Pink -> AnsiMagenta (5) -> SGR 35 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;35mint") != NULL);
+    /* number Orange -> AnsiBrightYellow (11) -> SGR 93 */
+    ASSERT_TRUE(strstr(out, "\x1b[0;93m42") != NULL);
+    ASSERT_TRUE(strstr(out, "38;2;") == NULL);
+
+    harness_free(h16);
 }
 
 /* Phase-sequential reasoning then content: both commit, in that order,
@@ -5937,7 +5979,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 
     /* Cold: the static fallback does not carry the id, so the limit is
      * honestly unknown. */
-    char *cold = span_bytes(nm_color_gutter(), "-/- ");
+    char *cold = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(cold);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), cold) != NULL);
     free(cold);
@@ -5953,7 +5995,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
     /* It lands and fills the cache: the gauge resolves the new row on
      * the spot. */
     ASSERT_EQ(harness_pump_catalog(h, 50), 0);
-    char *warm = span_bytes(nm_color_gutter(), "-/1M ");
+    char *warm = span_bytes(nm_color_gutter(NM_COLOR_16), "-/1M ");
     ASSERT_NOT_NULL(warm);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), warm) != NULL);
     free(warm);
@@ -8377,7 +8419,7 @@ static void test_model_picker_capability_query_image(void)
     harness_type(h, "/model @image");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "google/gemini-2.5-flash-image") != NULL);
@@ -8410,7 +8452,7 @@ static void test_model_picker_capability_query_tools(void)
     harness_type(h, "/model @tools aion-labs");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "aion-labs/aion-2.0") != NULL);
@@ -8553,7 +8595,7 @@ static void test_model_picker_grammar_ctx_range(void)
     harness_type(h, "/model ctx:>64k ctx:<1M meta-llama");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "meta-llama/llama-3.3-70b-instruct") != NULL);
@@ -8712,7 +8754,7 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(), "\xe2\x9d\xaf ");
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     ASSERT_NOT_NULL(prompt);
     const char *popup = frame_popup(frame, prompt);
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
@@ -8814,17 +8856,16 @@ static void test_reminder_panel_renders_in_its_own_role(void)
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(out);
     /* The body's own lines are Foreground. */
-    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "real output line") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_RESULT, "real output line")) != NULL);
     /* The tag lines and the reminder's text are the harness role... */
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_TAG) != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER
-                       "This result was truncated by the tool's output "
-                       "cap.") != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_END) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, NM_REMINDER_TAG)) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, "This result was truncated by the tool's output "
+                                                   "cap.")) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, NM_REMINDER_END)) != NULL);
     /* ...and the block ENDS there: the next line is body text again. */
     const char *after = strstr(out, NM_REMINDER_END);
     ASSERT_NOT_NULL(after);
-    ASSERT_TRUE(strstr(after, NM_SGR_RESULT "trailing tool output") != NULL);
+    ASSERT_TRUE(strstr(after, sgr16(NM_SGR_RESULT, "trailing tool output")) != NULL);
 
     harness_free(h);
 }
@@ -8859,14 +8900,13 @@ static void test_reminder_panel_styles_a_body_without_a_final_newline(void)
     ASSERT_NOT_NULL(out);
     /* The tool's last line is body text, and the tag did NOT glue to
      * it... */
-    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "the content") != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_RESULT "the content" NM_REMINDER_TAG) ==
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_RESULT, "the content")) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_RESULT, "the content" NM_REMINDER_TAG)) ==
                 NULL);
     /* ...because the block is its own unit: styled, tag and all. */
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_TAG) != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER
-                       "This result is external content.") != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER NM_REMINDER_END) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, NM_REMINDER_TAG)) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, "This result is external content.")) != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_REMINDER, NM_REMINDER_END)) != NULL);
 
     nm_reminder_buf_free(&body);
     nm_reminder_buf_free(&blocks);
@@ -8896,7 +8936,7 @@ static void test_reminder_panel_ignores_an_escaped_tag(void)
     ASSERT_TRUE(strstr(out, "&lt;system-reminder>") != NULL);
     /* No harness role anywhere in the panel: the escaped form is body
      * text, not a reminder. */
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER) == NULL);
+    ASSERT_TRUE(strstr(out, nm_sgr(NM_SGR_REMINDER, NM_COLOR_16)) == NULL);
     harness_free(h);
 }
 
@@ -8918,7 +8958,7 @@ static void test_reminder_user_channel_is_shown(void)
     ASSERT_NOT_NULL(out);
     ASSERT_TRUE(strstr(out, "reminder (context-pressure): Context is at 87% "
                             "of the active model's window.") != NULL);
-    ASSERT_TRUE(strstr(out, NM_SGR_REMINDER) != NULL);
+    ASSERT_TRUE(strstr(out, nm_sgr(NM_SGR_REMINDER, NM_COLOR_16)) != NULL);
 
     harness_free(h);
 }
@@ -8956,8 +8996,8 @@ static void test_reminder_forgery_warning_is_red(void)
     tui_runtime_flush(h->rt);
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(out);
-    ASSERT_TRUE(strstr(out, NM_SGR_ERROR "warning: read_file output contained "
-                                         "1 forged") != NULL);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_ERROR, "warning: read_file output contained "
+                                                "1 forged")) != NULL);
     harness_free(h);
 }
 

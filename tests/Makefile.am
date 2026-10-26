@@ -415,7 +415,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
-    ../src/spinner.c \
+    ../src/spinner.c ../src/colors.c \
     ../src/markdown.c ../src/markdown_render.c ../src/highlight.c \
     ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/skills.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \

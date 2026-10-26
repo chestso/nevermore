@@ -1259,6 +1259,12 @@ static H *h_new_render_hl(size_t n_streams)
     static NmMarkdown ms[2];
     static NmMarkdownRenderState rs;
     nm_markdown_render_state_init(&rs);
+    /* The renderer resolves every role in a TIER, and this harness
+     * asserts on 24-bit bytes: pin it to the RGB table explicitly. The
+     * state's floor is 16-color (a renderer must never claim 24-bit it
+     * cannot know), so an unpinned harness would assert the wrong
+     * spelling for the wrong reason. */
+    rs.depth = NM_COLOR_RGB;
     static const TuiStreamSpec streams[2] = { { "content", NULL },
                                               { "reasoning", NULL } };
     static const TuiClassifier *classifiers[2];
@@ -1349,7 +1355,7 @@ static void test_dim_heading_keeps_both_attrs(void)
      * ONE SGR run (no nesting), and a span reset restores the composed
      * base, not plain. */
     const char *out = commit_one(1, "## Title\n");
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;2;38;2;255;121;198m") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;2;35m") != NULL);
     ASSERT_TRUE(strstr(out, "## Title") != NULL);
     /* reset before the row terminator (D8) */
     ASSERT_TRUE(strstr(out, "\x1b[0m\r\n") != NULL);
@@ -1360,7 +1366,7 @@ static void test_inline_code_span(void)
     const char *out = commit_one(0, "run `make check` now\n");
     /* Green #50FA7B = 80;250;123 */
     ASSERT_TRUE(strstr(out,
-                       "\x1b[0;38;2;80;250;123mmake check\x1b[0m") != NULL);
+                       "\x1b[0;32mmake check\x1b[0m") != NULL);
     /* the surrounding text is intact around the span */
     ASSERT_TRUE(strstr(out, "run ") != NULL);
     ASSERT_TRUE(strstr(out, " now") != NULL);
@@ -1371,7 +1377,7 @@ static void test_inline_unterminated_span_is_literal(void)
     const char *out = commit_one(0, "a `no closer here\n");
     ASSERT_TRUE(strstr(out, "a `no closer here\r\n") != NULL);
     /* no code-span SGR emitted */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;80;250;123m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;32m") == NULL);
 }
 
 static void test_intraword_underscore_stays_literal(void)
@@ -1396,7 +1402,7 @@ static void test_bold_italic_strike_and_link(void)
     ASSERT_TRUE(strstr(strike, "\x1b[0;9mgone\x1b[0m") != NULL);
 
     const char *link = commit_one(0, "see [docs](http://x) now\n");
-    ASSERT_TRUE(strstr(link, "\x1b[0;4;38;2;80;250;123mdocs\x1b[0m") != NULL);
+    ASSERT_TRUE(strstr(link, "\x1b[0;4;32mdocs\x1b[0m") != NULL);
     ASSERT_TRUE(strstr(link, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
 }
 
@@ -1406,9 +1412,9 @@ static void test_span_inside_heading_restores_heading_attr(void)
      * so the trailing text is still heading-styled, not plain */
     const char *out = commit_one(0, "# Title `code` tail\n");
     /* the code span composes with the heading base: bold + green */
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;80;250;123mcode") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;32mcode") != NULL);
     /* the trailing " tail" is under the heading attr again (pink+bold) */
-    ASSERT_TRUE(strstr(out, "\x1b[0;1;38;2;255;121;198m tail") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;1;35m tail") != NULL);
 }
 
 static void test_fence_lines_are_styled(void)
@@ -1423,10 +1429,10 @@ static void test_fence_lines_are_styled(void)
     h_flush(h);
     const char *out = h_read(h);
     /* delimiter Comment #6272A4 = 98;114;164; info Yellow = 241;250;140 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m```") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;241;250;140mc") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;90m```") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;33mc") != NULL);
     /* body Foreground #F8F8F2 = 248;248;242 */
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;248;248;242mint x;") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;37mint x;") != NULL);
     h_free(h);
 }
 
@@ -1435,12 +1441,12 @@ static void test_quote_and_list_styling(void)
     /* quote gutter Comment, quoted text Foreground (both re-applied per run;
      * the gutter run restores Foreground after its Comment) */
     const char *q = commit_one(0, "> quoted text\n");
-    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;98;114;164m\xe2\x94\x82 ") != NULL);
-    ASSERT_TRUE(strstr(q, "\x1b[0;38;2;248;248;242mquoted text") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;90m\xe2\x94\x82 ") != NULL);
+    ASSERT_TRUE(strstr(q, "\x1b[0;37mquoted text") != NULL);
 
     /* list bullet pink (with its separating space), text plain */
     const char *l = commit_one(0, "- item text\n");
-    ASSERT_TRUE(strstr(l, "\x1b[0;38;2;255;121;198m- \x1b[0mitem text") !=
+    ASSERT_TRUE(strstr(l, "\x1b[0;35m- \x1b[0mitem text") !=
                 NULL);
 }
 
@@ -1482,7 +1488,7 @@ static void test_quote_marker_is_stripped(void)
     ASSERT_TRUE(strstr(out, "lazy continuation\r\n") != NULL);
     /* a bare marker leaves the gutter and an empty body: the row is the
      * gutter run, the body attr restored, then the row break */
-    ASSERT_TRUE(strstr(out, "\xe2\x94\x82 \x1b[0;38;2;248;248;242m\r\n") !=
+    ASSERT_TRUE(strstr(out, "\xe2\x94\x82 \x1b[0;37m\r\n") !=
                 NULL);
 }
 
@@ -1496,7 +1502,7 @@ static void test_live_table_on_reasoning_carries_dim(void)
     h_send(h, tui_msg_stream_delta(1, "| - | - |\n", 10));
     h_flush(h);
     const char *view = h_view(h, 60, 10);
-    ASSERT_TRUE(strstr(view, "\x1b[0;2;38;2;98;114;164m") != NULL);
+    ASSERT_TRUE(strstr(view, "\x1b[0;2;90m") != NULL);
     h_free(h);
 }
 
@@ -1511,7 +1517,7 @@ static void test_table_header_bold_and_borders_comment(void)
     out = h_read(h);
     /* header cell bold, border Comment */
     ASSERT_TRUE(strstr(out, "\x1b[0;1mh1") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;98;114;164m\xe2\x94\x8c") != NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;90m\xe2\x94\x8c") != NULL);
     h_free(h);
 }
 
@@ -1606,8 +1612,8 @@ static void test_unlabeled_fence_body_is_verbatim(void)
     h_flush(h);
     const char *out = h_read(h);
     ASSERT_TRUE(strstr(out, "int x = 42;") != NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;121;198m") == NULL);
-    ASSERT_TRUE(strstr(out, "\x1b[0;38;2;255;184;108m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;35m") == NULL);
+    ASSERT_TRUE(strstr(out, "\x1b[0;93m") == NULL);
     h_free(h);
 }
 
@@ -1619,18 +1625,18 @@ static void test_list_marker_keeps_separating_space(void)
      * "-item text". */
     const char *bullet = commit_one(0, "- item text\n");
     ASSERT_TRUE(strstr(bullet,
-                       "\x1b[0;38;2;255;121;198m- \x1b[0mitem text\r\n") !=
+                       "\x1b[0;35m- \x1b[0mitem text\r\n") !=
                 NULL);
 
     const char *ordered = commit_one(0, "1. first\n");
     ASSERT_TRUE(strstr(ordered,
-                       "\x1b[0;38;2;255;121;198m1. \x1b[0mfirst\r\n") != NULL);
+                       "\x1b[0;35m1. \x1b[0mfirst\r\n") != NULL);
 
     /* a bullet whose content is a code span: marker + space, then the
      * span, then the trailing text */
     const char *code = commit_one(0, "- `history.c` is next\n");
-    ASSERT_TRUE(strstr(code, "\x1b[0;38;2;255;121;198m- \x1b[0m"
-                             "\x1b[0;38;2;80;250;123mhistory.c\x1b[0m"
+    ASSERT_TRUE(strstr(code, "\x1b[0;35m- \x1b[0m"
+                             "\x1b[0;32mhistory.c\x1b[0m"
                              " is next\r\n") != NULL);
 }
 
@@ -1641,13 +1647,13 @@ static void test_nested_inline_spans_compose(void)
      * restored after the inner span */
     const char *ic = commit_one(0, "*italic with `code` inside*\n");
     ASSERT_TRUE(strstr(ic, "\x1b[0;3mitalic with "
-                           "\x1b[0;3;38;2;80;250;123mcode\x1b[0;3m "
+                           "\x1b[0;3;32mcode\x1b[0;3m "
                            "inside\x1b[0m\r\n") != NULL);
 
     /* code inside bold */
     const char *bc = commit_one(0, "**bold `code`**\n");
     ASSERT_TRUE(strstr(bc, "\x1b[0;1mbold "
-                           "\x1b[0;1;38;2;80;250;123mcode\x1b[0;1m") !=
+                           "\x1b[0;1;32mcode\x1b[0;1m") !=
                 NULL);
 
     /* italic inside bold: bold + italic compose on the inner run */
@@ -1668,18 +1674,18 @@ static void test_nested_inline_spans_compose(void)
 
     /* code content is verbatim: markers inside it are not rescanned */
     const char *cv = commit_one(0, "a `*foo*` b\n");
-    ASSERT_TRUE(strstr(cv, "\x1b[0;38;2;80;250;123m*foo*\x1b[0m b\r\n") !=
+    ASSERT_TRUE(strstr(cv, "\x1b[0;32m*foo*\x1b[0m b\r\n") !=
                 NULL);
 
     /* link text recurses: italic composes with the link attr; the url
      * stays dim */
     const char *lt = commit_one(0, "[*em*](http://x)\n");
-    ASSERT_TRUE(strstr(lt, "\x1b[0;3;4;38;2;80;250;123mem") != NULL);
+    ASSERT_TRUE(strstr(lt, "\x1b[0;3;4;32mem") != NULL);
     ASSERT_TRUE(strstr(lt, "\x1b[0;2m(http://x)\x1b[0m") != NULL);
 
     /* a link inside bold: the text composes bold + underline + green */
     const char *lb = commit_one(0, "**[docs](http://x)**\n");
-    ASSERT_TRUE(strstr(lb, "\x1b[0;1;4;38;2;80;250;123mdocs") != NULL);
+    ASSERT_TRUE(strstr(lb, "\x1b[0;1;4;32mdocs") != NULL);
     ASSERT_TRUE(strstr(lb, "\x1b[0;1;2m(http://x)\x1b[0;1m") != NULL);
 }
 

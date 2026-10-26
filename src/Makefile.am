@@ -190,6 +190,7 @@ nevermore_SOURCES = \
     spinner.h \
     spinner.c \
     colors.h \
+    colors.c \
     $(TOOLS_SPAWN_SOURCE) \
     $(TLS_SOURCE)
 
