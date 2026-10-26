@@ -2353,12 +2353,28 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
  * 2^53 is not representable as a double, so the parse would round it and
  * the expected string would be a guess).
  *
- * The property is the COMPLETE ⚡ cluster: gauge_field writes a field
- * whole or not at all, so an undersized buffer DROPS the marker. A
- * truncated one would be worse — cut before the VS15 it is two cells
- * wide, and the row's column math would reserve the wrong columns. */
+ * The property is the COMPLETE ⚡ cluster: a field is written whole or
+ * not at all, so an undersized buffer DROPS the marker. A truncated one
+ * would be worse — cut before the VS15 it is two cells wide, and the
+ * row's column math would reserve the wrong columns.
+ *
+ * The worst case is a `long`'s worst case, and `long` is 32-BIT on
+ * Windows (LLP64): there the three fields cannot reach 64 bytes at all,
+ * so there is nothing to trap and the test returns early. The values
+ * below are 2^61/2^62, which a 32-bit long cannot hold — casting them
+ * would be UB, not a smaller number. */
 static void test_context_gauge_survives_the_worst_case_counts(void)
 {
+    if (sizeof(long) < 8) {
+        /* Say so out loud: this sub-test is vacuous here, and a
+         * vacuous PASS that says nothing is how a platform difference
+         * hides. */
+        fprintf(stderr, "  (skip: a %zu-byte long cannot reach the "
+                        "buffer's old bound)\n",
+                sizeof(long));
+        return;
+    }
+
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 2;
