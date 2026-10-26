@@ -122,7 +122,9 @@ app stays). Above the prompt its status row carries the
 context gauge, `<used>/<limit> ↓<out> ⚡<pct>`: the used count is the
 prompt the provider last reported and the limit the active model's
 catalog window, `↓<out>` is the output the conversation has accumulated
-(every completed round's `completion_tokens`, summed), and `⚡<pct>` is
+(every completed round's `completion_tokens`, summed) — the row's one
+Cyan field, the spec's own color for a marker, in whichever spelling the
+terminal can show (see `spinner_ramp` below) — and `⚡<pct>` is
 the session's cache rate — the share of this conversation's input that
 came from the provider's prefix cache, accumulated over every completed
 round that reported a read count (a round that omits the field is left
@@ -385,6 +387,13 @@ back, rather than dipping to a dark green — and on a terminal without
 truecolor (no `COLORTERM`, no direct-color `TERM`) it blinks instead:
 the same animation, told in the color the terminal can actually show.
 The star set that rotates while a tool runs is unaffected either way.
+
+The same tier governs the status row's output marker: `↓<n>` is Dracula's
+Cyan — the spec's own color for a marker — asked for as the 16-color
+palette's `AnsiCyan` slot on a terminal that cannot show 24-bit, and as
+the hex otherwise. The two are the SAME color under Dracula's terminal
+palette (the spec's AnsiCyan _is_ Cyan's `#8BE9FD`), so nothing is
+approximated: a 16-color terminal draws exactly what a 24-bit one does.
 
 `reminders` (a bool, default `on`) is the gate for the harness's own
 nudges: short `<system-reminder>` blocks injected into the conversation

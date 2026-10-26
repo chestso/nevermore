@@ -86,6 +86,36 @@
 #define NM_DRACULA_PINK_B 198
 
 /* ------------------------------------------------------------------ */
+/* The terminal's color tier                                           */
+/* ------------------------------------------------------------------ */
+
+/* Which of the spec's two tables this terminal can be handed. The spec
+ * publishes BOTH on purpose (spec.draculatheme.com §1.2.1 Standard,
+ * §1.2.2 ANSI): an editor paints the Standard hexes, while a 16-color
+ * terminal can only be asked for a palette INDEX — and a 24-bit
+ * sequence on such a terminal is the thing this tier exists to avoid.
+ * boba emits exactly what a TuiColor says (an RGB TuiColor is a
+ * `38;2;…` and nothing else, see style.c), so the tier is the APP's
+ * decision: the caller resolves it from boba's
+ * TuiTerminalProfile::truecolor and a depth-aware role picks its
+ * spelling. Lives here because it is a COLOR fact, not an animation
+ * one — the spinner is only its first consumer. */
+typedef enum
+{
+    NM_COLOR_16 = 0,
+    NM_COLOR_RGB = 1
+} NmColorDepth;
+
+/* The spec's ANSI table (§1.2.2), by palette index: the 16-color tier's
+ * spelling of a role. A terminal shows whatever ITS palette holds at
+ * that index, and under Dracula's own terminal themes each index
+ * carries the hex named here — which is what makes an ANSI spelling an
+ * EXACT rendering rather than a nearest-neighbour guess at a hex. Only
+ * the indices a depth-aware role needs live here; the spinner's two are
+ * named in spinner.c, beside the animation they belong to. */
+#define NM_DRACULA_ANSI_CYAN 6 /* #8BE9FD — AnsiCyan; Cyan's own hex */
+
+/* ------------------------------------------------------------------ */
 /* SGR strings (raw byte writers)                                      */
 /* ------------------------------------------------------------------ */
 
@@ -204,6 +234,27 @@ static inline TuiColor nm_color_gutter_warn_hot(void)
 {
     return tui_color_rgb(NM_DRACULA_RED_R, NM_DRACULA_RED_G,
                          NM_DRACULA_RED_B);
+}
+
+/* The status row's output-token field — the `↓` and the count it
+ * labels: Dracula Cyan. The spec's own vocabulary for a marker is Cyan
+ * (MarkupListBulletOrNumber is Cyan, as are ClassName and
+ * MarkupLinkUrl), and Cyan is the one hue this row has left: the gauge's
+ * counts are Comment (Orange/Red under pressure), the identity
+ * Foreground, the spinner glyph its own frame's Green or Yellow. Orange
+ * — the spec's numbers role, and what a bare counter might suggest — is
+ * not a candidate: it has NO entry in the spec's ANSI table, so it
+ * cannot degrade to a 16-color terminal at all.
+ *
+ * The ANSI tier is EXACT, not an approximation: the spec's AnsiCyan is
+ * #8BE9FD, the same value as Cyan, so a terminal running Dracula's
+ * palette draws the identical color at 16 colors. */
+static inline TuiColor nm_color_gauge_output(NmColorDepth depth)
+{
+    if (depth == NM_COLOR_RGB)
+        return tui_color_rgb(NM_DRACULA_CYAN_R, NM_DRACULA_CYAN_G,
+                             NM_DRACULA_CYAN_B);
+    return tui_color_ansi(NM_DRACULA_ANSI_CYAN);
 }
 
 /* The status row's right-aligned identity block (`provider · model`):

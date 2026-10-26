@@ -955,10 +955,14 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   It used to be a field of the text input (`TuiSpan` +
   `tui_textinput_set_status_line`, both deleted): chrome a text widget
   could not measure, sitting inside the input's height and cursor
-  arithmetic. Four segments, in order: the spinner glyph (LEFT, FIXED;
-  its color rides the frame the spinner hands over, not a static role)
-  and the gauge (LEFT, FIXED) — the row's chrome, never cut — then a
-  `─` FILL (priority 1, min_cols 1) and the right-aligned identity
+  arithmetic. Six segments at most, in order: the spinner glyph (LEFT,
+  FIXED; its color rides the frame the spinner hands over, not a static
+  role), then the gauge's fields — the counts, the session's output count
+  and the cache rate, ONE SEGMENT EACH so each can carry its own color
+  (`nm_color_gauge_output` for the output count; the counts and the rate
+  share the TIER's color, since they are window facts and the output
+  count is not) — all LEFT and FIXED: the row's chrome, never cut. Then
+  a `─` FILL (priority 1, min_cols 1) and the right-aligned identity
   (priority 2, min_cols 1, pad_left 1). So the ladder is a DECLARATION,
   not app arithmetic: the identity elides before the rule gives, the
   rule before the chrome, and a row with a fill is always exactly the
@@ -969,9 +973,10 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   `<used>/<limit> ↓<out> ⚡<pct>` — the first pair provider-reported
   (used) over catalog metadata (limit), then the session ledger's
   accumulated output and cache-read rate, each OMITTED until a round
-  reports its fact (`compose_gauge`'s `gauge_field` writes a field whole
-  or not at all, so a short buffer drops a marker rather than cutting
-  one). The identity is `<provider> · <label>`
+  reports its fact (an empty field is a segment the row does not declare
+  at all, and each field is written whole into a buffer sized for the
+  worst its own type can print — a FIXED segment is never shrunk, so a
+  marker is never cut). The identity is `<provider> · <label>`
   (U+00B7; `nm_chat_app_model_label` is the ONE `(no model)` spelling)
   and it is the row's alone: the startup banner prints the version
   and the width model, so the pair is stated in exactly one place. The
@@ -1001,7 +1006,11 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   env-derived `truecolor` hint (`COLORTERM`, or a direct-color `TERM`),
   read at the point of use and passed INTO the tick: the model knows
   nothing of boba, and the app owns the policy (which agent state shows
-  which style). The frame comes back BY VALUE — no static frame string,
+  which style). `NmColorDepth` itself lives in `src/colors.h` — a color
+  tier is a color fact, and the status row's output marker
+  (`nm_color_gauge_output`) is its second consumer: a 16-color terminal
+  gets the spec's ANSI palette INDEX, a truecolor one the spec's hex.
+  The frame comes back BY VALUE — no static frame string,
   so no consumer can lean on pointer identity over a frame whose color
   changes while its glyph does not.
 - **Images** — two halves, one sniffer. `src/image_bytes.{h,c}` is

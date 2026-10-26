@@ -970,6 +970,47 @@ static char *status_row_bytes(const char *left, const char *identity)
     return row;
 }
 
+/* The gauge's fields as the row paints them: ONE SPAN PER FIELD, in
+ * declaration order. The counts and the rate carry the TIER's color
+ * (nm_color_gutter at rest, Orange/Red under pressure), while the output
+ * count carries its own (nm_color_gauge_output) — it is not a window
+ * fact, so it must not change color with the window. An empty field is a
+ * span that is simply not there.
+ *
+ * `depth` is the tier the harness pinned: harness_new is 16-color (so the
+ * output span is a palette-index SGR), harness_new_rgb truecolor (a 24-bit
+ * one). Caller frees. */
+static char *gauge_bytes(TuiColor tier, const char *counts, const char *out,
+                         const char *rate, NmColorDepth depth)
+{
+    int has_out = out && out[0];
+    int has_rate = rate && rate[0];
+    char *a = span_bytes(tier, counts);
+    char *b = has_out ? span_bytes(nm_color_gauge_output(depth), out) : NULL;
+    char *c = has_rate ? span_bytes(tier, rate) : NULL;
+    if (!a || (has_out && !b) || (has_rate && !c)) {
+        free(a);
+        free(b);
+        free(c);
+        return NULL;
+    }
+    size_t n = strlen(a) + (b ? strlen(b) : 0) + (c ? strlen(c) : 0) + 1;
+    char *row = (char *)malloc(n);
+    if (row)
+        snprintf(row, n, "%s%s%s", a, b ? b : "", c ? c : "");
+    free(a);
+    free(b);
+    free(c);
+    return row;
+}
+
+/* The same, on the row at rest (the gauge's tier is Comment). */
+static char *gauge_bytes_rest(const char *counts, const char *out,
+                              const char *rate, NmColorDepth depth)
+{
+    return gauge_bytes(nm_color_gutter(), counts, out, rate, depth);
+}
+
 /* The harness's identity for a provider/model pair: the ONE spelling the
  * status row's right block and the startup banner share. */
 #define IDENT(p, m) p " \xc2\xb7 " m
@@ -1981,10 +2022,11 @@ static void test_context_gauge_reports_usage_and_limit(void)
               2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x86\x93"
-                                                "5 \xe2\x9a\xa1"
-                                                "\xef\xb8\x8e"
-                                                "65.3% ");
+    char *gauge = gauge_bytes_rest("12.4k/131k ", "\xe2\x86\x93"
+                                                  "5 ",
+                                   "\xe2\x9a\xa1\xef\xb8\x8e"
+                                   "65.3% ",
+                                   NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2062,8 +2104,10 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "8.9k/131k \xe2\x86\x93"
-                                                "153 ");
+    char *gauge = gauge_bytes_rest("8.9k/131k ", "\xe2\x86\x93"
+                                                 "153 ",
+                                   NULL,
+                                   NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2081,10 +2125,11 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "11.3k/131k \xe2\x86\x93"
-                                          "317 \xe2\x9a\xa1"
-                                          "\xef\xb8\x8e"
-                                          "80.3% ");
+    gauge = gauge_bytes_rest("11.3k/131k ", "\xe2\x86\x93"
+                                            "317 ",
+                             "\xe2\x9a\xa1\xef\xb8\x8e"
+                             "80.3% ",
+                             NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2096,10 +2141,11 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "10k/131k \xe2\x86\x93"
-                                          "417 \xe2\x9a\xa1"
-                                          "\xef\xb8\x8e"
-                                          "42.6% ");
+    gauge = gauge_bytes_rest("10k/131k ", "\xe2\x86\x93"
+                                          "417 ",
+                             "\xe2\x9a\xa1\xef\xb8\x8e"
+                             "42.6% ",
+                             NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2161,9 +2207,10 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "1k/131k \xe2\x9a\xa1"
-                                                "\xef\xb8\x8e"
-                                                "50.0% ");
+    char *gauge = gauge_bytes_rest("1k/131k ", NULL,
+                                   "\xe2\x9a\xa1\xef\xb8\x8e"
+                                   "50.0% ",
+                                   NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2178,10 +2225,11 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "2k/131k \xe2\x86\x93"
-                                          "0 \xe2\x9a\xa1"
-                                          "\xef\xb8\x8e"
-                                          "50.0% ");
+    gauge = gauge_bytes_rest("2k/131k ", "\xe2\x86\x93"
+                                         "0 ",
+                             "\xe2\x9a\xa1\xef\xb8\x8e"
+                             "50.0% ",
+                             NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2192,6 +2240,92 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
                             "output tokens") != NULL);
 
     harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The output marker's color is the TIER's business. A 16-color terminal
+ * gets the spec's ANSI palette INDEX — a `36` SGR, never a 24-bit
+ * sequence, which is the whole reason the tier exists — and a truecolor
+ * one the spec's Cyan hex. The two are the same color under Dracula's
+ * own terminal palette (the spec's AnsiCyan is #8BE9FD, Cyan's own
+ * value), which is what makes the 16-color rendering an EXACT one rather
+ * than a nearest-neighbour guess at a hex.
+ *
+ * Both tiers are driven through the real path — the same canned round on
+ * a 16-color harness and then on a truecolor one — so this pins the
+ * app's CHOICE of depth, not just the role's two spellings. */
+static void test_output_marker_color_follows_the_terminal_tier(void)
+{
+    /* The role itself: one color, two spellings. */
+    TuiColor rgb = nm_color_gauge_output(NM_COLOR_RGB);
+    TuiColor ansi = nm_color_gauge_output(NM_COLOR_16);
+    ASSERT_EQ(rgb.type, TUI_COLOR_RGB);
+    ASSERT_EQ(rgb.v.rgb.r, NM_DRACULA_CYAN_R);
+    ASSERT_EQ(rgb.v.rgb.g, NM_DRACULA_CYAN_G);
+    ASSERT_EQ(rgb.v.rgb.b, NM_DRACULA_CYAN_B);
+    ASSERT_EQ(ansi.type, TUI_COLOR_ANSI16);
+    ASSERT_EQ(ansi.v.ansi, NM_DRACULA_ANSI_CYAN);
+    ASSERT_EQ(NM_DRACULA_ANSI_CYAN, 6); /* AnsiCyan, the spec's slot */
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2; /* one turn per tier */
+    for (int i = 0; i < 2; i++)
+        sc.sse[i] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,"
+            "\"completion_tokens\":5,\"total_tokens\":1005,"
+            "\"prompt_tokens_details\":{\"cached_tokens\":500}}}\n\n"
+            "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    /* The 16-color tier: the palette index, and the 24-bit sequence
+     * nowhere in the paint. */
+    AppHarness *h16 = harness_new("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h16);
+    harness_type(h16, "hi");
+    harness_enter(h16);
+    ASSERT_EQ(harness_drive(h16, 500), 0);
+    const char *frame = tui_runtime_render(h16->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge = gauge_bytes_rest("1k/131k ", "\xe2\x86\x93"
+                                               "5 ",
+                                   "\xe2\x9a\xa1\xef\xb8\x8e"
+                                   "50.0% ",
+                                   NM_COLOR_16);
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    ASSERT_TRUE(strstr(frame, "\033[36m") != NULL); /* the index's SGR */
+    ASSERT_TRUE(strstr(frame, "\033[38;2;139;233;253m") == NULL);
+    harness_free(h16);
+
+    /* The truecolor tier: the spec's Cyan hex. */
+    AppHarness *h32 = harness_new_rgb("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h32);
+    harness_type(h32, "hi");
+    harness_enter(h32);
+    ASSERT_EQ(harness_drive(h32, 500), 0);
+    frame = tui_runtime_render(h32->rt);
+    ASSERT_NOT_NULL(frame);
+    gauge = gauge_bytes_rest("1k/131k ", "\xe2\x86\x93"
+                                         "5 ",
+                             "\xe2\x9a\xa1\xef\xb8\x8e"
+                             "50.0% ",
+                             NM_COLOR_RGB);
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    ASSERT_TRUE(strstr(frame, "\033[38;2;139;233;253m") != NULL);
+    harness_free(h32);
+
     pthread_join(th, NULL);
     close(sc.fd);
 }
@@ -2253,11 +2387,13 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
      * so it does not overflow where a long multiply would. */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter_warn_hot(),
-                             "4611686018427.3M/131k \xe2\x86\x93"
-                             "4611686018427.3M \xe2\x9a\xa1"
-                             "\xef\xb8\x8e"
-                             "461168601842738790400.0% ");
+    char *gauge = gauge_bytes(
+        nm_color_gutter_warn_hot(), "4611686018427.3M/131k ",
+        "\xe2\x86\x93"
+        "4611686018427.3M ",
+        "\xe2\x9a\xa1\xef\xb8\x8e"
+        "461168601842738790400.0% ",
+        NM_COLOR_16);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2302,8 +2438,10 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = span_bytes(nm_color_gutter_warn(), "115k/131k \xe2\x86\x93"
-                                                    "1 ");
+    char *warn =
+        gauge_bytes(nm_color_gutter_warn(), "115k/131k ", "\xe2\x86\x93"
+                                                          "1 ",
+                    NULL, NM_COLOR_16);
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -2313,8 +2451,10 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = span_bytes(nm_color_gutter_warn_hot(), "126k/131k \xe2\x86\x93"
-                                                       "2 ");
+    char *hot = gauge_bytes(nm_color_gutter_warn_hot(), "126k/131k ",
+                            "\xe2\x86\x93"
+                            "2 ",
+                            NULL, NM_COLOR_16);
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -9429,6 +9569,7 @@ int main(void)
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
     RUN_TEST(test_context_gauge_output_marker_waits_for_a_report);
+    RUN_TEST(test_output_marker_color_follows_the_terminal_tier);
     RUN_TEST(test_context_gauge_survives_the_worst_case_counts);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_status_row_identity_follows_model);

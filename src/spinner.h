@@ -30,6 +30,7 @@
 #include <stdint.h>
 
 #include "agent.h"
+#include "colors.h" /* NmColorDepth — the terminal's color tier */
 
 /* One animation instance (spinner.c owns the definition). */
 typedef struct NmSpinner NmSpinner;
@@ -41,15 +42,6 @@ typedef enum
     NM_SPINNER_PULSE_DOT_FIXED,
     NM_SPINNER_STARS
 } NmSpinnerStyleId;
-
-/* The terminal's color tier, as the caller resolved it (boba's
- * TuiTerminalProfile::truecolor). NM_COLOR_RGB pulses the dot's green;
- * NM_COLOR_16 blinks it in a bright ANSI16 green instead. */
-typedef enum
-{
-    NM_COLOR_16 = 0,
-    NM_COLOR_RGB = 1
-} NmColorDepth;
 
 /* One tick's worth of animation, returned BY VALUE: the caller owns
  * nothing and aliases nothing, so no consumer can be tempted into

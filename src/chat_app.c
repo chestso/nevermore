@@ -760,9 +760,11 @@ static int spinner_ramp_on(const NmChatApp *app)
 /* The terminal's color tier, from the probe's env-derived hint: 24-bit
  * where the environment advertises it (COLORTERM, or a direct-color
  * TERM), 16-color otherwise — which is where the dot blinks instead of
- * pulsing. Read at the point of use, like the keyboard tier: the hint
- * lands when the probe starts, so there is nothing to cache. */
-static NmColorDepth spinner_depth(const NmChatApp *app)
+ * pulsing, and where a depth-aware role (nm_color_gauge_output) asks for
+ * a palette index instead of a hex. Read at the point of use, like the
+ * keyboard tier: the hint lands when the probe starts, so there is
+ * nothing to cache. */
+static NmColorDepth color_depth(const NmChatApp *app)
 {
     if (!app->rt)
         return NM_COLOR_16;
@@ -1877,7 +1879,7 @@ void nm_chat_app_tick(NmChatApp *app)
     if (app->catalog_src)
         catalog_step(app);
 
-    NmSpinnerFrame frame = nm_spinner_tick(app->spinner, spinner_depth(app));
+    NmSpinnerFrame frame = nm_spinner_tick(app->spinner, color_depth(app));
     app->spinner_frame = frame;
     if (frame.glyph)
         tui_runtime_wakeup(app->rt);
@@ -3784,7 +3786,7 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
      * opens a stream goes through on_state(ERROR), which stops it. */
     if (saved[0] != '/') {
         spinner_follow_state(app, NM_AGENT_STREAMING);
-        app->spinner_frame = nm_spinner_frame(app->spinner, spinner_depth(app));
+        app->spinner_frame = nm_spinner_frame(app->spinner, color_depth(app));
     }
     tui_runtime_flush(app->rt);
 
@@ -4136,30 +4138,32 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 /* Status row (P2): spinner + gauge + separator rule + identity      */
 /* ---------------------------------------------------------------- */
 
-/* Append one " <marker><text>" field to the gauge, WHOLE or not at all.
- * snprintf would truncate silently, and a cut ⚡ cluster loses the VS15
- * selector that makes it one cell (see compose_gauge) — so a field that
- * does not fit is refused rather than cut. *len is the bytes written so
- * far; the buffer is NUL-terminated on every return path. */
-static void gauge_field(char *dst, size_t cap, size_t *len, const char *marker,
-                        const char *text)
+/* The gauge's three fields, ONE SEGMENT EACH so each can carry its own
+ * color: the counts (the tier's color), the session's output count (the
+ * ↓ field, its own role) and the cache-read rate (the tier's color
+ * again). An empty field is a segment the row does not declare at all.
+ *
+ * Every field carries its own trailing space — the spacing between the
+ * row's left segments is CONTENT (the app owns the text), and the last
+ * field's space is what separates the chrome from the rule — so the
+ * bytes are identical whether or not a field is present.
+ *
+ * A field is written WHOLE. Each is a priority-0 (FIXED) segment, which
+ * boba never shrinks and never drops; that is what guarantees a marker
+ * is never cut, and it matters: a truncated ⚡ cluster loses the VS15
+ * selector that makes it one cell. The rate's buffer is sized for the
+ * worst a `%.1f` of a double can print, not the ≤26 the rate can
+ * actually reach — the same rule that makes u/l 24 and not 16, and what
+ * -Wformat-truncation exists to catch. */
+typedef struct
 {
-    size_t m = strlen(marker);
-    size_t t = strlen(text);
-    if (*len + 1 + m + t + 1 > cap)
-        return;
-    dst[(*len)++] = ' ';
-    memcpy(dst + *len, marker, m);
-    *len += m;
-    memcpy(dst + *len, text, t);
-    *len += t;
-    dst[*len] = '\0';
-}
+    char counts[64]; /* `<used>/<limit> ` — always present */
+    char out[32];    /* `↓<out> ` — empty until a round reports output */
+    char rate[336];  /* `⚡<pct> ` — empty until a round reports a read */
+} NmGaugeFields;
 
-/* The gauge text: `<used>/<limit>`, then the SESSION's output count
- * (`↓<n>`) and cache-read rate (`⚡<pct>`) when the ledger has them. The
- * two counts are provider-reported (used) / catalog metadata (limit); "-"
- * is an honest unknown, never an estimate.
+/* Fill the gauge's fields. The counts are provider-reported (used) over
+ * catalog metadata (limit); "-" is an honest unknown, never an estimate.
  *
  * The ↓ count is Σ completion_tokens over the completed rounds that
  * reported usage (nm_agent_session_output_tokens) — the same accessor
@@ -4190,7 +4194,7 @@ static void gauge_field(char *dst, size_t cap, size_t *len, const char *marker,
  * the base's two cells stand. Both agree with what those terminals draw,
  * so the row reserves exactly the columns the terminal draws — as long as
  * the model is the terminal's, which is why the banner states it. */
-static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
+static void compose_gauge(const NmChatApp *app, NmGaugeFields *f)
 {
     /* Sized for the worst a long can print (19 digits + '.' +
      * fraction + unit + NUL = 23), not the 16 it took before: a
@@ -4200,31 +4204,22 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
     char u[24], l[24];
     format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
     format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
-    int n = snprintf(dst, cap, "%s/%s", u, l);
-    if (n <= 0 || (size_t)n >= cap)
-        return;
-    size_t len = (size_t)n;
+    snprintf(f->counts, sizeof(f->counts), "%s/%s ", u, l);
 
-    char o[24];
+    f->out[0] = '\0';
     long out = nm_agent_session_output_tokens(app->agent);
     if (out >= 0) {
+        char o[24];
         format_tokens(out, o, sizeof(o));
-        gauge_field(dst, cap, &len, "\xe2\x86\x93", o); /* ↓ */
+        snprintf(f->out, sizeof(f->out), "\xe2\x86\x93%s ", o); /* ↓ */
     }
 
+    f->rate[0] = '\0';
     long read = nm_agent_session_cache_read_tokens(app->agent);
     long base = nm_agent_session_cache_base_tokens(app->agent);
-    if (read >= 0 && base > 0) {
-        /* Sized for the worst a `%.1f` of a double can print, not the
-         * ≤26 the rate can actually reach (a 19-digit read over a
-         * 1-token base is 22 digits and a point before the '%'): the
-         * buffer holds what the TYPE can produce, which is the same rule
-         * that makes u/l 24 and not 16. Sizing it to the value seen is
-         * what -Wformat-truncation exists to catch. */
-        char r[320];
-        snprintf(r, sizeof(r), "%.1f%%", (double)read * 100.0 / (double)base);
-        gauge_field(dst, cap, &len, "\xe2\x9a\xa1\xef\xb8\x8e", r);
-    }
+    if (read >= 0 && base > 0)
+        snprintf(f->rate, sizeof(f->rate), "\xe2\x9a\xa1\xef\xb8\x8e%.1f%% ",
+                 (double)read * 100.0 / (double)base);
 }
 
 /* The gauge's tier (nm_agent_context_tier): Comment at rest, Orange
@@ -4300,29 +4295,15 @@ static void compose_status(NmChatApp *app)
      * separate busy check that could disagree with the animation. */
     const NmSpinnerFrame *frame = &app->spinner_frame;
 
-    /* The gauge carries its own trailing space: the spacing between the
-     * row's left segments is CONTENT here (the app owns the text), while
-     * the identity's gap is the declaration's pad_left.
-     *
-     * Sized for the worst the three fields can print, not the 64 the
-     * two-field gauge fit in: two 23-byte counts, the ↓ field (1 + 3 + a
-     * 23-byte count) and the ⚡ field (1 + 4 + a 24-byte rate) come to
-     * 105 bytes + NUL. gauge_field refuses a field that will not fit
-     * whole, so an undersized buffer would DROP a marker rather than
-     * print a lie — the test that drives the gauge past 64 bytes is what
-     * keeps this number honest. */
-    char gauge[128];
-    compose_gauge(app, gauge, sizeof(gauge));
-    size_t glen = strlen(gauge);
-    if (glen + 2 <= sizeof(gauge)) {
-        gauge[glen] = ' ';
-        gauge[glen + 1] = '\0';
-    }
+    /* The gauge's fields (each already carrying its own trailing space —
+     * see compose_gauge). */
+    NmGaugeFields g;
+    compose_gauge(app, &g);
 
     char identity[256];
     nm_chat_app_identity(app, identity, sizeof(identity));
 
-    TuiSegment segs[4];
+    TuiSegment segs[6];
     size_t n = 0;
     char glyph_text[16];
     if (frame->glyph) {
@@ -4333,14 +4314,24 @@ static void compose_status(NmChatApp *app)
             snprintf(glyph_text, sizeof(glyph_text), "%s ", frame->glyph);
         else
             snprintf(glyph_text, sizeof(glyph_text), "  ");
-        NmColorDepth depth = spinner_depth(app);
+        NmColorDepth depth = color_depth(app);
         TuiColor color = depth == NM_COLOR_RGB
                              ? tui_color_rgb(frame->r, frame->g, frame->b)
                              : tui_color_ansi(frame->ansi16);
         segs[n++] = status_segment(glyph_text, TUI_SEGMENT_LEFT, 0, 0, 0, color);
     }
-    segs[n++] =
-        status_segment(gauge, TUI_SEGMENT_LEFT, 0, 0, 0, gauge_color(app));
+    /* One segment per gauge field, so the output count can carry a color
+     * of its own: the counts and the rate are the TIER's color (how full
+     * the window is), while the output count is not a window fact at all
+     * and must not change color with the window's pressure. All three are
+     * priority 0 — the row's chrome, never shrunk and never dropped. */
+    TuiColor tier = gauge_color(app);
+    segs[n++] = status_segment(g.counts, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
+    if (g.out[0])
+        segs[n++] = status_segment(g.out, TUI_SEGMENT_LEFT, 0, 0, 0,
+                                   nm_color_gauge_output(color_depth(app)));
+    if (g.rate[0])
+        segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
     segs[n++] =
         status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
                        nm_color_gutter());
