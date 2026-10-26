@@ -246,11 +246,20 @@ struct NmAgent
      * excluded from the rate rather than counted as a miss — while a
      * round that reports 0 IS a miss (0 in the numerator, its input in
      * the base). write is accumulated as an absolute count only: the
-     * write side is not rated or rendered beyond that yet. -1 means
-     * "no round ever reported the fact". */
+     * write side is not rated or rendered beyond that yet.
+     *
+     * Each accumulator has its own `seen` latch, because a SUM cannot
+     * carry the unknown: the totals start at 0, so without the latch a
+     * ledger that has counted nothing is indistinguishable from one that
+     * counted a reported 0. The accessors answer -1 off the latch — "no
+     * round ever reported the fact" — which is what agent.h documents
+     * and what a UI needs to omit a field rather than print a fabricated
+     * 0. in/out are latched separately: a usage object may carry one
+     * count and not the other. */
     long sess_in, sess_out;
     long sess_cache_read, sess_cache_write, sess_cache_base;
-    int sess_rounds, sess_read_seen, sess_write_seen;
+    int sess_rounds, sess_in_seen, sess_out_seen, sess_read_seen,
+        sess_write_seen;
 
     /* The last COMPLETED round's provider response metadata (Hyper's
      * Prism routing: which model actually answered, savings — §3.5.2).
@@ -792,12 +801,16 @@ long nm_agent_session_rounds(const NmAgent *a)
 
 long nm_agent_session_input_tokens(const NmAgent *a)
 {
-    return a ? a->sess_in : -1;
+    if (!a || !a->sess_in_seen)
+        return -1;
+    return a->sess_in;
 }
 
 long nm_agent_session_output_tokens(const NmAgent *a)
 {
-    return a ? a->sess_out : -1;
+    if (!a || !a->sess_out_seen)
+        return -1;
+    return a->sess_out;
 }
 
 long nm_agent_session_cache_read_tokens(const NmAgent *a)
@@ -1619,10 +1632,14 @@ static void session_account_round(NmAgent *a)
     if (!a->round_usage_seen)
         return;
     const NmUsage *u = &a->last_usage;
-    if (u->prompt_tokens >= 0)
+    if (u->prompt_tokens >= 0) {
         a->sess_in += u->prompt_tokens;
-    if (u->completion_tokens >= 0)
+        a->sess_in_seen = 1;
+    }
+    if (u->completion_tokens >= 0) {
         a->sess_out += u->completion_tokens;
+        a->sess_out_seen = 1;
+    }
     if (u->cached_tokens >= 0) {
         a->sess_cache_read += u->cached_tokens;
         /* The rate's denominator: input of the rounds that reported the

@@ -2793,9 +2793,13 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    /* Before any round: every session accessor is the unknown sentinel. */
+    /* Before any round: every session accessor is the unknown sentinel
+     * — including in/out, which a SUM cannot carry on its own (the
+     * totals start at 0, so the latch is what tells "counted nothing"
+     * from "counted a reported 0"). */
     ASSERT_EQ(nm_agent_session_rounds(agent), 0);
-    ASSERT_EQ(nm_agent_session_input_tokens(agent), 0);
+    ASSERT_EQ(nm_agent_session_input_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_session_output_tokens(agent), -1);
     ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), -1);
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), -1);
     ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), -1);

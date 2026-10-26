@@ -327,13 +327,18 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `openai_client.c`'s `parse_usage()`, the only reader of a provider's
   wire keys (a new provider maps its keys there, never in the
   provider file). The session ledger (`agent.c`) accumulates once per
-  COMPLETED round, and the cache pair is PAIRED — `sess_cache_read`
+  COMPLETED round, and every accumulator carries its own `seen` latch: a
+  SUM cannot hold the unknown, so the accessors answer `-1` ("no round
+  ever reported the fact") off the latch rather than a `0` no provider
+  ever sent. The cache pair is PAIRED — `sess_cache_read`
   moves with `sess_cache_base` (the input of the rounds that reported
   a read), so a round that omits the field is excluded from the rate
   rather than counted as a miss, while a reported `0` IS a miss. The
-  status line's `⚡` is `Σcached / Σprompt` over the read-reporting
-  rounds — input, never output (output is never cacheable) — and is
-  omitted entirely when no read was ever reported.
+  status row reads two of them: `↓` is `Σcompletion_tokens`, the output
+  the conversation has accumulated, and `⚡` is `Σcached / Σprompt` over
+  the read-reporting rounds — input, never output (output is never
+  cacheable). Each marker is omitted entirely until a round has reported
+  its fact.
 - **Transport** (`src/transport.c` + `src/transport_socket.c`) —
   connection lifecycle + TLS handshake in transport.c; sockets,
   HTTP/1.1 framing, chunked dechunking in transport_socket.c. TLS
@@ -960,7 +965,13 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   terminal width. **boba owns the columns, the app owns the content**
   (`compose_gauge` + `nm_chat_app_identity`); boba also change-detects
   the declaration set, so the app's old `status_text`/`status_last`
-  buffers and `strcmp` are gone. The identity is `<provider> · <label>`
+  buffers and `strcmp` are gone. The gauge's text is
+  `<used>/<limit> ↓<out> ⚡<pct>` — the first pair provider-reported
+  (used) over catalog metadata (limit), then the session ledger's
+  accumulated output and cache-read rate, each OMITTED until a round
+  reports its fact (`compose_gauge`'s `gauge_field` writes a field whole
+  or not at all, so a short buffer drops a marker rather than cutting
+  one). The identity is `<provider> · <label>`
   (U+00B7; `nm_chat_app_model_label` is the ONE `(no model)` spelling)
   and it is the row's alone: the startup banner prints the version
   and the width model, so the pair is stated in exactly one place. The

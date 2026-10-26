@@ -1583,6 +1583,32 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
 /* Context gauge (P2): provider-reported usage in the status line    */
 /* ---------------------------------------------------------------- */
 
+/* The output marker (U+2193) is ONE CELL under every width model — that
+ * is the whole reason it is a plain arrow and not a VS15 cluster like the
+ * ⚡ rate beside it. Pin the measurement, because the row's column math
+ * (the rule's fill, the identity's right edge) is built on it: a boba
+ * regression that widened the arrow would leave the gauge's bytes
+ * unchanged and shift every cell after it.
+ *
+ * Measured against all three models EXPLICITLY, never the ambient one: a
+ * dev box and a CI runner resolve the ambient model differently, so the
+ * zero-suffix call would be a coin flip (the same reason the ⚡ test names
+ * its model). */
+static void test_output_marker_is_one_cell_under_every_model(void)
+{
+    ASSERT_EQ(
+        tui_utf8_display_width_model("\xe2\x86\x93", TUI_WIDTH_MODEL_GRID), 1);
+    ASSERT_EQ(
+        tui_utf8_display_width_model("\xe2\x86\x93", TUI_WIDTH_MODEL_WCWIDTH),
+        1);
+    ASSERT_EQ(
+        tui_utf8_display_width_model("\xe2\x86\x93", TUI_WIDTH_MODEL_UTS51), 1);
+    /* And the ⚡ cluster it sits beside is the contrast that makes the
+     * point: two cells under the grid rule without its selector. */
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1", TUI_WIDTH_MODEL_GRID),
+              2);
+}
+
 /* The idle frame carries the gauge, the rule and the identity (Q4) and it
  * says "unknown" honestly: no usage reported yet, and the catalog carries
  * no window for this model. */
@@ -1924,11 +1950,13 @@ static void test_context_gauge_reports_usage_and_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    /* The idle frame's gauge: 12.4k of 131k, with the SESSION cache-read
-     * rate (the one round's 8100 read / 12400 input = 65.3 %). The rate
-     * marker is the small ⚡ — U+26A1 + VS15 (the text-presentation
-     * request), so the assert pins the selector: a bare ⚡ is a prefix of
-     * it and would slip back in unnoticed.
+    /* The idle frame's gauge: 12.4k of 131k, then the SESSION's output
+     * count (the one round's 5 completion tokens — the accumulated
+     * field, read from the same accessor /context spells out), then the
+     * cache-read rate (the one round's 8100 read / 12400 input =
+     * 65.3 %). The rate marker is the small ⚡ — U+26A1 + VS15 (the
+     * text-presentation request), so the assert pins the selector: a
+     * bare ⚡ is a prefix of it and would slip back in unnoticed.
      *
      * The cluster measures ONE cell — that is the whole reason for the
      * selector, and the row's column math (the rule's fill, the
@@ -1953,7 +1981,8 @@ static void test_context_gauge_reports_usage_and_limit(void)
               2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x9a\xa1"
+    char *gauge = span_bytes(nm_color_gutter(), "12.4k/131k \xe2\x86\x93"
+                                                "5 \xe2\x9a\xa1"
                                                 "\xef\xb8\x8e"
                                                 "65.3% ");
     ASSERT_NOT_NULL(gauge);
@@ -2025,13 +2054,16 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_NOT_NULL(h);
 
     /* Round 1: usage, but no cache read ever reported => no ⚡ at all
-     * (never a fabricated 0 %) and the session line says so. */
+     * (never a fabricated 0 %) and the session line says so. The ↓ count
+     * IS there: this round reported output, which is what the marker
+     * needs — the two fields' conditions are independent. */
     harness_type(h, "one");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(), "8.9k/131k ");
+    char *gauge = span_bytes(nm_color_gutter(), "8.9k/131k \xe2\x86\x93"
+                                                "153 ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, gauge) != NULL);
     free(gauge);
@@ -2049,7 +2081,8 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "11.3k/131k \xe2\x9a\xa1"
+    gauge = span_bytes(nm_color_gutter(), "11.3k/131k \xe2\x86\x93"
+                                          "317 \xe2\x9a\xa1"
                                           "\xef\xb8\x8e"
                                           "80.3% ");
     ASSERT_NOT_NULL(gauge);
@@ -2063,7 +2096,8 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    gauge = span_bytes(nm_color_gutter(), "10k/131k \xe2\x9a\xa1"
+    gauge = span_bytes(nm_color_gutter(), "10k/131k \xe2\x86\x93"
+                                          "417 \xe2\x9a\xa1"
                                           "\xef\xb8\x8e"
                                           "42.6% ");
     ASSERT_NOT_NULL(gauge);
@@ -2077,6 +2111,156 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_TRUE(strstr(out, "context: session cache read 9,088 tokens "
                             "(42.6% of the 21,322 input)") != NULL);
     ASSERT_TRUE(strstr(out, "context: session cache write 2,048 tokens") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The ↓ field appears only once a round has REPORTED output — and a
+ * reported 0 is a report, not an unknown. The two halves of that rule are
+ * one test because they are the same latch: a usage object that omits
+ * completion_tokens leaves the ledger's output side unseen (no marker),
+ * and one that carries a 0 latches it (marker, reading "0").
+ *
+ * The cache rate rides the same rounds and is INDEPENDENT: round 1
+ * reports a read but no output, so the ⚡ is there while the ↓ is not —
+ * which is what makes the pair a pair of conditions rather than one. */
+static void test_context_gauge_output_marker_waits_for_a_report(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    /* Round 1: a read count, NO completion_tokens. */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":500}}}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 2: output reported, and it is 0. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2000,"
+        "\"completion_tokens\":0,\"total_tokens\":2000}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h);
+
+    /* Round 1: the counts and the ⚡ rate, and no ↓ anywhere in the paint
+     * — the ledger has no output fact, and the row omits rather than
+     * printing a fabricated "↓0". */
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge = span_bytes(nm_color_gutter(), "1k/131k \xe2\x9a\xa1"
+                                                "\xef\xb8\x8e"
+                                                "50.0% ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    ASSERT_TRUE(strstr(frame, "\xe2\x86\x93") == NULL);
+
+    /* Round 2: completion_tokens 0 is a REPORT — the marker appears and
+     * reads 0, while the rate is unmoved (round 2 reported no read, so it
+     * joins neither cache operand). /context's exact spelling agrees on
+     * the same accessor. */
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    gauge = span_bytes(nm_color_gutter(), "2k/131k \xe2\x86\x93"
+                                          "0 \xe2\x9a\xa1"
+                                          "\xef\xb8\x8e"
+                                          "50.0% ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: session 2 rounds, 3,000 input / 0 "
+                            "output tokens") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The gauge's buffer holds the WORST its fields can print, not the worst
+ * seen in practice. A long rate needs a SMALL cache base while a long
+ * count needs a LARGE prompt, so driving the row past its old 64 bytes
+ * takes two rounds — and every value here is a power of two, which is
+ * what makes the JSON numbers land on the long exactly (a decimal past
+ * 2^53 is not representable as a double, so the parse would round it and
+ * the expected string would be a guess).
+ *
+ * The property is the COMPLETE ⚡ cluster: gauge_field writes a field
+ * whole or not at all, so an undersized buffer DROPS the marker. A
+ * truncated one would be worse — cut before the VS15 it is two cells
+ * wide, and the row's column math would reserve the wrong columns. */
+static void test_context_gauge_survives_the_worst_case_counts(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    /* Round 1: a 1-token prompt (the rate's denominator) with a huge
+     * read, and half the output. */
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,"
+        "\"completion_tokens\":2305843009213693952,"
+        "\"prompt_tokens_details\":{\"cached_tokens\":4611686018427387904}"
+        "}}\n\n"
+        "data: [DONE]\n\n";
+    /* Round 2: the huge prompt the gauge's used count shows (2^62), and
+     * the other half of the output — the sum stays inside a long. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}]}\n\n"
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4611686018427387904,"
+        "\"completion_tokens\":2305843009213693952}}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    /* 16 + 1 + 4 + (1+3+16) + (1+6+24) + NUL = 74 bytes: the old 64-byte
+     * buffer cannot hold it, and the ⚡ field would be refused. Tier 2
+     * (past 95 % of a known window) is the colour of a used count this
+     * far over the catalog's — and the tier's own arithmetic is a double,
+     * so it does not overflow where a long multiply would. */
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *gauge = span_bytes(nm_color_gutter_warn_hot(),
+                             "4611686018427.3M/131k \xe2\x86\x93"
+                             "4611686018427.3M \xe2\x9a\xa1"
+                             "\xef\xb8\x8e"
+                             "461168601842738790400.0% ");
+    ASSERT_NOT_NULL(gauge);
+    ASSERT_TRUE(strstr(frame, gauge) != NULL);
+    free(gauge);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -2118,7 +2302,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *warn = span_bytes(nm_color_gutter_warn(), "115k/131k ");
+    char *warn = span_bytes(nm_color_gutter_warn(), "115k/131k \xe2\x86\x93"
+                                                    "1 ");
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
     free(warn);
@@ -2128,7 +2313,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = span_bytes(nm_color_gutter_warn_hot(), "126k/131k ");
+    char *hot = span_bytes(nm_color_gutter_warn_hot(), "126k/131k \xe2\x86\x93"
+                                                       "2 ");
     ASSERT_NOT_NULL(hot);
     ASSERT_TRUE(strstr(frame, hot) != NULL);
     free(hot);
@@ -9230,6 +9416,7 @@ int main(void)
     RUN_TEST(test_spinner_clears_when_round_completes);
     RUN_TEST(test_spinner_glyphs_are_one_cell);
     RUN_TEST(test_streaming_frame_shows_tail_and_spinner);
+    RUN_TEST(test_output_marker_is_one_cell_under_every_model);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
     RUN_TEST(test_kbd_tier_follows_the_terminal);
@@ -9241,6 +9428,8 @@ int main(void)
     RUN_TEST(test_paste_lands_as_text_with_newlines);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
+    RUN_TEST(test_context_gauge_output_marker_waits_for_a_report);
+    RUN_TEST(test_context_gauge_survives_the_worst_case_counts);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_status_row_identity_follows_model);
     RUN_TEST(test_status_row_identity_follows_provider);

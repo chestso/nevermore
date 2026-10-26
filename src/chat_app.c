@@ -4136,15 +4136,60 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 /* Status row (P2): spinner + gauge + separator rule + identity      */
 /* ---------------------------------------------------------------- */
 
-/* The gauge text: `<used>/<limit>`, with the SESSION's cache-read
- * rate appended when any round has reported a cached count. Both
- * numbers are provider-reported (used) / catalog metadata (limit); "-"
- * is an honest unknown, never an estimate. The ⚡ rate is
- * cache_read / cache_base (see nm_agent_session_*): reads over the input
- * of the rounds that reported a read count, so a round that omitted the
- * fact is not counted as a miss. It is omitted entirely when no round
- * ever reported one — never a fabricated 0 % — and the write count never
- * enters it (a distinct, differently-billed fact). */
+/* Append one " <marker><text>" field to the gauge, WHOLE or not at all.
+ * snprintf would truncate silently, and a cut ⚡ cluster loses the VS15
+ * selector that makes it one cell (see compose_gauge) — so a field that
+ * does not fit is refused rather than cut. *len is the bytes written so
+ * far; the buffer is NUL-terminated on every return path. */
+static void gauge_field(char *dst, size_t cap, size_t *len, const char *marker,
+                        const char *text)
+{
+    size_t m = strlen(marker);
+    size_t t = strlen(text);
+    if (*len + 1 + m + t + 1 > cap)
+        return;
+    dst[(*len)++] = ' ';
+    memcpy(dst + *len, marker, m);
+    *len += m;
+    memcpy(dst + *len, text, t);
+    *len += t;
+    dst[*len] = '\0';
+}
+
+/* The gauge text: `<used>/<limit>`, then the SESSION's output count
+ * (`↓<n>`) and cache-read rate (`⚡<pct>`) when the ledger has them. The
+ * two counts are provider-reported (used) / catalog metadata (limit); "-"
+ * is an honest unknown, never an estimate.
+ *
+ * The ↓ count is Σ completion_tokens over the completed rounds that
+ * reported usage (nm_agent_session_output_tokens) — the same accessor
+ * /context's "session N rounds, X input / Y output tokens" line reads, so
+ * the compact form and the spelled-out one cannot disagree. It is omitted
+ * until a round reports output, never a fabricated 0; a REPORTED 0 prints
+ * "↓0", because a real report is not an unknown. U+2193 is one cell under
+ * every width model (grid, wcwidth, uts51 — test_chat_app pins it), so it
+ * needs no presentation selector: adding one would change nothing under
+ * any of the three and would be a second spelling of the same marker.
+ *
+ * The ⚡ rate is cache_read / cache_base (see nm_agent_session_*): reads
+ * over the input of the rounds that reported a read count, so a round that
+ * omitted the fact is not counted as a miss. It is omitted entirely when
+ * no round ever reported one — never a fabricated 0 % — and the write
+ * count never enters it (a distinct, differently-billed fact).
+ *
+ * The rate marker is the SMALL ⚡: U+26A1 followed by VS15 (U+FE0E), the
+ * text-presentation request (UTS #51) for the one-cell text glyph instead
+ * of the two-cell colour emoji the bare codepoint presents. The selector
+ * is load-bearing and must not be "cleaned up": without it the terminal
+ * is asked for the emoji presentation.
+ *
+ * The WIDTH of the cluster is the TERMINAL's rule, not a constant —
+ * boba's width model, which the startup banner names. Under UTS #51
+ * (portty, kitty) the cluster is the one-cell text glyph; under the grid
+ * rule (xterm) the selector picks the glyph but not the cell count, and
+ * the base's two cells stand. Both agree with what those terminals draw,
+ * so the row reserves exactly the columns the terminal draws — as long as
+ * the model is the terminal's, which is why the banner states it. */
 static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
 {
     /* Sized for the worst a long can print (19 digits + '.' +
@@ -4156,28 +4201,30 @@ static void compose_gauge(const NmChatApp *app, char *dst, size_t cap)
     format_tokens(nm_agent_context_used_tokens(app->agent), u, sizeof(u));
     format_tokens(nm_agent_context_limit(app->agent), l, sizeof(l));
     int n = snprintf(dst, cap, "%s/%s", u, l);
+    if (n <= 0 || (size_t)n >= cap)
+        return;
+    size_t len = (size_t)n;
+
+    char o[24];
+    long out = nm_agent_session_output_tokens(app->agent);
+    if (out >= 0) {
+        format_tokens(out, o, sizeof(o));
+        gauge_field(dst, cap, &len, "\xe2\x86\x93", o); /* ↓ */
+    }
+
     long read = nm_agent_session_cache_read_tokens(app->agent);
     long base = nm_agent_session_cache_base_tokens(app->agent);
-    if (read >= 0 && base > 0 && n > 0 && (size_t)n < cap)
-        /* The rate marker is the SMALL ⚡: U+26A1 followed by VS15
-         * (U+FE0E), the text-presentation request (UTS #51) for the
-         * one-cell text glyph instead of the two-cell colour emoji the
-         * bare codepoint presents. The selector is load-bearing and must
-         * not be "cleaned up": without it the terminal is asked for the
-         * emoji presentation.
-         *
-         * The WIDTH of the cluster is the TERMINAL's rule, not a
-         * constant — boba's width model, which the startup banner names.
-         * Under UTS #51 (portty, kitty) the cluster is the one-cell
-         * text glyph; under the grid rule (xterm) the selector picks
-         * the glyph but not the cell count, and the base's two cells
-         * stand. Both agree with what those terminals draw, so the row
-         * reserves exactly the columns the terminal draws — as long as
-         * the model is the terminal's, which is why the banner states
-         * it. */
-        snprintf(dst + n, cap - (size_t)n,
-                 " \xe2\x9a\xa1\xef\xb8\x8e%.1f%%",
-                 (double)read * 100.0 / (double)base);
+    if (read >= 0 && base > 0) {
+        /* Sized for the worst a `%.1f` of a double can print, not the
+         * ≤26 the rate can actually reach (a 19-digit read over a
+         * 1-token base is 22 digits and a point before the '%'): the
+         * buffer holds what the TYPE can produce, which is the same rule
+         * that makes u/l 24 and not 16. Sizing it to the value seen is
+         * what -Wformat-truncation exists to catch. */
+        char r[320];
+        snprintf(r, sizeof(r), "%.1f%%", (double)read * 100.0 / (double)base);
+        gauge_field(dst, cap, &len, "\xe2\x9a\xa1\xef\xb8\x8e", r);
+    }
 }
 
 /* The gauge's tier (nm_agent_context_tier): Comment at rest, Orange
@@ -4255,8 +4302,16 @@ static void compose_status(NmChatApp *app)
 
     /* The gauge carries its own trailing space: the spacing between the
      * row's left segments is CONTENT here (the app owns the text), while
-     * the identity's gap is the declaration's pad_left. */
-    char gauge[64];
+     * the identity's gap is the declaration's pad_left.
+     *
+     * Sized for the worst the three fields can print, not the 64 the
+     * two-field gauge fit in: two 23-byte counts, the ↓ field (1 + 3 + a
+     * 23-byte count) and the ⚡ field (1 + 4 + a 24-byte rate) come to
+     * 105 bytes + NUL. gauge_field refuses a field that will not fit
+     * whole, so an undersized buffer would DROP a marker rather than
+     * print a lie — the test that drives the gauge past 64 bytes is what
+     * keeps this number honest. */
+    char gauge[128];
     compose_gauge(app, gauge, sizeof(gauge));
     size_t glen = strlen(gauge);
     if (glen + 2 <= sizeof(gauge)) {

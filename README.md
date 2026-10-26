@@ -119,15 +119,18 @@ prompt while a turn runs (keys edit it; Enter is a no-op until the turn
 ends; Ctrl+C interrupts, and so does Esc — Esc cancels the round, a
 running tool included, and does nothing else: your text stays, and the
 app stays). Above the prompt its status row carries the
-context gauge, `<used>/<limit>`, where the used count is the prompt
-the provider last reported and the limit the active model's catalog
-window — plus, once some round has reported a cache read, the session's
-cache rate `⚡<pct>`: the share of this conversation's input that came
-from the provider's prefix cache, accumulated over every completed round
-that reported a read count (a round that omits the field is left out of
-the rate, never counted as a miss). The write side is tracked separately
-and not rated. An unknown number reads as `-`, never an estimate, and
-the `⚡` marker is simply absent until a read count exists. The row's
+context gauge, `<used>/<limit> ↓<out> ⚡<pct>`: the used count is the
+prompt the provider last reported and the limit the active model's
+catalog window, `↓<out>` is the output the conversation has accumulated
+(every completed round's `completion_tokens`, summed), and `⚡<pct>` is
+the session's cache rate — the share of this conversation's input that
+came from the provider's prefix cache, accumulated over every completed
+round that reported a read count (a round that omits the field is left
+out of the rate, never counted as a miss). The write side is tracked
+separately and not rated. An unknown number reads as `-`, never an
+estimate, and the `↓` and `⚡` markers are simply absent until a round has
+reported the fact behind them — a _reported_ zero is a report, so it
+reads `↓0`. The row's
 right end names the endpoint it is talking to — `provider · model` —
 elided from the tail when the terminal is narrow, and dropped when there
 is no room for it at all; what the turn is DOING is the spinner glyph at
@@ -136,7 +139,8 @@ on a terminal without 24-bit color), the star set rotates while a tool
 runs — so there is no word beside it to go stale between states.
 `/context` prints the exact breakdown — the last
 round's numbers plus the session totals, the cache read (and its rate),
-and the cache write count.
+and the cache write count. Its output line is the same accessor the row's
+`↓` reads, so the compact and spelled-out forms cannot disagree.
 
 Providers differ in what they report: Hyper, OpenRouter and the
 OpenCode tiers report a cache read (`prompt_tokens_details.cached_tokens`)
@@ -144,8 +148,8 @@ OpenCode tiers report a cache read (`prompt_tokens_details.cached_tokens`)
 also report a cache write, and Ollama reports the token counts but no
 cache breakdown. Every provider's usage object is folded into one
 canonical set by the shared client; where a fact is not reported the
-display degrades (no `⚡`, `session cache: not reported`), it is never
-invented.
+display degrades (no `↓` or `⚡`, `session cache: not reported`), it is
+never invented.
 
 Every request's system message is assembled once per chat: the base
 prompt, an `<env>` block (working directory, whether it is a git repo,
