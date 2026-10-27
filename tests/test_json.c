@@ -846,6 +846,73 @@ static void test_json_kept_parse_without_keys_keeps_everything(void)
     nm_json_free(v);
 }
 
+/* The append seam: one caller-owned buffer across dumps — the same
+ * bytes three fresh nm_json_dump calls would produce, glued, with the
+ * allocation grown geometrically and never shrunk (reuse, not a dump
+ * per element). */
+static void test_json_dump_append_accumulates_and_reuses(void)
+{
+    char *buf = NULL;
+    size_t len = 0, cap = 0;
+
+    NmJson *o = nm_json_new_object();
+    nm_json_set(o, "type", nm_json_new_string("reasoning.encrypted"));
+    NmJson *str = nm_json_new_string("sig");
+    NmJson *arr = nm_json_new_array();
+    nm_json_push(arr, nm_json_new_number(1));
+    nm_json_push(arr, nm_json_new_number(2));
+
+    char *d_o = nm_json_dump(o);
+    char *d_str = nm_json_dump(str);
+    char *d_arr = nm_json_dump(arr);
+    ASSERT_NOT_NULL(d_o);
+    ASSERT_NOT_NULL(d_str);
+    ASSERT_NOT_NULL(d_arr);
+
+    ASSERT_TRUE(nm_json_dump_append(o, &buf, &len, &cap));
+    size_t cap_after_first = cap;
+    ASSERT_TRUE(cap_after_first > 0);
+    ASSERT_EQ(len, strlen(d_o));
+    ASSERT_STR_EQ(buf, d_o);
+
+    ASSERT_TRUE(nm_json_dump_append(str, &buf, &len, &cap));
+    ASSERT_TRUE(cap >= cap_after_first); /* reuse: the cap never shrinks */
+    size_t cap_after_second = cap;
+    ASSERT_TRUE(nm_json_dump_append(arr, &buf, &len, &cap));
+    ASSERT_TRUE(cap >= cap_after_second);
+
+    char *glued = malloc(strlen(d_o) + strlen(d_str) + strlen(d_arr) + 1);
+    ASSERT_NOT_NULL(glued);
+    sprintf(glued, "%s%s%s", d_o, d_str, d_arr);
+    ASSERT_STR_EQ(buf, glued);
+    ASSERT_EQ(len, strlen(glued));
+
+    /* A second append after a big one still works on the same buffer. */
+    NmJson *big = nm_json_new_string("");
+    char *big_bytes = malloc(4096);
+    ASSERT_NOT_NULL(big_bytes);
+    memset(big_bytes, 'x', 4000);
+    big_bytes[4000] = 0;
+    nm_json_free(big);
+    big = nm_json_new_string(big_bytes);
+    ASSERT_TRUE(nm_json_dump_append(big, &buf, &len, &cap));
+    ASSERT_EQ(len, strlen(glued) + 4002);
+    ASSERT_TRUE(strncmp(buf, glued, strlen(glued)) == 0);
+    ASSERT_EQ(buf[len], '\0');
+    ASSERT_TRUE(strstr(buf, "xxxx") != NULL);
+
+    free(big_bytes);
+    free(glued);
+    free(d_o);
+    free(d_str);
+    free(d_arr);
+    nm_json_free(o);
+    nm_json_free(str);
+    nm_json_free(arr);
+    nm_json_free(big);
+    free(buf);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -884,5 +951,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_json_kept_parse_skips_the_bulk);
     RUN_TEST(test_json_kept_parse_rejects_malformed);
     RUN_TEST(test_json_kept_parse_without_keys_keeps_everything);
+    RUN_TEST(test_json_dump_append_accumulates_and_reuses);
     TEST_SUMMARY();
 }

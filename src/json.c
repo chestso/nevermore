@@ -1601,3 +1601,32 @@ char *nm_json_dump(const NmJson *v)
     }
     return b.s;
 }
+
+int nm_json_dump_append(const NmJson *v, char **s, size_t *len, size_t *cap)
+{
+    if (!s || !len || !cap)
+        return 0;
+    const size_t had = *len;
+    /* The caller's state IS the dump state: no per-call copy, the
+     * geometric growth inside db_reserve is the reuse. */
+    DumpBuf b = { *s, *len, *cap, 0 };
+    dump_value(&b, v);
+    if (!b.oom)
+        db_reserve(&b, 1); /* room for the terminator */
+    /* Hand the (possibly regrown) allocation back before deciding: on
+     * OOM the pointer may have moved, and the caller must not dangle. */
+    *s = b.s;
+    *cap = b.cap;
+    if (b.oom) {
+        /* Truncate back to what was there: a partial element must
+         * never ride out as if it were the whole one. */
+        *len = had < *cap ? had : (*cap ? *cap - 1 : 0);
+        if (*s)
+            (*s)[*len] = '\0';
+        return 0;
+    }
+    *len = b.len;
+    if (*s)
+        (*s)[*len] = '\0';
+    return 1;
+}

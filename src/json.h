@@ -93,6 +93,15 @@ void nm_json_set(NmJson *obj, const char *key, NmJson *v);
 void nm_json_push(NmJson *arr, NmJson *v);
 char *nm_json_dump(const NmJson *v);
 
+/* Serialize `v` and APPEND it onto a caller-owned growable buffer
+ * (*s, *len, *cap — the nm_json_dump shape, but reusable: the caller
+ * keeps the buffer across calls). Grows geometrically, NUL-terminates,
+ * returns 1 on success, 0 on out of memory (buffer left valid). This
+ * is the per-event-zero-allocation seam: a streamed element is
+ * serialized onto a buffer that outlives the event (the client's
+ * reasoning_details accumulator) instead of a fresh dump per element. */
+int nm_json_dump_append(const NmJson *v, char **s, size_t *len, size_t *cap);
+
 #ifdef __cplusplus
 }
 #endif
