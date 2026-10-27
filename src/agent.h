@@ -38,6 +38,18 @@ typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
  * the store's `rounds` key (see nm_agent_max_rounds). */
 #define NM_AGENT_DEFAULT_MAX_ROUNDS 25
 
+/* How many times a VOID round — a round the provider answered with
+ * nothing in it (no text, no tool call, no image: the model emitted a
+ * function call the provider could not parse) — is asked again before
+ * the turn fails with a real error. A void round is not a tool round:
+ * it never counts against the round cap, and this is what bounds it
+ * instead. Two is the shape the 2026-10-27 wire dump argues for: the
+ * round right after a void one answered normally in five of the eight
+ * cases, and the other three were one run of four that only a human
+ * could break. A note plus two retries give the model more than the
+ * hand did, and the cap keeps a stuck model from looping. */
+#define NM_AGENT_DEFAULT_VOID_RETRIES 2
+
 /* Default stream-inactivity timeout (ms): while a round is streaming,
  * if no answer/reasoning delta arrives for this long the turn fails
  * with "timed out" instead of hanging. Matches Codex's 300 s stream

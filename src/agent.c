@@ -136,6 +136,20 @@ struct NmAgent
      * cumulative: the fact the output-cut rule latches on (a new cut is
      * a new edge). */
     unsigned output_cuts;
+    /* VOID rounds — the ones that came back with nothing in them (no
+     * text, no tool call, no image: see round_is_void). Two facts,
+     * each with its own lifetime:
+     *
+     *   void_streak  consecutive voids THIS turn: the gate for the note
+     *                the model gets (the first void of a turn speaks
+     *                once; a good round ends the streak).
+     *   void_retries retries spent this turn: the bound on how often a
+     *                void round may be asked again (a void round is not
+     *                a tool round, so it never counts against the
+     *                round cap — the cap's own words are "too many
+     *                tool rounds without a final answer"). */
+    int void_streak;
+    int void_retries;
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -214,9 +228,13 @@ struct NmAgent
     size_t n_round_images;
     size_t round_images_cap;
 
-    /* Provider-reported token usage: the LAST usage object seen this
-     * round (sentinels -1 when a field was not reported). has_usage is
-     * the gate — a real prompt_tokens (>= 0) has arrived at least once.
+    /* Provider-reported token usage: the LAST GOOD round's report
+     * (sentinels -1 when a field was not reported) — the gauge reads
+     * it, and it is published only by a round that actually produced
+     * something (a VOID round's all-zero report is the error
+     * envelope's, not a measurement, and must not move the gauge).
+     * has_usage is the gate — a real prompt_tokens (>= 0) has arrived
+     * at least once, in a round that counted.
      * The context window is NOT a field: like the model's vision and
      * tool-use claims it is a CATALOG fact, resolved at the point of use
      * (nm_agent_context_limit) from the cached read — a pushed copy went
@@ -226,11 +244,18 @@ struct NmAgent
     NmUsage last_usage;
     int has_usage;
 
-    /* 1 while THIS round has carried a real usage report: cleared at
+    /* THIS round's usage report, in the round's own slot: the report
+     * lands here while the round streams, and the round's completion
+     * publishes it into last_usage (above) — or drops it, when the
+     * round turned out to be void. Two slots, so "the round's report"
+     * and "the session's last good report" can never be the same
+     * number by accident.
+     *
+     * 1 while THIS round has carried a real usage report: cleared at
      * round_reset, set by round_on_usage. finish_round accumulates the
      * session ledger only when it is set — a round with no report must
-     * not re-add last_usage (which still holds the previous round's
-     * numbers). */
+     * not re-add the previous round's numbers. */
+    NmUsage round_usage;
     int round_usage_seen;
 
     /* Session accounting: the provider-agnostic ledger behind the
@@ -374,6 +399,20 @@ static int model_tools(const NmProvider *p, const char *model)
     return m ? m->tools : 0;
 }
 
+/* A usage slot with nothing in it: every field unknown (-1), never a
+ * fabricated 0. The gauge's own rule — a REPORTED 0 is a fact, an
+ * absent report is an unknown — and the sentinels are what make the
+ * two tell apart (a slot that starts at 0 would report a cache write
+ * of zero before the provider ever said a word about writes). */
+static void usage_reset(NmUsage *u)
+{
+    u->prompt_tokens = -1;
+    u->completion_tokens = -1;
+    u->total_tokens = -1;
+    u->cached_tokens = -1;
+    u->cache_write_tokens = -1;
+}
+
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
                       NmToolset *tools, void *userdata)
 {
@@ -386,10 +425,8 @@ NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
     a->userdata = userdata;
     a->state = NM_AGENT_IDLE;
     /* Usage gauge starts unknown: sentinels until the provider reports. */
-    a->last_usage.prompt_tokens = -1;
-    a->last_usage.completion_tokens = -1;
-    a->last_usage.total_tokens = -1;
-    a->last_usage.cached_tokens = -1;
+    usage_reset(&a->last_usage);
+    usage_reset(&a->round_usage);
     /* Context assembly is construction-time I/O (one walk + a couple
      * of bounded reads). Failure degrades to the base prompt, never
      * to a failed agent. The model's vision flag is part of the
@@ -1128,19 +1165,19 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
     }
 }
 
-/* Agent-internal usage receiver: records the LAST usage object seen this
- * round (multiple fires possible — see NmUsageFn), flips the gate on the
- * first real prompt_tokens, and marks the round as having reported (what
- * lets finish_round accumulate the session ledger exactly once). */
+/* Agent-internal usage receiver: records THIS round's usage report
+ * (multiple fires possible — see NmUsageFn) in the round's own slot.
+ * The slot is published into the session's last-good report when the
+ * round completes as a round that produced something; a round that
+ * comes back void (nothing in it) publishes nothing, so the error
+ * envelope's all-zero report never moves the gauge. */
 static void round_on_usage(const NmUsage *usage, void *userdata)
 {
     NmAgent *a = userdata;
     if (!usage)
         return;
-    a->last_usage = *usage;
+    a->round_usage = *usage;
     a->round_usage_seen = 1;
-    if (usage->prompt_tokens >= 0)
-        a->has_usage = 1;
 }
 
 /* Serialize the round's tool calls as the wire tool_calls array
@@ -1239,8 +1276,11 @@ static void round_reset(NmAgent *a)
      * the bytes (harmless), the round's id list goes with the round. */
     a->n_round_images = 0;
     /* A fresh round has not reported usage yet: the session ledger must
-     * not re-add the previous round's last_usage (see finish_round). */
+     * not re-add the previous round's last_usage (see finish_round),
+     * and the round's own slot starts empty (a report the round never
+     * made must not read as a report of zero). */
     a->round_usage_seen = 0;
+    usage_reset(&a->round_usage);
     /* The previous round's provider metadata goes with the previous
      * round: a fresh round reports its own (or none). */
     memset(&a->round_meta, 0, sizeof(a->round_meta));
@@ -1631,7 +1671,7 @@ static void session_account_round(NmAgent *a)
 {
     if (!a->round_usage_seen)
         return;
-    const NmUsage *u = &a->last_usage;
+    const NmUsage *u = &a->round_usage;
     if (u->prompt_tokens >= 0) {
         a->sess_in += u->prompt_tokens;
         a->sess_in_seen = 1;
@@ -1678,6 +1718,101 @@ static int round_was_cut(const NmChatResult *r)
     return fr[sizeof(cut) - 1] == '\0';
 }
 
+/* A VOID round: the provider answered, and the answer carried NOTHING —
+ * no text, no tool call, no generated image. The wire's own words say
+ * why (OpenRouter relays Google's `MALFORMED_FUNCTION_CALL`: the model
+ * emitted a function call the provider could not parse — the 2026-10-27
+ * wire dump carries eight such rounds), and the model usually said what
+ * it INTENDED to do in its reasoning trace, which the human watches as
+ * it streams — so the turn looked like the model announced an action
+ * and then stopped. Nothing happened because nothing came back.
+ *
+ * A void round is not an answer: it must not end the turn, must not
+ * ride the transcript (an empty assistant message is not a message),
+ * and must not move the usage gauge (its zeros are the error
+ * envelope's, not a measurement). The round is asked again instead —
+ * see void_round. */
+static int round_is_void(const NmAgent *a)
+{
+    if (a->n_calls > 0 || a->n_round_images > 0)
+        return 0; /* the model asked for something, or made something */
+    return !(a->text && a->text[0]);
+}
+
+/* The wire's own account of how the round ended, in one line: the
+ * normalized reason, and the upstream's own word when it reported one
+ * ("finish_reason: error, native: MALFORMED_FUNCTION_CALL"). A wire
+ * that reported neither says so — an absent fact is named as absent,
+ * never filled in with a guess. */
+static void void_round_reason(const NmChatResult *r, char *out, size_t cap)
+{
+    if (!r->finish_reason[0] && !r->native_finish_reason[0]) {
+        snprintf(out, cap, "no finish reason reported");
+        return;
+    }
+    if (r->native_finish_reason[0])
+        snprintf(out, cap, "finish_reason: %s, native: %s", r->finish_reason,
+                 r->native_finish_reason);
+    else
+        snprintf(out, cap, "finish_reason: %s", r->finish_reason);
+}
+
+/* A void round: the turn does not end, the transcript does not grow,
+ * the gauge does not move — the round is asked again.
+ *
+ * The retry carries the NOTE that tells the model what the provider
+ * rejected (the void rule, reminder.c): the model's own "continue" —
+ * what the 2026-10-27 session was reduced to — carries no such
+ * information, and the failures CLUSTER (four of that session's eight
+ * void rounds came in one run of four, and the "continue"s in between
+ * did not break it), so the retry is asked with the reason rather than
+ * with the same question again. The note is appended at the END of the
+ * transcript, so the provider's cached prefix is untouched: the retry
+ * re-reads the note, not the conversation.
+ *
+ * When the retries are spent the turn ends in a REAL error — never in
+ * silence, which is what the 2026-10-27 dump showed: eight rounds
+ * that stopped the turn with nothing said and nothing shown.
+ *
+ * A void round is not a tool round: it never counts against the round
+ * cap (whose own words are "too many tool rounds without a final
+ * answer"), and the retry count is what bounds it. */
+static int void_round(NmAgent *a, const NmChatResult *r)
+{
+    a->void_streak++;
+
+    char reason[128];
+    void_round_reason(r, reason, sizeof(reason));
+
+    if (a->void_retries >= NM_AGENT_DEFAULT_VOID_RETRIES) {
+        char msg[NM_CHAT_MSG_MAX + 96];
+        snprintf(msg, sizeof(msg),
+                 "the model produced no output: no text, no tool call (%s)",
+                 reason);
+        set_error(a, msg);
+        return -1;
+    }
+
+    a->void_retries++;
+    /* The void round's own budget: it opened a stream, so it counted
+     * as a round — undo that, so a round that produced nothing cannot
+     * spend the turn's round budget. */
+    if (a->round > 0)
+        a->round--;
+
+    if (a->on_notice) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "round produced no output (%s) — retrying (%d/%d)", reason,
+                 a->void_retries, NM_AGENT_DEFAULT_VOID_RETRIES);
+        a->on_notice(msg, a->userdata);
+    }
+
+    /* The same transcript, asked again — with the note appended (the
+     * reminder rides the retry's request), and nothing else changed. */
+    return begin_round(a) == 0 ? 0 : -1;
+}
+
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
     if (r->status != NM_CHAT_OK) {
@@ -1702,6 +1837,17 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     if (a->on_round_meta && r->meta.routed_model[0])
         a->on_round_meta(&r->meta, a->userdata);
 
+    /* A VOID round: nothing in it. It is not an answer and not a tool
+     * round — the turn goes on (the round is asked again), the
+     * transcript stays as it was, and the usage report (the error
+     * envelope's zeros) is dropped rather than published. */
+    if (round_is_void(a))
+        return void_round(a, r);
+
+    /* A round that produced something ends the void streak: the model is
+     * answering again. */
+    a->void_streak = 0;
+
     /* A round the output limit cut short is incomplete by construction:
      * the model was still writing when the cap landed and nothing was
      * generated after it. Count it — the output-cut reminder raises the
@@ -1710,6 +1856,16 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
      * never treats the cut text as the whole answer. */
     if (round_was_cut(r))
         a->output_cuts++;
+
+    /* The round's usage report becomes the session's last good one: the
+     * gauge and the ledger read the last round that produced
+     * something. A round with no report changes nothing (the previous
+     * round's numbers stay). */
+    if (a->round_usage_seen) {
+        a->last_usage = a->round_usage;
+        if (a->round_usage.prompt_tokens >= 0)
+            a->has_usage = 1;
+    }
 
     /* The round completed: fold its usage into the session ledger (a
      * failed round above never reaches here, so it contributes no
@@ -2123,6 +2279,12 @@ int nm_agent_start(NmAgent *a, const char *user_input,
         nm_session_append(a->session, NM_ROLE_USER, user_input);
     }
     a->round = 0;
+    /* A new turn: the void-round budget is per turn (a turn that asked
+     * again twice has spent it; the next turn starts fresh), and the
+     * streak of consecutive voids starts over too — a turn that ends
+     * with a good round has nothing to escalate. */
+    a->void_retries = 0;
+    a->void_streak = 0;
     /* A new turn: state reminders (context pressure, jobs still running)
      * ride their own user message right after the user's own, before the
      * first round is built — the prefix before this point is untouched,

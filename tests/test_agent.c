@@ -952,6 +952,174 @@ static void test_agent_connect_notice_names_the_family(void)
     close(sc.fd);
 }
 
+/* A VOID round, as the wire spells it: the 2026-10-27 dump's round 72,
+ * event for event. A reasoning trace that says what the model INTENDED
+ * to do (the human watches it stream — that is why the turn looked like
+ * "the model announced an action and then stopped"), an encrypted
+ * reasoning detail (the dump's blob is elided here; the shape is what
+ * matters), `finish_reason: "error"` with the upstream's own
+ * `native_finish_reason: "MALFORMED_FUNCTION_CALL"`, and an all-zero
+ * usage object. No content, no tool call: nothing at all came back. */
+#define VOID_ROUND_SSE                                                           \
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
+    "\"role\":\"assistant\",\"reasoning\":\"I am now running the ls -la "        \
+    "command.\"},\"finish_reason\":null}]}\n\n"                                  \
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
+    "\"role\":\"assistant\",\"reasoning\":null,\"reasoning_details\":["         \
+    "{\"type\":\"reasoning.encrypted\",\"data\":\"EoECCv4B\"}]}}]}\n\n"        \
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
+    "\"role\":\"assistant\"},\"finish_reason\":\"error\","                       \
+    "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}]}\n\n"                \
+    "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
+    "\"role\":\"assistant\"},\"finish_reason\":\"error\","                       \
+    "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}],"                    \
+    "\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0," \
+    "\"cost\":0}}\n\n"                                                           \
+    "data: [DONE]\n\n"
+
+/* The body of a captured request (past the header block). */
+static const char *request_body(const char *req)
+{
+    const char *sep = strstr(req, "\r\n\r\n");
+    return sep ? sep + 4 : req;
+}
+
+static void test_agent_void_round_is_retried(void)
+{
+    /* A round that came back with NOTHING in it is not an answer: the
+     * turn must not end on it, the transcript must not grow an empty
+     * assistant message, and the round must be asked again. */
+    reset_capture();
+    g_notice_calls = 0;
+    g_notice_text[0] = '\0';
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = VOID_ROUND_SSE;
+    /* The retry: a tool call, as if the model had answered the second
+     * time it was asked. */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"edit_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
+        "\\\"slow red\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    /* And the round after the tool: the answer. */
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+    nm_agent_on_notice(agent, cap_notice);
+
+    int rc = nm_agent_turn(agent, "change quick to slow in the fixture", NULL,
+                           0);
+
+    /* The turn ran on: the void round did not end it. */
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "done");
+    ASSERT_EQ(g_tool_starts, 1);
+    ASSERT_EQ(g_tool_ends, 1);
+
+    /* Three requests: the void one, its retry, and the round after the
+     * tool. */
+    ASSERT_EQ(g_n_requests, 3);
+
+    /* The void round left NO trace in the transcript: the retry's
+     * request carries no assistant message at all (an empty one is not
+     * a message). */
+    ASSERT_TRUE(strstr(request_body(g_requests[1]), "\"role\":\"assistant\"") ==
+                NULL);
+
+    /* The human was told: a void round is never silent. */
+    ASSERT_TRUE(g_notice_calls >= 1);
+    ASSERT_TRUE(strstr(g_notice_text, "no output") != NULL);
+    ASSERT_TRUE(strstr(g_notice_text, "MALFORMED_FUNCTION_CALL") != NULL);
+
+    /* The void round's all-zero usage report is the error envelope's,
+     * not a measurement: it never reached the gauge. The later rounds
+     * reported no usage at all, so the gauge is still unknown. */
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_context_has_usage(agent), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
+static void test_agent_void_round_retries_exhausted_is_an_error(void)
+{
+    /* When the retries are spent the turn ends in a REAL error, with
+     * the wire's own words in it — never in silence, which is what the
+     * 2026-10-27 dump showed (eight rounds that stopped the turn with
+     * nothing said and nothing shown). */
+    reset_capture();
+    g_notice_calls = 0;
+    g_notice_text[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3; /* the round, and its two retries */
+    sc.sse[0] = VOID_ROUND_SSE;
+    sc.sse[1] = VOID_ROUND_SSE;
+    sc.sse[2] = VOID_ROUND_SSE;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+    nm_agent_on_notice(agent, cap_notice);
+
+    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    ASSERT_EQ(g_n_requests, 3); /* the round, and its two retries */
+
+    /* The error names the fact and the wire's own reason for it. */
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "no output") != NULL);
+    ASSERT_TRUE(strstr(err, "MALFORMED_FUNCTION_CALL") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* The system message on the wire carries the AGENTS.md context: a
  * scratch project with an AGENTS.md, a .git marker at its root, and
  * the agent built from that working directory. The system role must
@@ -5171,11 +5339,6 @@ static void test_agent_output_cut_reminder(void)
     close(sc.fd);
 }
 
-/* The boundary for EXTERNAL content: a tool whose output came from
- * outside the machine (the web_search shape) declares it, and the note
- * rides THAT result — the model is told where the untrusted text is,
- * not once for the whole conversation. The system prompt's clause says
- * the rule; this says it at the injection surface. */
 static NmToolResult stub_external_exec(const NmTool *tool, const char *args_json,
                                        const NmToolCtx *ctx)
 {
@@ -6319,6 +6482,8 @@ int main(void)
     RUN_TEST(test_agent_sampling_knobs_ride_the_request);
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
+    RUN_TEST(test_agent_void_round_is_retried);
+    RUN_TEST(test_agent_void_round_retries_exhausted_is_an_error);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_round_meta_from_prism);
     RUN_TEST(test_agent_round_meta_from_late_trailer);
