@@ -118,6 +118,36 @@ extern "C" {
  * and can re-trip the replay check the echo exists for. A change
  * applies to the next chat. */
 #define NM_CFG_KEY_REASONING_ECHO "reasoning_echo"
+/* Signature echo-back: which assistant messages re-send their round's
+ * `reasoning_details` array to the provider — the structured reasoning
+ * carrier (Gemini's thought signature, OpenAI's encrypted blob). Same
+ * three modes, same spellings, same canon (nm_config_reasoning_echo_canon),
+ * one vocabulary:
+ *
+ *   `off` (default) — none. Nevermore still RECEIVES the array and
+ *                     keeps it on the session message; it just never
+ *                     rides back.
+ *   `tools` — every assistant message carrying `tool_calls` that HAS an
+ *             array.
+ *   `all` — that, plus every other assistant message that has one.
+ *
+ * STRICT ECHO-BACK: the field only ever carries elements the model
+ * itself sent in this conversation — never synthesized, never an empty
+ * placeholder (contrast the trace echo's `""`, which DeepSeek's replay
+ * check demands). So a model that never speaks `reasoning_details`
+ * never receives the field, whatever this says.
+ *
+ * The default is `off` and no provider declares one: nothing observed
+ * NEEDS the signature back — the missing thought_signature has never
+ * been seen to 400 (docs/OPENROUTER-API.md §3.2), so the echo is an A/B
+ * lever, not a wire requirement. A provider declaration
+ * (NmProvider.signature_echo) may join here once a measurement says so.
+ *
+ * Like the trace echo, the mode FREEZES once a request has actually
+ * carried the field (its own latch: a prefix that gains or loses either
+ * field is a different prefix, and the two knobs must not yank each
+ * other). Env spelling: NEVERMORE_SIGNATURE_ECHO. */
+#define NM_CFG_KEY_SIGNATURE_ECHO "signature_echo"
 /* Stream-inactivity timeout for a chat round, in ms. While a round
  * streams, no wire byte for this long fails the turn ("timed out")
  * instead of hanging — a model that connects but never answers, or
@@ -612,6 +642,14 @@ const char *nm_config_reasoning_echo_name(NmReasoningEcho mode);
  * config. This is what the agent reads at the point of use (before its
  * own freeze latches — see agent.h). */
 NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
+
+/* The `signature_echo` key resolved and parsed: the same value space as
+ * `reasoning_echo` (one vocabulary), applied to the round's
+ * reasoning_details array. NM_REASONING_ECHO_OFF when the key is unset,
+ * and for a NULL config — the built-in default, and the only default
+ * today (no provider declares one). The agent reads it at the point of
+ * use, before its own freeze latch. */
+NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c);
 
 /* Is `value` a `kbd` mode: `auto` / `on` / `off` (case-insensitive, with
  * the bool spellings and `kitty` / `legacy` accepted as synonyms)? */

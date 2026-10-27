@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 24
+#define NM_CFG_NKEYS 25
 
 /* The scoped-key pool: `model.<provider>` is a family, not a fixed
  * list, but only the two PERSISTED layers have a scoped spelling (-m
@@ -128,6 +128,7 @@ static const struct
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
     { NM_CFG_KEY_REASONING_ECHO, "NEVERMORE_REASONING_ECHO", "off" },
+    { NM_CFG_KEY_SIGNATURE_ECHO, "NEVERMORE_SIGNATURE_ECHO", "off" },
     { NM_CFG_KEY_TIMEOUT, "NEVERMORE_TIMEOUT_MS",
       NM_STR(NM_AGENT_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
@@ -699,6 +700,18 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c)
                                        : NM_REASONING_ECHO_OFF;
 }
 
+NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c)
+{
+    const char *v =
+        c ? nm_config_resolve(c, NM_CFG_KEY_SIGNATURE_ECHO, NULL) : NULL;
+    char canon[16];
+    if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
+        return NM_REASONING_ECHO_OFF;
+    return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
+           : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
+                                       : NM_REASONING_ECHO_OFF;
+}
+
 /* ---------------------------------------------------------------- */
 /* The `kbd` value space                                             */
 /* ---------------------------------------------------------------- */
@@ -841,9 +854,11 @@ static int normalize_value(const char *key, const char *raw, char *out,
          * layer reads one spelling (a token-count key is stored
          * verbatim; this one has a fraction to normalize). */
         return nm_config_temperature_canon(raw, out, cap);
-    } else if (strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0) {
-        /* The one key whose value space is not a bool: off/tools/all
-         * (with the old bool spellings folded in). */
+    } else if (strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0 ||
+               strcmp(key, NM_CFG_KEY_SIGNATURE_ECHO) == 0) {
+        /* The keys whose value space is not a bool: off/tools/all (with
+         * the old bool spellings folded in). Two keys, ONE canon — the
+         * signature echo shares the trace echo's vocabulary. */
         return nm_config_reasoning_echo_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_KBD) == 0) {
         /* auto / on / off (bool spellings and kitty/legacy folded in). */
