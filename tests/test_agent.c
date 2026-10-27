@@ -1046,8 +1046,12 @@ static void test_agent_void_round_is_retried(void)
 
     /* The void round left NO trace in the transcript: the retry's
      * request carries no assistant message at all (an empty one is not
-     * a message). */
+     * a message). The round's reasoning_details array died with it too
+     * (D7: a signature is not an answer, and a stale one must never ride
+     * the retry). */
     ASSERT_TRUE(strstr(request_body(g_requests[1]), "\"role\":\"assistant\"") ==
+                NULL);
+    ASSERT_TRUE(strstr(request_body(g_requests[1]), "reasoning_details") ==
                 NULL);
 
     /* The human was told: a void round is never silent. */
@@ -2498,6 +2502,88 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
     close(sc.fd);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* The round's structured carrier (the thought signature / encrypted
+ * blob) is KEPT on the session's assistant message, byte for byte: the
+ * round's elements concatenated in arrival order, closed into one
+ * array. Nothing replays it yet (the signature_echo knob arrives with
+ * the replay half), so no request body carries it. */
+static void test_agent_reasoning_details_kept_on_the_tool_message(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"thinking\",\"reasoning_details\":["
+        "{\"type\":\"reasoning.text\",\"signature\":\"sigA\","
+        "\"format\":\"google-gemini-v1\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+        "\"data\":\"opaque\"}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "all read");
+
+    /* The round's assistant message carries the whole array, elements
+     * in arrival order. */
+    const NmSession *sess = nm_agent_session(agent);
+    ASSERT_NOT_NULL(sess);
+    const NmSessionMessage *call_msg = NULL;
+    for (size_t i = 0; i < nm_session_len(sess); i++) {
+        const NmSessionMessage *m = nm_session_get(sess, i);
+        if (m->role == NM_ROLE_ASSISTANT && m->tool_calls_json)
+            call_msg = m;
+    }
+    ASSERT_NOT_NULL(call_msg);
+    ASSERT_STR_EQ(call_msg->reasoning_details_json,
+                  "[{\"type\":\"reasoning.text\",\"signature\":\"sigA\","
+                  "\"format\":\"google-gemini-v1\"},"
+                  "{\"type\":\"reasoning.encrypted\",\"data\":\"opaque\"}]");
+    /* The trace text still rides its own field. */
+    ASSERT_STR_EQ(call_msg->reasoning, "thinking");
+
+    /* Phase 1 has no replay: the array never rides a request, whatever
+     * the reasoning echo says. */
+    ASSERT_EQ(g_n_requests, 2);
+    for (int i = 0; i < g_n_requests; i++)
+        ASSERT_TRUE(strstr(g_requests[i], "reasoning_details") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
 }
 
 static void test_agent_cancel_then_next_turn_works(void)
@@ -4459,6 +4545,91 @@ static void test_image_url(char *out, size_t cap)
     char *b64 = nm_image_b64_encode(T_PNG_HDR, sizeof(T_PNG_HDR), &b64_len);
     snprintf(out, cap, "data:image/png;base64,%s", b64 ? b64 : "");
     free(b64);
+}
+
+/* The carrier is not tied to the tool round: an ANSWER round keeps its
+ * array, and so does an IMAGE round (reasoning_details rides image
+ * rounds too — OPENROUTER-API.md §5.1). */
+static void test_agent_reasoning_details_kept_on_answer_and_image_rounds(
+    void)
+{
+    reset_capture();
+
+    size_t b64_len = 0;
+    char *b64 = nm_image_b64_encode(T_PNG_HDR, sizeof(T_PNG_HDR), &b64_len);
+    ASSERT_NOT_NULL(b64);
+    char url[256];
+    snprintf(url, sizeof(url), "data:image/png;base64,%s", b64);
+    free(b64);
+
+    char sse0[512];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\","
+             "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+             "\"signature\":\"sig-answer\"}]}}]}\n\n"
+             "data: [DONE]\n\n");
+    char sse1[1024];
+    snprintf(sse1, sizeof(sse1),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+             "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"%s\"}}],"
+             "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+             "\"data\":\"sig-image\"}]}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"content\":\"drawn\"}}]}"
+             "\n\n"
+             "data: [DONE]\n\n",
+             url);
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] = sse0;
+    sc.sse[1] = sse1;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_turn(agent, "answer one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_img_count, 1);
+
+    const NmSession *sess = nm_agent_session(agent);
+    ASSERT_NOT_NULL(sess);
+    const NmSessionMessage *answer = NULL;
+    const NmSessionMessage *image = NULL;
+    for (size_t i = 0; i < nm_session_len(sess); i++) {
+        const NmSessionMessage *m = nm_session_get(sess, i);
+        if (m->role != NM_ROLE_ASSISTANT)
+            continue;
+        if (m->n_images > 0)
+            image = m;
+        else if (m->content && strcmp(m->content, "an answer") == 0)
+            answer = m;
+    }
+    ASSERT_NOT_NULL(answer);
+    ASSERT_STR_EQ(answer->reasoning_details_json,
+                  "[{\"type\":\"reasoning.text\",\"signature\":\"sig-answer\"}]");
+    ASSERT_NOT_NULL(image);
+    ASSERT_STR_EQ(image->reasoning_details_json,
+                  "[{\"type\":\"reasoning.encrypted\",\"data\":\"sig-image\"}]");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
 }
 
 /* A generated image arrives whole on NM_STREAM_IMAGE, attaches VERBATIM
@@ -6524,7 +6695,7 @@ int main(void)
      * this run never creates — under the scratch root, so no platform
      * can read "/nonexistent" as anything but absent. */
     {
-        char noskills[512];
+        char noskills[600];
         snprintf(noskills, sizeof(noskills), "%s/no-skills",
                  test_scratch_dir());
         nm_skills_set_global_dir(noskills);
@@ -6617,6 +6788,8 @@ int main(void)
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
+    RUN_TEST(test_agent_reasoning_details_kept_on_the_tool_message);
+    RUN_TEST(test_agent_reasoning_details_kept_on_answer_and_image_rounds);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);
     TEST_SUMMARY();

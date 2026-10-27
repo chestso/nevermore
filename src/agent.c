@@ -195,6 +195,15 @@ struct NmAgent
     char *reasoning;
     size_t reasoning_len;
     size_t reasoning_cap;
+    /* This round's accumulated reasoning_details array (the structured
+     * carrier). One reused buffer for the agent's life, truncated at
+     * round_reset; copied into the session at finish_round (the
+     * session's copy is the frozen one). The wire client delivers the
+     * round's whole array at the final callback — one memcpy per
+     * round, never per element. */
+    char *details;
+    size_t details_len;
+    size_t details_cap;
     NmToolCall *calls; /* delivered tool calls (owned between rounds) */
     size_t n_calls;
     /* Tool phase (state RUNNING_TOOL): the round's calls are executed one
@@ -506,6 +515,7 @@ void nm_agent_free(NmAgent *a)
     free(a->last_error);
     free(a->text); /* reused round buffer; released with the agent */
     free(a->reasoning);
+    free(a->details);
     for (size_t i = 0; i < a->n_tool_images; i++)
         free(a->tool_images[i].tool);
     free(a->tool_images);
@@ -1125,6 +1135,28 @@ static void round_on_delta(NmStreamChannel channel, const char *delta_text,
     }
 
     if (delta_text && *delta_text) {
+        if (channel == NM_STREAM_REASONING_DETAILS) {
+            /* Copy the round's assembled array into the reused buffer
+             * (the client's copy dies with its stream). Not forwarded to
+             * the UI: an encrypted carrier is not the model's speech —
+             * the trace text is, and it already rides NM_STREAM_REASONING.
+             * The wire dump is the human's window on this. */
+            size_t dlen = strlen(delta_text);
+            if (a->details_len + dlen + 1 > a->details_cap) {
+                size_t ncap = a->details_cap ? a->details_cap : 256;
+                while (ncap < a->details_len + dlen + 1)
+                    ncap *= 2;
+                char *nb = realloc(a->details, ncap);
+                if (!nb)
+                    return; /* OOM: drop rather than die */
+                a->details = nb;
+                a->details_cap = ncap;
+            }
+            memcpy(a->details, delta_text, dlen);
+            a->details_len = dlen;
+            a->details[dlen] = '\0';
+            return;
+        }
         if (channel == NM_STREAM_REASONING) {
             /* Keep it with the round's assistant message (display now,
              * echo-back later if enabled); forward for display. */
@@ -1267,6 +1299,13 @@ static void round_reset(NmAgent *a)
     a->reasoning_len = 0;
     if (a->reasoning)
         a->reasoning[0] = '\0';
+    /* The round's reasoning_details array dies with the round — a VOID
+     * round's partial accumulation included (the retry starts empty:
+     * the signature is not the answer, and a stale one must never ride
+     * the retry). */
+    a->details_len = 0;
+    if (a->details)
+        a->details[0] = '\0';
     nm_tool_calls_free(a->calls, a->n_calls);
     a->calls = NULL;
     a->n_calls = 0;
@@ -1884,18 +1923,23 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
     /* Record what the model said, with the round's reasoning trace
      * kept alongside it. The trace is display/history material: the
      * wire sees it again only when the echo mode says so
-     * (nm_agent_reasoning_echo / the store's `reasoning_echo` key). */
+     * (nm_agent_reasoning_echo / the store's `reasoning_echo` key).
+     * The round's reasoning_details array rides the same message, and
+     * the wire sees THAT only when the signature echo says so. */
+    const char *round_details = (a->details_len > 1) ? a->details : NULL;
     if (a->n_calls == 0) {
         if (a->n_round_images > 0)
             /* The round generated images: content (possibly ""), trace
              * and image ids are ONE append. */
             nm_session_append_assistant_images(
-                a->session, a->reasoning, a->text, NULL, a->round_images,
-                a->n_round_images);
+                a->session, a->reasoning, round_details, a->text, NULL,
+                a->round_images, a->n_round_images);
         else if (a->text && *a->text)
-            nm_session_append_reasoning(a->session, a->reasoning, a->text);
+            nm_session_append_reasoning(a->session, a->reasoning,
+                                        round_details, a->text);
         else if (a->reasoning && *a->reasoning)
-            nm_session_append_reasoning(a->session, a->reasoning, NULL);
+            nm_session_append_reasoning(a->session, a->reasoning,
+                                        round_details, NULL);
         /* Plain answer: turn complete. */
         set_state(a, NM_AGENT_DONE);
         return 1;
@@ -1915,11 +1959,12 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
          * the images ride the message-level array beside tool_calls,
          * and if an upstream rejects the shape the next round errors
          * loudly (never a silent strip). */
-        nm_session_append_assistant_images(a->session, a->reasoning, NULL,
-                                           calls_json, a->round_images,
-                                           a->n_round_images);
+        nm_session_append_assistant_images(a->session, a->reasoning,
+                                           round_details, NULL, calls_json,
+                                           a->round_images, a->n_round_images);
     else
-        nm_session_append_tool_call(a->session, calls_json, a->reasoning);
+        nm_session_append_tool_call(a->session, calls_json, a->reasoning,
+                                    round_details);
     free(calls_json);
 
     set_state(a, NM_AGENT_RUNNING_TOOL);

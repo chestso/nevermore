@@ -123,6 +123,13 @@ typedef struct NmSessionMessage
      * `reasoning_content` anyway, because the check tests the field's
      * presence, not its content. */
     char *reasoning;
+    /* NM_ROLE_ASSISTANT: the round's reasoning_details array — the
+     * structured reasoning carrier (thought signature / encrypted
+     * blob), pre-serialized wire JSON frozen once at append and never
+     * re-derived (the prefix cache keys on the replayed bytes).
+     * NULL when the round carried none. Replay is decided by the
+     * agent's signature_echo mode, not by this field's presence. */
+    char *reasoning_details_json;
 } NmSessionMessage;
 
 NmSession *nm_session_new(const char *system_prompt);
@@ -143,14 +150,18 @@ int nm_session_set_system(NmSession *s, const char *prompt);
 const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
                                           const char *content);
 /* Append an assistant message carrying a reasoning trace (content
- * may be NULL for a tool-call-only turn). */
-const NmSessionMessage *nm_session_append_reasoning(NmSession *s,
-                                                    const char *reasoning,
-                                                    const char *content);
+ * may be NULL for a tool-call-only turn) and, when the round carried
+ * one, its reasoning_details array (pre-serialized JSON, echoed back
+ * per the agent's signature_echo mode). */
+const NmSessionMessage *nm_session_append_reasoning(
+    NmSession *s, const char *reasoning, const char *reasoning_details_json,
+    const char *content);
 /* Append an assistant message carrying a tool_calls array, with the
- * round's reasoning echoed back (reasoning may be NULL/""). */
+ * round's reasoning echoed back (reasoning may be NULL/"") and its
+ * reasoning_details array, when it had one. */
 const NmSessionMessage *nm_session_append_tool_call(
-    NmSession *s, const char *tool_calls_json, const char *reasoning);
+    NmSession *s, const char *tool_calls_json, const char *reasoning,
+    const char *reasoning_details_json);
 const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
                                                       const char *tool_call_id,
                                                       const char *tool_name,
@@ -262,8 +273,9 @@ const NmSessionMessage *nm_session_append_user_images(NmSession *s,
  * message-level "images" array (docs/OPENROUTER-API.md §5.1). Returns
  * NULL without appending when any id is out of range. */
 const NmSessionMessage *nm_session_append_assistant_images(
-    NmSession *s, const char *reasoning, const char *content,
-    const char *tool_calls_json, const size_t *image_ids, size_t n_images);
+    NmSession *s, const char *reasoning, const char *reasoning_details_json,
+    const char *content, const char *tool_calls_json, const size_t *image_ids,
+    size_t n_images);
 
 /* The transcript, as the agent sends it: message 0 is the system
  * prompt when the session has one, and EVERY stored message rides the

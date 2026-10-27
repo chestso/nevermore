@@ -108,6 +108,7 @@ void nm_session_free(NmSession *s)
         free(s->msgs[i].tool_call_id);
         free(s->msgs[i].tool_name);
         free(s->msgs[i].reasoning);
+        free(s->msgs[i].reasoning_details_json);
         free(s->msgs[i].images);
     }
     for (size_t i = 0; i < s->n_images; i++) {
@@ -134,9 +135,9 @@ const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
     return m;
 }
 
-const NmSessionMessage *nm_session_append_reasoning(NmSession *s,
-                                                    const char *reasoning,
-                                                    const char *content)
+const NmSessionMessage *nm_session_append_reasoning(
+    NmSession *s, const char *reasoning, const char *reasoning_details_json,
+    const char *content)
 {
     if (!s)
         return NULL;
@@ -146,12 +147,13 @@ const NmSessionMessage *nm_session_append_reasoning(NmSession *s,
     m->role = NM_ROLE_ASSISTANT;
     m->content = dup_or_null(content);
     m->reasoning = dup_or_null(reasoning);
+    m->reasoning_details_json = dup_or_null(reasoning_details_json);
     return m;
 }
 
-const NmSessionMessage *nm_session_append_tool_call(NmSession *s,
-                                                    const char *tool_calls_json,
-                                                    const char *reasoning)
+const NmSessionMessage *nm_session_append_tool_call(
+    NmSession *s, const char *tool_calls_json, const char *reasoning,
+    const char *reasoning_details_json)
 {
     if (!s)
         return NULL;
@@ -161,6 +163,7 @@ const NmSessionMessage *nm_session_append_tool_call(NmSession *s,
     m->role = NM_ROLE_ASSISTANT;
     m->tool_calls_json = dup_or_null(tool_calls_json);
     m->reasoning = dup_or_null(reasoning);
+    m->reasoning_details_json = dup_or_null(reasoning_details_json);
     return m;
 }
 
@@ -723,8 +726,9 @@ const NmSessionMessage *nm_session_append_user_images(NmSession *s,
 }
 
 const NmSessionMessage *nm_session_append_assistant_images(
-    NmSession *s, const char *reasoning, const char *content,
-    const char *tool_calls_json, const size_t *image_ids, size_t n_images)
+    NmSession *s, const char *reasoning, const char *reasoning_details_json,
+    const char *content, const char *tool_calls_json, const size_t *image_ids,
+    size_t n_images)
 {
     if (!s)
         return NULL;
@@ -751,6 +755,7 @@ const NmSessionMessage *nm_session_append_assistant_images(
      * array the composer emits for an assistant message. */
     m->content = dup_or_null(content ? content : "");
     m->reasoning = dup_or_null(reasoning);
+    m->reasoning_details_json = dup_or_null(reasoning_details_json);
     m->tool_calls_json = dup_or_null(tool_calls_json);
     m->images = ids;
     m->n_images = n_images;
@@ -1062,6 +1067,15 @@ int nm_session_save(const NmSession *s, const char *path)
         if (m->tool_calls_json && *m->tool_calls_json) {
             fputs("\n<!-- tool_calls: ", f);
             comment_write(f, m->tool_calls_json);
+            fputs(" -->\n", f);
+        }
+        /* The round's reasoning_details array, the sibling of
+         * tool_calls: relayed wire bytes on a message, so it rides a
+         * comment line (no meta change, no body count — the format's
+         * optional lines stay optional). */
+        if (m->reasoning_details_json && *m->reasoning_details_json) {
+            fputs("\n<!-- reasoning_details: ", f);
+            comment_write(f, m->reasoning_details_json);
             fputs(" -->\n", f);
         }
     }
