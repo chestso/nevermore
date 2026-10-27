@@ -551,6 +551,70 @@ static void test_finish_reason_is_published(void)
     close(lfd);
 }
 
+static void test_native_finish_reason_is_published(void)
+{
+    /* The UPSTREAM's own word for the round's end rides the result too.
+     * The round's `finish_reason` says "error" and this says what the
+     * error WAS: "MALFORMED_FUNCTION_CALL" is the model emitting a
+     * function call the provider could not parse — the whole diagnosis
+     * of a round that came back with nothing in it (the empty-answer
+     * case the agent now retries). It is verbatim, first non-empty
+     * value wins, like its sibling. */
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":"
+        "\"thinking\"},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\"},"
+        "\"finish_reason\":\"error\","
+        "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL };
+    NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.finish_reason, "error");
+    ASSERT_STR_EQ(r.native_finish_reason, "MALFORMED_FUNCTION_CALL");
+    pthread_join(th, NULL);
+    close(lfd);
+
+    /* A wire that reports no native reason publishes "" — never
+     * reported, not "STOP" (a value nobody sent is not a guess). */
+    lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s2 = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_create(&th, NULL, sse_server_thread, &s2);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
+                             "nevermore-test", NULL, 0, 0, NULL };
+    NmChatResult r2 = nm_openai_chat(&ep2, &req);
+    ASSERT_EQ(r2.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r2.finish_reason, "stop");
+    ASSERT_STR_EQ(r2.native_finish_reason, "");
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 static void test_chat_stream_end_to_end(void)
 {
     int port;
@@ -2958,6 +3022,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_usage_absent_fires_nothing);
     RUN_TEST(test_usage_null_chunk_fires_nothing);
     RUN_TEST(test_finish_reason_is_published);
+    RUN_TEST(test_native_finish_reason_is_published);
     RUN_TEST(test_chat_stream_end_to_end);
     RUN_TEST(test_chat_image_parts_shape);
     RUN_TEST(test_chat_image_marker_part_shape);

@@ -354,6 +354,14 @@ struct NmChatStream
      * chunk), and it is published into NmChatResult.finish_reason so a
      * caller can tell a cut round (`length`) from a finished one. */
     char finish_reason[NM_CHAT_FINISH_MAX];
+    /* The UPSTREAM's own word for the same moment
+     * (`native_finish_reason`: "STOP", "MALFORMED_FUNCTION_CALL", ...),
+     * verbatim and capped like its sibling, first non-empty value wins.
+     * It is a diagnostic only — the wire's own `finish_reason` is the
+     * normalized one, and this says WHY the round ended the way it
+     * did ("error" + "MALFORMED_FUNCTION_CALL" is the whole story of a
+     * round that came back empty). */
+    char native_finish_reason[NM_CHAT_FINISH_MAX];
     NmChatStatus status; /* final status */
     int http_status;
     char error_body[ERROR_BODY_MAX]; /* captured non-SSE error body, capped */
@@ -502,6 +510,19 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
                 snprintf(st->finish_reason, sizeof(st->finish_reason), "%s",
                          finish);
         }
+        /* The upstream's OWN word for the same moment
+         * (`native_finish_reason`: "STOP", "MALFORMED_FUNCTION_CALL",
+         * ...). It rides the SAME chunk as the normalized reason and is
+         * kept verbatim: the round's `finish_reason` says "error" and
+         * this says what the error WAS — the difference between a
+         * provider that rejected the model's function call and one
+         * that ran out of tokens. First non-empty value wins, like its
+         * sibling. */
+        const char *native =
+            nm_json_str(nm_json_get(choice, "native_finish_reason"));
+        if (native && !st->native_finish_reason[0])
+            snprintf(st->native_finish_reason, sizeof(st->native_finish_reason),
+                     "%s", native);
         NmJson *delta = nm_json_get(choice, "delta");
         if (delta) {
             /* Reasoning first: providers stream it phase-sequential
@@ -951,6 +972,10 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
      * never reported one publishes "" — never reported, not "stop". */
     snprintf(result->finish_reason, sizeof(result->finish_reason), "%s",
              h->finish_reason);
+    /* The upstream's own word for the same moment, on the same terms:
+     * "" when the wire reported none. */
+    snprintf(result->native_finish_reason, sizeof(result->native_finish_reason),
+             "%s", h->native_finish_reason);
     /* Provider response metadata (Hyper's Prism routing, §3.5.2): read
      * from the live connection's retained headers/trailers. All-empty
      * when the provider reports none — the "direct" case. The
@@ -1205,6 +1230,7 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         result->http_status = 0;
         result->message[0] = '\0';
         result->finish_reason[0] = '\0';
+        result->native_finish_reason[0] = '\0';
         memset(&result->meta, 0, sizeof(result->meta));
     }
     if (!h) {

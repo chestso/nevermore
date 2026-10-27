@@ -337,6 +337,16 @@ typedef struct NmChatResult
      * chunks); the agent reads it to tell a cut round
      * (`finish_reason: "length"`) from a finished one. */
     char finish_reason[NM_CHAT_FINISH_MAX];
+    /* The UPSTREAM's own word for how the round ended
+     * (`native_finish_reason` on the OpenRouter wire: "STOP",
+     * "MALFORMED_FUNCTION_CALL", "MAX_TOKENS", ...). Verbatim, capped,
+     * empty when the wire reported none. It is a DIAGNOSTIC, never a
+     * decision: the agent reads `finish_reason` to tell a cut round
+     * from a finished one, and this one to say WHY a round came back
+     * with nothing in it (the empty-answer case: the provider's
+     * "MALFORMED_FUNCTION_CALL" is the whole story, and the round's
+     * own `finish_reason` only says "error"). */
+    char native_finish_reason[NM_CHAT_FINISH_MAX];
     /* Provider response metadata for the round (Prism routing, §3.5.2).
      * All-empty when the provider reports none (the "direct" case). */
     NmRoundMeta meta;
