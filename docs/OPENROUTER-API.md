@@ -118,7 +118,54 @@ OpenRouter deltas (all verified):
   `prompt_tokens_details.cached_tokens`, `cost_details`). Then
   `data: [DONE]`.
 - `native_finish_reason` mirrors `finish_reason` (upstream's own
-  code); `provider` names the upstream that served the chunk.
+  code); `provider` names the upstream that served the chunk. It does
+  NOT always mirror it: on a round that failed, `finish_reason` is
+  the normalized `"error"` and the native word is the upstream's own
+  (`"MALFORMED_FUNCTION_CALL"` — see §3.1).
+
+## 3.1 The empty round — a 200 with nothing in it (live, 2026-10-27)
+
+A round can come back with NO content, NO tool call and an all-zero
+usage object, and still be a `200`. The wire says so twice: the
+normalized `finish_reason: "error"` and the upstream's own
+`native_finish_reason: "MALFORMED_FUNCTION_CALL"` — Google's word for
+"the model emitted a function call the provider could not parse".
+
+The whole round, verbatim (`google/gemini-3.8-flash` through Google
+AI Studio, 2026-10-27, wire dump):
+
+```
+data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant",
+  "reasoning":"**Executing File Inspection**\n\nI am now running the
+  'ls -la' command on the specified JPG files. …"},"finish_reason":null}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"},
+  "finish_reason":"error","native_finish_reason":"MALFORMED_FUNCTION_CALL"}]}
+
+data: {"choices":[{"index":0,"delta":{"content":"","role":"assistant"},
+  "finish_reason":"error","native_finish_reason":"MALFORMED_FUNCTION_CALL"}],
+  "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0,"cost":0,
+  "is_byok":false,…}}]
+
+data: [DONE]
+```
+
+What a client must NOT do: read the absence of content as the end of
+the turn. The reasoning trace is there (the model was mid-thought: it
+says what it is about to do), the provider calls the round finished,
+and the human sees a turn that stops in the middle of a sentence with
+nothing said. nevermore's answer is the agent's `round_is_void`
+(`src/agent.c`): a round with no text, no tool call and no image is
+not an answer — it is asked again, and the turn never ends on one
+(the retry and the note are the agent's; see ARCHITECTURE.md, "Agent
+loop").
+
+Observed 8 times in one 26-minute session, all with
+`google/gemini-3.8-flash`, all above ~84k prompt tokens and none
+below: the model's function calling is what degrades with a long
+context. The round right after a void one answered normally in five
+of the eight — which is why a retry is worth more than a "continue"
+from the human.
 
 ## 4. Errors (live test)
 

@@ -516,6 +516,34 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   minutes-long image-generation gap count) resets the agent's
   `last_activity` exactly like a delta does, so a live-but-eventless
   stream is never cut (the counter-proof: silence still times out).
+  **A round that produced NOTHING is not an answer**
+  (`round_is_void`): no text, no tool call, no generated image. The
+  provider's own words are the diagnosis — OpenRouter relays Google's
+  `native_finish_reason: "MALFORMED_FUNCTION_CALL"` (the model
+  emitted a function call the provider could not parse) with
+  `finish_reason: "error"` and an all-zero usage object, while the
+  model's reasoning trace says what it was about to do — so the human
+  watches the turn stop in the middle of a sentence, with nothing
+  said and nothing shown (the 2026-10-27 wire dump: eight such
+  rounds in one session, every one of them answered by a human typing
+  "continue"). A void round therefore does not end the turn, does not
+  ride the transcript (an empty assistant message is not a message),
+  and does not move the usage gauge (its zeros are the error
+  envelope's, not a measurement: the report lands in the round's own
+  slot, and only a round that produced something publishes it). The
+  round is asked again, and the retry carries the NOTE that tells the
+  model what the provider rejected (`void-round`, reminder.c) — the
+  model's own "continue" carries no such information, and the failures
+  CLUSTER (four of that session's eight void rounds came in one run of
+  four, and the "continue"s in between did not break it), so the retry
+  is asked with the reason rather than with the same question again.
+  The note is appended at the END of the transcript, so the provider's
+  cached prefix is untouched: the retry re-reads the note, not the
+  conversation. A void round is not a tool round: it never spends
+  the turn's round budget, and the retry count
+  (`NM_AGENT_DEFAULT_VOID_RETRIES`) is what bounds it. When the
+  retries are spent the turn ends in a REAL error carrying the wire's
+  own words — never in silence.
 - **Provider response metadata is a per-round fact, and it has its own
   seam** (`NmRoundMeta`, in `NmChatResult.meta`). Some providers report
   things ABOUT a round that are neither content nor usage: Hyper's Prism
@@ -805,8 +833,8 @@ save [path]` writes session.c's markdown). Const on purpose: the
   clause says the rule once, this says it at the injection surface),
   `file-already-read` and `file-changed` (the session's file ledger:
   `NmToolResult.file_state`, see the file-ledger bullet).
-  Then `context-pressure`, `background-jobs`, `round-budget` and
-  `output-cut` (USER). The ROUND-point one
+  Then `context-pressure`, `background-jobs`, `round-budget`,
+  `output-cut` and `void-round` (USER). The ROUND-point one
   is the one
   whose facts are the agent's own bookkeeping: `output-cut` counts the
   rounds the model's OUTPUT limit cut short — `NmChatResult.finish_reason`,
@@ -815,7 +843,15 @@ save [path]` writes session.c's markdown). Const on purpose: the
   non-empty value wins; empty = never reported) — and it fires the note
   at the NEXT round's request, so a cut round that ended the turn is
   answered knowingly when the next turn opens. It is latched (the fact
-  is cumulative).
+  is cumulative). `void-round` is its sibling on the other side of the
+  same round: the rounds the provider answered with NOTHING in them
+  (the empty-answer case — the agent's `round_is_void`). It speaks
+  ONCE per turn (the signature is the turn): the note stays in the
+  transcript, so every retry after it carries the note, and a run of
+  void rounds does not pile up notes. The gate is the STREAK (a turn
+  with no void round has nothing to say), and the note names the
+  provider's own account of the rejection
+  (`NmChatResult.native_finish_reason`, "MALFORMED_FUNCTION_CALL").
   **The per-result facts are the tool's own** (`NmToolResult.truncated`,
   `.untrusted`, `.read_state`, `.file_state`) plus the active model's
   vision flag, which
