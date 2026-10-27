@@ -191,9 +191,9 @@ Settings resolve once, lowest to highest:
 3. **runtime shadow** — `~/.local/state/nevermore/config`, written by
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
-   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
-   `NEVERMORE_SIGNATURE_ECHO`, `NEVERMORE_TIMEOUT_MS`,
-   `NEVERMORE_TEMPERATURE`,
+   `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_VOID_RETRIES`,
+   `NEVERMORE_REASONING_ECHO`, `NEVERMORE_SIGNATURE_ECHO`,
+   `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_TEMPERATURE`,
    `NEVERMORE_MAX_TOKENS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
@@ -217,6 +217,7 @@ config back in charge, with nothing else to unwind.
 provider         = opencode:go
 model            = glm-5.3
 rounds           = 40
+void_retries     = 2
 # The two echo knobs: unset, each follows the provider's own
 # declaration; a value here overrides it (see "the two echo knobs").
 # reasoning_echo = tools
@@ -256,6 +257,27 @@ outranks the plain `model`. `-m` and `$NEVERMORE_MODEL` stay global
 provider, nevermore says so and waits for `/model` — ask mode exits
 before any traffic — rather than guessing an id from another
 provider's catalog.
+
+`rounds` caps the tool rounds in one turn (default 25): a model that
+keeps calling tools without ever answering is stopped with "too many
+tool rounds without a final answer". `void_retries` (default 2, `0`-`9`)
+caps a different thing — how many times a round that came back with
+**nothing in it** is asked again. A void round is not a tool round: the
+provider rejected the model's function call (`finish_reason: error`,
+`native_finish_reason: MALFORMED_FUNCTION_CALL`), so no text and no tool
+call arrived, and the same transcript is asked again with a note telling
+the model what the provider rejected. Set it to `0` and the first empty
+round ends the turn instead — the retry is a net, not a fix, and this is
+how you make the failure visible rather than absorbed.
+
+Either way, **every void round is a system error you will see**: red in
+the chat, `void round: the model produced no output (finish_reason: …,
+native: …) — retrying (1/2)` (or `— retries spent (2/2), the turn ends`,
+or `— no retries configured (void_retries = 0), the turn ends`), and the
+same line on stderr in ask mode. The reason is quoted from the wire, not
+guessed: an empty round is never silent, which is exactly what the
+2026-10-27 session showed before this existed — eight rounds that stopped
+a turn with nothing said and nothing shown.
 
 The whole transcript rides every request: nevermore never trims it to a
 guessed token budget (a sliding window would silently cap the

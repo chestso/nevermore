@@ -591,10 +591,23 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   The note is appended at the END of the transcript, so the provider's
   cached prefix is untouched: the retry re-reads the note, not the
   conversation. A void round is not a tool round: it never spends
-  the turn's round budget, and the retry count
-  (`NM_AGENT_DEFAULT_VOID_RETRIES`) is what bounds it. When the
-  retries are spent the turn ends in a REAL error carrying the wire's
-  own words — never in silence.
+  the turn's round budget, and the retry count — the store's
+  `void_retries` key, `0`-`9`, resolved at the point of use
+  (`nm_agent_void_retries`; default `NM_AGENT_DEFAULT_VOID_RETRIES` = 2)
+  — is what bounds it. `0` means never retry: the first empty round ends
+  the turn, which is the setting for someone who wants the failure to
+  surface instead of being absorbed.
+  **Every void round is reported to the human, whatever the knob says**
+  (`nm_agent_on_warning`: red in the chat, stderr in ask mode) with the
+  wire's own words verbatim — `void round: the model produced no output
+  (finish_reason: error, native: MALFORMED_FUNCTION_CALL) — retrying
+  (1/2)`, or `— retries spent (2/2), the turn ends`, or `— no retries
+  configured (void_retries = 0), the turn ends`. It is the UI's channel
+  on purpose: the model is told through the reminder note, never through
+  this, and nothing about it rides the wire. When the retries are spent
+  the turn ends in a REAL error carrying the same words — never in
+  silence, which is what the eight void rounds of the 2026-10-27 dump did
+  before either mechanism existed.
 - **Provider response metadata is a per-round fact, and it has its own
   seam** (`NmRoundMeta`, in `NmChatResult.meta`). Some providers report
   things ABOUT a round that are neither content nor usage: Hyper's Prism
