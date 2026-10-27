@@ -369,10 +369,10 @@ prose. Both are received, shown where they are meant to be shown, and
 kept in the transcript; only what rides _back_ to the provider is a
 choice, and there are two independent choices for the two carriers:
 
-| carrier                                                                                              | where it arrives                                                        | knob                                           | who declares it                                   |
-| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------- |
-| **trace text** — `reasoning_content` / `reasoning`                                                   | reasoning stream; `### reasoning` in the transcript, dimmed in the chat | `reasoning_echo` / `$NEVERMORE_REASONING_ECHO` | `opencode:go` → `tools`; `hyper` → `off` (probed) |
-| **structured carrier** — `reasoning_details[]` (Gemini's thought signature, OpenAI's encrypted blob) | its own stream channel, assembled once per round; never displayed       | `signature_echo` / `$NEVERMORE_SIGNATURE_ECHO` | `openrouter` → `tools`; everyone else → `off`     |
+| carrier                                                                                              | where it arrives                                                        | knob                                           | who declares it                                |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------- |
+| **trace text** — `reasoning_content` / `reasoning`                                                   | reasoning stream; `### reasoning` in the transcript, dimmed in the chat | `reasoning_echo` / `$NEVERMORE_REASONING_ECHO` | `opencode:go` → `tools`; everyone else → `off` |
+| **structured carrier** — `reasoning_details[]` (Gemini's thought signature, OpenAI's encrypted blob) | its own stream channel, assembled once per round; never displayed       | `signature_echo` / `$NEVERMORE_SIGNATURE_ECHO` | `openrouter` → `tools`; everyone else → `off`  |
 
 Both knobs take the same three values, with the old bool spellings
 folded in (`on`/`true`/`1` mean `all`, `off`/`false`/`0`/`no` mean
@@ -408,8 +408,7 @@ What the providers declare today:
   opinion — the two carriers are separate fields, and this provider
   needs the second, not the first.
 - `hyper`, `ollama:cloud`, `ollama:local`, `opencode:zen` — no opinion
-  on either. Hyper was probed _not_ to need the trace echo; the rest
-  were never probed, and a declaration is a probe result, not a guess.
+  on either; a declaration is a probe result, not a guess.
 
 `/config` tells you which of those is in force, not what your file
 says: a row reads `off` when nothing is set anywhere, `tools (provider

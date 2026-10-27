@@ -516,12 +516,7 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `opencode:go` load-balances one model id across several endpoints
   and one of them (`x-opencode-endpoint-id: deepseek`) does this, which
   is the "flaky 400" shape it shows in practice — that is what `tools`
-  exists for. **Hyper does NOT need it** (a live probe:
-  six reasoning models across every taxonomy class answered 200 with
-  the field echoed and omitted — the inherited "must be echoed back"
-  claim in docs/HYPER-API.md was never observed and is now disproved
-  for hyper; `provider_hyper.c` declares `NM_REASONING_ECHO_OFF`).
-  **All three reasoning carriers are handled end to end.** The text
+  exists for. **All three reasoning carriers are handled end to end.** The text
   pair (`reasoning_content` / `reasoning`) rides `NM_STREAM_REASONING`
   and the session's `reasoning` field, and goes back as
   `reasoning_content` per `reasoning_echo`. The structured carrier —

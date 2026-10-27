@@ -155,8 +155,7 @@ typedef struct NmMessage
      * nm_agent_reasoning_echo / the store's `reasoning_echo` key).
      * The field is required by DeepSeek's thinking-mode replay check
      * on tool-call rounds (observed on opencode:go, docs/OPENCODE-API.md
-     * §3) and claimed for hyper by docs/HYPER-API.md's inherited,
-     * unverified note.
+     * §3).
      *
      * NULL = omit the field; a non-NULL string = emit it. "" is a
      * deliberate empty string, not "omit": the replay check tests the
@@ -445,10 +444,9 @@ struct NmProvider
      * here, so the requirement rides the wire instead of the user
      * having to know it: agent.c's nm_agent_reasoning_echo takes this
      * as the DEFAULT and the store's `reasoning_echo` key as the
-     * override (an explicit user setting always wins). Probed sources
-     * in the field's consumers: opencode:go's deepseek endpoint
-     * (docs/OPENCODE-API.md §3) requires it; hyper does NOT (a live
-     * probe, docs/HYPER-API.md §3.5). */
+     * override (an explicit user setting always wins). Probed source:
+     * opencode:go's deepseek endpoint (docs/OPENCODE-API.md §3)
+     * requires it; every other provider declares OFF. */
     NmReasoningEcho reasoning_echo;
 
     /* Does this provider's WIRE need the round's STRUCTURED reasoning

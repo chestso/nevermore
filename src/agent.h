@@ -265,14 +265,12 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * nm_agent_reasoning_echo reports the mode in force (store, provider
  * default, or latch); nm_agent_reasoning_echo_frozen says which it was.
  *
- * NOTE (why the mode exists at all): the echo was offered for
- * docs/HYPER-API.md's claim that a trace "must be echoed back" on any
- * request carrying the turn — an inherited, hand-written doc claim.
- * A live hyper probe (2026-10-08) DISPROVED it for hyper: six reasoning
- * models across every taxonomy class answered 200 with the field both
- * echoed and omitted, so hyper declares NM_REASONING_ECHO_OFF. The rule
- * IS real on opencode:go's deepseek endpoint (docs/OPENCODE-API.md §3),
- * which is what `tools` answers. */
+ * NOTE (why the mode exists at all): some upstreams 400 a `tool_calls`
+ * message that omits `reasoning_content` (`""` is enough; plain
+ * answers are exempt). `opencode:go` load-balances one model id across
+ * several endpoints and one of them (`x-opencode-endpoint-id:
+ * deepseek`) does this — the "flaky 400" shape it shows in practice —
+ * which is what `tools` exists for (docs/OPENCODE-API.md §3). */
 NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a);
 
 /* The mode the NEXT chat would use — nm_agent_reasoning_echo's

@@ -2127,8 +2127,8 @@ static void test_agent_reasoning_collected_and_echoed(void)
     ASSERT_STR_EQ(g_reasoning, "let me think about the edit");
 
     /* Round 2 carries the assistant tool_calls message with the
-     * reasoning echoed as reasoning_content (HYPER-API.md's
-     * requirement). */
+     * reasoning echoed as reasoning_content (what the echo mode
+     * asked for). */
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);

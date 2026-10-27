@@ -254,9 +254,7 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
          * presence is what DeepSeek's thinking-mode replay check
          * demands on a tool-call round whose trace was never
          * streamed — observed on opencode:go, docs/OPENCODE-API.md
-         * §3). The field is claimed for hyper by docs/HYPER-API.md's
-         * inherited, unverified note; elsewhere it is inert
-         * documentation of the thinking. */
+         * §3; elsewhere it is inert documentation of the thinking). */
         if (req->messages[i].reasoning)
             nm_json_set(m, "reasoning_content",
                         nm_json_new_string(req->messages[i].reasoning));

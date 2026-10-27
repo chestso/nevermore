@@ -117,8 +117,7 @@ typedef struct NmSessionMessage
      * plus every assistant message with a trace — nm_agent_reasoning_echo
      * / the store's `reasoning_echo` key). What the echo is for:
      * DeepSeek's thinking-mode replay check, observed on opencode:go
-     * (docs/OPENCODE-API.md §3), plus docs/HYPER-API.md's inherited,
-     * unverified claim for hyper. NULL/"" when the round streamed
+     * (docs/OPENCODE-API.md §3). NULL/"" when the round streamed
      * none — a tool-call round then rides back an empty
      * `reasoning_content` anyway, because the check tests the field's
      * presence, not its content. */

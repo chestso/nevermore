@@ -451,27 +451,13 @@ catalog models (2026-09):
 When reasoning is enabled, the trace must be echoed back — as
 `reasoning_content` on the assistant message — on any subsequent request that
 carries that turn (including tool-call rounds); some providers require it
-present (or empty) on assistant tool-call messages in the history.
-
-**Does Hyper itself require this? No — probed 2026-10-08.** The paragraph
-above is inherited from quoth and hand-written; a live probe settles it
-for Hyper. A two-round tool turn (`tools` + `tool_choice: "auto"`,
-`reasoning_effort: "high"`, a forced `get_weather` call) was replayed
-twice: once with the assistant tool-call message carrying
-`reasoning_content` (both the real trace and `""`), once with the field
-omitted entirely. Across six reasoning models spanning every taxonomy
-class — `deepseek-v4.1-flash`, `glm-5.3` (effort models),
-`kimi-k2-thinking` (silenceable default-thinker), `minimax-m3`
-(un-silenceable), `gpt-oss-120b`, `deepseek-v4-pro` — **all six answered
-`200` both ways**, with sensible content either way. Hyper tolerates the
-omission; the trace need not be echoed to it, and nevermore does not
-(`provider_hyper.c` declares `NM_REASONING_ECHO_OFF`).
-
-The echo is still real — just on another route: OpenCode Go's `deepseek`
+present (or empty) on assistant tool-call messages in the history. This
+paragraph is inherited from quoth and hand-written, and is not observed on
+Hyper. The rule is observed on another route — OpenCode Go's `deepseek`
 endpoint 400s a tool-call round replayed without the field (probed
 2026-09-22, `docs/OPENCODE-API.md` §3), and that provider declares the
-requirement itself (`NM_REASONING_ECHO_TOOLS`). nevermore's echo is
-granular (`off` / `tools` / `all`), defaults from the provider's
+requirement itself (`NM_REASONING_ECHO_TOOLS`). nevermore's echo is granular
+(`off` / `tools` / `all`), defaults from the provider's
 declaration, and is frozen for a chat once a request has carried a trace
 (`nm_agent_reasoning_echo`).
 

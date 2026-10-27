@@ -145,8 +145,8 @@ static void test_provider_names_are_tier_qualified(void)
 /* The provider declares its wire's reasoning-echo requirement (the
  * store's `reasoning_echo` key is the user's override; see
  * nm_agent_reasoning_echo). Only opencode:go's deepseek endpoint is
- * probed to need it (docs/OPENCODE-API.md §3); hyper is probed NOT to
- * (docs/HYPER-API.md §3.5); the rest say nothing (OFF). */
+ * probed to need it (docs/OPENCODE-API.md §3); the rest say nothing
+ * (OFF). */
 static void test_provider_reasoning_echo_declarations(void)
 {
     const NmProvider *go = nm_provider_by_name("opencode:go");
