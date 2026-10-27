@@ -3121,6 +3121,15 @@ static void print_config(NmChatApp *app)
                 layer = "provider default";
             }
         }
+        /* The signature echo freezes on its OWN latch. No provider
+         * declares a default for it today (nothing observed needs the
+         * signature back), so there is only the frozen case to show. */
+        if (strcmp(k, NM_CFG_KEY_SIGNATURE_ECHO) == 0 && app->agent &&
+            nm_agent_signature_echo_frozen(app->agent)) {
+            v = nm_config_reasoning_echo_name(
+                nm_agent_signature_echo(app->agent));
+            layer = "frozen this chat";
+        }
         /* A latched family is INERT while the policy is off: the walk
          * neither earns nor honours it (family_skip is the one switch
          * the user owns). The value stays visible — /config reset is
@@ -3155,28 +3164,47 @@ static void print_config(NmChatApp *app)
     }
 }
 
-/* One line of truth when a reasoning-echo change cannot take effect
- * yet: the mode is frozen for this conversation, because a request has
- * already carried a trace (the prefix — and with it the provider's
- * cached prefix and DeepSeek's replay check — must not change shape
- * mid-conversation; see nm_agent_reasoning_echo_frozen). Silence when the
- * change matches the frozen mode: nothing is being overridden. */
+/* One line of truth when an echo change cannot take effect yet: the mode
+ * is frozen for this conversation, because a request has already carried
+ * the field (the prefix — and with it the provider's cached prefix — must
+ * not change shape mid-conversation; see
+ * nm_agent_reasoning_echo_frozen / nm_agent_signature_echo_frozen).
+ * Silence when the change matches the frozen mode: nothing is being
+ * overridden. The two knobs freeze independently, so each key asks its
+ * own latch. */
 static void note_frozen_echo(NmChatApp *app, const char *key)
 {
-    if (!app->agent || !app->cfg ||
-        (key && strcmp(key, NM_CFG_KEY_REASONING_ECHO) != 0) ||
-        !nm_agent_reasoning_echo_frozen(app->agent))
+    if (!app->agent || !app->cfg || !key)
         return;
-    NmReasoningEcho frozen = nm_agent_reasoning_echo(app->agent);
+    int reasoning = strcmp(key, NM_CFG_KEY_REASONING_ECHO) == 0;
+    int signature = strcmp(key, NM_CFG_KEY_SIGNATURE_ECHO) == 0;
+    if (!reasoning && !signature)
+        return;
+    int frozen_flag = reasoning ? nm_agent_reasoning_echo_frozen(app->agent)
+                                : nm_agent_signature_echo_frozen(app->agent);
+    if (!frozen_flag)
+        return;
+    NmReasoningEcho frozen = reasoning ? nm_agent_reasoning_echo(app->agent)
+                                       : nm_agent_signature_echo(app->agent);
     /* What the change WOULD do (the store's key, else the provider's
      * declaration) — the agent's own resolution with the freeze
      * ignored, so a reset back to the provider default (which leaves
      * the effective mode unchanged) is correctly silent. */
-    NmReasoningEcho after = nm_agent_reasoning_echo_next(app->agent);
-    if (after != frozen)
+    NmReasoningEcho after = reasoning
+                                ? nm_agent_reasoning_echo_next(app->agent)
+                                : nm_agent_signature_echo_next(app->agent);
+    if (after == frozen)
+        return;
+    if (reasoning)
         sys_line(app, "config: the reasoning echo is frozen at '%s' for "
                       "this conversation (a request already carried a "
                       "trace) — the change applies to the next chat",
+                 nm_config_reasoning_echo_name(frozen));
+    else
+        sys_line(app, "config: the signature echo is frozen at '%s' for "
+                      "this conversation (a request already carried a "
+                      "reasoning_details field) — the change applies to "
+                      "the next chat",
                  nm_config_reasoning_echo_name(frozen));
 }
 

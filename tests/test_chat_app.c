@@ -4340,7 +4340,9 @@ static void script_reasoning_tool_turn(struct ServerScript *sc)
     sc->n_rounds = 2;
     sc->sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"let me think about the edit\"}}]}\n\n"
+        "\"reasoning_content\":\"let me think about the edit\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-chat\",\"format\":\"google-gemini-v1\"}]}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
         "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE_PATH
@@ -4476,6 +4478,59 @@ static void test_config_reasoning_echo_freezes_for_the_chat(void)
     ASSERT_TRUE(strstr(out, "the reasoning echo is frozen at 'tools'") !=
                 NULL);
     ASSERT_STR_EQ(cfg_read_shadow(), "reasoning_echo = off\n");
+
+    nm_config_free(cfg);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE_PATH);
+}
+
+/* The `signature_echo` row and its freeze line. The knob has no provider
+ * default (nothing observed needs the signature back), so /config shows
+ * the store's value until a request actually carries the field, then the
+ * frozen one — and a change says it applies to the next chat. */
+static void test_config_signature_echo_row_and_freeze(void)
+{
+    pin_cfg_paths("signature-echo");
+    struct ServerScript sc;
+    pthread_t th;
+    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    /* Before anything has been sent: the built-in default. */
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "signature_echo"));
+    ASSERT_NOT_NULL(strstr(out, "signature_echo       off"));
+
+    store_set(NM_CFG_KEY_SIGNATURE_ECHO, "tools");
+    harness_type(h, "read it");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    /* Round 1's array rode back (the tool message carries the array, and
+     * nothing else: the trace echo stayed at its own default). */
+    ASSERT_TRUE(strstr(g_request, "reasoning_details") != NULL);
+    ASSERT_TRUE(strstr(g_request, "reasoning_content") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(nm_chat_app_agent(h->app)), 1);
+
+    /* The row reports the FROZEN mode from here on. */
+    harness_type(h, "/config");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "signature_echo       tools"));
+    ASSERT_NOT_NULL(strstr(out, "frozen this chat"));
+
+    /* A change is accepted (next chat's setting) and called out. */
+    harness_type(h, "/config set signature_echo all");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "config: signature_echo = all"));
+    ASSERT_NOT_NULL(strstr(out, "the signature echo is frozen at 'tools'"));
+    ASSERT_STR_EQ(cfg_read_shadow(), "signature_echo = all\n");
 
     nm_config_free(cfg);
     harness_free(h);
@@ -9650,6 +9705,7 @@ int main(void)
     RUN_TEST(test_help_command_lists_commands);
     RUN_TEST(test_config_runtime_change_writes_shadow);
     RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
+    RUN_TEST(test_config_signature_echo_row_and_freeze);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_shows_provider_default_echo);
