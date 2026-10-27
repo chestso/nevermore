@@ -303,7 +303,6 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
 /* ---------------------------------------------------------------- */
 /* SSE delta dispatch                                                */
 /* ---------------------------------------------------------------- */
-
 /* Stream handle: the StreamState + connection + reused read buffer.
  * One allocation per chat call (memory-reuse principle: the SSE
  * parser, read buffer, and tool-call array live here for the
@@ -390,6 +389,20 @@ struct NmChatStream
     NmToolCall *tool_calls;
     size_t n_tool_calls;
     size_t tc_cap;
+    /* The round's assembled reasoning_details[] (the structured
+     * reasoning carrier — thought signature / encrypted blob). One
+     * growable buffer per stream (per round), appended per element in
+     * arrival order, delivered ONCE at stream_finish with the final
+     * NM_STREAM_REASONING_DETAILS callback, freed with the stream.
+     * Bytes: '[' then each element's serialization, then ',', the
+     * trailing comma overwritten with ']' at delivery. Zero per-event
+     * allocation (nm_json_dump_append, geometric growth). */
+    char *rdetails;
+    size_t rdetails_len;
+    size_t rdetails_cap;
+    int rdetails_poisoned; /* an append failed: deliver nothing, rather
+                            * than a half-built array (never fail the
+                            * round — the signature is not the answer). */
 };
 
 void nm_tool_calls_free(NmToolCall *calls, size_t n)
@@ -439,6 +452,28 @@ static void parse_usage(NmJson *uobj, NmUsage *u)
     NmJson *cw = details ? nm_json_get(details, "cache_write_tokens") : NULL;
     u->cached_tokens = cr ? (long)nm_json_num(cr) : -1;
     u->cache_write_tokens = cw ? (long)nm_json_num(cw) : -1;
+}
+
+/* Append one raw byte sequence onto the stream's reasoning_details
+ * accumulator, growing geometrically (never per event). Returns 1 on
+ * success; 0 when the grow failed. */
+static int rd_put(NmChatStream *st, const char *s)
+{
+    size_t n = strlen(s);
+    if (st->rdetails_len + n + 1 > st->rdetails_cap) {
+        size_t ncap = st->rdetails_cap ? st->rdetails_cap : 256;
+        while (ncap < st->rdetails_len + n + 1)
+            ncap *= 2;
+        char *nb = realloc(st->rdetails, ncap);
+        if (!nb)
+            return 0;
+        st->rdetails = nb;
+        st->rdetails_cap = ncap;
+    }
+    memcpy(st->rdetails + st->rdetails_len, s, n);
+    st->rdetails_len += n;
+    st->rdetails[st->rdetails_len] = '\0';
+    return 1;
 }
 
 /* Handle one complete SSE event's data payload (already JSON-parsed
@@ -529,18 +564,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
              * with content (never concurrent). Two key spellings:
              * reasoning_content (GLM/Go, hyper, OpenRouter) and
              * reasoning (Zen free models, OpenRouter's other shape).
-             * Read the first present one; both carry the same text.
-             *
-             * `reasoning_details[]` is NOT read here, and that is a
-             * known GAP, not a redundancy: for Gemini its elements
-             * carry the THOUGHT SIGNATURE — the encrypted carrier the
-             * model must see again with the tool result, so it can
-             * continue the reasoning behind its call (docs/
-             * OPENROUTER-API.md §3.2). The signature is not an echo
-             * of this text and cannot be reconstructed from it, so the
-             * reasoning echo that does exist (`reasoning_content`,
-             * agent.c's nm_agent_reasoning_echo) does not substitute:
-             * it sends the text, which is a different field. */
+             * Read the first present one; both carry the same text. */
             const char *reasoning =
                 nm_json_str(nm_json_get(delta, "reasoning_content"));
             if (!reasoning)
@@ -548,6 +572,40 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
             if (reasoning && *reasoning && st->on_delta)
                 st->on_delta(NM_STREAM_REASONING, reasoning, NULL, 0,
                              st->userdata);
+
+            /* The structured reasoning carrier: delta.reasoning_details[]
+             * — one element per chunk, in stream order; a round's full
+             * set is the concatenation (docs/OPENROUTER-API.md §3.2).
+             * The array's PRESENCE is the trigger: elements arrive on
+             * chunks whose reasoning TEXT is null (the trailing
+             * encrypted element), so this must not sit under the text
+             * read. Non-object elements are skipped (not a carrier).
+             * Accumulated onto the stream's reused buffer — zero
+             * allocation per event — and delivered whole at
+             * stream_finish. */
+            NmJson *rds = nm_json_get(delta, "reasoning_details");
+            size_t n_rds = nm_json_len(rds);
+            for (size_t i = 0; i < n_rds && !st->rdetails_poisoned; i++) {
+                NmJson *el = nm_json_at(rds, i);
+                if (nm_json_type(el) != NM_JSON_OBJECT)
+                    continue;
+                /* first element opens the array */
+                if (!st->rdetails_len && !rd_put(st, "["))
+                    continue;
+                if (!nm_json_dump_append(el, &st->rdetails,
+                                         &st->rdetails_len,
+                                         &st->rdetails_cap) ||
+                    !rd_put(st, ",")) {
+                    /* Poison: a half-built array must never ride out
+                     * (it would reach the session and be dropped by
+                     * the composer's malformed guard anyway). The
+                     * round still completes — the signature is not the
+                     * answer. */
+                    st->rdetails_poisoned = 1;
+                    st->rdetails_len = 0;
+                    break;
+                }
+            }
 
             const char *content = nm_json_str(nm_json_get(delta, "content"));
             /* Empty content is not a content delta: providers put ""
@@ -677,6 +735,18 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
  * nm_tool_calls_free); the client forgets the pointer. */
 static void stream_finish(NmChatStream *st)
 {
+    /* The round's reasoning_details array: delivered whole, once, with
+     * the same final-callback delivery the assembled tool calls use.
+     * Borrowed for the call — the receiver copies (agent.c) — and
+     * freed with the stream. A round that carried none delivers
+     * nothing: the field never appears on the wire unless the model
+     * itself sent one. */
+    if (st->rdetails_len > 1 && st->on_delta) {
+        if (st->rdetails[st->rdetails_len - 1] == ',')
+            st->rdetails[st->rdetails_len - 1] = ']'; /* close in place */
+        st->on_delta(NM_STREAM_REASONING_DETAILS, st->rdetails, NULL, 0,
+                     st->userdata);
+    }
     if (st->n_tool_calls > 0 && st->on_delta) {
         st->on_delta(NM_STREAM_CONTENT, NULL, st->tool_calls,
                      st->n_tool_calls, st->userdata);
@@ -1441,6 +1511,11 @@ void nm_openai_chat_end(NmChatStream *h)
     /* Cancelled or already-torn-down: tool calls still owned by the
      * client (never delivered) are freed here. */
     nm_tool_calls_free(h->tool_calls, h->n_tool_calls);
+    h->tool_calls = NULL;
+    free(h->rdetails);
+    h->rdetails = NULL;
+    h->rdetails_len = 0;
+    h->rdetails_cap = 0;
     free(h);
 }
 

@@ -705,7 +705,7 @@ static void test_hyper_chat_end_to_end(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, "you are terse", NULL, -1, -1,
@@ -745,7 +745,7 @@ static void test_hyper_prism_round_meta(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1,
@@ -783,7 +783,7 @@ static void test_hyper_prism_late_trailer(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1,
@@ -815,7 +815,7 @@ static void test_hyper_chat_begin_step(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -939,7 +939,7 @@ static void test_hyper_chat_carries_affinity_headers(void)
     ASSERT_NOT_NULL(p);
 
     const char *conv = "nm-0123456789abcdef0123456789abcdef";
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -978,7 +978,7 @@ static void test_hyper_chat_null_conversation_id_falls_back(void)
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -1014,7 +1014,7 @@ static void test_hyper_session_cache_opt_out(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("hyper");
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -1047,7 +1047,7 @@ static void test_hyper_affinity_stable_across_paths(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("hyper");
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
@@ -1233,7 +1233,7 @@ static void test_ollama_local_chat_never_carries_a_key(void)
     test_setenv("OLLAMA_API_KEY", "sk-cloud-must-not-ride");
     const char *api_key = nm_provider_api_key(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
@@ -1278,7 +1278,7 @@ static void test_ollama_cloud_chat_carries_the_key(void)
     snprintf(api_key, sizeof(api_key), "%s", env_key);
     test_unsetenv("OLLAMA_API_KEY");
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:120b", &msg, 1, NULL, NULL, -1, -1,
@@ -1454,7 +1454,7 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
@@ -1489,7 +1489,7 @@ static void test_openrouter_chat_carries_app_attribution(void)
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
@@ -1532,7 +1532,7 @@ static void test_openrouter_app_url_env_knob(void)
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
@@ -1729,7 +1729,7 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_NOT_NULL(p);
     ASSERT_STR_EQ(p->default_base_url, "https://opencode.ai/zen/go/v1");
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "glm-5.3", &msg, 1, NULL, NULL, -1, -1,
@@ -1803,7 +1803,7 @@ static void test_opencode_chat_without_done_is_complete(void)
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "hello", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "hello", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "minimax-m3", &msg, 1, NULL, NULL, -1, -1,
@@ -1835,7 +1835,7 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
     const NmProvider *p = nm_provider_by_name("opencode:zen");
     ASSERT_NOT_NULL(p);
 
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "mimo-v2.5-free", &msg, 1, NULL, NULL, -1, -1,

@@ -119,6 +119,14 @@ typedef struct Capture
     char reasoning[256];
     size_t reasoning_len;
     int n_reasoning;
+    /* The round's assembled reasoning_details array (ONE callback per
+     * round, at stream completion). details holds the payload; a
+     * payload that would not fit is counted but truncated — loudly
+     * (details_truncated), never silently. */
+    char details[1024];
+    size_t details_len;
+    int n_details;
+    int details_truncated;
     /* NM_STREAM_IMAGE events (IMAGEGEN): whole data URLs, one callback
      * per image. n_images counts; last_image is a heap copy of the last
      * payload (freed by the test). */
@@ -156,6 +164,20 @@ static void capture_delta(NmStreamChannel channel, const char *delta_text,
             cap->n_images++;
             free(cap->last_image);
             cap->last_image = strdup(delta_text);
+        }
+        return;
+    }
+    if (channel == NM_STREAM_REASONING_DETAILS) {
+        if (delta_text && *delta_text) {
+            cap->n_details++;
+            if (cap->details_len + strlen(delta_text) < sizeof(cap->details)) {
+                memcpy(cap->details + cap->details_len, delta_text,
+                       strlen(delta_text));
+                cap->details_len += strlen(delta_text);
+                cap->details[cap->details_len] = '\0';
+            } else {
+                cap->details_truncated = 1;
+            }
         }
         return;
     }
@@ -258,8 +280,8 @@ static void test_usage_rides_finish_reason_chunk(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 1, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 1, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -303,8 +325,8 @@ static void test_usage_standalone_chunk(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -350,8 +372,8 @@ static void test_usage_cache_read_and_write_are_distinct(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 1, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 1, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -393,8 +415,8 @@ static void test_usage_reported_zero_is_not_absent(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 1, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 1, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -430,8 +452,8 @@ static void test_usage_absent_fires_nothing(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 1, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 1, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -473,8 +495,8 @@ static void test_usage_null_chunk_fires_nothing(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 1, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 1, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "deepseek-v4.1-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -516,8 +538,8 @@ static void test_finish_reason_is_published(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say a lot", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say a lot", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -543,7 +565,7 @@ static void test_finish_reason_is_published(void)
     pthread_create(&th, NULL, sse_server_thread, &s2);
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
-                             "nevermore-test", NULL, 0, 0, NULL };
+                             "nevermore-test", NULL, 0, 0, NULL, NULL };
     NmChatResult r2 = nm_openai_chat(&ep2, &req);
     ASSERT_EQ(r2.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r2.finish_reason, "");
@@ -578,8 +600,8 @@ static void test_native_finish_reason_is_published(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -606,7 +628,7 @@ static void test_native_finish_reason_is_published(void)
     pthread_create(&th, NULL, sse_server_thread, &s2);
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
-                             "nevermore-test", NULL, 0, 0, NULL };
+                             "nevermore-test", NULL, 0, 0, NULL, NULL };
     NmChatResult r2 = nm_openai_chat(&ep2, &req);
     ASSERT_EQ(r2.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r2.finish_reason, "stop");
@@ -626,8 +648,8 @@ static void test_chat_stream_end_to_end(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, "you are terse", NULL, -1, -1,
@@ -675,7 +697,7 @@ static void capture_round(char *body, size_t cap, const NmMessage *msgs,
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
     Capture cap2 = { 0 };
     NmChatRequest req = { "gpt-oss:20b", msgs, n_msgs, system, NULL, -1, -1,
                           NULL, capture_delta, NULL, &cap2 };
@@ -694,8 +716,8 @@ static void test_chat_image_parts_shape(void)
 {
     const char *parts[1] = { IMG_PART };
     NmMessage msgs[2] = {
-        { "user", "what color is this?", NULL, NULL, parts, 1, NULL },
-        { "user", "and plain text", NULL, NULL, NULL, 0, NULL },
+        { "user", "what color is this?", NULL, NULL, parts, 1, NULL, NULL },
+        { "user", "and plain text", NULL, NULL, NULL, 0, NULL, NULL },
     };
     char body[8192];
     capture_round(body, sizeof(body), msgs, 2, NULL);
@@ -728,7 +750,7 @@ static void test_chat_image_marker_part_shape(void)
         "24 B — attached earlier, not repeated]\"}";
     const char *parts[1] = { MARKER };
     NmMessage msgs[1] = {
-        { "user", "what color is this?", NULL, NULL, parts, 1, NULL },
+        { "user", "what color is this?", NULL, NULL, parts, 1, NULL, NULL },
     };
     char body[8192];
     capture_round(body, sizeof(body), msgs, 1, NULL);
@@ -756,7 +778,7 @@ static void test_chat_image_prefix_is_byte_stable(void)
 {
     const char *parts[1] = { IMG_PART };
     NmMessage r1[1] = {
-        { "user", "describe this", NULL, NULL, parts, 1, NULL },
+        { "user", "describe this", NULL, NULL, parts, 1, NULL, NULL },
     };
     char body1[8192];
     capture_round(body1, sizeof(body1), r1, 1, "be terse");
@@ -765,9 +787,9 @@ static void test_chat_image_prefix_is_byte_stable(void)
      * message is history now, with an answer and a new question after
      * it. */
     NmMessage r2[3] = {
-        { "user", "describe this", NULL, NULL, parts, 1, NULL },
-        { "assistant", "a 64x32 test image", NULL, NULL, NULL, 0, NULL },
-        { "user", "and now?", NULL, NULL, NULL, 0, NULL },
+        { "user", "describe this", NULL, NULL, parts, 1, NULL, NULL },
+        { "assistant", "a 64x32 test image", NULL, NULL, NULL, 0, NULL, NULL },
+        { "user", "and now?", NULL, NULL, NULL, 0, NULL, NULL },
     };
     char body2[8192];
     capture_round(body2, sizeof(body2), r2, 3, "be terse");
@@ -873,9 +895,9 @@ static void test_chat_image_large_body_growth(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
     const char *parts[1] = { part };
-    NmMessage msg = { "user", "big one", NULL, NULL, parts, 1, NULL };
+    NmMessage msg = { "user", "big one", NULL, NULL, parts, 1, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = { "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
                           capture_delta, NULL, &cap };
@@ -916,8 +938,8 @@ static void test_chat_image_delta_fires_whole_url(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -960,8 +982,8 @@ static void test_chat_image_delta_bare_url_is_forwarded(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -1014,8 +1036,8 @@ static void test_chat_image_single_huge_event(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "img-model", &msg, 1, NULL, NULL, -1, -1, NULL,
@@ -1044,11 +1066,11 @@ static void test_chat_assistant_images_message_level(void)
 {
     const char *parts[1] = { IMG_PART };
     NmMessage msgs[3] = {
-        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
-        { "assistant", "here you go", NULL, NULL, parts, 1, NULL },
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL, NULL },
+        { "assistant", "here you go", NULL, NULL, parts, 1, NULL, NULL },
         /* A round that produced ONLY an image: content is "" (present,
          * empty) — the probed replay shape. */
-        { "assistant", NULL, NULL, NULL, parts, 1, NULL },
+        { "assistant", NULL, NULL, NULL, parts, 1, NULL, NULL },
     };
     char body[8192];
     capture_round(body, sizeof(body), msgs, 3, NULL);
@@ -1077,15 +1099,15 @@ static void test_chat_assistant_image_prefix_is_byte_stable(void)
 {
     const char *parts[1] = { IMG_PART };
     NmMessage r1[1] = {
-        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL, NULL },
     };
     char body1[8192];
     capture_round(body1, sizeof(body1), r1, 1, "be terse");
 
     NmMessage r2[3] = {
-        { "user", "draw a square", NULL, NULL, NULL, 0, NULL },
-        { "assistant", "", NULL, NULL, parts, 1, NULL },
-        { "user", "make it blue", NULL, NULL, NULL, 0, NULL },
+        { "user", "draw a square", NULL, NULL, NULL, 0, NULL, NULL },
+        { "assistant", "", NULL, NULL, parts, 1, NULL, NULL },
+        { "user", "make it blue", NULL, NULL, NULL, 0, NULL, NULL },
     };
     char body2[8192];
     capture_round(body2, sizeof(body2), r2, 3, "be terse");
@@ -1160,8 +1182,8 @@ static void test_chat_step_traffic_counts_comment_bytes(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "m", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL, &cap
@@ -1255,8 +1277,8 @@ static void test_chat_step_pending_between_events(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
@@ -1394,8 +1416,8 @@ static void test_chat_step_drains_everything_available(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
@@ -1502,8 +1524,8 @@ static void test_chat_step_whole_response_in_first_read_delivers_tools(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
@@ -1618,8 +1640,8 @@ static void test_parallel_calls_with_same_index_stay_distinct(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "do two things", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "do two things", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "minimax-m3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -1699,8 +1721,8 @@ static void test_fragmented_tool_args_merge_by_index_and_id(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "do two things", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "do two things", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -1756,8 +1778,8 @@ static void test_chat_step_cancel_mid_stream(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -1820,8 +1842,8 @@ static void test_chat_auth_error_carries_detail(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "bad-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -1843,8 +1865,8 @@ static void test_chat_auth_error_carries_detail(void)
 static void test_chat_connect_refused_names_target(void)
 {
     NmOpenaiEndpoint ep = { "http://127.0.0.1:1/v1", NULL, NULL,
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -1898,8 +1920,8 @@ static void test_chat_truncated_body_reports_byte_counts(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -1979,8 +2001,8 @@ static void test_chat_no_done_after_finish_reason_is_complete(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "minimax-m3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2019,8 +2041,8 @@ static void test_chat_no_done_and_no_finish_reason_is_truncated(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2086,8 +2108,8 @@ static void test_chat_long_error_body_is_clipped(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -2155,8 +2177,8 @@ static void test_chat_midstream_error_event_is_fatal(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -2334,8 +2356,8 @@ static void test_extra_headers_ordered_between_auth_and_ua(void)
         { "x-second", "two", 0 },
     };
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            extras, 2, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            extras, 2, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2380,8 +2402,8 @@ static void test_extra_headers_empty_value_is_skipped(void)
         { "x-live", "yes", 0 },           /* the one real pair */
     };
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            extras, 4, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            extras, 4, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2414,8 +2436,8 @@ static void test_extra_headers_null_changes_nothing(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2556,8 +2578,8 @@ static void test_extra_headers_redaction_marker(void)
         { "x-future-key", "super-secret-value", 1 },
     };
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            extras, 2, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            extras, 2, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
         "glm-5.3", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2614,8 +2636,8 @@ static void test_affinity_headers_logged_verbatim(void)
         { "x-crush-id", "0123456789abcdef", 0 },
     };
     NmOpenaiEndpoint ep = { base, "Bearer %s", "sk-hyper-secret",
-                            "nevermore (nevermore agent)", extras, 3, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore (nevermore agent)", extras, 3, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req2 = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2658,8 +2680,8 @@ static void test_wiretap_401_records_error_with_status(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "wiretap-secret-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     NmChatRequest req = {
         "gpt-4o", &msg, 1, NULL, NULL, -1, -1, NULL, NULL, NULL, NULL
     };
@@ -2702,8 +2724,8 @@ static void test_wiretap_stream_records_events(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "key", "nevermore-test",
-                            NULL, 0, 0, NULL };
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+                            NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
@@ -2746,12 +2768,12 @@ static void test_reasoning_content_serialized_when_attached(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
     NmMessage msg = {
         "assistant", NULL,
         "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
         "{\"name\":\"read_file\",\"arguments\":\"{}\"}}]",
-        NULL, NULL, 0, "thinking hard"
+        NULL, NULL, 0, "thinking hard", NULL
     };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -2784,8 +2806,8 @@ static void test_reasoning_content_omitted_when_absent(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
-    NmMessage msg = { "assistant", "answered plainly", NULL, NULL, NULL, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "assistant", "answered plainly", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
@@ -2818,12 +2840,12 @@ static void test_reasoning_content_empty_string_emits_field(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
-                            "nevermore-test", NULL, 0, 0, NULL };
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
     NmMessage msg = {
         "assistant", NULL,
         "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
         "{\"name\":\"read_file\",\"arguments\":\"{}\"}}]",
-        NULL, NULL, 0, ""
+        NULL, NULL, 0, "", NULL
     };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -2836,6 +2858,189 @@ static void test_reasoning_content_empty_string_emits_field(void)
 
     ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"reasoning_content\":\"\"") != NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The structured carrier: delta.reasoning_details[] accumulates ACROSS
+ * the round — one element per chunk, in arrival order — and is
+ * delivered ONCE at stream completion (the assembled-tool-calls
+ * pattern), on its own channel. The array's presence is the trigger,
+ * not the reasoning text: the trailing encrypted element arrives on a
+ * chunk whose reasoning text is null (the 2026-10-27 dump's shape). */
+static void test_reasoning_details_accumulate_across_chunks(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sigA\",\"format\":\"google-gemini-v1\","
+        "\"text\":\"Let\"}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" me\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sigB\",\"format\":\"google-gemini-v1\"}]},"
+        "\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"reasoning\":null,"
+        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+        "\"data\":\"opaque\"}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    /* ONE callback per round, carrying the whole array. */
+    ASSERT_EQ(cap.n_details, 1);
+    ASSERT_FALSE(cap.details_truncated);
+    ASSERT_STR_EQ(cap.details,
+                  "[{\"type\":\"reasoning.text\",\"signature\":\"sigA\","
+                  "\"format\":\"google-gemini-v1\",\"text\":\"Let\"},"
+                  "{\"type\":\"reasoning.text\",\"signature\":\"sigB\","
+                  "\"format\":\"google-gemini-v1\"},"
+                  "{\"type\":\"reasoning.encrypted\",\"data\":\"opaque\"}]");
+    /* The text channel is untouched by any of this. */
+    ASSERT_EQ(cap.n_reasoning, 2);
+    ASSERT_STR_EQ(cap.reasoning, "Let me");
+    ASSERT_STR_EQ(cap.text, "Done");
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* A plain content round carries no array: no event on the channel at
+ * all (an absent array never becomes an empty one — the field exists
+ * on the wire only as an echo of what the model sent). */
+static void test_reasoning_details_absent_never_fires(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_details, 0);
+    ASSERT_STR_EQ(cap.details, "");
+    ASSERT_STR_EQ(cap.text, "Hi");
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* The array can arrive on a chunk that has no reasoning TEXT at all
+ * (content "", no reasoning key): presence of the array is the
+ * trigger, not the text. A signature alone is still captured. */
+static void test_reasoning_details_fire_without_reasoning_text(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+        "\"data\":\"only-this\"}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "go", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_details, 1);
+    ASSERT_STR_EQ(cap.details,
+                  "[{\"type\":\"reasoning.encrypted\",\"data\":\"only-this\"}]");
+    ASSERT_EQ(cap.n_reasoning, 0);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* Only objects are carriers: a scalar, a string and a null in the
+ * array are skipped, never serialized into the echo (a non-object is
+ * not a reasoning element the upstream can want back). */
+static void test_reasoning_details_nonobject_elements_skipped(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[1,\"x\",null,{\"type\":\"reasoning.text\","
+        "\"signature\":\"s\"}]},\"finish_reason\":null}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+        "\"finish_reason\":\"stop\"}]}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    pthread_create(&th, NULL, sse_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "user", "go", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, NULL, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_details, 1);
+    ASSERT_STR_EQ(cap.details,
+                  "[{\"type\":\"reasoning.text\",\"signature\":\"s\"}]");
 
     pthread_join(th, NULL);
     close(lfd);
@@ -2968,8 +3173,8 @@ static void run_meta_case(int with_meta, NmChatResult *out)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test",
-                            NULL, 0, 1, test_read_meta };
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL };
+                            NULL, 0, 1, test_read_meta, NULL };
+    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = { "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1, NULL,
                           capture_delta, NULL, &cap };
@@ -3059,6 +3264,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_reasoning_content_serialized_when_attached);
     RUN_TEST(test_reasoning_content_omitted_when_absent);
     RUN_TEST(test_reasoning_content_empty_string_emits_field);
+    RUN_TEST(test_reasoning_details_accumulate_across_chunks);
+    RUN_TEST(test_reasoning_details_absent_never_fires);
+    RUN_TEST(test_reasoning_details_fire_without_reasoning_text);
+    RUN_TEST(test_reasoning_details_nonobject_elements_skipped);
     RUN_TEST(test_split_base_url_accepts_bracketed_ipv6);
     RUN_TEST(test_round_meta_reads_headers_and_trailers);
     RUN_TEST(test_round_meta_absent_is_empty);

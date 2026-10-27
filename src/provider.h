@@ -163,6 +163,16 @@ typedef struct NmMessage
      * field's PRESENCE, so a tool-call round whose trace was never
      * streamed must still carry `"reasoning_content":""`. */
     const char *reasoning;
+    /* Assistant reasoning DETAILS — the round's structured
+     * reasoning_details[] array (Gemini's thought signature / OpenAI's
+     * encrypted blob), pre-serialized JSON the client embeds VERBATIM
+     * as a message-level "reasoning_details" field when the caller
+     * attaches it (the signature_echo mode — see agent.c). Strictly
+     * echo-back: it is only ever the serialization of elements the
+     * model itself sent in this conversation, so a model that never
+     * speaks reasoning_details never receives the field. NULL/"" =
+     * omit. Borrowed — the owner must outlive the request. */
+    const char *reasoning_details_json;
 } NmMessage;
 
 typedef struct NmToolCall
@@ -201,12 +211,26 @@ typedef struct NmToolCall
  * payload is never a partial fragment and never a file path; a URL
  * that is not a `data:` URL is forwarded as-is and degrades at the
  * receiver (nevermore fetches no remote source), never a turn
- * failure. */
+ * failure.
+ *
+ * NM_STREAM_REASONING_DETAILS is a whole-object event too, and one per
+ * ROUND: it fires at the final (stream-completion) callback, alongside
+ * the assembled tool-call delivery, when the round carried
+ * `delta.reasoning_details[]` elements. delta_text is the round's
+ * assembled array as ONE complete JSON text (`[{"type":…},…]`),
+ * elements in arrival order, borrowed for the call (the receiver
+ * copies if it keeps it); tool_calls/n_tool_calls are NULL/0 on it. It
+ * fires only when the round actually carried elements (no array = no
+ * event), on any round kind, whether or not reasoning TEXT streamed on
+ * the same chunks — the array's presence is the trigger (wire truth:
+ * docs/OPENROUTER-API.md §3.2). */
 typedef enum
 {
-    NM_STREAM_CONTENT = 0, /* the assistant answer */
-    NM_STREAM_REASONING,   /* CoT / thinking trace */
-    NM_STREAM_IMAGE        /* a whole generated image (data URL) */
+    NM_STREAM_CONTENT = 0,       /* the assistant answer */
+    NM_STREAM_REASONING,         /* CoT / thinking trace */
+    NM_STREAM_REASONING_DETAILS, /* the round's reasoning_details array,
+                                    ONE whole-object event per round */
+    NM_STREAM_IMAGE              /* a whole generated image (data URL) */
 } NmStreamChannel;
 
 typedef void (*NmStreamCallback)(NmStreamChannel channel,
