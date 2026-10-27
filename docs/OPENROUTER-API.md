@@ -248,8 +248,21 @@ past ~84k prompt tokens, the §3.1 failure regime), run with
 same task text, one environment variable apart, the wire dump as the
 instrument. The primary endpoint is void rounds per 100 requests, with
 the ≥84k stratum reported beside it and the upstream histogram named
-per arm (routing is a weighted share, §7.4). `TBD(A/B)` — the result
-lands here when it has run.
+per arm (routing is a weighted share, §7.4).
+
+**The A/B ran (2026-10-27, 12 sessions per arm).** Arm A: 3 void rounds
+in 490 requests (0.61 per 100; 0.88 in the ≥84k stratum). Arm B: 0 void
+rounds in 234 requests, with 210 replayed `reasoning_details` fields,
+zero HTTP ≥ 400 and zero error bodies naming the field; the cache-read
+rate moved 4.6% relative (0.9403 → 0.8967). The rate did not move within
+what 3 events can resolve (Fisher's exact p = 0.56; arm B's true rate is
+bounded at 1.28% by the rule of three), and the workload's model batched
+tool calls, so the session was shorter than the baseline's and the
+failure regime was barely reached. **The echo therefore stays opt-in.**
+What the run does settle: replaying the array is wire-safe on this
+surface, the replayed bytes are stable from request to request, and it
+does not collapse the prompt cache. Whether a signature improves the
+model's function calling at long context is still unmeasured.
 
 ## 4. Errors (live test)
 

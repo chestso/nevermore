@@ -545,8 +545,11 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   round: the retry starts empty, because a signature is not an answer.
   The echo ships OPT-IN because nothing observed NEEDS it — nevermore
   has never been answered with `missing thought_signature` (docs/
-  OPENROUTER-API.md §3.2) — so what it is worth is the A/B's question,
-  not the docs'.
+  OPENROUTER-API.md §3.2) — and the A/B that ran (12 sessions per arm,
+  2026-10-27) did not move the void-round rate within what 3 events can
+  resolve; it did show the replay is wire-safe and leaves the prompt
+  cache standing. So the default stays `off` until a measurement at the
+  real failure rate says otherwise.
   The stream-inactivity deadline counts wire BYTES, not
   events: `NmChatResult.traffic` (set by the client whenever a step
   moved response bytes — the SSE keep-alive comments bridging a
