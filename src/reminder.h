@@ -168,6 +168,17 @@ typedef struct NmReminderFacts
      * the next turn's first round opens. */
     unsigned output_cuts;
 
+    /* The VOID rounds — the ones the provider answered with nothing in
+     * them (no text, no tool call: the model's function call was
+     * malformed and the provider dropped it). void_streak is the run of
+     * consecutive voids THIS turn (the gate: a turn with no void round
+     * has nothing to say); void_reason is the wire's own account of the
+     * last one ("finish_reason: error, native: MALFORMED_FUNCTION_CALL"),
+     * borrowed for the length of the evaluation, NULL when there was
+     * none to name. */
+    int void_streak;
+    const char *void_reason;
+
     /* The tool round about to open: `round` rounds have been started
      * this turn, `round_cap` is the turn's cap. */
     int round, round_cap;

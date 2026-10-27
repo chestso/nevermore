@@ -965,8 +965,8 @@ static void test_agent_connect_notice_names_the_family(void)
     "\"role\":\"assistant\",\"reasoning\":\"I am now running the ls -la "        \
     "command.\"},\"finish_reason\":null}]}\n\n"                                  \
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
-    "\"role\":\"assistant\",\"reasoning\":null,\"reasoning_details\":["         \
-    "{\"type\":\"reasoning.encrypted\",\"data\":\"EoECCv4B\"}]}}]}\n\n"        \
+    "\"role\":\"assistant\",\"reasoning\":null,\"reasoning_details\":["          \
+    "{\"type\":\"reasoning.encrypted\",\"data\":\"EoECCv4B\"}]}}]}\n\n"          \
     "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"\","              \
     "\"role\":\"assistant\"},\"finish_reason\":\"error\","                       \
     "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}]}\n\n"                \
@@ -5339,6 +5339,74 @@ static void test_agent_output_cut_reminder(void)
     close(sc.fd);
 }
 
+static void test_agent_void_note_speaks_once_per_turn(void)
+{
+    /* The note that tells the model what the provider rejected rides
+     * the FIRST retry — the failures cluster (four of the 2026-10-27
+     * session's eight void rounds came in one run of four, and the
+     * "continue"s in between did not break it), so the retry is asked
+     * with the reason rather than with the same question again. It
+     * speaks once per turn: the second retry carries the same note in
+     * the transcript, and the note does not pile up. */
+    reset_capture();
+    g_reminder_calls = 0;
+    g_reminder_names[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = VOID_ROUND_SSE;
+    sc.sse[1] = VOID_ROUND_SSE;
+    sc.sse[2] = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}"
+                "\n\n"
+                "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_reminder(agent, cap_reminder);
+
+    ASSERT_EQ(nm_agent_turn(agent, "do a thing", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 3);
+
+    /* The first retry carries the note — on the USER channel, and the
+     * human sees it too. It names the wire's own reason. */
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_STR_EQ(g_reminder_names, "void-round,");
+    ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
+    ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
+    ASSERT_TRUE(strstr(g_requests[1], "MALFORMED_FUNCTION_CALL") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "no content and no tool call") != NULL);
+
+    /* The second retry: the note is already in the transcript, so the
+     * request is the same one — and the note did not speak twice. */
+    ASSERT_EQ(g_reminder_calls, 1);
+    ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
+    ASSERT_STR_EQ(request_body(g_requests[2]), request_body(g_requests[1]));
+
+    /* And the turn ends normally once the model answers. */
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "recovered");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* The boundary for EXTERNAL content: a tool whose output came from
+ * outside the machine (the web_search shape) declares it, and the note
+ * rides THAT result — the model is told where the untrusted text is,
+ * not once for the whole conversation. The system prompt's clause says
+ * the rule; this says it at the injection surface. */
 static NmToolResult stub_external_exec(const NmTool *tool, const char *args_json,
                                        const NmToolCtx *ctx)
 {
@@ -6483,6 +6551,7 @@ int main(void)
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_void_round_is_retried);
+    RUN_TEST(test_agent_void_note_speaks_once_per_turn);
     RUN_TEST(test_agent_void_round_retries_exhausted_is_an_error);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_round_meta_from_prism);

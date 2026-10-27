@@ -150,6 +150,10 @@ struct NmAgent
      *                tool rounds without a final answer"). */
     int void_streak;
     int void_retries;
+    /* The wire's own account of the LAST void round ("finish_reason:
+     * error, native: MALFORMED_FUNCTION_CALL"), kept so the note the
+     * model gets can name what happened instead of guessing. */
+    char void_reason[128];
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -615,6 +619,10 @@ static void reminder_facts(NmAgent *a, NmReminderFacts *f)
     f->round = a->round;
     f->round_cap = nm_agent_max_rounds(a);
     f->output_cuts = a->output_cuts;
+    /* The void rounds: how many in a row this turn (the gate) and the
+     * wire's own account of the last one (the note names it). */
+    f->void_streak = a->void_streak;
+    f->void_reason = a->void_reason[0] ? a->void_reason : NULL;
     /* The process registry: the jobs the MODEL started. nevermore's own
      * machinery (the context <env> git stage) is hidden and is not the
      * model's business — a reminder naming it would be noise the model
@@ -1783,6 +1791,7 @@ static int void_round(NmAgent *a, const NmChatResult *r)
 
     char reason[128];
     void_round_reason(r, reason, sizeof(reason));
+    snprintf(a->void_reason, sizeof(a->void_reason), "%s", reason);
 
     if (a->void_retries >= NM_AGENT_DEFAULT_VOID_RETRIES) {
         char msg[NM_CHAT_MSG_MAX + 96];

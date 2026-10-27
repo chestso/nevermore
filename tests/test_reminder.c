@@ -502,6 +502,62 @@ static void test_state_rules_are_edge_triggered(void)
     nm_reminder_out_free(&out);
 }
 
+/* The void rule: it speaks ONCE per turn — the note says what the
+ * provider rejected, and every retry after that carries the same note
+ * in the transcript, so a run of void rounds does not pile up notes. */
+static void test_void_rule_speaks_once_per_turn(void)
+{
+    NmReminderFacts f;
+    NmReminderOut out;
+    int latch[NM_REMINDER_MAX_RULES];
+    memset(latch, 0, sizeof(latch));
+
+    /* No void: nothing. */
+    facts_zero(&f);
+    f.round_cap = 0; /* no round-budget nudge in these facts */
+    f.turn = 1;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
+              (size_t)0);
+    nm_reminder_out_free(&out);
+
+    /* The first void of the turn: the note speaks, and it names the
+     * wire's own reason for the empty round. */
+    f.void_streak = 1;
+    f.void_reason = "finish_reason: error, native: MALFORMED_FUNCTION_CALL";
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
+              (size_t)1);
+    ASSERT_TRUE(strstr(out.user.data, "MALFORMED_FUNCTION_CALL") != NULL);
+    ASSERT_TRUE(strstr(out.user.data, "no content and no tool call") != NULL);
+    nm_reminder_out_free(&out);
+
+    /* A second void in the same turn: the note is already in the
+     * transcript, so it does not speak twice. */
+    f.void_streak = 2;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
+              (size_t)0);
+    nm_reminder_out_free(&out);
+
+    /* A good round ends the streak: the state went away, so the latch
+     * clears and the next turn's first void speaks again. */
+    facts_zero(&f);
+    f.round_cap = 0;
+    f.turn = 1;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
+              (size_t)0);
+    nm_reminder_out_free(&out);
+
+    f.turn = 2;
+    f.void_streak = 1;
+    nm_reminder_out_init(&out);
+    ASSERT_EQ(nm_reminder_eval(NM_REMINDER_POINT_ROUND, &f, latch, &out),
+              (size_t)1);
+    nm_reminder_out_free(&out);
+}
+
 /* The facts that make rule `i` fire — one rule at a time, so the
  * "did it fire?" assertion is unambiguous (two TURN rules can fire
  * together, and a facts set that fires both cannot say which text
@@ -549,6 +605,10 @@ static void facts_for_rule(size_t i, NmReminderFacts *f)
         f->turn = 1;
     } else if (strcmp(name, "output-cut") == 0) {
         f->output_cuts = 1;
+    } else if (strcmp(name, "void-round") == 0) {
+        f->turn = 1;
+        f->void_streak = 1;
+        f->void_reason = "finish_reason: error, native: MALFORMED_FUNCTION_CALL";
     }
 }
 
@@ -691,6 +751,7 @@ int main(void)
     RUN_TEST(test_attach_keeps_the_block_its_own_unit);
     RUN_TEST(test_rules_fire_on_their_facts);
     RUN_TEST(test_state_rules_are_edge_triggered);
+    RUN_TEST(test_void_rule_speaks_once_per_turn);
     RUN_TEST(test_rule_table_is_sane);
     TEST_SUMMARY();
 }

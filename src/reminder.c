@@ -536,6 +536,37 @@ static int text_output_cut(const NmReminderFacts *f, char *out, size_t cap)
                     "resume directly from where it stopped.");
 }
 
+/* --- the round came back with nothing in it --------------------- */
+
+/* The signature is the TURN: the note speaks once per turn (the latch
+ * holds the turn it fired at), so a run of void rounds does not pile
+ * up notes — the first one says it, and every retry after that carries
+ * the same note in the transcript. The gate is the streak: a turn with
+ * no void round has nothing to say, and a streak of 0 clears the
+ * latch, so the next turn's first void speaks again. */
+static int sig_void(const NmReminderFacts *f)
+{
+    if (f->void_streak < 1)
+        return 0;
+    return (int)f->turn;
+}
+
+static int text_void(const NmReminderFacts *f, char *out, size_t cap)
+{
+    if (f->void_reason && *f->void_reason)
+        return snprintf(out, cap,
+                        "Your previous round produced no content and no tool "
+                        "call — the provider rejected it (%s). If you meant "
+                        "to call a tool, emit exactly one call, with JSON "
+                        "arguments that match the schema.",
+                        f->void_reason);
+    return snprintf(out, cap,
+                    "Your previous round produced no content and no tool call "
+                    "— the provider rejected it. If you meant to call a tool, "
+                    "emit exactly one call, with JSON arguments that match "
+                    "the schema.");
+}
+
 static const Rule RULES[] = {
     { "tool-output-truncated", NM_REMINDER_POINT_TOOL_RESULT,
       NM_REMINDER_CHANNEL_TOOL, 0, sig_tool_truncated, text_tool_truncated },
@@ -562,6 +593,8 @@ static const Rule RULES[] = {
       sig_round, text_round },
     { "output-cut", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
       sig_output_cut, text_output_cut },
+    { "void-round", NM_REMINDER_POINT_ROUND, NM_REMINDER_CHANNEL_USER, 1,
+      sig_void, text_void },
 };
 
 #define N_RULES (sizeof(RULES) / sizeof(RULES[0]))
