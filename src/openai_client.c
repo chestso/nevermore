@@ -529,9 +529,18 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
              * with content (never concurrent). Two key spellings:
              * reasoning_content (GLM/Go, hyper, OpenRouter) and
              * reasoning (Zen free models, OpenRouter's other shape).
-             * Read the first present one; both carry the same text,
-             * and reasoning_details[]/top-level reasoning is a
-             * structured echo of it, not a second channel. */
+             * Read the first present one; both carry the same text.
+             *
+             * `reasoning_details[]` is NOT read here, and that is a
+             * known GAP, not a redundancy: for Gemini its elements
+             * carry the THOUGHT SIGNATURE — the encrypted carrier the
+             * model must see again with the tool result, so it can
+             * continue the reasoning behind its call (docs/
+             * OPENROUTER-API.md §3.2). The signature is not an echo
+             * of this text and cannot be reconstructed from it, so the
+             * reasoning echo that does exist (`reasoning_content`,
+             * agent.c's nm_agent_reasoning_echo) does not substitute:
+             * it sends the text, which is a different field. */
             const char *reasoning =
                 nm_json_str(nm_json_get(delta, "reasoning_content"));
             if (!reasoning)

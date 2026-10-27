@@ -167,6 +167,58 @@ context. The round right after a void one answered normally in five
 of the eight — which is why a retry is worth more than a "continue"
 from the human.
 
+## 3.2 The thought signature — the part nevermore drops (live, 2026-10-27)
+
+`reasoning_details[]` is NOT a second copy of the reasoning text.
+Each element is a carrier of its own:
+
+- Gemini: `{"type":"reasoning.text","signature":…,"format":"google-gemini-v1"}`
+- OpenAI's own shape: `{"type":"reasoning.encrypted","data":…}`
+
+The elements ACCUMULATE across the round — one per chunk, in stream
+order (a reasoning-text element per reasoning delta, then the
+encrypted one at the end). So a round's full set is the concatenation
+of the per-chunk arrays, in the order they arrived.
+
+**What the `signature` IS**: Gemini's *thought signature* — the
+encrypted carrier Google wants back WITH the tool result, so the model
+can continue the chain of thought behind the call it just made. Google
+documents it as mandatory for function calling (a missing one is a
+`400 INVALID_ARGUMENT / missing thought_signature`); OpenRouter's
+reasoning-tokens guide says the same from its side: use
+`reasoning_details` for models that return special reasoning types
+(encrypted, summarized) — "this preserves the full structure needed
+for those models" — and its Gemini models require the reasoning
+details to be preserved across requests.
+
+**What nevermore does with it**: nothing. The client reads
+`reasoning_content` (or `reasoning`) and ignores `reasoning_details[]`
+entirely, on the stated assumption (src/openai_client.c) that the
+array is "a structured echo of it, not a second channel". **That
+assumption is wrong for Gemini**: the signature is not an echo of the
+text, and there is no text to echo it from — the encrypted blob is the
+only carrier. The reasoning ECHO that does exist
+(`nm_agent_reasoning_echo`, `reasoning_content`) sends the TEXT, a
+different field Google does not read for this purpose, and on this
+provider it is off by default anyway: in the 2026-10-27 dump, 0 of
+118 requests carried `reasoning_content` and 0 carried
+`reasoning_details`, while 187 stream events delivered a signature
+that was dropped in the client.
+
+**What we have and have not observed**: nevermore's traffic has never
+been answered with a `missing thought_signature` — 105 of that dump's
+118 rounds worked fine without the signature — so the requirement has
+not been seen to bite. The counterweight is the empty rounds (§3.1):
+eight rounds in that session came back with a malformed function call,
+all of them above ~84k prompt tokens, and the signature was missing
+from every round of that session, not just the failing ones. A cause
+present in 100% of rounds cannot explain a failure in 7% of them, so
+the missing signature is at most an AGGRAVATING factor, and the
+empty-round retry (the agent's `round_is_void`, ARCHITECTURE.md) is
+the fix under test. Echoing the signature back is a separate branch,
+and it needs its own A/B: the same long tool session, with and
+without, and the wire dump as the instrument.
+
 ## 4. Errors (live test)
 
 - 401 (no/invalid key): `{"error":{"message":"...","code":401}}`
@@ -228,8 +280,8 @@ part>]}, user]` is accepted (no 400) and the model edits the image
 - **`reasoning_details` rides image rounds** (both providers):
   `{"type":"reasoning.text","signature":...,"format":"google-gemini-v1"}`
   (Gemini) / `{"type":"reasoning.encrypted","data":...}` (OpenAI).
-  Ignored by nevermore today (never echoed back; no observed
-  requirement to).
+  Ignored by nevermore today — and the reason is §3.2, which says
+  what that costs.
 - Keep-alives are the usual `: OPENROUTER PROCESSING` comments
   (gpt-image emits dozens while generating — the minutes-long gap
   before the image event; the stream-inactivity deadline must be

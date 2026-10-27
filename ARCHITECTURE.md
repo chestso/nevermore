@@ -510,6 +510,15 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   the field echoed and omitted — the inherited "must be echoed back"
   claim in docs/HYPER-API.md was never observed and is now disproved
   for hyper; `provider_hyper.c` declares `NM_REASONING_ECHO_OFF`).
+  **The client's reasoning handling has one known GAP, and it is a
+  wire fact, not a policy**: `reasoning_details[]` — which for Gemini
+  carries the encrypted THOUGHT SIGNATURE the model must see again
+  with the tool result, so it can continue the reasoning behind its
+  call — is dropped in the client, because it is not the text the
+  echo sends and cannot be reconstructed from it (docs/
+  OPENROUTER-API.md §3.2). The echo is therefore NOT a substitute for
+  it: one sends `reasoning_content`, the other would have to send
+  `reasoning_details`.
   The stream-inactivity deadline counts wire BYTES, not
   events: `NmChatResult.traffic` (set by the client whenever a step
   moved response bytes — the SSE keep-alive comments bridging a
