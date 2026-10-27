@@ -260,6 +260,24 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         if (req->messages[i].reasoning)
             nm_json_set(m, "reasoning_content",
                         nm_json_new_string(req->messages[i].reasoning));
+        /* Reasoning details echo-back: an assistant message may carry
+         * its round's reasoning_details[] array as pre-serialized JSON
+         * (the thought signature — see provider.h's NmMessage field).
+         * Embedded via a parse+set exactly like tool_calls: the
+         * session's frozen bytes, re-serialized deterministically, so
+         * the replayed prefix is byte-stable round after round. */
+        if (req->messages[i].reasoning_details_json &&
+            *req->messages[i].reasoning_details_json) {
+            const char *jerr = NULL;
+            NmJson *rd = nm_json_parse(
+                req->messages[i].reasoning_details_json,
+                strlen(req->messages[i].reasoning_details_json), &jerr);
+            if (rd) {
+                nm_json_set(m, "reasoning_details", rd);
+                nm_json_free(rd); /* set() deep-copied it */
+            }
+            /* Malformed array: omit rather than fail the turn. */
+        }
         nm_json_push(messages, m);
     }
     nm_json_set(body, "model", nm_json_new_string(req->model));

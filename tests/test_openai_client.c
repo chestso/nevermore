@@ -2863,6 +2863,126 @@ static void test_reasoning_content_empty_string_emits_field(void)
     close(lfd);
 }
 
+/* The client is a dumb serializer for the signature echo too: an
+ * assistant message that carries a round's reasoning_details array goes
+ * on the wire with the field, embedded via the same parse+set as
+ * tool_calls. Whether one is attached is the composer's call
+ * (nm_agent_signature_echo). */
+static void test_reasoning_details_serialized_when_attached(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = {
+        "assistant", NULL,
+        "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{}\"}}]",
+        NULL, NULL, 0, NULL,
+        "[{\"type\":\"reasoning.text\",\"signature\":\"sig-1\","
+        "\"format\":\"google-gemini-v1\"},"
+        "{\"type\":\"reasoning.encrypted\",\"data\":\"opaque\"}]"
+    };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "google/gemini-3.8-flash", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    ASSERT_TRUE(strstr(last_request, "\"role\":\"assistant\"") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
+    /* Element order and bytes survive the round trip through the
+     * composer (the parse+set re-serializes deterministically). */
+    ASSERT_TRUE(strstr(last_request,
+                       "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+                       "\"signature\":\"sig-1\",\"format\":"
+                       "\"google-gemini-v1\"},{\"type\":"
+                       "\"reasoning.encrypted\",\"data\":\"opaque\"}]") !=
+                NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* Absent and "" both omit the field: unlike the trace echo there is no
+ * wire observation demanding an empty placeholder, so the composer never
+ * invents one (strict echo-back). */
+static void test_reasoning_details_omitted_when_absent(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msgs[2] = {
+        { "assistant", "answered plainly", NULL, NULL, NULL, 0, NULL,
+          NULL },
+        { "assistant", "again", NULL, NULL, NULL, 0, NULL, "" },
+    };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", msgs, 2, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+
+    ASSERT_TRUE(strstr(last_request, "answered plainly") != NULL);
+    ASSERT_TRUE(strstr(last_request, "reasoning_details") == NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* A malformed array is OMITTED, never a failed turn: the round still
+ * goes out (the signature is not the answer, and a session's frozen
+ * bytes should be well-formed — this is the guard for when they are
+ * not). */
+static void test_reasoning_details_malformed_omitted(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, NULL };
+    NmMessage msg = { "assistant", "hi", NULL, NULL, NULL, 0, NULL,
+                      "not json" };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hello, world"); /* the round completed */
+
+    ASSERT_TRUE(strstr(last_request, "reasoning_details") == NULL);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
 /* The structured carrier: delta.reasoning_details[] accumulates ACROSS
  * the round — one element per chunk, in arrival order — and is
  * delivered ONCE at stream completion (the assembled-tool-calls
@@ -3264,6 +3384,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_reasoning_content_serialized_when_attached);
     RUN_TEST(test_reasoning_content_omitted_when_absent);
     RUN_TEST(test_reasoning_content_empty_string_emits_field);
+    RUN_TEST(test_reasoning_details_serialized_when_attached);
+    RUN_TEST(test_reasoning_details_omitted_when_absent);
+    RUN_TEST(test_reasoning_details_malformed_omitted);
     RUN_TEST(test_reasoning_details_accumulate_across_chunks);
     RUN_TEST(test_reasoning_details_absent_never_fires);
     RUN_TEST(test_reasoning_details_fire_without_reasoning_text);
