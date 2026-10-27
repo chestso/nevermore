@@ -114,6 +114,18 @@ configured says so up front — `export OPENROUTER_API_KEY`, or add the
 runs through the same key lookup as the request, so a `~/.authinfo`
 entry counts.
 
+On OpenRouter, nevermore identifies itself as an app: every chat
+round carries `HTTP-Referer: https://chest.so/nevermore`, the display
+name and the `cli-agent` category, so the traffic shows up as the
+_nevermore_ app in OpenRouter's dashboard, rankings and marketplace
+page (`openrouter.ai/apps?url=https://chest.so/nevermore`). Point
+`NEVERMORE_APP_URL` somewhere else to attribute a run to a different
+app — a fork, a private deployment, a CI rig that should not appear
+in the public rankings. It replaces the URL, it does not rename the
+app: a different URL is a different app on OpenRouter's side, so a
+value that is not an absolute `http(s)` URL is refused (the shipped
+one is used instead) rather than creating a junk app.
+
 The input row is always on screen, busy or not: it gathers the next
 prompt while a turn runs (keys edit it; Enter is a no-op until the turn
 ends; Ctrl+C interrupts, and so does Esc — Esc cancels the round, a

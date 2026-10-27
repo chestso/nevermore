@@ -2,7 +2,8 @@
 
 > Status: verified against the live wire (unauthenticated catalog +
 > authenticated chat probes, Sep 2026; the batch surface in §6 on
-> 2026-10-23; the routing surface in §7 on 2026-10-24). Every claim
+> 2026-10-23; the routing surface in §7 on 2026-10-24; the app
+> attribution surface in §9 on 2026-10-26). Every claim
 > below was probed on the real endpoint unless marked otherwise.
 > nevermore consumes OpenRouter through the shared OpenAI-compatible
 > client (`src/openai_client.c`) exactly as quoth does.
@@ -22,7 +23,8 @@ OpenAI-compatible surface over many upstream model providers.
 | Content type   | `application/json`                               |
 
 Optional attribution headers exist (`HTTP-Referer`, `X-Title`) —
-not required; nevermore does not send them.
+not required for the request to succeed, but nevermore DOES send them:
+the app's identity rides every chat round (§9).
 
 ## 2. Model catalog (live test, 445 entries, Sep 2026)
 
@@ -470,7 +472,8 @@ endpoints' `selected` flag names the winner. The legacy header name
 
 ## 8. Provider notes for the nevermore side
 
-- `provider_openrouter.c` only supplies base URL, auth, and the
+- `provider_openrouter.c` only supplies base URL, auth, the app
+  attribution headers (§9) and the
   model catalog; all wire logic lives in openai_client.c (verified:
   the SSE tool-call framing is byte-identical, so no client changes
   are needed).
@@ -487,6 +490,9 @@ endpoints' `selected` flag names the winner. The legacy header name
   The `:batch` variants are dropped on the way in (§6.3).
 - Keys live in `~/.authinfo` (`machine openrouter.ai user apikey
 password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
+- The app's identity rides the chat round (§9): `HTTP-Referer`,
+  `X-OpenRouter-Title` and `X-OpenRouter-Categories`, with the URL
+  and the name from `src/identity.h` and `$NEVERMORE_APP_URL`.
 - **The request body has no seam for a provider's own fields.** It is
   a fixed OpenAI-shaped set (`model`, `messages`, `stream`,
   `stream_options`, `temperature`, `max_tokens`, `tools`,
@@ -509,3 +515,72 @@ password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
   `provider` (§7.7) and nevermore does not parse it, so the transcript
   cannot name the upstream that served the round — the Prism-style
   notice Hyper has does not exist here.
+
+## 9. App attribution (live test, 2026-10-26)
+
+An "app" on OpenRouter is NOT an account, a key or a registration:
+it is an identity **derived from the request headers**, and the first
+request that carries the attribution headers CREATES it.
+
+| header                                  | role                                                   |
+| --------------------------------------- | ------------------------------------------------------ |
+| `HTTP-Referer`                          | **required** — the app's URL, and it IS the app's key  |
+| `X-OpenRouter-Title` (legacy `X-Title`) | the display name; cannot create an app alone           |
+| `X-OpenRouter-Categories`               | the marketplace category (a fixed vocabulary)          |
+| `X-OpenRouter-App-Visibility: hidden`   | create the app hidden (attribution works, no rankings) |
+
+An attributed app appears in the Logs page's _Attribution_ field, in
+Activity's "top apps" rollups, on `openrouter.ai/apps?url=<referer>`,
+in the public rankings, and in the `GET /api/v1/datasets/app-rankings`
+dataset. The categories are a fixed vocabulary (e.g. `cli-agent`,
+`ide-extension`, `cloud-agent`); an unrecognized value is dropped
+without an error.
+
+### 9.1 The URL is the key (probed)
+
+The **whole URL** is the app's identity, not the origin — probed
+live on 2026-10-26:
+
+| request's `HTTP-Referer`           | app id  | app title    |
+| ---------------------------------- | ------- | ------------ |
+| `https://chest.so/nevermore`       | 5409936 | nevermore    |
+| `https://chest.so/some-other-path` | 5410043 | nevermore    |
+| `https://chest.so/nevermore-v2`    | 5410047 | nevermore v2 |
+
+So two paths on one host are TWO apps, and the title is only a label
+on the app the referer created. A **trailing slash is normalized
+away**: `https://chest.so/nevermore/` and `https://chest.so/nevermore`
+are one app, and the app page resolves at the slashless spelling
+(`?url=…/nevermore` → 200; `?url=…/nevermore/` → 404 "Not Found").
+
+**Without the referer there is no app at all.** A request with only a
+`User-Agent` came back with `app_id: null` and `origin: ""` — the UA
+is recorded (`user_agent`) but it does not identify an app. The
+`GET /api/v1/generation?id=…` record of an attributed request shows
+`app_id`, `origin` (the app's URL) and `user_agent`; an unattributed
+one shows `app_id: null`.
+
+### 9.2 The nevermore side
+
+- The chat round carries the attribution: `HTTP-Referer` (the app's
+  URL), `X-OpenRouter-Title` (the display name) and
+  `X-OpenRouter-Categories` (`cli-agent` — nevermore is a terminal
+  coding agent). The headers ride the shared client's extra-header
+  seam (`NmExtraHeader`), between the auth header and the UA.
+- The app's URL and display name are PRODUCT facts and live in
+  `src/identity.h` beside the User-Agent (`NM_APP_URL`,
+  `NM_APP_NAME`, `NM_APP_CATEGORY`) — the same "one identity, no
+  disagreement" idea the UA already follows.
+- **The catalog fetch stays anonymous**: `GET /v1/models` is public
+  and tokenless, and an app is its CHAT traffic.
+- **`$NEVERMORE_APP_URL` replaces the app's URL for one run** (a fork,
+  a private deployment, a CI rig that must not appear in the public
+  rankings). It is a REPLACEMENT, not a rename: a different URL is a
+  different app on OpenRouter's side, so a value that is not an
+  absolute http(s) URL is REFUSED (the shipped URL is used instead)
+  rather than creating a junk app.
+- The app is **public**: it appears in the rankings and the
+  marketplace. `X-OpenRouter-App-Visibility: hidden` is NOT sent —
+  the visibility header applies only when the request CREATES a
+  brand-new app, so it can never hide an app that already exists
+  (changing an existing app's visibility needs OpenRouter support).

@@ -61,6 +61,15 @@ architecture "the right way"**: fix a design flaw at its root
 
 ## Modules
 
+- **Identity** (`src/identity.h`) — the build's ONE identity string, in
+  two forms that cannot disagree: the `--version` line and the
+  User-Agent product token (the same tail macro, a space becoming a
+  `/`). The TUI banner prints the UA verbatim. Beside it live the
+  APP's identity — the product facts a provider attributes traffic by
+  (`NM_APP_URL`, `NM_APP_NAME`, `NM_APP_CATEGORY`, and the
+  `$NEVERMORE_APP_URL` knob): on OpenRouter the URL IS the app's key,
+  so the app's address is a first-class constant here, not a string
+  typed into a provider file (OPENROUTER-API.md §9).
 - **Command line** (`src/args.{h,c}`) — the argv grammar, PURE C: it
   fills `NmArgs` or hands back a reason STRING (never a print, never an
   exit), so `tests/test_args.c` pins the CLI's shape without a process
@@ -104,6 +113,14 @@ architecture "the right way"**: fix a design flaw at its root
   startup and on a `/provider` switch) — the preflight twin of agent.c's
   post-401 hint, and gated on the SAME `nm_provider_api_key` seam the
   request uses, so a `~/.authinfo` entry counts (never `getenv`).
+  **A provider's own request HEADERS ride the shared client's extra
+  seam** (`NmExtraHeader`, a small ordered array between the auth
+  header and the UA — hyper's affinity pair, opencode's session id,
+  openrouter's app attribution): a provider states them in its own
+  endpoint builder, and the shared client appends them in array order
+  so the two drives (blocking and event-driven) cannot drift. A header
+  VALUE must outlive the queue call, so it is a literal, a
+  process-static slot, or the environment's own string.
 - **OpenAI-compatible provider surface** (`src/provider_openaicompat.c`)
   — the endpoint pair (chat + chat_begin off ONE build call site), the
   process-lifetime live-catalog cache, the async fetch seam, and the
@@ -314,7 +331,8 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   governs it). Wire truth: `docs/OPENCODE-API.md` §5.1.
 - **openai_client.c** — shared OpenAI-compatible wire client
   (hyper/ollama/openrouter/opencode all reuse it; only
-  endpoint/auth/catalog differ). Port of quoth-openai-client.el. Wire truth:
+  endpoint/auth/headers/catalog differ). Port of quoth-openai-client.el.
+  Wire truth:
   `docs/HYPER-API.md`, `docs/OLLAMA-CLOUD-API.md`, `docs/OPENROUTER-API.md`
   (all ported from quoth and live-probed).
   **Usage accounting is a contract, not a per-provider habit**

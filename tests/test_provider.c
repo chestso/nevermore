@@ -1472,6 +1472,114 @@ static void test_openrouter_chat_with_keepalive_comments(void)
     ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
 }
 
+/* The app attribution headers (OPENROUTER-API.md §9): the chat round
+ * carries the app's identity, and the CATALOG fetch stays anonymous
+ * (a public GET needs no identity — an app is its chat traffic). */
+static void test_openrouter_chat_carries_app_attribution(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hi there");
+    pthread_join(th, NULL);
+
+    /* The app's identity: the referer IS the app's key, the title is
+     * the display name, the category files it under cli-agent. */
+    ASSERT_TRUE(strstr(last_request,
+                       "HTTP-Referer: " NM_APP_URL) != NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "X-OpenRouter-Title: " NM_APP_NAME) != NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "X-OpenRouter-Categories: " NM_APP_CATEGORY) != NULL);
+    /* The attribution rides the CHAT round only. */
+    ASSERT_TRUE(strstr(last_request, "User-Agent: " NM_USER_AGENT) != NULL);
+}
+
+/* The environment knob replaces the app's URL for one run. It is a
+ * REPLACEMENT, not a rename: on the provider's side a different URL
+ * is a different app, so the value must be a real absolute URL — a
+ * malformed one is refused (the shipped URL is used instead) rather
+ * than creating a junk app. */
+static void test_openrouter_app_url_env_knob(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+
+    /* A valid override rides the request instead of the shipped URL. */
+    test_setenv(NM_APP_URL_ENV, "https://example.test/fork");
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "HTTP-Referer: https://example.test/fork") != NULL);
+    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) == NULL);
+
+    /* A malformed one is refused: the shipped URL rides, so no junk
+     * app is created on the provider's side. */
+    lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    test_setenv(NM_APP_URL_ENV, "not-a-url");
+    r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
+    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: not-a-url") == NULL);
+
+    /* A value that would SPLIT the request (a CR/LF in a header
+     * value) is refused too — the same rule, one more reason. */
+    lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    test_setenv(NM_APP_URL_ENV, "https://a.test/x\r\nX-Evil: 1");
+    r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
+    ASSERT_TRUE(strstr(last_request, "X-Evil") == NULL);
+
+    test_unsetenv(NM_APP_URL_ENV);
+}
+
 static void test_openrouter_models_fetch(void)
 {
     int port;
@@ -2084,6 +2192,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_ollama_local_catalog_uses_local_default);
     RUN_TEST(test_openrouter_models_fetch);
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);
+    RUN_TEST(test_openrouter_chat_carries_app_attribution);
+    RUN_TEST(test_openrouter_app_url_env_knob);
     RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
     RUN_TEST(test_opencode_chat_carries_session_header);
