@@ -870,6 +870,20 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
 static char g_notice_text[256];
 static int g_notice_calls;
 
+/* The USER-facing warning channel (nm_agent_on_warning): system errors
+ * the model is never told — a void round's report, a neutralized forged
+ * reminder tag. Captured here so the early tests can assert on it. */
+static char g_warn_text[512];
+static int g_warn_calls;
+
+static void cap_warning(const char *msg, void *userdata)
+{
+    (void)userdata;
+    g_warn_calls++;
+    if (msg)
+        snprintf(g_warn_text, sizeof(g_warn_text), "%s", msg);
+}
+
 static void cap_notice(const char *msg, void *userdata)
 {
     (void)userdata;
@@ -1029,6 +1043,7 @@ static void test_agent_void_round_is_retried(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
     nm_agent_on_notice(agent, cap_notice);
+    nm_agent_on_warning(agent, cap_warning);
 
     int rc = nm_agent_turn(agent, "change quick to slow in the fixture", NULL,
                            0);
@@ -1054,10 +1069,14 @@ static void test_agent_void_round_is_retried(void)
     ASSERT_TRUE(strstr(request_body(g_requests[1]), "reasoning_details") ==
                 NULL);
 
-    /* The human was told: a void round is never silent. */
-    ASSERT_TRUE(g_notice_calls >= 1);
-    ASSERT_TRUE(strstr(g_notice_text, "no output") != NULL);
-    ASSERT_TRUE(strstr(g_notice_text, "MALFORMED_FUNCTION_CALL") != NULL);
+    /* The human was told: a void round is never silent, and it is told on
+     * the WARNING channel (a system error, not a dim notice) with the
+     * wire's own words verbatim. */
+    ASSERT_EQ(g_warn_calls, 1);
+    ASSERT_TRUE(strstr(g_warn_text, "void round:") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "no output") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "retrying (1/2)") != NULL);
 
     /* The void round's all-zero usage report is the error envelope's,
      * not a measurement: it never reached the gauge. The later rounds
@@ -1072,15 +1091,126 @@ static void test_agent_void_round_is_retried(void)
     remove(FIXTURE);
 }
 
+/* `void_retries = 0`: never retry. The first empty round ends the turn
+ * — one request, no note in any body, and the user is told in the terms
+ * that matter: a system error naming the wire's own words, plus the
+ * turn's own error. The failure surfaces instead of being absorbed. */
+static void test_agent_void_retries_zero_fails_at_once(void)
+{
+    reset_capture();
+    g_warn_calls = 0;
+    g_warn_text[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1; /* the void round only: none is retried */
+    sc.sse[0] = VOID_ROUND_SSE;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+    nm_agent_on_warning(agent, cap_warning);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_VOID_RETRIES, "0"), 0);
+    ASSERT_EQ(nm_agent_void_retries(agent), 0);
+
+    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    ASSERT_EQ(g_n_requests, 1); /* one round, no retry */
+
+    /* The report says exactly why no retry happened, and carries the
+     * wire's own words. */
+    ASSERT_EQ(g_warn_calls, 1);
+    ASSERT_TRUE(strstr(g_warn_text, "void round:") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "void_retries = 0") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
+    const char *err = nm_agent_last_error(agent);
+    ASSERT_NOT_NULL(err);
+    ASSERT_TRUE(strstr(err, "MALFORMED_FUNCTION_CALL") != NULL);
+
+    /* And the retry note never rode a request: there was no retry. */
+    ASSERT_TRUE(strstr(g_requests[0],
+                       "Your previous round produced no content") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_VOID_RETRIES);
+}
+
+/* `void_retries = 1`: one retry, then the turn ends. Pins the bound
+ * itself rather than the default's shape. */
+static void test_agent_void_retries_caps_the_run(void)
+{
+    reset_capture();
+    g_warn_calls = 0;
+    g_warn_text[0] = '\0';
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2; /* the round and its ONE retry */
+    sc.sse[0] = VOID_ROUND_SSE;
+    sc.sse[1] = VOID_ROUND_SSE;
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_state(agent, cap_state);
+    nm_agent_on_warning(agent, cap_warning);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_VOID_RETRIES, "1"), 0);
+    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
+
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_EQ(g_warn_calls, 2);
+    ASSERT_TRUE(strstr(g_warn_text, "retries spent (1/1)") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_VOID_RETRIES);
+}
+
 static void test_agent_void_round_retries_exhausted_is_an_error(void)
 {
     /* When the retries are spent the turn ends in a REAL error, with
      * the wire's own words in it — never in silence, which is what the
      * 2026-10-27 dump showed (eight rounds that stopped the turn with
-     * nothing said and nothing shown). */
+     * nothing said and nothing shown). Every one of the three voids is
+     * reported to the user; the last says the retries are spent. */
     reset_capture();
     g_notice_calls = 0;
     g_notice_text[0] = '\0';
+    g_warn_calls = 0;
+    g_warn_text[0] = '\0';
 
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
@@ -1105,12 +1235,19 @@ static void test_agent_void_round_retries_exhausted_is_an_error(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
     nm_agent_on_notice(agent, cap_notice);
+    nm_agent_on_warning(agent, cap_warning);
 
     int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
 
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     ASSERT_EQ(g_n_requests, 3); /* the round, and its two retries */
+
+    /* Three void rounds, three reports; the last one names the spent
+     * budget rather than promising another try. */
+    ASSERT_EQ(g_warn_calls, 3);
+    ASSERT_TRUE(strstr(g_warn_text, "retries spent (2/2)") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
 
     /* The error names the fact and the wire's own reason for it. */
     const char *err = nm_agent_last_error(agent);
@@ -5628,17 +5765,6 @@ static int count_framed_reminders(const char *req)
     return count_substr(req, "<system-reminder>\\n");
 }
 
-static char g_warn_text[512];
-static int g_warn_calls;
-
-static void cap_warning(const char *msg, void *userdata)
-{
-    (void)userdata;
-    g_warn_calls++;
-    if (msg)
-        snprintf(g_warn_text, sizeof(g_warn_text), "%s", msg);
-}
-
 /* Whole-body capture for the nested-reminder test: cap_tool keeps only
  * the HEAD of a result (512 bytes), and a reminder rides the TAIL of a
  * truncated one. What the test must prove is that the panel's bytes and
@@ -6104,6 +6230,8 @@ static void test_agent_void_note_speaks_once_per_turn(void)
     reset_capture();
     g_reminder_calls = 0;
     g_reminder_names[0] = '\0';
+    g_warn_calls = 0;
+    g_warn_text[0] = '\0';
 
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
@@ -6126,6 +6254,7 @@ static void test_agent_void_note_speaks_once_per_turn(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
+    nm_agent_on_warning(agent, cap_warning);
 
     ASSERT_EQ(nm_agent_turn(agent, "do a thing", NULL, 0), 0);
     ASSERT_EQ(g_n_requests, 3);
@@ -6144,6 +6273,13 @@ static void test_agent_void_note_speaks_once_per_turn(void)
     ASSERT_EQ(g_reminder_calls, 1);
     ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
     ASSERT_STR_EQ(request_body(g_requests[2]), request_body(g_requests[1]));
+
+    /* Both channels fired, and they are different channels: the model
+     * got the note ONCE (it rides the retry's request), the human got a
+     * system error for EACH void round (two here) — the report is per
+     * event, the note is per turn. */
+    ASSERT_EQ(g_warn_calls, 2);
+    ASSERT_TRUE(strstr(g_warn_text, "retrying (2/2)") != NULL);
 
     /* And the turn ends normally once the model answers. */
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -7305,6 +7441,8 @@ int main(void)
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_void_round_is_retried);
     RUN_TEST(test_agent_void_note_speaks_once_per_turn);
+    RUN_TEST(test_agent_void_retries_zero_fails_at_once);
+    RUN_TEST(test_agent_void_retries_caps_the_run);
     RUN_TEST(test_agent_void_round_retries_exhausted_is_an_error);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_round_meta_from_prism);

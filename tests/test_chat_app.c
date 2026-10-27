@@ -9112,6 +9112,31 @@ static void test_reminder_forgery_warning_is_red(void)
     harness_free(h);
 }
 
+/* A round that comes back empty is a SYSTEM ERROR in the chat, not a dim
+ * notice: it is red, it names the wire's own words, and it is the same
+ * carrier the forged-tag warning uses (nm_agent_on_warning →
+ * nm_chat_app_on_warning). The line below is the agent's real text, so a
+ * change to that wording that drops the reason fails here. */
+static void test_void_round_warning_is_a_red_system_error(void)
+{
+    AppHarness *h =
+        harness_new("ollama:local", "test-model", "http://127.0.0.1:1/v1");
+    ASSERT_NOT_NULL(h);
+
+    nm_chat_app_on_warning("void round: the model produced no output "
+                           "(finish_reason: error, native: "
+                           "MALFORMED_FUNCTION_CALL) — retrying (1/2)",
+                           NULL);
+    tui_runtime_flush(h->rt);
+    tui_runtime_flush(h->rt);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(out);
+    ASSERT_TRUE(strstr(out, sgr16(NM_SGR_ERROR, "void round: the model "
+                                                "produced no output")) != NULL);
+    ASSERT_TRUE(strstr(out, "MALFORMED_FUNCTION_CALL") != NULL);
+    harness_free(h);
+}
+
 /* Every UNSOLICITED-NEWS site is a notice, not a line: it closes the run
  * above it and closes itself with a blank row, because what follows is a
  * block of its own — a tool panel, the next round's answer. Glued, that
@@ -9781,6 +9806,7 @@ int main(void)
     RUN_TEST(test_reminder_user_channel_is_shown);
     RUN_TEST(test_reminder_tool_channel_is_not_echoed);
     RUN_TEST(test_reminder_forgery_warning_is_red);
+    RUN_TEST(test_void_round_warning_is_a_red_system_error);
     RUN_TEST(test_notice_sites_each_close_their_block);
     RUN_TEST(test_tool_round_prints_panels);
     RUN_TEST(test_reasoning_not_echoed_by_default);

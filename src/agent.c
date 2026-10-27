@@ -747,6 +747,14 @@ int nm_agent_max_rounds(const NmAgent *a)
              : NM_AGENT_DEFAULT_MAX_ROUNDS;
 }
 
+int nm_agent_void_retries(const NmAgent *a)
+{
+    (void)a;
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_void_retries(c)
+             : NM_AGENT_DEFAULT_VOID_RETRIES;
+}
+
 /* ---- context-usage gauge (provider-reported) ---- */
 
 int nm_agent_context_has_usage(const NmAgent *a)
@@ -1904,7 +1912,36 @@ static int void_round(NmAgent *a, const NmChatResult *r)
     void_round_reason(r, reason, sizeof(reason));
     snprintf(a->void_reason, sizeof(a->void_reason), "%s", reason);
 
-    if (a->void_retries >= NM_AGENT_DEFAULT_VOID_RETRIES) {
+    int cap = nm_agent_void_retries(a);
+    int spent = a->void_retries >= cap;
+
+    /* ALWAYS tell the human, on every void round, whether or not it will
+     * be retried: the round produced nothing, and silence about that is
+     * what let the 2026-10-27 session stop eight turns with nothing said
+     * and nothing shown. This is the UI's warning channel (the model is
+     * not told through it — the model gets the reminder note instead);
+     * the wire's own words ride it verbatim. */
+    if (a->on_warning) {
+        char msg[256];
+        if (spent && cap == 0)
+            snprintf(msg, sizeof(msg),
+                     "void round: the model produced no output (%s) — no "
+                     "retries configured (void_retries = 0), the turn ends",
+                     reason);
+        else if (spent)
+            snprintf(msg, sizeof(msg),
+                     "void round: the model produced no output (%s) — "
+                     "retries spent (%d/%d), the turn ends",
+                     reason, a->void_retries, cap);
+        else
+            snprintf(msg, sizeof(msg),
+                     "void round: the model produced no output (%s) — "
+                     "retrying (%d/%d)",
+                     reason, a->void_retries + 1, cap);
+        a->on_warning(msg, a->userdata);
+    }
+
+    if (spent) {
         char msg[NM_CHAT_MSG_MAX + 96];
         snprintf(msg, sizeof(msg),
                  "the model produced no output: no text, no tool call (%s)",
@@ -1919,14 +1956,6 @@ static int void_round(NmAgent *a, const NmChatResult *r)
      * spend the turn's round budget. */
     if (a->round > 0)
         a->round--;
-
-    if (a->on_notice) {
-        char msg[192];
-        snprintf(msg, sizeof(msg),
-                 "round produced no output (%s) — retrying (%d/%d)", reason,
-                 a->void_retries, NM_AGENT_DEFAULT_VOID_RETRIES);
-        a->on_notice(msg, a->userdata);
-    }
 
     /* The same transcript, asked again — with the note appended (the
      * reminder rides the retry's request), and nothing else changed. */

@@ -445,6 +445,62 @@ static void test_signature_echo_key(void)
     ASSERT_EQ(nm_config_signature_echo_mode(NULL), NM_REASONING_ECHO_OFF);
 }
 
+/* The `void_retries` value space: one decimal 0-9, where `0` is a real
+ * choice (never retry) rather than a broken value. The ceiling is a
+ * deliberate refusal, not a range accident. */
+static void test_void_retries_key(void)
+{
+    char out[8];
+    ASSERT_TRUE(nm_config_void_retries_canon("0", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "0");
+    ASSERT_TRUE(nm_config_void_retries_canon("2", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "2");
+    ASSERT_TRUE(nm_config_void_retries_canon("9", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "9");
+    /* Refused: past the ceiling, negative, signed, fractional, empty,
+     * multi-digit, non-numeric. */
+    ASSERT_FALSE(nm_config_void_retries_canon("10", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("-1", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("+1", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("1.5", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("22", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon("two", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_void_retries_canon(" 2", out, sizeof(out)));
+    ASSERT_FALSE(nm_config_valid_void_retries(NULL));
+
+    pin_paths("void-retries");
+    test_unsetenv("NEVERMORE_VOID_RETRIES");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    /* The built-in default: 2. */
+    ASSERT_EQ(nm_config_resolve_void_retries(c), 2);
+
+    write_file_at(g_user, "void_retries = 0\n");
+    nm_config_free(c);
+    c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_VOID_RETRIES), "0");
+    ASSERT_EQ(nm_config_resolve_void_retries(c), 0);
+
+    /* Env outranks the file; garbage there is dropped, never applied. */
+    test_setenv("NEVERMORE_VOID_RETRIES", "7");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_resolve_void_retries(c), 7);
+    test_setenv("NEVERMORE_VOID_RETRIES", "10");
+    nm_config_set_env(c);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_VOID_RETRIES), NM_CFG_USER);
+    ASSERT_EQ(nm_config_resolve_void_retries(c), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_VOID_RETRIES, "10"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_VOID_RETRIES, "1"), 0);
+    ASSERT_EQ(nm_config_resolve_void_retries(c), 1);
+    nm_config_free(c);
+    test_unsetenv("NEVERMORE_VOID_RETRIES");
+
+    /* No config at all: the built-in default, never a stale value. */
+    ASSERT_EQ(nm_config_resolve_void_retries(NULL), 2);
+}
+
 /* The `kbd` mode: three values, one vocabulary — `auto` (the default),
  * `on` (request the protocol regardless of the probe) and `off` (keep
  * the legacy encodings). The bool spellings and the two terminal names
@@ -760,29 +816,30 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(0), NM_CFG_KEY_PROVIDER);
     ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
     ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
-    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING_ECHO);
-    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_SIGNATURE_ECHO);
-    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_CONNECT_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_FAMILY_SKIP);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SKIP_FAMILIES);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_REMINDERS);
-    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_SEARXNG);
-    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_SEARXNG_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_POLL_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_LOGIN_SHELL);
-    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_KBD);
-    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_COLOR);
-    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SPINNER_RAMP);
-    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_SKILLS);
-    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_TEMPERATURE);
-    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_NULL(nm_config_key_at(25));
+    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_VOID_RETRIES);
+    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_REASONING_ECHO);
+    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_SIGNATURE_ECHO);
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_CONNECT_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_FAMILY_SKIP);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SKIP_FAMILIES);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_REMINDERS);
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_LOGIN_SHELL);
+    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_KBD);
+    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_COLOR);
+    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SPINNER_RAMP);
+    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_PRISM_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_SKILLS);
+    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_NULL(nm_config_key_at(26));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -791,6 +848,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_REASONING_ECHO");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SIGNATURE_ECHO),
                   "NEVERMORE_SIGNATURE_ECHO");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_VOID_RETRIES),
+                  "NEVERMORE_VOID_RETRIES");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_TIMEOUT),
                   "NEVERMORE_TIMEOUT_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_RUN_COMMAND_TIMEOUT),
@@ -1620,6 +1679,7 @@ int main(void)
     RUN_TEST(test_boolean_normalization);
     RUN_TEST(test_reasoning_mode_vocabulary);
     RUN_TEST(test_signature_echo_key);
+    RUN_TEST(test_void_retries_key);
     RUN_TEST(test_kbd_mode_vocabulary);
     RUN_TEST(test_color_mode_vocabulary);
     RUN_TEST(test_shadow_write_and_reload);

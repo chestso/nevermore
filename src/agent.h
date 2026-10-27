@@ -47,7 +47,13 @@ typedef void (*NmAgentStateFn)(NmAgentState state, void *userdata);
  * round right after a void one answered normally in five of the eight
  * cases, and the other three were one run of four that only a human
  * could break. A note plus two retries give the model more than the
- * hand did, and the cap keeps a stuck model from looping. */
+ * hand did, and the cap keeps a stuck model from looping.
+ *
+ * This is the BUILT-IN DEFAULT behind the store's `void_retries` key
+ * (0-9; `0` = never retry). The retry is a net, not a fix, so it is a
+ * knob — and every void round is reported to the user through
+ * nm_agent_on_warning whatever the setting says, because a round that
+ * produced nothing must never pass in silence. */
 #define NM_AGENT_DEFAULT_VOID_RETRIES 2
 
 /* Default stream-inactivity timeout (ms): while a round is streaming,
@@ -83,6 +89,21 @@ void nm_agent_set_model(NmAgent *a, const char *model);
  * use with NM_AGENT_DEFAULT_MAX_ROUNDS as the default; the agent keeps
  * no copy. Takes effect on the next round. */
 int nm_agent_max_rounds(const NmAgent *a);
+
+/* Void-round retries allowed in one turn: how many times a round that
+ * came back with NOTHING in it (no text, no tool call, no image — see
+ * round_is_void) is asked again before the turn fails with a real error.
+ * The value is the config store's `void_retries` key, resolved at the
+ * point of use with NM_AGENT_DEFAULT_VOID_RETRIES as the default; the
+ * agent keeps no copy, so a change takes effect on the next turn.
+ *
+ * `0` means NEVER RETRY: the first empty round ends the turn. That is a
+ * legitimate setting, not a broken one — the retry is a net, and a
+ * person who wants the failure to surface instead of being absorbed sets
+ * it here. Every void round raises a user-visible system error either
+ * way (nm_agent_on_warning), naming the wire's own words; the knob only
+ * decides whether the turn continues after it. */
+int nm_agent_void_retries(const NmAgent *a);
 
 /* Context-usage gauge (provider-reported, P2). Every number comes from
  * the provider's `usage` object — never an estimate.

@@ -79,6 +79,23 @@ extern "C" {
  * See nm_config_model_for. */
 #define NM_CFG_KEY_MODEL  "model"
 #define NM_CFG_KEY_ROUNDS "rounds"
+/* How many times a VOID round — a round that came back with nothing in
+ * it: no text, no tool call, no image (the provider rejected the model's
+ * function call, or the stream ended empty) — is asked again before the
+ * turn fails. `0` means never retry: the first empty round ends the turn
+ * with a real error, so the failure is seen instead of papered over.
+ *
+ * The built-in default is 2 (NM_AGENT_DEFAULT_VOID_RETRIES), and it is a
+ * NET, not a fix: a void round is not a tool round, so it never counts
+ * against `rounds`, and this key is what bounds it. The retry is never
+ * silent either way — every void round raises a user-visible system
+ * error naming the wire's own words (finish_reason / native reason), and
+ * `0` turns that error into the end of the turn.
+ *
+ * Resolved at the point of use (nm_agent_void_retries), so a mid-chat
+ * change applies to the next turn; no latch, because the value cannot
+ * change a request prefix. Env spelling: NEVERMORE_VOID_RETRIES. */
+#define NM_CFG_KEY_VOID_RETRIES "void_retries"
 
 /* Longest scoped-key spelling ("model." + a provider name), for a
  * caller that builds one (the TUI writes `model.<provider>`). */
@@ -588,6 +605,16 @@ void nm_config_set_provider_validator(int (*fn)(const char *name));
  * `rounds` name is this shape under its own key's spelling. */
 int nm_config_valid_positive_int(const char *value);
 int nm_config_valid_rounds(const char *value);
+/* The `void_retries` value space: a plain decimal 0-9. Unlike the
+ * positive-int shape above, `0` is MEANINGFUL here — "never retry, fail
+ * at the first empty round" — and the cap at 9 is deliberate: the note
+ * the model receives is latched per turn, so a run of 10+ retries adds
+ * nothing but requests against a model that is already stuck. */
+int nm_config_void_retries_canon(const char *value, char *out, size_t cap);
+int nm_config_valid_void_retries(const char *value);
+/* The `void_retries` key resolved (the winning layer's decimal), or
+ * NM_AGENT_DEFAULT_VOID_RETRIES when unset / unparseable. */
+int nm_config_resolve_void_retries(const NmConfig *c);
 /* Is `value` an `image_live` spelling — a positive decimal (the number
  * of requests an image rides) or `off` (every request carries the
  * image)? `0` is REFUSED: an image that never rides is a broken
