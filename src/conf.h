@@ -676,9 +676,11 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
 /* The `signature_echo` key resolved and parsed: the same value space as
  * `reasoning_echo` (one vocabulary), applied to the round's
  * reasoning_details array. NM_REASONING_ECHO_OFF when the key is unset,
- * and for a NULL config — the built-in default, and the only default
- * today (no provider declares one). The agent reads it at the point of
- * use, before its own freeze latch. */
+ * and for a NULL config — the built-in default. The provider's own
+ * declaration is layered over it by the AGENT (nm_agent_signature_echo
+ * takes NmProvider.signature_echo as the default and this key as the
+ * override), so this function answers only "what does the store say".
+ * The agent reads it at the point of use, before its own freeze latch. */
 NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c);
 
 /* Is `value` a `kbd` mode: `auto` / `on` / `off` (case-insensitive, with
