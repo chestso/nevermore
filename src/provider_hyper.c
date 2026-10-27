@@ -266,6 +266,7 @@ const NmOpenaiCompat nm_hyper_compat = {
     nm_catalog_hyper, /* the generated fallback catalog */
     hyper_row,
     NULL, /* one tier: the row needs no context */
+    NULL, /* no entry veto: every catalog entry is reachable */
 };
 
 static int hyper_needs_auth(const NmProvider *p, const char *base_url)

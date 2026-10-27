@@ -67,6 +67,7 @@ const NmOpenaiCompat nm_ollama_compat = {
     NULL,
     NULL,
     NULL,
+    NULL,
 };
 
 /* The provider fixed the cloud-vs-local choice when the user named

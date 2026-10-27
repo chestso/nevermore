@@ -643,7 +643,7 @@ static void test_read_file_ledger_skips_a_repeat(void)
     NmToolset *ts = nm_toolset_new_defaults();
     NmFileLedger *l = nm_file_ledger_new();
     ASSERT_NOT_NULL(l);
-    NmToolCtx ctx = { NULL, l };
+    NmToolCtx ctx = { NULL, l, NULL };
     NmJson *jargs = nm_json_new_object();
     nm_json_set(jargs, "path", nm_json_new_string(path));
     char *args = nm_json_dump(jargs);
@@ -4942,7 +4942,7 @@ static void test_every_tool_result_has_one_shape(void)
 /* mkdir -p for the fixture tree (forward slashes; Windows accepts). */
 static void skills_mkdir_p(const char *path)
 {
-    char buf[512];
+    char buf[1024];
     snprintf(buf, sizeof(buf), "%s", path);
     for (char *p = buf + 1; *p; p++) {
         if (*p == '/') {
