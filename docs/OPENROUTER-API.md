@@ -213,10 +213,16 @@ KEPT, and can be REPLAYED.
   the model's speech: the reasoning TRACE stays the only reasoning thing
   the transcript shows, and the wire dump
   (`NEVERMORE_DEBUG_WIRE=1`) is the human's window on the signature.
-- _Replay_: the `signature_echo` knob (`off` default / `tools` / `all`,
-  the same value space as `reasoning_echo`, frozen once a request has
-  carried the field) decides which replayed assistant messages carry
-  their round's array as a message-level `reasoning_details` field.
+- _Replay_: the `signature_echo` knob (`off` / `tools` / `all`, the same
+  value space as `reasoning_echo`, frozen once a request has carried the
+  field) decides which replayed assistant messages carry their round's
+  array as a message-level `reasoning_details` field. On THIS provider
+  the default is `tools`: `provider_openrouter.c` declares
+  `NmProvider.signature_echo = NM_REASONING_ECHO_TOOLS`, because the
+  signature rule above is a wire requirement of the models this provider
+  serves, and a requirement should ride the wire rather than the user
+  having to know it. The store's `signature_echo` key is the override —
+  an explicit `off` at any layer wins.
   STRICT ECHO-BACK: the field is emitted only from an array the model
   itself sent in this conversation — never synthesized, never an empty
   placeholder — so a model that never speaks `reasoning_details` never
@@ -237,10 +243,21 @@ eight rounds in that session came back with a malformed function call,
 all of them above ~84k prompt tokens, and the signature was missing
 from every round of that session, not just the failing ones. A cause
 present in 100% of rounds cannot explain a failure in 7% of them, so
-the missing signature is at most an AGGRAVATING factor, and the
-empty-round retry (the agent's `round_is_void`, ARCHITECTURE.md) is
-the fix under test. That is why the echo ships OPT-IN: the A/B is the
-only honest way to promote or dismiss it.
+the missing signature is at most an AGGRAVATING factor on the
+`MALFORMED_FUNCTION_CALL` rounds — which is why the echo is NOT
+justified as their cure, and why the empty-round retry (the agent's
+`round_is_void`, ARCHITECTURE.md) stays exactly as it is: the two are
+independent, and the retry is the one that has been observed to recover
+a turn.
+
+The signature echo is justified instead by the rule Google documents
+and nevermore has no counter-evidence for: the signature is REQUIRED
+back with the tool result. A `missing thought_signature` 400 is a hard
+turn failure with no recovery path, so on the models that mint one, the
+cheap, cacheable cost of replaying it is the right side of the bet —
+independent of whether it also reduces malformed calls. On every model
+that sends no `reasoning_details` the echo is inert by construction
+(strict echo-back), so the declaration costs them nothing.
 
 Its protocol: the same long tool session (a read-every-file task driven
 past ~84k prompt tokens, the §3.1 failure regime), run with
@@ -250,19 +267,38 @@ instrument. The primary endpoint is void rounds per 100 requests, with
 the ≥84k stratum reported beside it and the upstream histogram named
 per arm (routing is a weighted share, §7.4).
 
-**The A/B ran (2026-10-27, 12 sessions per arm).** Arm A: 3 void rounds
-in 490 requests (0.61 per 100; 0.88 in the ≥84k stratum). Arm B: 0 void
-rounds in 234 requests, with 210 replayed `reasoning_details` fields,
-zero HTTP ≥ 400 and zero error bodies naming the field; the cache-read
-rate moved 4.6% relative (0.9403 → 0.8967). The rate did not move within
-what 3 events can resolve (Fisher's exact p = 0.56; arm B's true rate is
-bounded at 1.28% by the rule of three), and the workload's model batched
-tool calls, so the session was shorter than the baseline's and the
-failure regime was barely reached. **The echo therefore stays opt-in.**
-What the run does settle: replaying the array is wire-safe on this
-surface, the replayed bytes are stable from request to request, and it
-does not collapse the prompt cache. Whether a signature improves the
-model's function calling at long context is still unmeasured.
+**The A/B ran (2026-10-27, 12 sessions per arm).** Arm A (`off`):
+3 void rounds in 490 requests (0.61 per 100; 0.88 in the ≥84k stratum),
+in **3 of 12 sessions**. Arm B (`tools`): 0 void rounds in 234 requests,
+in **0 of 12 sessions**, with 210 replayed `reasoning_details` fields,
+zero HTTP ≥ 400 and zero error bodies naming the field.
+
+Read at the round level the effect is not resolved (3 vs 0 in 490 vs 234
+rounds, Fisher p = 0.56); read at the SESSION level — the unit a person
+experiences, "did this chat need me to step in?" — it is 3/12 vs 0/12
+(p = 0.11 one-sided), and rounds are not independent trials: they share
+one transcript, and the arms did not even have the same shape (arm A
+repaired one file per round and ran up to 102 rounds; arm B batched ten
+tool calls per round and ran ≤28, so arm B had 2.1x less exposure). The
+design was under-powered for the rate the workload actually produced
+(0.61%, not the baseline's 6.8%) — about 20 sessions per arm would be
+needed for a 25% -> 2.5% session-level effect to be decidable. What the
+run DOES settle, and what the declaration rests on: replaying the array
+is wire-safe here (210 replays, no 4xx, no error naming the field), the
+replayed bytes are byte-stable from one request to the next, and it does
+not collapse the prompt cache (0.9403 -> 0.8967, and the arms' shapes
+differ, so even that dip is confounded). Whether a signature also
+improves function calling at long context remains unmeasured — that is
+the open question, not the reason for the declaration.
+
+One caveat that is genuinely untested: OpenRouter routes each request as
+a weighted share (§7.4) and a signature is minted per upstream. All 24
+runs of this A/B landed on `Google AI Studio`, so "the upstream accepts
+the replayed array" is proven for one upstream, not for a routing mix. A
+replayed signature reaching a different upstream of the same model is
+unprobed; if it is refused rather than ignored, that surfaces as a 400 on
+a conversation that is already sending signatures — the exposure is
+bounded to those conversations, and none has been seen.
 
 ## 4. Errors (live test)
 

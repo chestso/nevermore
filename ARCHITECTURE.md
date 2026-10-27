@@ -161,11 +161,15 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   model memory (plain + every scoped spelling).
   **Two knobs are ECHO MODES, not bools** (`off` / `tools` / `all`,
   one vocabulary, one canon): `reasoning_echo` (the trace text) and
-  `signature_echo` (the round's `reasoning_details` array). Each has
-  its own freeze latch in the agent, and each `/config` row shows what
-  the NEXT request will send (the frozen mode, labelled "frozen this
-  chat") rather than what the store says — a conversation's request
-  prefix must not change shape mid-flight.
+  `signature_echo` (the round's `reasoning_details` array). Each has a
+  provider declaration as its DEFAULT (the wire requirement rides the
+  wire: `opencode:go` for the trace, `openrouter` for the signature),
+  each store key as its OVERRIDE, and each its own freeze latch in the
+  agent. Every `/config` row shows what the NEXT request will send —
+  the frozen mode ("frozen this chat"), else the provider's declaration
+  ("provider default"), else the store's value — rather than what the
+  file says, because a conversation's request prefix must not change
+  shape mid-flight.
 - **Listing plane** (`src/source.h` / `source.c`) — everything pickable
   (providers, models) behind one `NmListSource` of `NmEntry` rows, so a
   picker never knows which source it drives. The **catalog source is
@@ -533,7 +537,7 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   dups it onto the round's assistant message (`reasoning_details_json`,
   frozen once written, saved on its own `<!-- reasoning_details: … -->`
   line). It goes back as a message-level `reasoning_details` field per
-  `signature_echo` (`off` default / `tools` / `all`), a knob with its
+  `signature_echo` (`off` / `tools` / `all`), a knob with its
   OWN freeze latch: a prefix that gains or loses either reasoning field
   is a different prefix, so the two knobs must not yank each other.
   STRICT ECHO-BACK: the field only ever carries elements the model
@@ -543,13 +547,20 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   trace is the only reasoning the transcript shows; the wire dump is
   the human's window), and a VOID round's partial array dies with the
   round: the retry starts empty, because a signature is not an answer.
-  The echo ships OPT-IN because nothing observed NEEDS it — nevermore
-  has never been answered with `missing thought_signature` (docs/
-  OPENROUTER-API.md §3.2) — and the A/B that ran (12 sessions per arm,
-  2026-10-27) did not move the void-round rate within what 3 events can
-  resolve; it did show the replay is wire-safe and leaves the prompt
-  cache standing. So the default stays `off` until a measurement at the
-  real failure rate says otherwise.
+  WHICH messages carry it is the provider's declaration and the user's
+  override, exactly like the trace echo: `NmProvider.signature_echo` is
+  the default (`openrouter` declares `tools` — Google documents the
+  signature as required back with the tool result, and a
+  `missing thought_signature` 400 is an unrecoverable turn), the store's
+  `signature_echo` key is the override, and the built-in default behind
+  both is `off`, so a provider with no opinion never sends it. The A/B
+  that ran (12 sessions per arm, 2026-10-27) is the reason the
+  declaration is not the same as a cure: 3 of 12 sessions hit a void
+  round without the echo, 0 of 12 with it, which is directionally what
+  the retry-cost argument predicts but not resolved at that sample size.
+  The replay is wire-safe and leaves the prompt cache standing, and the
+  void-round retry stays exactly as it is — the two are independent, and
+  the retry is the one observed to recover a turn.
   The stream-inactivity deadline counts wire BYTES, not
   events: `NmChatResult.traffic` (set by the client whenever a step
   moved response bytes — the SSE keep-alive comments bridging a

@@ -192,7 +192,8 @@ Settings resolve once, lowest to highest:
    the chat (`$XDG_STATE_HOME` honored; `%LOCALAPPDATA%` on Windows)
 4. **environment** — `NEVERMORE_PROVIDER`, `NEVERMORE_MODEL`,
    `NEVERMORE_MAX_ROUNDS`, `NEVERMORE_REASONING_ECHO`,
-   `NEVERMORE_TIMEOUT_MS`, `NEVERMORE_TEMPERATURE`,
+   `NEVERMORE_SIGNATURE_ECHO`, `NEVERMORE_TIMEOUT_MS`,
+   `NEVERMORE_TEMPERATURE`,
    `NEVERMORE_MAX_TOKENS`, `NEVERMORE_CONNECT_TIMEOUT_MS`,
    `NEVERMORE_CONNECT_FAMILY_SKIP`, `NEVERMORE_CONNECT_SKIP_FAMILIES`,
    `NEVERMORE_SEARXNG_URL`, `NEVERMORE_SEARXNG_ENABLED`,
@@ -216,8 +217,10 @@ config back in charge, with nothing else to unwind.
 provider         = opencode:go
 model            = glm-5.3
 rounds           = 40
-reasoning_echo   = tools
-signature_echo   = off
+# The two echo knobs: unset, each follows the provider's own
+# declaration; a value here overrides it (see "the two echo knobs").
+# reasoning_echo = tools
+# signature_echo = tools
 timeout          = 300000
 connect_timeout  = 1500
 handshake_timeout = 10000
@@ -337,41 +340,97 @@ latched set is the `skip_families` key (`none`, `ipv4`, `ipv6`,
 shows like any other value — marked `inert: family_skip off` when the
 policy is off.
 
-`reasoning_echo` (`$NEVERMORE_REASONING_ECHO`) decides whether a round's
-thinking trace is re-sent to the
-provider as `reasoning_content` on the assistant messages of later
-requests. The trace is always received, shown (dimmed) and kept in the
-session; only the wire changes. The **provider decides the default** —
-a provider whose wire 400s a replayed tool-call turn that omits the
-field declares it, and `opencode:go` declares `tools` (its `deepseek`
-endpoint is the one probed to demand it, so a `deepseek` model on
-`opencode:go` stops returning an intermittent 400 on tool rounds) — and
-this key is the override, winning whenever it is set at any layer.
-`off` sends none, `tools`
-sends the ones on messages that carry `tool_calls` —
-and `all` sends every trace. (`on`/`true`/`1` are accepted for `all`.)
-Once a request has actually carried a trace the mode is **frozen for
-that chat**: a prefix that gains or loses the field is a different
-prefix, so changing the key mid-conversation would throw the provider's
-prompt cache away; the change applies to the next chat, and `/config`
-says so.
+### What goes back on the wire: the two echo knobs
 
-`signature_echo` (`$NEVERMORE_SIGNATURE_ECHO`) is the same three values
-for a DIFFERENT carrier: a round's `reasoning_details` array — Gemini's
-encrypted **thought signature**, OpenAI's encrypted reasoning blob — is
-re-sent to the provider as a message-level `reasoning_details` field.
-The array is always received and kept on the round's assistant message
-(the trace stays the only reasoning the transcript shows; the signature
-is opaque and invisible), and replayed only when this says so: `off`
-(default) sends none, `tools` sends the arrays of messages that carry
-`tool_calls` — the place the signature belongs, beside the tool result
-— and `all` sends every one. It is **strict echo-back**: the field is
-only ever what the model itself sent, never synthesized, so a model that
-never returns `reasoning_details` never receives the field. There is no
-provider default, because nothing observed needs it back (nevermore has
-never been refused with a missing thought signature); it is a knob so
-you can try it, and it freezes once a request has carried the field,
-independently of `reasoning_echo`.
+A reasoning model says two different things, and only one of them is
+prose. Both are received, shown where they are meant to be shown, and
+kept in the transcript; only what rides _back_ to the provider is a
+choice, and there are two independent choices for the two carriers:
+
+| carrier                                                                                              | where it arrives                                                        | knob                                           | who declares it                                   |
+| ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------------------------- |
+| **trace text** — `reasoning_content` / `reasoning`                                                   | reasoning stream; `### reasoning` in the transcript, dimmed in the chat | `reasoning_echo` / `$NEVERMORE_REASONING_ECHO` | `opencode:go` → `tools`; `hyper` → `off` (probed) |
+| **structured carrier** — `reasoning_details[]` (Gemini's thought signature, OpenAI's encrypted blob) | its own stream channel, assembled once per round; never displayed       | `signature_echo` / `$NEVERMORE_SIGNATURE_ECHO` | `openrouter` → `tools`; everyone else → `off`     |
+
+Both knobs take the same three values, with the old bool spellings
+folded in (`on`/`true`/`1` mean `all`, `off`/`false`/`0`/`no` mean
+`off`):
+
+- `off` — nothing goes back. Still received, still kept, still shown
+  on screen and saved to the transcript.
+- `tools` — every assistant message that carries `tool_calls` re-sends
+  its round's copy. This is where both carriers matter: the upstream
+  replay check (and Google's signature rule) is about the tool result.
+- `all` — that, plus every other assistant message that has one.
+
+**The provider decides the default; you decide otherwise.** A provider
+whose _wire_ refuses a replayed round declares the mode it needs
+(`NmProvider.reasoning_echo` / `.signature_echo`), and that declaration
+is what an unset key resolves to — the requirement rides the wire
+instead of you having to know it. Your config, the shadow file, the
+environment and the command line are all **overrides**: set the key at
+any layer and it wins, including a deliberate `off` on a provider that
+declares `tools`. The built-in default behind both is `off`, so a
+provider with no opinion never sends anything it did not ask for.
+
+What the providers declare today:
+
+- `opencode:go` — trace text `tools`. Its `deepseek` endpoint returns an
+  intermittent 400 when a replayed tool-call round omits
+  `reasoning_content` (probed), so a `deepseek` model there stops
+  failing on tool rounds. Signature echo: no opinion.
+- `openrouter` — signature echo `tools`. Its Gemini models mint a
+  thought signature on every function-calling round, and the upstream
+  documents the signature as required back _with_ the tool result
+  (`missing thought_signature` is a 400 otherwise). Trace echo: no
+  opinion — the two carriers are separate fields, and this provider
+  needs the second, not the first.
+- `hyper`, `ollama:cloud`, `ollama:local`, `opencode:zen` — no opinion
+  on either. Hyper was probed _not_ to need the trace echo; the rest
+  were never probed, and a declaration is a probe result, not a guess.
+
+`/config` tells you which of those is in force, not what your file
+says: a row reads `off` when nothing is set anywhere, `tools (provider
+default)` when the provider's declaration is what the next request will
+use, and `tools (frozen this chat)` once a conversation has actually
+carried the field.
+
+**The signature echo is strict echo-back.** It only ever re-sends
+elements the model itself sent in this conversation — never a
+synthesized array, never an empty placeholder — so a model that never
+returns `reasoning_details` never receives the field, whatever the knob
+says and whatever its provider declared. The trace echo is different by
+design: on a tool-call message under `tools`/`all` it sends the field
+even when the round streamed no trace (`"reasoning_content":""`),
+because that replay check tests the field's _presence_, not its
+content.
+
+**Both freeze once sent, and they freeze separately.** The first request
+that actually carries a trace (or a `reasoning_details` field) latches
+that knob for the rest of the conversation: a request prefix that gains
+or loses the field is a different prefix, so changing the knob
+mid-conversation would throw the provider's prompt cache away (and, for
+the trace echo, can re-trip the check the echo exists for). The change
+is still stored — it applies to the next chat — and `/config` says so
+when you try. Because the latches are separate, the trace echo being off
+while the signature echo is on is a normal state, not a bug: it is the
+shape of OpenRouter's Gemini traffic.
+
+**What it costs.** Both echoes put the copies on _every_ later request
+in the conversation (the whole transcript rides each request). The
+signature array is the bigger one when a model sends visible reasoning
+elements — measured on a 95-file tool session, `reasoning_details` was
+8–11% of the request body at peak and grew with the transcript. It is
+cacheable, so most of it is billed as a cache read, and turning the knob
+on re-bills the tail once, at the freeze. If you are paying per token
+on a long session and nothing is failing, `off` is the cheaper answer;
+if a provider's declaration turned it on for you, that is because the
+alternative was a 400.
+
+To see exactly what was sent, `NEVERMORE_DEBUG_WIRE=1` records every
+request body and stream event verbatim under
+`$XDG_STATE_HOME/nevermore/wire/` — that dump is the human's window on
+a field the transcript deliberately never shows.
 
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the
