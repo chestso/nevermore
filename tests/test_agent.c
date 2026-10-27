@@ -2504,11 +2504,467 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
+/* ------------------------------------------------------------------ */
+/* The signature echo: the round's reasoning_details array replayed     */
+/* ------------------------------------------------------------------ */
+
+/* Under `tools`, a tool-call round's array rides the SAME message that
+ * carries its tool_calls — the thought signature goes back WITH the
+ * tool result, which is the whole point. The trace echo stays off (the
+ * two knobs are independent). */
+static void test_agent_signature_echoed_under_tools(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-one\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+        "\"data\":\"blob-two\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_s2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"both read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
+              0);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_turn(agent, "read it twice", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "both read");
+    ASSERT_EQ(g_n_requests, 3);
+
+    /* Request 2 replays round 1's tool message WITH its array, and the
+     * trace echo never fired (it is off): only the signature rode. */
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"reasoning_details\":[{\"type\":"
+                       "\"reasoning.text\",\"signature\":\"sig-one\"}]") !=
+                NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    /* Request 3 replays BOTH tool messages with their own arrays. */
+    ASSERT_TRUE(strstr(g_requests[2], "sig-one") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "blob-two") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
+/* The built-in default is off: the array is received and kept, but no
+ * request carries it, and nothing freezes. */
+static void test_agent_signature_not_echoed_by_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-one\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_d1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    ASSERT_EQ(g_n_requests, 2);
+    for (int i = 0; i < g_n_requests; i++)
+        ASSERT_TRUE(strstr(g_requests[i], "reasoning_details") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
+
+    /* It was kept anyway: the knob decides replay, never receipt. */
+    const NmSession *sess = nm_agent_session(agent);
+    ASSERT_NOT_NULL(sess);
+    const NmSessionMessage *call_msg = NULL;
+    for (size_t i = 0; i < nm_session_len(sess); i++) {
+        const NmSessionMessage *m = nm_session_get(sess, i);
+        if (m->role == NM_ROLE_ASSISTANT && m->tool_calls_json)
+            call_msg = m;
+    }
+    ASSERT_NOT_NULL(call_msg);
+    ASSERT_NOT_NULL(call_msg->reasoning_details_json);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
+/* `tools` is a SCOPE, not a global switch: an ANSWER round's array stays
+ * home under `tools`; `all` sends it too. Two agents, the same script. */
+static void test_agent_signature_tools_scope(void)
+{
+    for (int arm = 0; arm < 2; arm++) {
+        reset_capture();
+        write_fixture();
+
+        struct ServerScript sc;
+        memset(&sc, 0, sizeof(sc));
+        sc.n_rounds = 3;
+        /* Turn 1: a plain ANSWER round that carries an array. */
+        sc.sse[0] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"first answer\","
+            "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+            "\"signature\":\"sig-answer\"}]}}]}\n\n"
+            "data: [DONE]\n\n";
+        /* Turn 2: a tool round, whose request replays turn 1. */
+        sc.sse[1] =
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+            "\"id\":\"call_t1\",\"type\":\"function\",\"function\":"
+            "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+            "\\\"}\"}}]}}]}\n\n"
+            "data: [DONE]\n\n";
+        sc.sse[2] =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+            "data: [DONE]\n\n";
+        sc.fd = server_bind(&sc.port);
+        ASSERT_TRUE(sc.fd >= 0);
+
+        pthread_t th;
+        pthread_create(&th, NULL, agent_server_thread, &sc);
+
+        char base[64];
+        snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+        const NmProvider *p = nm_provider_by_name("ollama:local");
+        ASSERT_NOT_NULL(p);
+
+        NmToolset *tools = nm_toolset_new_defaults();
+        NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+        nm_agent_set_endpoint(agent, base, NULL);
+        nm_agent_on_delta(agent, cap_delta);
+        nm_agent_on_tool(agent, cap_tool);
+        nm_agent_on_state(agent, cap_state);
+
+        ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO,
+                                        arm ? "all" : "tools"),
+                  0);
+        ASSERT_EQ(nm_agent_turn(agent, "first question", NULL, 0), 0);
+        ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+        ASSERT_EQ(nm_agent_turn(agent, "now read it", NULL, 0), 0);
+        ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+        ASSERT_EQ(g_n_requests, 3);
+
+        /* Request 2 replays the answer round's array: `tools` leaves it
+         * off the wire (that message carries no tool_calls), `all`
+         * sends it. */
+        int carried = strstr(g_requests[1], "sig-answer") != NULL;
+        ASSERT_EQ(carried, arm);
+
+        nm_agent_free(agent);
+        nm_toolset_free(tools);
+        pthread_join(th, NULL);
+        close(sc.fd);
+        remove(FIXTURE);
+        nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+    }
+}
+
+/* The latch: once a request has carried the field, a mode change does
+ * not reshape this conversation's prefix. The trace echo's latch is a
+ * SEPARATE one and stays untouched. */
+static void test_agent_signature_freezes_once_sent(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-one\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_f1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    /* Turn 1's second round answers (it carries its own array, which
+     * rides back on turn 2's request under the frozen `all`). */
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read one\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-two\"}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    /* Turn 2. */
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "all"),
+              0);
+    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_TRUE(strstr(g_requests[1], "sig-one") != NULL);
+    /* The trace echo was never involved: its latch is its own. */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    /* Switching the key off does NOT reshape this conversation: the
+     * frozen mode is what flies, and _next reports the would-be mode. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
+              0);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_signature_echo_next(agent), NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    ASSERT_TRUE(strstr(g_requests[2], "sig-one") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "sig-two") != NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
+/* The prefix-cache guarantee, pinned: what a replayed round looks like on
+ * the wire does not change from one request to the next. Round 1's
+ * assistant message is the slice of each body up to the tool result that
+ * follows it, and the two are compared byte for byte. */
+static void slice_upto(const char *body, const char *needle, char *out,
+                       size_t cap)
+{
+    const char *p = body ? strstr(body, needle) : NULL;
+    out[0] = '\0';
+    if (!p)
+        return;
+    size_t n = (size_t)(p - body);
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, body, n);
+    out[n] = '\0';
+}
+
+static void test_agent_signature_replay_is_byte_stable(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-stable\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_b1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-second\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_b2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"stable\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
+              0);
+    ASSERT_EQ(nm_agent_turn(agent, "read twice", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "stable");
+    ASSERT_EQ(g_n_requests, 3);
+
+    static char a[REQ_CAP], b[REQ_CAP];
+    slice_upto(request_body(g_requests[1]), "{\"role\":\"tool\",", a,
+               sizeof(a));
+    slice_upto(request_body(g_requests[2]), "{\"role\":\"tool\",", b,
+               sizeof(b));
+    ASSERT_TRUE(*a != '\0');
+    ASSERT_STR_EQ(a, b);
+    /* And the prefix really carries the echoed round: the array and the
+     * call. */
+    ASSERT_TRUE(strstr(a, "sig-stable") != NULL);
+    ASSERT_TRUE(strstr(a, "\"tool_calls\"") != NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
+/* The two knobs are independent, both ways: with the trace echo off and
+ * the signature echo on — the shape of the 2026-10-27 dump — the tool
+ * message carries reasoning_details and NOT reasoning_content, and the
+ * latches freeze separately. */
+static void test_agent_signature_echo_independent_of_reasoning_echo(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"a trace\",\"reasoning_details\":["
+        "{\"type\":\"reasoning.text\",\"signature\":\"sig-ind\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_i1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
+              0);
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
+              0);
+    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+
+    /* The tool message carries the array and not the trace. */
+    ASSERT_TRUE(strstr(g_requests[1], "sig-ind") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "a trace") == NULL);
+    /* One latch fired, the other did not. */
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
 /* The round's structured carrier (the thought signature / encrypted
  * blob) is KEPT on the session's assistant message, byte for byte: the
  * round's elements concatenated in arrival order, closed into one
- * array. Nothing replays it yet (the signature_echo knob arrives with
- * the replay half), so no request body carries it. */
+ * array. (Whether it rides back is the signature_echo knob's call —
+ * off by default, and pinned by its own tests below.)
+ */
 static void test_agent_reasoning_details_kept_on_the_tool_message(void)
 {
     reset_capture();
@@ -2573,8 +3029,8 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
     /* The trace text still rides its own field. */
     ASSERT_STR_EQ(call_msg->reasoning, "thinking");
 
-    /* Phase 1 has no replay: the array never rides a request, whatever
-     * the reasoning echo says. */
+    /* The default is off: no request carries it (replay has its own
+     * pins in the signature-echo tests below). */
     ASSERT_EQ(g_n_requests, 2);
     for (int i = 0; i < g_n_requests; i++)
         ASSERT_TRUE(strstr(g_requests[i], "reasoning_details") == NULL);
@@ -6788,6 +7244,12 @@ int main(void)
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
+    RUN_TEST(test_agent_signature_echoed_under_tools);
+    RUN_TEST(test_agent_signature_not_echoed_by_default);
+    RUN_TEST(test_agent_signature_tools_scope);
+    RUN_TEST(test_agent_signature_freezes_once_sent);
+    RUN_TEST(test_agent_signature_replay_is_byte_stable);
+    RUN_TEST(test_agent_signature_echo_independent_of_reasoning_echo);
     RUN_TEST(test_agent_reasoning_details_kept_on_the_tool_message);
     RUN_TEST(test_agent_reasoning_details_kept_on_answer_and_image_rounds);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);

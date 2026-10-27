@@ -186,6 +186,14 @@ struct NmAgent
      * see nm_agent_reasoning_echo. */
     int reasoning_echo_frozen;
     NmReasoningEcho reasoning_echo_mode;
+    /* Signature echo mode — the same latch shape, over the round's
+     * reasoning_details array instead of its trace text. A SEPARATE
+     * latch on purpose: a prefix that gains or loses either field is a
+     * different prefix, and the two knobs must not yank each other (a
+     * user turning the signature echo off must not unfreeze the trace
+     * echo). See nm_agent_signature_echo. */
+    int signature_echo_frozen;
+    NmReasoningEcho signature_echo_mode;
     char *text; /* this round's accumulated answer text */
     size_t text_len;
     size_t text_cap;
@@ -1050,6 +1058,31 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a)
     return a ? a->reasoning_echo_frozen : 0;
 }
 
+/* The signature echo mode in force: the store's `signature_echo` key,
+ * resolved at the point of use (OFF by default), and the frozen mode
+ * once a request has actually carried a reasoning_details field. No
+ * provider declares one today — nothing observed NEEDS the signature
+ * back (docs/OPENROUTER-API.md §3.2) — so there is no provider default
+ * layer here; a measured need would add it beside its trace twin
+ * (NmProvider.signature_echo). */
+NmReasoningEcho nm_agent_signature_echo_next(const NmAgent *a)
+{
+    (void)a;
+    return nm_config_signature_echo_mode(nm_config_store());
+}
+
+NmReasoningEcho nm_agent_signature_echo(const NmAgent *a)
+{
+    if (a && a->signature_echo_frozen)
+        return a->signature_echo_mode;
+    return nm_agent_signature_echo_next(a);
+}
+
+int nm_agent_signature_echo_frozen(const NmAgent *a)
+{
+    return a ? a->signature_echo_frozen : 0;
+}
+
 NmAgentState nm_agent_state(const NmAgent *a)
 {
     return a ? a->state : NM_AGENT_IDLE;
@@ -1455,6 +1488,12 @@ static int begin_round(NmAgent *a)
      * any actually did is what freezes the mode below. */
     NmReasoningEcho echo = nm_agent_reasoning_echo(a);
     int echoed = 0;
+    /* The signature echo mode this request will use, and whether any
+     * message actually carried a reasoning_details field (the freeze's
+     * trigger). A separate mode and a separate latch from the trace
+     * echo above — one knob must never reshape the other's prefix. */
+    NmReasoningEcho sig = nm_agent_signature_echo(a);
+    int sig_echoed = 0;
     /* The DERIVED contents: a per-request array of owned strings, one
      * slot per message. A slot is non-NULL only for a message whose
      * content this request DERIVED (an assistant message whose images
@@ -1640,6 +1679,26 @@ static int begin_round(NmAgent *a)
         msgs[i].reasoning = trace;
         if (trace)
             echoed = 1;
+
+        /* Signature echo-back: the round's reasoning_details array
+         * rides back as a message-level field, gated by the
+         * signature_echo mode — the SAME shape as the trace echo, a
+         * separate latch (a prefix that gains or loses either field
+         * is a different prefix; the two knobs must not yank each
+         * other). STRICT ECHO-BACK: only a message whose round
+         * actually delivered an array ever carries one — the knob
+         * cannot fabricate the field, so a model that never speaks
+         * reasoning_details never sees it. */
+        const char *details = NULL;
+        if (sm->reasoning_details_json && *sm->reasoning_details_json) {
+            if (carries_calls && sig != NM_REASONING_ECHO_OFF)
+                details = sm->reasoning_details_json;
+            else if (sig == NM_REASONING_ECHO_ALL)
+                details = sm->reasoning_details_json;
+        }
+        msgs[i].reasoning_details_json = details;
+        if (details)
+            sig_echoed = 1;
     }
 
     /* The sampling knobs are store keys resolved at the point of use
@@ -1697,6 +1756,12 @@ static int begin_round(NmAgent *a)
     if (echoed && !a->reasoning_echo_frozen) {
         a->reasoning_echo_frozen = 1;
         a->reasoning_echo_mode = echo;
+    }
+    /* Same for the signature echo: its OWN latch, so the two knobs
+     * freeze independently. */
+    if (sig_echoed && !a->signature_echo_frozen) {
+        a->signature_echo_frozen = 1;
+        a->signature_echo_mode = sig;
     }
     /* Arm the inactivity deadline at the moment the stream opens: an
      * accepted connection that never sends a delta must still time out

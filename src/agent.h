@@ -267,6 +267,44 @@ NmReasoningEcho nm_agent_reasoning_echo_next(const NmAgent *a);
  * to say "the change applies to the next chat". */
 int nm_agent_reasoning_echo_frozen(const NmAgent *a);
 
+/* Signature echo-back: which assistant messages riding a later request
+ * carry their round's `reasoning_details` array — the structured
+ * reasoning carrier (Gemini's thought signature, OpenAI's encrypted
+ * blob) — as a message-level field. The store's `signature_echo` key,
+ * one of NM_REASONING_ECHO_OFF / TOOLS / ALL (the SAME value space as
+ * `reasoning_echo`, see conf.h), with no provider declaration behind it
+ * today: nothing observed NEEDS the signature back (docs/
+ * OPENROUTER-API.md §3.2), so the built-in `off` is the whole default.
+ * The array is received and kept on the session message in every mode;
+ * the mode decides only what goes back on the wire.
+ *
+ * STRICT ECHO-BACK. Unlike the trace echo, the field is attached ONLY
+ * to a message that actually has an array — the round's own elements,
+ * never a synthesized or empty placeholder. A model that never speaks
+ * reasoning_details therefore never receives the field, whatever this
+ * says; there is no wire observation that demands an empty one.
+ *
+ * FROZEN ONCE SENT, with its OWN latch: the first request that actually
+ * carries a `reasoning_details` field latches the mode for the rest of
+ * the conversation (a prefix that gains or loses the field is a
+ * different prefix, so the provider's cache would be thrown away). The
+ * two latches are independent — the trace echo can be off while the
+ * signature echo is on, which is the shape of the 2026-10-27 wire dump.
+ * A change after the latch applies to the next chat.
+ * nm_agent_signature_echo reports the mode in force;
+ * nm_agent_signature_echo_frozen says which it was. */
+NmReasoningEcho nm_agent_signature_echo(const NmAgent *a);
+
+/* The mode the NEXT chat would use — the freeze ignored. Before the
+ * latch it equals nm_agent_signature_echo; after it, comparing the two
+ * tells whether a change is being overridden (chat_app.c's
+ * note_frozen_echo). */
+NmReasoningEcho nm_agent_signature_echo_next(const NmAgent *a);
+
+/* Is the signature echo mode frozen for this conversation (has a request
+ * already carried a reasoning_details field)? */
+int nm_agent_signature_echo_frozen(const NmAgent *a);
+
 /* Register UI callbacks. */
 void nm_agent_on_delta(NmAgent *a, NmStreamCallback cb); /* text chunks */
 void nm_agent_on_tool(NmAgent *a, NmToolCallback cb);    /* tool start/end */
