@@ -104,9 +104,10 @@ OpenRouter deltas (all verified):
   chunk carrying `content:""` as a placeholder, then content
   streams (reasoning absent or `""`; reverse never observed,
   wire-possible). nevermore now surfaces these on the reasoning
-  channel; a client that
-  reads `delta.content` only must not treat an empty `content:""`
-  delta with `reasoning` present as end-of-stream.
+  channel and the array on its own (assembled once per
+  round, §3.2); a client that reads `delta.content` only must not treat
+  an empty `content:""` delta with `reasoning` present as
+  end-of-stream.
 - **Tool-call streaming**: byte-identical to OpenAI —
   `delta.tool_calls[0].id/type/function.name` on the first chunk,
   then `delta.tool_calls[0].function.arguments` fragments (verified:
@@ -167,7 +168,7 @@ context. The round right after a void one answered normally in five
 of the eight — which is why a retry is worth more than a "continue"
 from the human.
 
-## 3.2 The thought signature — the part nevermore drops (live, 2026-10-27)
+## 3.2 The thought signature — the structured reasoning carrier (live, 2026-10-27)
 
 `reasoning_details[]` is NOT a second copy of the reasoning text.
 Each element is a carrier of its own:
@@ -178,7 +179,10 @@ Each element is a carrier of its own:
 The elements ACCUMULATE across the round — one per chunk, in stream
 order (a reasoning-text element per reasoning delta, then the
 encrypted one at the end). So a round's full set is the concatenation
-of the per-chunk arrays, in the order they arrived.
+of the per-chunk arrays, in the order they arrived. The array's
+PRESENCE is the trigger, never the reasoning text's: elements arrive
+on chunks whose `reasoning`/`reasoning_content` is `null` (the
+trailing encrypted element), and on image rounds (§5.1).
 
 **What the `signature` IS**: Gemini's *thought signature* — the
 encrypted carrier Google wants back WITH the tool result, so the model
@@ -191,19 +195,39 @@ reasoning-tokens guide says the same from its side: use
 for those models" — and its Gemini models require the reasoning
 details to be preserved across requests.
 
-**What nevermore does with it**: nothing. The client reads
-`reasoning_content` (or `reasoning`) and ignores `reasoning_details[]`
-entirely, on the stated assumption (src/openai_client.c) that the
-array is "a structured echo of it, not a second channel". **That
-assumption is wrong for Gemini**: the signature is not an echo of the
-text, and there is no text to echo it from — the encrypted blob is the
-only carrier. The reasoning ECHO that does exist
-(`nm_agent_reasoning_echo`, `reasoning_content`) sends the TEXT, a
-different field Google does not read for this purpose, and on this
-provider it is off by default anyway: in the 2026-10-27 dump, 0 of
-118 requests carried `reasoning_content` and 0 carried
-`reasoning_details`, while 187 stream events delivered a signature
-that was dropped in the client.
+**What nevermore does with it**: the whole round's array is CAPTURED,
+KEPT, and can be REPLAYED.
+
+- _Receive_: the shared client accumulates `delta.reasoning_details[]`
+  on a per-round reused buffer — elements in arrival order, the array's
+  presence as the trigger, non-object elements skipped — and delivers
+  the assembled array ONCE at stream completion, on
+  `NM_STREAM_REASONING_DETAILS`, the same whole-object delivery the
+  assembled tool calls use. Zero allocation per SSE event.
+- _Keep_: the array is stored on the round's assistant message in the
+  session (`reasoning_details_json`), frozen once written like
+  `tool_calls_json`, and saved on its own `<!-- reasoning_details: … -->`
+  comment line — the sibling of `tool_calls`, with the same escaping;
+  the file format does not change.
+- _Display_: nothing. The signature is an opaque encrypted carrier, not
+  the model's speech: the reasoning TRACE stays the only reasoning thing
+  the transcript shows, and the wire dump
+  (`NEVERMORE_DEBUG_WIRE=1`) is the human's window on the signature.
+- _Replay_: the `signature_echo` knob (`off` default / `tools` / `all`,
+  the same value space as `reasoning_echo`, frozen once a request has
+  carried the field) decides which replayed assistant messages carry
+  their round's array as a message-level `reasoning_details` field.
+  STRICT ECHO-BACK: the field is emitted only from an array the model
+  itself sent in this conversation — never synthesized, never an empty
+  placeholder — so a model that never speaks `reasoning_details` never
+  receives the field, whatever the knob says. The knob decides the
+  request only; receipt and the session are unaffected.
+
+The `reasoning_echo` that sends the TEXT is not a substitute and never
+was: it is a different field (`reasoning_content`), which Google does
+not read for this purpose. The two carriers are two knobs on purpose,
+with two freeze latches, because a prefix that gains or loses either
+field is a different prefix.
 
 **What we have and have not observed**: nevermore's traffic has never
 been answered with a `missing thought_signature` — 105 of that dump's
@@ -215,9 +239,17 @@ from every round of that session, not just the failing ones. A cause
 present in 100% of rounds cannot explain a failure in 7% of them, so
 the missing signature is at most an AGGRAVATING factor, and the
 empty-round retry (the agent's `round_is_void`, ARCHITECTURE.md) is
-the fix under test. Echoing the signature back is a separate branch,
-and it needs its own A/B: the same long tool session, with and
-without, and the wire dump as the instrument.
+the fix under test. That is why the echo ships OPT-IN: the A/B is the
+only honest way to promote or dismiss it.
+
+Its protocol: the same long tool session (a read-every-file task driven
+past ~84k prompt tokens, the §3.1 failure regime), run with
+`NEVERMORE_SIGNATURE_ECHO=off` and `=tools`, interleaved, same build,
+same task text, one environment variable apart, the wire dump as the
+instrument. The primary endpoint is void rounds per 100 requests, with
+the ≥84k stratum reported beside it and the upstream histogram named
+per arm (routing is a weighted share, §7.4). `TBD(A/B)` — the result
+lands here when it has run.
 
 ## 4. Errors (live test)
 
@@ -280,8 +312,8 @@ part>]}, user]` is accepted (no 400) and the model edits the image
 - **`reasoning_details` rides image rounds** (both providers):
   `{"type":"reasoning.text","signature":...,"format":"google-gemini-v1"}`
   (Gemini) / `{"type":"reasoning.encrypted","data":...}` (OpenAI).
-  Ignored by nevermore today — and the reason is §3.2, which says
-  what that costs.
+  Captured with the round and replayed per `signature_echo` (§3.2): the
+  image round's assistant message keeps its array like any other.
 - Keep-alives are the usual `: OPENROUTER PROCESSING` comments
   (gpt-image emits dozens while generating — the minutes-long gap
   before the image event; the stream-inactivity deadline must be
@@ -599,6 +631,11 @@ password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
   the preferences object and `service_tier` cannot ride (§7): every
   round gets OpenRouter's own routing (§7.4), with no `only`/`order`/
   `ignore`/`sort`, no `max_price`, no `zdr` and no pinned tier.
+  MESSAGE-level reasoning fields are not provider fields and are no
+  exception: `reasoning_content` and `reasoning_details` ride the
+  assistant message shape itself (the OpenAI-compatible wire's own),
+  and the composer emits both — the trace text per `reasoning_echo`,
+  the structured array per `signature_echo` (§3.2).
 - **A hand-typed routing variant DOES ride the wire** — the model id
   is passed through as typed, so `vendor/model:nitro` reaches
   OpenRouter as a routing variant (probed live through nevermore:

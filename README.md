@@ -217,6 +217,7 @@ provider         = opencode:go
 model            = glm-5.3
 rounds           = 40
 reasoning_echo   = tools
+signature_echo   = off
 timeout          = 300000
 connect_timeout  = 1500
 handshake_timeout = 10000
@@ -354,6 +355,23 @@ that chat**: a prefix that gains or loses the field is a different
 prefix, so changing the key mid-conversation would throw the provider's
 prompt cache away; the change applies to the next chat, and `/config`
 says so.
+
+`signature_echo` (`$NEVERMORE_SIGNATURE_ECHO`) is the same three values
+for a DIFFERENT carrier: a round's `reasoning_details` array — Gemini's
+encrypted **thought signature**, OpenAI's encrypted reasoning blob — is
+re-sent to the provider as a message-level `reasoning_details` field.
+The array is always received and kept on the round's assistant message
+(the trace stays the only reasoning the transcript shows; the signature
+is opaque and invisible), and replayed only when this says so: `off`
+(default) sends none, `tools` sends the arrays of messages that carry
+`tool_calls` — the place the signature belongs, beside the tool result
+— and `all` sends every one. It is **strict echo-back**: the field is
+only ever what the model itself sent, never synthesized, so a model that
+never returns `reasoning_details` never receives the field. There is no
+provider default, because nothing observed needs it back (nevermore has
+never been refused with a missing thought signature); it is a knob so
+you can try it, and it freezes once a request has carried the field,
+independently of `reasoning_echo`.
 
 `NEVERMORE_CONFIG` / `NEVERMORE_SHADOW_CONFIG` point the two files
 elsewhere (e2e and replay rigs). `NEVERMORE_BASE_URL` overrides the

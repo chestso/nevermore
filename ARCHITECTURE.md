@@ -159,6 +159,13 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   switch re-resolves for the NEW provider (no memory = the ask, never
   the previous provider's id); `/config reset model` clears the whole
   model memory (plain + every scoped spelling).
+  **Two knobs are ECHO MODES, not bools** (`off` / `tools` / `all`,
+  one vocabulary, one canon): `reasoning_echo` (the trace text) and
+  `signature_echo` (the round's `reasoning_details` array). Each has
+  its own freeze latch in the agent, and each `/config` row shows what
+  the NEXT request will send (the frozen mode, labelled "frozen this
+  chat") rather than what the store says — a conversation's request
+  prefix must not change shape mid-flight.
 - **Listing plane** (`src/source.h` / `source.c`) — everything pickable
   (providers, models) behind one `NmListSource` of `NmEntry` rows, so a
   picker never knows which source it drives. The **catalog source is
@@ -510,15 +517,36 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   the field echoed and omitted — the inherited "must be echoed back"
   claim in docs/HYPER-API.md was never observed and is now disproved
   for hyper; `provider_hyper.c` declares `NM_REASONING_ECHO_OFF`).
-  **The client's reasoning handling has one known GAP, and it is a
-  wire fact, not a policy**: `reasoning_details[]` — which for Gemini
-  carries the encrypted THOUGHT SIGNATURE the model must see again
-  with the tool result, so it can continue the reasoning behind its
-  call — is dropped in the client, because it is not the text the
-  echo sends and cannot be reconstructed from it (docs/
-  OPENROUTER-API.md §3.2). The echo is therefore NOT a substitute for
-  it: one sends `reasoning_content`, the other would have to send
-  `reasoning_details`.
+  **All three reasoning carriers are handled end to end.** The text
+  pair (`reasoning_content` / `reasoning`) rides `NM_STREAM_REASONING`
+  and the session's `reasoning` field, and goes back as
+  `reasoning_content` per `reasoning_echo`. The structured carrier —
+  `delta.reasoning_details[]`, whose Gemini elements carry the
+  encrypted THOUGHT SIGNATURE the model must see again with the tool
+  result so it can continue the reasoning behind its call — is
+  accumulated client-side on a per-round reused buffer (elements in
+  arrival order, the array's presence the trigger, never the text's;
+  non-object elements skipped) and delivered ONCE at stream completion
+  on `NM_STREAM_REASONING_DETAILS` — the same whole-object delivery the
+  assembled tool calls use, so an SSE event never costs an allocation.
+  The agent copies it into its own per-round buffer and the session
+  dups it onto the round's assistant message (`reasoning_details_json`,
+  frozen once written, saved on its own `<!-- reasoning_details: … -->`
+  line). It goes back as a message-level `reasoning_details` field per
+  `signature_echo` (`off` default / `tools` / `all`), a knob with its
+  OWN freeze latch: a prefix that gains or loses either reasoning field
+  is a different prefix, so the two knobs must not yank each other.
+  STRICT ECHO-BACK: the field only ever carries elements the model
+  itself sent, never a synthesized placeholder, so a model that never
+  speaks `reasoning_details` never receives the field. Nothing about
+  the signature is displayed (it is an opaque carrier, not speech — the
+  trace is the only reasoning the transcript shows; the wire dump is
+  the human's window), and a VOID round's partial array dies with the
+  round: the retry starts empty, because a signature is not an answer.
+  The echo ships OPT-IN because nothing observed NEEDS it — nevermore
+  has never been answered with `missing thought_signature` (docs/
+  OPENROUTER-API.md §3.2) — so what it is worth is the A/B's question,
+  not the docs'.
   The stream-inactivity deadline counts wire BYTES, not
   events: `NmChatResult.traffic` (set by the client whenever a step
   moved response bytes — the SSE keep-alive comments bridging a
@@ -689,7 +717,15 @@ save [path]` writes session.c's markdown). Const on purpose: the
   would split the heading and fabricate a meta line exactly where a
   reader looks). The heading is display-only either way — a reader takes
   the tool facts from meta and requires the meta comment to be the first
-  line after the heading LF. The images a message held are declared there
+  line after the heading LF. **Relayed wire JSON rides optional comment
+  lines beside the body**, never in meta and never counted: the
+  assistant message's `tool_calls` array (`<!-- tool_calls: … -->`) and
+  its round's reasoning_details array (`<!-- reasoning_details: … -->`,
+  the thought signature — see the Agent loop). Both are escaped by the
+  same comment writer (a `-->` inside a payload becomes `--\u003e`, the
+  JSON-equivalent bytes), so neither can end its comment early, and the
+  format version does not move: an optional line breaks no reader rule.
+  The images a message held are declared there
   and not carried, so a loader refuses such a file instead of rebuilding
   a transcript whose request prefix differs from the chat's.
 - **Context** (`src/context.c`) — system-prompt assembly: the base
