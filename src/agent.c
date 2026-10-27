@@ -1058,17 +1058,24 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a)
     return a ? a->reasoning_echo_frozen : 0;
 }
 
-/* The signature echo mode in force: the store's `signature_echo` key,
- * resolved at the point of use (OFF by default), and the frozen mode
- * once a request has actually carried a reasoning_details field. No
- * provider declares one today — nothing observed NEEDS the signature
- * back (docs/OPENROUTER-API.md §3.2) — so there is no provider default
- * layer here; a measured need would add it beside its trace twin
- * (NmProvider.signature_echo). */
+/* The signature echo mode in force. Same layer order as its trace twin:
+ * the provider's own declaration is the DEFAULT (a provider whose WIRE
+ * needs the round's `reasoning_details` array back declares it — today
+ * openrouter, for Gemini's thought signature), and the store's
+ * `signature_echo` key is the OVERRIDE: an explicit user setting at any
+ * layer above the built-in default always wins, so a user who wants
+ * `off` on openrouter gets it. Resolution is at the point of use until
+ * a request actually carries the field, which freezes the mode for the
+ * conversation (a prefix that gains or loses it is a different prefix).
+ * See agent.h for the full contract. */
 NmReasoningEcho nm_agent_signature_echo_next(const NmAgent *a)
 {
-    (void)a;
-    return nm_config_signature_echo_mode(nm_config_store());
+    NmConfig *c = nm_config_store();
+    if (c && nm_config_source(c, NM_CFG_KEY_SIGNATURE_ECHO) != NM_CFG_DEFAULT)
+        return nm_config_signature_echo_mode(c);
+    if (a && a->provider)
+        return a->provider->signature_echo; /* OFF = no opinion */
+    return c ? nm_config_signature_echo_mode(c) : NM_REASONING_ECHO_OFF;
 }
 
 NmReasoningEcho nm_agent_signature_echo(const NmAgent *a)

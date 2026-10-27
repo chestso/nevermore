@@ -272,24 +272,33 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a);
  * reasoning carrier (Gemini's thought signature, OpenAI's encrypted
  * blob) — as a message-level field. The store's `signature_echo` key,
  * one of NM_REASONING_ECHO_OFF / TOOLS / ALL (the SAME value space as
- * `reasoning_echo`, see conf.h), with no provider declaration behind it
- * today: nothing observed NEEDS the signature back (docs/
- * OPENROUTER-API.md §3.2), so the built-in `off` is the whole default.
- * The array is received and kept on the session message in every mode;
- * the mode decides only what goes back on the wire.
+ * `reasoning_echo`, see conf.h), with the provider's own declaration
+ * (NmProvider.signature_echo) as the DEFAULT. The array is received and
+ * kept on the session message in every mode; the mode decides only what
+ * goes back on the wire.
+ *
+ * THE PROVIDER DECIDES, THE USER OVERRIDES — the same rule as the trace
+ * echo. openrouter declares NM_REASONING_ECHO_TOOLS because its Gemini
+ * models mint a thought signature on every function-calling round and
+ * the upstream documents the signature as required back WITH the tool
+ * result (docs/OPENROUTER-API.md §3.2). Every other provider declares
+ * nothing (the zero value), so on them this key is entirely the user's.
+ * An explicit setting — any layer above the built-in default — always
+ * wins, so `off` on openrouter is honoured.
  *
  * STRICT ECHO-BACK. Unlike the trace echo, the field is attached ONLY
  * to a message that actually has an array — the round's own elements,
  * never a synthesized or empty placeholder. A model that never speaks
  * reasoning_details therefore never receives the field, whatever this
- * says; there is no wire observation that demands an empty one.
+ * says, and whatever the provider declared: a declaration is a mode, not
+ * a licence to fabricate the bytes.
  *
  * FROZEN ONCE SENT, with its OWN latch: the first request that actually
  * carries a `reasoning_details` field latches the mode for the rest of
  * the conversation (a prefix that gains or loses the field is a
  * different prefix, so the provider's cache would be thrown away). The
  * two latches are independent — the trace echo can be off while the
- * signature echo is on, which is the shape of the 2026-10-27 wire dump.
+ * signature echo is on, which is the shape of the observed dumps.
  * A change after the latch applies to the next chat.
  * nm_agent_signature_echo reports the mode in force;
  * nm_agent_signature_echo_frozen says which it was. */

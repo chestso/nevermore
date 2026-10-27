@@ -27,6 +27,10 @@ const struct NmProvider nm_opencode_zen_provider = {
     "https://opencode.ai/zen/v1",
     "opencode.ai",
     NM_REASONING_ECHO_OFF, /* Zen: unprobed — the 400 was observed on Go */
+    NM_REASONING_ECHO_OFF, /* Zen's free models DO stream reasoning_details
+                            * but were never probed for needing one back;
+                            * no claim (declaring is a probe result, not a
+                            * guess — docs/OPENCODE-API.md §3) */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,

@@ -451,6 +451,28 @@ struct NmProvider
      * probe, docs/HYPER-API.md §3.5). */
     NmReasoningEcho reasoning_echo;
 
+    /* Does this provider's WIRE need the round's STRUCTURED reasoning
+     * carrier echoed back on replayed assistant messages — the
+     * `reasoning_details` array (Gemini's thought signature, OpenAI's
+     * encrypted blob) — with the SAME value space and the SAME
+     * resolution rule as `reasoning_echo` above (provider declaration =
+     * DEFAULT, the store's `signature_echo` key = override, an explicit
+     * user setting always wins; zero value = no opinion, i.e. OFF).
+     *
+     * The two fields are deliberately separate and independent: they
+     * carry different bytes on the wire (prose vs an opaque carrier),
+     * they freeze on separate latches, and a provider may need one
+     * without the other. openrouter declares TOOLS — its Gemini models
+     * mint a thought signature on every function-calling round and the
+     * upstream documents the signature as required back with the tool
+     * result (docs/OPENROUTER-API.md §3.2: Google's own
+     * `missing thought_signature` / 400 INVALID_ARGUMENT rule) — while
+     * every other onboarded provider declares nothing, and a model that
+     * never sends a `reasoning_details` element never receives the
+     * field whatever this says (the echo is STRICT: nevermore replays
+     * only elements the model itself sent). */
+    NmReasoningEcho signature_echo;
+
     /* Streaming chat completion. Blocking; on_delta fires from inside. */
     NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,
                          const char *base_url, const char *api_key);

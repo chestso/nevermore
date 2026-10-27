@@ -289,6 +289,9 @@ const struct NmProvider nm_hyper_provider = {
     "hyper.charm.land",
     NM_REASONING_ECHO_OFF, /* probed: hyper does NOT require the echo
                             * (docs/HYPER-API.md §3.5) */
+    NM_REASONING_ECHO_OFF, /* and nothing was ever seen to need the
+                            * structured carrier back either (hyper sends
+                            * no reasoning_details; unprobed, no claim) */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,

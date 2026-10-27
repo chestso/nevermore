@@ -166,6 +166,40 @@ static void test_provider_reasoning_echo_declarations(void)
     }
 }
 
+/* The provider declares its wire's STRUCTURED-carrier requirement the
+ * same way: a provider whose upstream wants the round's
+ * `reasoning_details` array back with the tool result declares it, and
+ * the store's `signature_echo` key is the user's override (see
+ * nm_agent_signature_echo). openrouter declares `tools` for Gemini's
+ * thought signature (docs/OPENROUTER-API.md §3.2); every other provider
+ * says nothing, so the echo stays off there unless the user opts in.
+ * The two declarations are INDEPENDENT fields: openrouter needs the
+ * signature back and NOT the trace text, opencode:go the reverse — the
+ * shape of the observed dumps, pinned here so a refactor cannot merge
+ * the two. */
+static void test_provider_signature_echo_declarations(void)
+{
+    const NmProvider *or_ = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(or_);
+    ASSERT_EQ(or_->signature_echo, NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(or_->reasoning_echo, NM_REASONING_ECHO_OFF);
+
+    const NmProvider *go = nm_provider_by_name("opencode:go");
+    ASSERT_NOT_NULL(go);
+    ASSERT_EQ(go->signature_echo, NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(go->reasoning_echo, NM_REASONING_ECHO_TOOLS);
+
+    const NmProvider *providers[NM_PROVIDER_MAX];
+    size_t n = 0;
+    nm_provider_list(providers, &n);
+    ASSERT_TRUE(n > 0);
+    for (size_t i = 0; i < n; i++) {
+        if (providers[i] == or_)
+            continue;
+        ASSERT_EQ(providers[i]->signature_echo, NM_REASONING_ECHO_OFF);
+    }
+}
+
 static void test_provider_api_key_env_then_authinfo(void)
 {
     const NmProvider *p = nm_provider_by_name("openrouter");
@@ -2168,6 +2202,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_reasoning_echo_declarations);
+    RUN_TEST(test_provider_signature_echo_declarations);
     RUN_TEST(test_provider_authinfo_machines);
     RUN_TEST(test_provider_api_key_env_then_authinfo);
     /* Fetch BEFORE the fallback test: the live catalog cache is

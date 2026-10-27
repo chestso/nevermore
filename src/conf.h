@@ -137,11 +137,14 @@ extern "C" {
  * check demands). So a model that never speaks `reasoning_details`
  * never receives the field, whatever this says.
  *
- * The default is `off` and no provider declares one: nothing observed
- * NEEDS the signature back — the missing thought_signature has never
- * been seen to 400 (docs/OPENROUTER-API.md §3.2), so the echo is an A/B
- * lever, not a wire requirement. A provider declaration
- * (NmProvider.signature_echo) may join here once a measurement says so.
+ * This key is the OVERRIDE; a provider whose WIRE needs the echo
+ * declares it (NmProvider.signature_echo) and that declaration is the
+ * DEFAULT — exactly the trace echo's rule one layer over. openrouter
+ * declares `tools`: its Gemini models mint a thought signature on every
+ * function-calling round and the upstream documents it as required back
+ * with the tool result (docs/OPENROUTER-API.md §3.2). Every other
+ * provider declares nothing, so with no explicit setting this key
+ * resolves to the built-in `off` there.
  *
  * Like the trace echo, the mode FREEZES once a request has actually
  * carried the field (its own latch: a prefix that gains or loses either

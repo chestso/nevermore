@@ -2959,6 +2959,132 @@ static void test_agent_signature_echo_independent_of_reasoning_echo(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
 
+/* The provider declaration is the DEFAULT, and the user's key is the
+ * OVERRIDE — the trace echo's rule, one layer over. On openrouter (which
+ * declares `tools` for Gemini's thought signature) the array rides back
+ * with no key set at all, and an explicit `off` silences it. */
+static void test_agent_signature_echo_provider_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-prov\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_p1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(p->signature_echo, NM_REASONING_ECHO_TOOLS);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* No store key set: the provider's declaration is the mode. */
+    ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO),
+              NM_CFG_DEFAULT);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "read");
+
+    /* The tool-call round goes back WITH the array, unprompted — and
+     * without the trace text, which this provider did not declare. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "sig-prov") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+}
+
+/* ...and the user's `off` overrides the declaration: the provider says
+ * what its wire wants, the person says what their conversation does. */
+static void test_agent_signature_echo_user_overrides_provider(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-prov\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_p2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
+              0);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_OFF);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_TRUE(strstr(g_requests[1], "sig-prov") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
 /* The round's structured carrier (the thought signature / encrypted
  * blob) is KEPT on the session's assistant message, byte for byte: the
  * round's elements concatenated in arrival order, closed into one
@@ -7244,6 +7370,8 @@ int main(void)
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
+    RUN_TEST(test_agent_signature_echo_provider_default);
+    RUN_TEST(test_agent_signature_echo_user_overrides_provider);
     RUN_TEST(test_agent_signature_echoed_under_tools);
     RUN_TEST(test_agent_signature_not_echoed_by_default);
     RUN_TEST(test_agent_signature_tools_scope);

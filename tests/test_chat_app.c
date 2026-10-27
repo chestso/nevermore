@@ -4486,10 +4486,12 @@ static void test_config_reasoning_echo_freezes_for_the_chat(void)
     remove(FIXTURE_PATH);
 }
 
-/* The `signature_echo` row and its freeze line. The knob has no provider
- * default (nothing observed needs the signature back), so /config shows
- * the store's value until a request actually carries the field, then the
- * frozen one — and a change says it applies to the next chat. */
+/* The `signature_echo` row and its freeze line. This harness runs
+ * `ollama:local`, which declares nothing, so /config shows the store's
+ * value until a request actually carries the field, then the frozen one
+ * — and a change says it applies to the next chat. (The PROVIDER-DEFAULT
+ * branch — openrouter's `tools` — is pinned by
+ * test_config_shows_provider_default_signature below.) */
 static void test_config_signature_echo_row_and_freeze(void)
 {
     pin_cfg_paths("signature-echo");
@@ -4537,6 +4539,44 @@ static void test_config_signature_echo_row_and_freeze(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE_PATH);
+}
+
+/* The same row when the PROVIDER dictates the mode: openrouter declares
+ * `tools` (Gemini's thought signature has to ride back with the tool
+ * result), so with the store at its built-in default the row shows
+ * `tools` + "(provider default)" — the declaration is what the next
+ * request uses, not the `off` the bare key would report. A user's key
+ * overrides it, and then the row shows the store's value instead. */
+static void test_config_shows_provider_default_signature(void)
+{
+    pin_cfg_paths("sig-provdefault");
+    AppHarness *h = harness_new("openrouter", "google/gemini-3.8-flash", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "signature_echo"));
+    ASSERT_NOT_NULL(strstr(out, "signature_echo       tools"));
+    ASSERT_NOT_NULL(strstr(out, "(provider default)"));
+
+    /* The user overrides the declaration: the row goes back to the
+     * store's value (no provider-default label any more). Only the
+     * freshly printed block counts — harness_read hands back the whole
+     * transcript, earlier /config rows included. */
+    size_t seen = strlen(out);
+    store_set(NM_CFG_KEY_SIGNATURE_ECHO, "off");
+    harness_type(h, "/config");
+    harness_enter(h);
+    out = harness_read(h);
+    const char *tail = out + (seen < strlen(out) ? seen : 0);
+    ASSERT_NOT_NULL(strstr(tail, "signature_echo       off"));
+    ASSERT_NULL(strstr(tail, "(provider default)"));
+    store_clear(NM_CFG_KEY_SIGNATURE_ECHO);
+
+    nm_config_free(cfg);
+    harness_free(h);
 }
 
 /* Parallel tool calls arrive in ONE assistant message (several entries
@@ -9706,6 +9746,7 @@ int main(void)
     RUN_TEST(test_config_runtime_change_writes_shadow);
     RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
     RUN_TEST(test_config_signature_echo_row_and_freeze);
+    RUN_TEST(test_config_shows_provider_default_signature);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
     RUN_TEST(test_config_shows_provider_default_echo);
