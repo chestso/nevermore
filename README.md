@@ -151,6 +151,15 @@ is no room for it at all; what the turn is DOING is the spinner glyph at
 the row's left — the green dot pulses while the model streams (blinking
 on a terminal without 24-bit color), the star set rotates while a tool
 runs — so there is no word beside it to go stale between states.
+The row paints **foreground only** — no surface — so it sits on the
+terminal's own background. That is deliberate and is the one departure
+from the spec's UI Color Palette: chest.so's projects run terminals with
+a pitch-black, often transparent background, and a painted surface shows
+up as a rectangle under the chrome, the one rectangle that is supposed to
+disappear into the terminal. The `─` that
+fills the row's slack is the spec's **Current Line** token, the color
+its UI guidelines give a subtle border or separator; the rest of the row
+is foreground text on the canvas.
 `/context` prints the exact breakdown — the last
 round's numbers plus the session totals, the cache read (and its rate),
 and the cache write count. Its output line is the same accessor the row's

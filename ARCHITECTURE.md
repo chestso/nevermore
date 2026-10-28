@@ -1098,7 +1098,14 @@ running with job ID 7`, `Job 7 killed`, or the inactivity stop's note
   terminal width. **boba owns the columns, the app owns the content**
   (`compose_gauge` + `nm_chat_app_identity`); boba also change-detects
   the declaration set, so the app's old `status_text`/`status_last`
-  buffers and `strcmp` are gone. The gauge's text is
+  buffers and `strcmp` are gone. The row paints FOREGROUND only — no
+  surface: it sits on the terminal's own canvas, which in chest.so's
+  projects is pitch-black or transparent, and a painted band would show
+  as a rectangle under the chrome. That is the one deliberate departure
+  from the spec's UI Color Palette; the row's
+  roles are all foreground ones, and so is the prompt below it. The rule
+  itself is `nm_color_status_rule`, the spec's Current Line token, the
+  color its UI guidelines give a subtle separator. The gauge's text is
   `<used>/<limit> ↓<out> ⚡<pct>` — the first pair provider-reported
   (used) over catalog metadata (limit), then the session ledger's
   accumulated output and cache-read rate, each OMITTED until a round

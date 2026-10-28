@@ -946,11 +946,13 @@ static char *span_bytes(TuiColor color, const char *text)
 }
 
 /* The status row's right-hand half, exactly as boba's layout paints it:
- * the rule filling the slack (gutter Comment), then the identity
- * segment's own pad_left blank and its text (nm_color_status_identity).
- * `left` is the row's left chrome text and `identity` the identity block
- * — the row's width is the harness's terminal (80), so the rule takes
- * what is left of it. Caller frees. */
+ * the rule filling the slack (nm_color_status_rule — the spec's Current
+ * Line token, the color the spec gives a subtle separator; FOREGROUND
+ * only, like the rest of the row, which has no surface), then the
+ * identity segment's own pad_left blank and its text
+ * (nm_color_status_identity). `left` is the row's left chrome text and
+ * `identity` the identity block — the row's width is the harness's
+ * terminal (80), so the rule takes what is left of it. Caller frees. */
 static char *status_row_bytes(const char *left, const char *identity)
 {
     int rule = 80 - (int)tui_utf8_display_width(left) - 1 /* pad_left */ -
@@ -969,7 +971,7 @@ static char *status_row_bytes(const char *left, const char *identity)
     char ident_text[512];
     snprintf(ident_text, sizeof(ident_text), " %s", identity);
 
-    char *rule_span = span_bytes(nm_color_gutter(NM_COLOR_16), rule_text);
+    char *rule_span = span_bytes(nm_color_status_rule(NM_COLOR_16), rule_text);
     char *ident_span = span_bytes(nm_color_status_identity(NM_COLOR_16), ident_text);
     if (!rule_span || !ident_span) {
         free(rule_span);
@@ -1075,6 +1077,39 @@ static char *frame_status_row(const char *frame, const char *prompt_span)
     memcpy(row, start, n);
     row[n] = '\0';
     return row;
+}
+
+/* Does any SGR sequence in `s` set a BACKGROUND? The background spellings
+ * are 40-47 and 100-107 (the palette) and 48 (48;5;n / 48;2;r;g;b), and
+ * a styled span writes foreground and background into the SAME sequence,
+ * so this parses the parameter list rather than looking for a substring. */
+static int has_background_sgr(const char *s)
+{
+    for (const char *p = s; (p = strstr(p, "\033[")) != NULL; p += 2) {
+        const char *q = p + 2;
+        long param = 0;
+        int have_param = 0;
+        while (*q && *q != 'm') {
+            if (*q == ';') {
+                if (have_param && (param == 48 || (param >= 40 && param <= 47) ||
+                                   (param >= 100 && param <= 107)))
+                    return 1;
+                param = 0;
+                have_param = 0;
+            } else if (*q >= '0' && *q <= '9') {
+                param = param * 10 + (*q - '0');
+                have_param = 1;
+            } else {
+                break; /* not a plain SGR: `\033[K`, `\033[2J`, … */
+            }
+            q++;
+        }
+        if (*q == 'm' && have_param &&
+            (param == 48 || (param >= 40 && param <= 47) ||
+             (param >= 100 && param <= 107)))
+            return 1;
+    }
+    return 0;
 }
 
 /* The SGR the identity block is painted with (its span's prefix), for
@@ -2343,6 +2378,50 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
 
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+/* The status row carries NO background: the app paints chrome in
+ * FOREGROUND roles only, so the row sits on the terminal's own canvas.
+ * That is deliberate and is the one departure from the spec's UI Color
+ * Palette — this project's terminals run pitch-black/transparent, and a
+ * painted surface would put a visible rectangle under the chrome.
+ * Asserted on the row's actual bytes, in both tiers, because "no
+ * background" is exactly the kind of thing a future role added with a
+ * style helper can quietly undo. */
+static void test_status_row_paints_no_background(void)
+{
+    AppHarness *h16 = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h16);
+    const char *frame = tui_runtime_render(h16->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_EQ(has_background_sgr(row), 0);
+    /* And the row is still PAINTED: the chrome, the rule and the
+     * identity are each foreground spans over the canvas. */
+    char *expected =
+        status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
+    ASSERT_NOT_NULL(expected);
+    ASSERT_TRUE(strstr(row, expected) != NULL);
+    free(expected);
+    free(row);
+    free(prompt);
+    harness_free(h16);
+
+    AppHarness *h32 = harness_new_rgb("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h32);
+    frame = tui_runtime_render(h32->rt);
+    ASSERT_NOT_NULL(frame);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_RGB), "\xe2\x9d\xaf ");
+    ASSERT_NOT_NULL(prompt);
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_EQ(has_background_sgr(row), 0);
+    free(row);
+    free(prompt);
+    harness_free(h32);
 }
 
 /* The gauge's buffer holds the WORST its fields can print, not the worst
@@ -9746,6 +9825,7 @@ int main(void)
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);
     RUN_TEST(test_context_gauge_output_marker_waits_for_a_report);
     RUN_TEST(test_output_marker_color_follows_the_terminal_tier);
+    RUN_TEST(test_status_row_paints_no_background);
     RUN_TEST(test_context_gauge_survives_the_worst_case_counts);
     RUN_TEST(test_context_gauge_warns_near_the_limit);
     RUN_TEST(test_status_row_identity_follows_model);

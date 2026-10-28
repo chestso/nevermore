@@ -4478,7 +4478,7 @@ static void compose_status(NmChatApp *app)
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
     segs[n++] =
         status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
-                       nm_color_gutter(color_depth(app)));
+                       nm_color_status_rule(color_depth(app)));
     segs[n++] = status_segment(identity, TUI_SEGMENT_RIGHT, 2, 1, 1,
                                nm_color_status_identity(color_depth(app)));
 

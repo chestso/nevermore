@@ -39,6 +39,15 @@
 #define NM_DRACULA_COMMENT_G 114
 #define NM_DRACULA_COMMENT_B 164
 
+/* Current Line #6272A4 - the spec's semantic current-line token, and the
+ * color its UI guidelines give a subtle border or separator ("Borders
+ * and Separators: Subtle borders: use Current Line"). The two tokens
+ * share a hex ON PURPOSE (the spec says so in both variants), so the
+ * value is written once, here, and each role names the token it means. */
+#define NM_DRACULA_CURRENT_LINE_R NM_DRACULA_COMMENT_R
+#define NM_DRACULA_CURRENT_LINE_G NM_DRACULA_COMMENT_G
+#define NM_DRACULA_CURRENT_LINE_B NM_DRACULA_COMMENT_B
+
 /* Foreground #F8F8F2 - default body text. */
 #define NM_DRACULA_FG_R 248
 #define NM_DRACULA_FG_G 248
@@ -349,6 +358,30 @@ static inline TuiColor nm_color_status_identity(NmColorDepth depth)
     return nm_color_pick(depth, NM_DRACULA_FG_R, NM_DRACULA_FG_G,
                          NM_DRACULA_FG_B, NM_DRACULA_ANSI_WHITE);
 }
+
+/* The status row's SEPARATOR rule (`─`): the spec's Current Line token,
+ * which is what its UI guidelines give a subtle border or separator
+ * ("Borders and Separators: Subtle borders: use Current Line"). It is
+ * the same hex as Comment — the spec makes the two tokens share a value
+ * — so the row's rule and its muted chrome look identical; the roles are
+ * still two roles, because the row means two things by them (a divider
+ * vs. muted text) and a future change to either must not move the other.
+ * AnsiBrightBlack is the slot whose hex IS #6272A4, so the 16-color tier
+ * is exact. */
+static inline TuiColor nm_color_status_rule(NmColorDepth depth)
+{
+    return nm_color_pick(depth, NM_DRACULA_CURRENT_LINE_R,
+                         NM_DRACULA_CURRENT_LINE_G, NM_DRACULA_CURRENT_LINE_B,
+                         NM_DRACULA_ANSI_BRIGHT_BLACK);
+}
+
+/* The status row paints FOREGROUND ONLY: the app owns no background on
+ * the row, so it sits on the terminal's own canvas — a pitch-black or
+ * transparent one in chest.so's projects, where a painted band would
+ * show as a rectangle under the chrome. That is the one deliberate
+ * departure from the spec's UI Color Palette (which otherwise governs
+ * every role): the row's colors are all foreground roles, and boba's
+ * declaration never sets a background here. */
 
 /* ------------------------------------------------------------------ */
 /* TuiAttr constructors (renderers)                                    */
