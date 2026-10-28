@@ -966,10 +966,20 @@ null`, and NO usage object anywhere in the response (observed when
   — cache behavior is upstream-specific (§10.3), so one upstream per
   conversation is one temperament per conversation — and groups the
   session in the Logs view.
-- **One env knob, the Hyper precedent** (`HYPER_NO_SESSION_CACHE`):
-  `OPENROUTER_PROMPT_CACHE` = `off` / `5m` / `1h`, read at the point
-  of use, default `5m` for the Anthropic family and nothing for
-  everyone else.
+- **The env knob** `OPENROUTER_PROMPT_CACHE` picks the marker's TTL, read
+  at the point of use so a changed value reaches the next request. Only
+  the Anthropic family ever carries a marker, whatever the value, and
+  `nevermore --help` lists the knob with the other environment ones:
+  - unset, `5m`, or any unrecognized value — the default 5-minute TTL:
+    `"cache_control": {"type": "ephemeral"}`;
+  - `1h` — the one-hour TTL, `{"type": "ephemeral", "ttl": "1h"}`.
+    Writes bill at 2x the input rate instead of 1.25x (§10.1); the
+    reason to pick it is a conversation that idles longer than the
+    five-minute entry lives;
+  - `off` (also `no`, `false`, `0`) — no marker at all: the round bills
+    uncached. An escape hatch for the miss surcharge (§10.3), for a
+    proxy that rejects top-level fields, and for measuring the control
+    arm.
 - **The observability already exists**: `cached_tokens` feeds the ⚡
   rate, `cache_write_tokens` the `/context` write count, both parsed
   by the shared client today. A round that pays the miss surcharge

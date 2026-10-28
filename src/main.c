@@ -129,7 +129,16 @@ static void usage(FILE *out)
             "  NEVERMORE_SKILLS=off    disable Agent Skills discovery\n"
             "                          (on by default; the skills live in\n"
             "                          ~/.agents/skills and in the\n"
-            "                          project's .agents/skills)\n");
+            "                          project's .agents/skills)\n"
+            "\n"
+            "provider knobs:\n"
+            "  OPENROUTER_PROMPT_CACHE=off|5m|1h\n"
+            "                          prompt-cache marker on OpenRouter's\n"
+            "                          Anthropic models: 5m (default), 1h\n"
+            "                          (writes bill at 2x the input rate\n"
+            "                          instead of 1.25x) or off (send no\n"
+            "                          marker). Read at every request; no\n"
+            "                          other model family sends one\n");
 }
 
 /* ask-mode UI callbacks: deltas stream to stdout; tool activity

@@ -267,9 +267,10 @@ another provider's catalog.
 Environment-only knobs: `NEVERMORE_CONFIG` and `NEVERMORE_SHADOW_CONFIG`
 relocate the two files, `NEVERMORE_BASE_URL` overrides the endpoint for one run,
 `NEVERMORE_APP_URL` changes the app URL OpenRouter attributes traffic to (an
-absolute `http(s)` URL, else ignored), and `NEVERMORE_DEBUG_WIRE=1` records
-every request body and stream event verbatim under
-`$XDG_STATE_HOME/nevermore/wire/`.
+absolute `http(s)` URL, else ignored), `OPENROUTER_PROMPT_CACHE=off|5m|1h` picks
+the prompt-cache TTL OpenRouter's Anthropic models are asked for (`off` sends
+no marker), and `NEVERMORE_DEBUG_WIRE=1` records every request body and stream
+event verbatim under `$XDG_STATE_HOME/nevermore/wire/`.
 
 ### Reasoning echo
 

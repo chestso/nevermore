@@ -154,12 +154,13 @@ static size_t openrouter_attribution_headers(
     return 3;
 }
 
-/* The prompt-cache knob (OPENROUTER-API.md §10.6): "off" sends no
- * marker, "1h" asks for the 1-hour TTL (2x the write price, §10.1),
- * and anything else — unset, "5m", "on" — asks for the default
- * 5-minute one. Read at the point of use so a changed value reaches
- * the next request; HYPER_NO_SESSION_CACHE is the precedent for a
- * provider-local knob. */
+/* The prompt-cache knob (OPENROUTER-API.md §10.6, documented in
+ * `nevermore --help`): "off" (also "no", "false", "0") sends no marker,
+ * "1h" asks for the 1-hour TTL (2x the write price, §10.1), and anything
+ * else — unset, "5m", "on", an unrecognized value — asks for the
+ * default 5-minute one. Read at the point of use so a changed value
+ * reaches the next request. Only the Anthropic family reads it; the
+ * marker never rides another family's round. */
 static int openrouter_prompt_cache(void)
 {
     const char *v = getenv("OPENROUTER_PROMPT_CACHE");

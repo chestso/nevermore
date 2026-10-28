@@ -1344,8 +1344,7 @@ static void test_openrouter_non_anthropic_chat_sends_no_marker(void)
     ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
 }
 
-/* OPENROUTER_PROMPT_CACHE=off drops the marker for one run — the
- * Hyper provider's HYPER_NO_SESSION_CACHE is the precedent. */
+/* OPENROUTER_PROMPT_CACHE=off drops the marker for one run. */
 static void test_openrouter_prompt_cache_opt_out(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
