@@ -287,33 +287,28 @@ static void drain_request(int cfd)
     last_request_len = strlen(last_request);
 }
 
-/* Chat server: two content deltas then [DONE], chunked. Chunk sizes
- * computed: 0x33, 0x35, 0xe (verified: printf | wc -c pattern). */
-static void *hyper_chat_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
+/* ---------------------------------------------------------------- */
+/* Canned servers: the round plumbing every server thread shares      */
+/* ---------------------------------------------------------------- */
 
-    const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
-        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
+/* Write the whole buffer, or stop at the peer's first refusal: a short
+ * send is a dead connection, not a reason to retry forever. */
+static void send_all(int cfd, const char *buf, size_t len)
+{
     size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
+    while (off < len) {
+        long n = send(cfd, buf + off, len - off, 0);
         if (n <= 0)
             break;
         off += (size_t)n;
     }
-    /* Drain-recv stall loop: the peer closes after reading; a select-
-     * only loop hot-spins on the EOF-readable socket. */
+}
+
+/* Drain-recv stall loop: the peer closes after reading its reply, and
+ * a select-only loop hot-spins on the EOF-readable socket, so wait in
+ * 50 ms slices and leave when nothing is readable. */
+static void stall_until_peer_closes(int cfd)
+{
     for (;;) {
         fd_set r;
         FD_ZERO(&r);
@@ -330,9 +325,143 @@ static void *hyper_chat_server_thread(void *arg)
         if (recv(cfd, sink, sizeof(sink), 0) <= 0)
             break; /* peer gone */
     }
-    close(cfd);
+}
+
+/* An HTTP 200 whose body is the whole document, the length in the
+ * head: the non-chunked body path every catalog answers with. */
+static void send_json(int cfd, const char *body)
+{
+    char head[128];
+    snprintf(head, sizeof(head),
+             "HTTP/1.1 200 OK\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n",
+             strlen(body));
+    send_all(cfd, head, strlen(head));
+    send_all(cfd, body, strlen(body));
+}
+
+/* Take the round's connection and land its request in `req` (NULL =
+ * the shared last_request). -1 when no peer came. */
+static int canned_accept(int lfd, char *req, size_t cap)
+{
+    int cfd = accept(lfd, NULL, NULL);
+    if (cfd < 0)
+        return -1;
+    if (req)
+        drain_request_into(req, cap, cfd);
+    else
+        drain_request(cfd);
+    return cfd;
+}
+
+/* End of a served round: hold the connection while the peer reads (the
+ * stall above), then release BOTH the connection and the listener it
+ * arrived on. A server thread owns the fd it was handed, which is why
+ * no test closes a listener it started. */
+static void canned_close(int cfd, int lfd)
+{
+    if (cfd >= 0) {
+        stall_until_peer_closes(cfd);
+        close(cfd);
+    }
     close(lfd);
+}
+
+/* Serve ONE ready-made round on `lfd`: `head`, then `tail` `gap_us`
+ * later (a server whose trailer section follows the stream's end),
+ * then close the round. */
+static void serve_round(int lfd, const char *head, const char *tail,
+                        unsigned gap_us)
+{
+    int cfd = canned_accept(lfd, NULL, 0);
+    if (cfd >= 0) {
+        if (head)
+            send_all(cfd, head, strlen(head));
+        if (tail) {
+            if (gap_us)
+                usleep(gap_us);
+            send_all(cfd, tail, strlen(tail));
+        }
+    }
+    canned_close(cfd, lfd);
+}
+
+/* serve_round for one reply written once: every SSE chat server. */
+static void serve_reply(int lfd, const char *reply)
+{
+    serve_round(lfd, reply, NULL, 0);
+}
+
+/* serve_round for a JSON document (Content-Length, no chunking). */
+static void serve_json(int lfd, const char *body)
+{
+    int cfd = canned_accept(lfd, NULL, 0);
+    if (cfd >= 0)
+        send_json(cfd, body);
+    canned_close(cfd, lfd);
+}
+
+/* Start `thread` on a fresh loopback listener and fill `base` with the
+ * "/v1" URL its round is driven against. 0 on success. The thread owns
+ * the listener (canned_close releases it), so the caller only joins. */
+static int server_start(void *(*thread)(void *), pthread_t *th, char *base,
+                        size_t cap)
+{
+    int port;
+    int lfd = server_listen(&port);
+    if (lfd < 0)
+        return -1;
+    if (pthread_create(th, NULL, thread, (void *)(intptr_t)lfd) != 0) {
+        close(lfd);
+        return -1;
+    }
+    snprintf(base, cap, "http://127.0.0.1:%d/v1", port);
+    return 0;
+}
+
+/* Chat server: two content deltas then [DONE], chunked. Chunk sizes
+ * computed: 0x33, 0x35, 0xe (verified: printf | wc -c pattern). */
+static void *hyper_chat_server_thread(void *arg)
+{
+    static const char sse[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    serve_reply((int)(intptr_t)arg, sse);
     return NULL;
+}
+
+/* The trailer section both Prism servers end with: the chunked
+ * terminator and the two savings as trailers. */
+static const char PRISM_TAIL[] =
+    "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
+    "X-Prism-Dollar-Savings: 0.0021\r\n\r\n";
+
+/* The Prism reply up to the trailer section: the head with the two
+ * model headers, then the one SSE chunk (its size computed from the
+ * body, never hand-counted). The two Prism servers differ only in
+ * WHEN the trailer lands, so they share this. */
+static size_t prism_reply_head(char *out, size_t cap)
+{
+    static const char body[] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    size_t n = (size_t)snprintf(out, cap,
+                                "HTTP/1.1 200 OK\r\n"
+                                "Content-Type: text/event-stream\r\n"
+                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
+                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
+                                "Transfer-Encoding: chunked\r\n\r\n");
+    n += (size_t)snprintf(out + n, cap - n, "%zx\r\n", strlen(body));
+    memcpy(out + n, body, strlen(body));
+    n += strlen(body);
+    n += (size_t)snprintf(out + n, cap - n, "\r\n");
+    return n;
 }
 
 /* Prism chat server: the four Hyper Prism headers — model id/name on
@@ -341,48 +470,10 @@ static void *hyper_chat_server_thread(void *arg)
  * it before the round completes (docs/HYPER-API.md §3.5.2). */
 static void *hyper_prism_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    char resp[1024];
-    size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                          strlen(body));
-    memcpy(resp + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
-                          "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
-                          "X-Prism-Dollar-Savings: 0.0021\r\n\r\n");
-    send(cfd, resp, n, 0);
-    for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break; /* peer gone */
-    }
-    close(cfd);
-    close(lfd);
+    char resp[512];
+    size_t n = prism_reply_head(resp, sizeof(resp));
+    snprintf(resp + n, sizeof(resp) - n, "%s", PRISM_TAIL); /* one write */
+    serve_reply((int)(intptr_t)arg, resp);
     return NULL;
 }
 
@@ -394,50 +485,9 @@ static void *hyper_prism_server_thread(void *arg)
  * gap, and the framing end delivers the trailer into the store. */
 static void *hyper_prism_late_trailer_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    static const char tail[] =
-        "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
-        "X-Prism-Dollar-Savings: 0.0021\r\n\r\n";
-    char resp[1024];
-    size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                          strlen(body));
-    memcpy(resp + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-    send(cfd, resp, n, 0);
-    usleep(40 * 1000); /* the tail: sent well after [DONE] was read */
-    send(cfd, tail, strlen(tail), 0);
-    for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break; /* peer gone */
-    }
-    close(cfd);
-    close(lfd);
+    char resp[512];
+    prism_reply_head(resp, sizeof(resp));
+    serve_round((int)(intptr_t)arg, resp, PRISM_TAIL, 40 * 1000);
     return NULL;
 }
 
@@ -446,13 +496,7 @@ static void *hyper_prism_late_trailer_server_thread(void *arg)
  * Content-Length (no chunked, exercise the other body path). */
 static void *hyper_models_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char body[] =
+    static const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"gpt-oss-120b\",\"display_name\":\"GPT OSS 120b\","
         "\"context_window\":131072,"
@@ -464,44 +508,7 @@ static void *hyper_models_server_thread(void *arg)
         "{\"id\":\"no-name-model\",\"context_window\":4096,"
         "\"capabilities\":{\"vision\":false}}"
         "]}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    size_t off = 0;
-    while (off < strlen(head)) {
-        long n = send(cfd, head + off, strlen(head) - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    off = 0;
-    while (off < sizeof(body) - 1) {
-        long n = send(cfd, body + off, sizeof(body) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break;
-    }
-    close(cfd);
-    close(lfd);
+    serve_json((int)(intptr_t)arg, body);
     return NULL;
 }
 
@@ -561,7 +568,6 @@ static void *ollama_catalog_server_thread(void *arg)
             break;
         drain_request(cfd);
 
-        char head[256];
         const char *body = NULL;
         if (strstr(last_request, "GET /v1/models?verbose=true")) {
             /* The cloud's one-request shape. */
@@ -588,42 +594,8 @@ static void *ollama_catalog_server_thread(void *arg)
                          "\"model_info\":{\"gptoss.embedding_length\":2880,"
                          "\"gptoss.context_length\":131072}}";
         }
-        snprintf(head, sizeof(head),
-                 "HTTP/1.1 200 OK\r\n"
-                 "Content-Type: application/json\r\n"
-                 "Content-Length: %zu\r\n\r\n",
-                 strlen(body));
-        size_t off = 0;
-        while (off < strlen(head)) {
-            long n = send(cfd, head + off, strlen(head) - off, 0);
-            if (n <= 0)
-                break;
-            off += (size_t)n;
-        }
-        off = 0;
-        while (off < strlen(body)) {
-            long n = send(cfd, body + off, strlen(body) - off, 0);
-            if (n <= 0)
-                break;
-            off += (size_t)n;
-        }
-        /* Drain-recv stall loop (peer closes after reading). */
-        for (;;) {
-            fd_set r;
-            FD_ZERO(&r);
-            FD_SET(cfd, &r);
-            struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-            if (select(0, &r, NULL, NULL, &tv) <= 0)
-                break;
-#else
-            if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-                break;
-#endif
-            char sink[64];
-            if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-                break;
-        }
+        send_json(cfd, body);
+        stall_until_peer_closes(cfd); /* peer closes after reading */
         close(cfd);
     }
     close(lfd);
@@ -667,20 +639,35 @@ static void capture_delta(NmStreamChannel channel, const char *delta_text,
     }
 }
 
+/* One canned chat round: `thread` started on a loopback port, the
+ * named provider's BLOCKING chat driven against it, the server joined
+ * (the thread releases its listener). The caller owns the request —
+ * it is what the assertions read off the wire — and last_request holds
+ * it on return. A setup failure comes back as a non-OK status, which
+ * is what the caller's ASSERT reports. */
+static NmChatResult canned_chat_round(const char *provider,
+                                      void *(*thread)(void *),
+                                      const NmChatRequest *req,
+                                      const char *api_key)
+{
+    NmChatResult r;
+    memset(&r, 0, sizeof(r));
+    const NmProvider *p = nm_provider_by_name(provider);
+    pthread_t th;
+    char base[64];
+    if (!p || server_start(thread, &th, base, sizeof(base)) != 0) {
+        r.status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(r.message, sizeof(r.message),
+                 "no %s provider, or no canned server", provider);
+        return r;
+    }
+    r = p->chat(p, req, base, api_key);
+    pthread_join(th, NULL);
+    return r;
+}
+
 static void test_hyper_chat_end_to_end(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -688,10 +675,10 @@ static void test_hyper_chat_end_to_end(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
+                                       "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
-    pthread_join(th, NULL);
 
     /* The request the server received: hyper path, Bearer auth,
      * model, stream:true, messages. */
@@ -709,18 +696,6 @@ static void test_hyper_chat_end_to_end(void)
  * not a test stand-in. */
 static void test_hyper_prism_round_meta(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_prism_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -728,15 +703,13 @@ static void test_hyper_prism_round_meta(void)
         "nm-conv-prism", /* conversation_id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round("hyper", hyper_prism_server_thread,
+                                       &req, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.routed_model, "glm-5.3-flash");
     ASSERT_STR_EQ(r.meta.routed_name, "GLM 5.3 Flash");
     ASSERT_STR_EQ(r.meta.hc_savings, "12.5");
     ASSERT_STR_EQ(r.meta.usd_savings, "0.0021");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* The same four headers, but the terminator + trailer section arrive
@@ -747,18 +720,6 @@ static void test_hyper_prism_round_meta(void)
  * budget's expiry (that is the chat_app test's, on the fake clock). */
 static void test_hyper_prism_late_trailer(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_prism_late_trailer_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -766,30 +727,23 @@ static void test_hyper_prism_late_trailer(void)
         "nm-conv-prism", /* conversation_id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round(
+        "hyper", hyper_prism_late_trailer_server_thread, &req, "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.routed_model, "glm-5.3-flash");
     ASSERT_STR_EQ(r.meta.routed_name, "GLM 5.3 Flash");
     ASSERT_STR_EQ(r.meta.hc_savings, "12.5");
     ASSERT_STR_EQ(r.meta.usd_savings, "0.0021");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 static void test_hyper_chat_begin_step(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(hyper_chat_server_thread, &th, base, sizeof(base)),
+              0);
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
@@ -844,17 +798,12 @@ static void test_hyper_models_live_then_fallback(void)
 
 static void test_hyper_models_fetch(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_models_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("hyper");
     ASSERT_NOT_NULL(p);
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(hyper_models_server_thread, &th, base, sizeof(base)),
+              0);
 
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
@@ -902,18 +851,6 @@ static void test_hyper_models_fetch(void)
  * the blocking and step paths. */
 static void test_hyper_chat_carries_affinity_headers(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
     const char *conv = "nm-0123456789abcdef0123456789abcdef";
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
@@ -921,9 +858,9 @@ static void test_hyper_chat_carries_affinity_headers(void)
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
         conv, capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
+                                       "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
 
     ASSERT_TRUE(strstr(last_request, "x-session-id: ed926fff3042616d") != NULL);
     ASSERT_TRUE(strstr(last_request,
@@ -942,27 +879,15 @@ static void test_hyper_chat_carries_affinity_headers(void)
  * disable caching). */
 static void test_hyper_chat_null_conversation_id_falls_back(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
         NULL, capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
+                                       "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
 
     const char *sid = strstr(last_request, "x-session-id: ");
     const char *aff = strstr(last_request, "x-session-affinity: ");
@@ -980,25 +905,15 @@ static void test_hyper_chat_null_conversation_id_falls_back(void)
 static void test_hyper_session_cache_opt_out(void)
 {
     test_setenv("HYPER_NO_SESSION_CACHE", "1");
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
         "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-hyper-test");
+    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
+                                       "sk-hyper-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     test_unsetenv("HYPER_NO_SESSION_CACHE");
 
     ASSERT_TRUE(strstr(last_request, "x-session-id:") == NULL);
@@ -1014,15 +929,12 @@ static void test_hyper_affinity_stable_across_paths(void)
 {
     const char *conv = "nm-0123456789abcdef0123456789abcdef";
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(hyper_chat_server_thread, &th, base, sizeof(base)),
+              0);
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -1068,21 +980,17 @@ static void test_hyper_needs_auth(void)
  * test below (one catalog per slot, ever). */
 static void test_ollama_models_tags_and_show(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
     ollama_server_verbose_mode = 0; /* the plain list: the fallback */
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
     pthread_t th;
-    pthread_create(&th, NULL, ollama_catalog_server_thread,
-                   (void *)(intptr_t)lfd);
+    char base[64];
+    ASSERT_EQ(server_start(ollama_catalog_server_thread, &th, base,
+                           sizeof(base)),
+              0);
 
     /* Base as the chat surface (with /v1): the catalog derives the
      * API root by stripping it — /api/tags is at the host root. */
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
-    ASSERT_NOT_NULL(p);
-
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
@@ -1104,7 +1012,6 @@ static void test_ollama_models_tags_and_show(void)
     ASSERT_EQ(models[1].tools, 0);
 
     pthread_join(th, NULL);
-    close(lfd);
 
     /* The tags round hit the host root, not /v1 (OLLAMA-CLOUD-API.md
      * §6: native endpoints are not under the OpenAI prefix). */
@@ -1122,18 +1029,14 @@ static void test_ollama_models_tags_and_show(void)
  * an index merge would hand one model another's window. */
 static void test_ollama_models_verbose_catalog(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
     ollama_server_verbose_mode = 1; /* the verbose shape */
-    pthread_t th;
-    pthread_create(&th, NULL, ollama_catalog_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(p);
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(ollama_catalog_server_thread, &th, base,
+                           sizeof(base)),
+              0);
 
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
@@ -1153,7 +1056,6 @@ static void test_ollama_models_verbose_catalog(void)
     ASSERT_EQ(models[1].tools, 0);
 
     pthread_join(th, NULL);
-    close(lfd);
     ollama_server_verbose_mode = 0;
 }
 
@@ -1193,15 +1095,6 @@ static void test_ollama_needs_auth_local_vs_cloud(void)
  * process, a replay server) must not be handed the cloud credential. */
 static void test_ollama_local_chat_never_carries_a_key(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1216,10 +1109,10 @@ static void test_ollama_local_chat_never_carries_a_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, api_key);
+    NmChatResult r = canned_chat_round("ollama:local", hyper_chat_server_thread,
+                                       &req, api_key);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
-    pthread_join(th, NULL);
     test_unsetenv("OLLAMA_API_KEY");
 
     /* No auth header, not even an empty one: the wire is the proof. */
@@ -1232,15 +1125,6 @@ static void test_ollama_local_chat_never_carries_a_key(void)
  * if this ever fails, the fix went a provider too far. */
 static void test_ollama_cloud_chat_carries_the_key(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, hyper_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(p);
 
@@ -1261,9 +1145,9 @@ static void test_ollama_cloud_chat_carries_the_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, api_key);
+    NmChatResult r = canned_chat_round("ollama:cloud", hyper_chat_server_thread,
+                                       &req, api_key);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
 
     ASSERT_TRUE(strstr(last_request,
                        "Authorization: Bearer sk-cloud-rides-here") != NULL);
@@ -1295,13 +1179,7 @@ static void test_ollama_local_catalog_uses_local_default(void)
  * — live-observed on the real wire; the parser must ignore them). */
 static void *openrouter_chat_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char sse[] =
+    static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
@@ -1311,31 +1189,7 @@ static void *openrouter_chat_server_thread(void *arg)
         "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
         "e\r\ndata: [DONE]\n\n\r\n"
         "0\r\n\r\n";
-    size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break;
-    }
-    close(cfd);
-    close(lfd);
+    serve_reply((int)(intptr_t)arg, sse);
     return NULL;
 }
 
@@ -1344,13 +1198,7 @@ static void *openrouter_chat_server_thread(void *arg)
  * architecture.input_modalities containing "image". Tokenless. */
 static void *openrouter_models_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char body[] =
+    static const char body[] =
         "{\"data\":["
         "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
         "\"context_length\":1050000,"
@@ -1375,82 +1223,22 @@ static void *openrouter_models_server_thread(void *arg)
         "\"context_length\":1000000,"
         "\"architecture\":{\"input_modalities\":[\"text\"]}}"
         "],\"total_count\":5}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    size_t off = 0;
-    while (off < strlen(head)) {
-        long n = send(cfd, head + off, strlen(head) - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    off = 0;
-    while (off < sizeof(body) - 1) {
-        long n = send(cfd, body + off, sizeof(body) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break;
-    }
-    close(cfd);
-    close(lfd);
+    serve_json((int)(intptr_t)arg, body);
     return NULL;
 }
 
-/* One canned OpenRouter chat round: the loopback server started, the
- * provider's blocking chat driven against it, the server joined (the
- * server thread owns and closes the listener). On return last_request
- * holds the request the server received. No round here carries a
- * system prompt, and every one authenticates with the test key. A
- * setup failure comes back as a non-OK status, which is what the
- * caller's ASSERT reports. */
+/* One canned OpenRouter chat round. Every round in this section has no
+ * system prompt and authenticates with the test key, so the request is
+ * built here; canned_chat_round owns the server's life. */
 static NmChatResult openrouter_chat_round(const char *model,
                                           const NmMessage *msgs, size_t n_msgs,
                                           const char *conversation_id,
                                           Capture *cap)
 {
-    NmChatResult r;
-    memset(&r, 0, sizeof(r));
-    int port;
-    int lfd = server_listen(&port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    if (lfd < 0 || !p) {
-        if (lfd >= 0)
-            close(lfd);
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        snprintf(r.message, sizeof(r.message),
-                 "no canned server, or no openrouter provider");
-        return r;
-    }
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     NmChatRequest req = { model, msgs, n_msgs, NULL, NULL, -1, -1,
                           conversation_id, capture_delta, NULL, cap };
-    r = p->chat(p, &req, base, "sk-or-test");
-    pthread_join(th, NULL);
-    return r;
+    return canned_chat_round("openrouter", openrouter_chat_server_thread, &req,
+                             "sk-or-test");
 }
 
 static void test_openrouter_chat_with_keepalive_comments(void)
@@ -1614,17 +1402,13 @@ static void test_openrouter_chat_without_session_id(void)
 
 static void test_openrouter_models_fetch(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_models_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(openrouter_models_server_thread, &th, base,
+                           sizeof(base)),
+              0);
 
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
@@ -1690,13 +1474,7 @@ static void test_openrouter_needs_auth(void)
  * pattern. */
 static void *opencode_chat_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char sse[] =
+    static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
@@ -1710,15 +1488,7 @@ static void *opencode_chat_server_thread(void *arg)
         "e\r\ndata: [DONE]\n\n\r\n"
         "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
         "0\r\n\r\n";
-    size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    close(lfd);
+    serve_reply((int)(intptr_t)arg, sse);
     return NULL;
 }
 
@@ -1748,15 +1518,6 @@ static void test_opencode_registry_and_identity(void)
 
 static void test_opencode_chat_carries_session_header(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, opencode_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
     ASSERT_STR_EQ(p->default_base_url, "https://opencode.ai/zen/go/v1");
@@ -1768,7 +1529,8 @@ static void test_opencode_chat_carries_session_header(void)
         "nm-0123456789abcdef0123456789abcdef", /* conversation id */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    NmChatResult r = canned_chat_round("opencode:go", opencode_chat_server_thread,
+                                       &req, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
     /* Reasoning-only deltas are not content and not end-of-stream;
@@ -1776,9 +1538,6 @@ static void test_opencode_chat_carries_session_header(void)
      * read, on the reasoning channel, never the content channel. */
     ASSERT_STR_EQ(cap.text, "Hello, world");
     ASSERT_STR_EQ(cap.reasoning, "thinking about itmore thought");
-
-    pthread_join(th, NULL);
-    close(lfd);
 
     ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
     ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-opencode-test") != NULL);
@@ -1795,13 +1554,7 @@ static void test_opencode_chat_carries_session_header(void)
  * before [DONE]" failure. */
 static void *opencode_no_done_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char sse[] =
+    static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
@@ -1809,45 +1562,23 @@ static void *opencode_no_done_server_thread(void *arg)
         "\"finish_reason\":\"stop\"}]}\n\n\r\n"
         "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
         "0\r\n\r\n";
-    size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    close(lfd);
+    serve_reply((int)(intptr_t)arg, sse);
     return NULL;
 }
 
 static void test_opencode_chat_without_done_is_complete(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, opencode_no_done_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode:go");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "hello", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "minimax-m3", &msg, 1, NULL, NULL, -1, -1,
         "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    NmChatResult r = canned_chat_round(
+        "opencode:go", opencode_no_done_server_thread, &req, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.message, "");
     ASSERT_STR_EQ(cap.text, "Hello");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* conversation_id == NULL must still carry a non-empty header: the
@@ -1855,18 +1586,6 @@ static void test_opencode_chat_without_done_is_complete(void)
  * letting the seam's skip-empty rule turn "no id" into a 400. */
 static void test_opencode_chat_null_conversation_id_still_sends_header(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, opencode_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("opencode:zen");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -1874,10 +1593,9 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
         NULL, /* no conversation id (direct caller) */
         capture_delta, NULL, &cap
     };
-    NmChatResult r = p->chat(p, &req, base, "sk-opencode-test");
+    NmChatResult r = canned_chat_round("opencode:zen", opencode_chat_server_thread,
+                                       &req, "sk-opencode-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
-    close(lfd);
 
     const char *h = strstr(last_request, "x-opencode-session: ");
     ASSERT_NOT_NULL(h);
@@ -1897,28 +1615,13 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
  * ("future-model-10" — the coverage rule drops it). */
 static void *opencode_models_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char body[] =
+    static const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
         "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
         "{\"id\":\"future-model-10\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
         "]}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    send(cfd, head, strlen(head), 0);
-    send(cfd, body, sizeof(body) - 1, 0);
-    close(cfd);
-    close(lfd);
+    serve_json((int)(intptr_t)arg, body);
     return NULL;
 }
 
@@ -1937,12 +1640,9 @@ static char document_request[4096];
 static void *opencode_document_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request_into(document_request, sizeof(document_request), cfd);
+    int cfd = canned_accept(lfd, document_request, sizeof(document_request));
 
-    const char body[] =
+    static const char body[] =
         "{"
         "\"opencode\":{\"models\":{"
         "\"big-pickle\":{\"name\":\"Big Pickle\","
@@ -1960,16 +1660,9 @@ static void *opencode_document_server_thread(void *arg)
         "\"tool_call\":true}}},"
         "\"other-provider\":{\"models\":{\"never-read\":{\"name\":\"Nope\"}}}"
         "}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    send(cfd, head, strlen(head), 0);
-    send(cfd, body, sizeof(body) - 1, 0);
-    close(cfd);
-    close(lfd);
+    if (cfd >= 0)
+        send_json(cfd, body);
+    canned_close(cfd, lfd);
     return NULL;
 }
 
@@ -1980,28 +1673,28 @@ static void *opencode_document_server_thread(void *arg)
  * live-catalog knob does not suppress it. */
 static void test_opencode_models_fetch_resolves_the_drift(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, opencode_models_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    int doc_port;
-    int dlfd = server_listen(&doc_port);
-    ASSERT_TRUE(dlfd >= 0);
-    pthread_t dth;
-    pthread_create(&dth, NULL, opencode_document_server_thread,
-                   (void *)(intptr_t)dlfd);
-    char docurl[128];
-    snprintf(docurl, sizeof(docurl), "http://127.0.0.1:%d/api.json",
-             doc_port);
-    test_setenv("NEVERMORE_OPENCODE_CATALOG_URL", docurl);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
+
+    pthread_t th;
+    char base[64];
+    ASSERT_EQ(server_start(opencode_models_server_thread, &th, base,
+                           sizeof(base)),
+              0);
+
+    pthread_t dth;
+    char docbase[64];
+    ASSERT_EQ(server_start(opencode_document_server_thread, &dth, docbase,
+                           sizeof(docbase)),
+              0);
+    /* The document lives at the host ROOT, not under the /v1 prefix
+     * the base carries: cut the prefix and name the path. */
+    char docurl[128];
+    const char *prefix = strstr(docbase, "/v1");
+    ASSERT_NOT_NULL(prefix);
+    snprintf(docurl, sizeof(docurl), "%.*s/api.json",
+             (int)(prefix - docbase), docbase);
+    test_setenv("NEVERMORE_OPENCODE_CATALOG_URL", docurl);
 
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
@@ -2032,8 +1725,6 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
      * picker cannot say anything about. The coverage rule drops it. */
     pthread_join(th, NULL);
     pthread_join(dth, NULL);
-    close(lfd);
-    close(dlfd);
     test_unsetenv("NEVERMORE_OPENCODE_CATALOG_URL");
 
     ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
@@ -2056,27 +1747,12 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
  * the coverage rule. */
 static void *opencode_zen_models_server_thread(void *arg)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    drain_request(cfd);
-
-    const char body[] =
+    static const char body[] =
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
         "{\"id\":\"uncovered-zen-id\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
         "]}";
-    char head[256];
-    snprintf(head, sizeof(head),
-             "HTTP/1.1 200 OK\r\n"
-             "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             sizeof(body) - 1);
-    send(cfd, head, strlen(head), 0);
-    send(cfd, body, sizeof(body) - 1, 0);
-    close(cfd);
-    close(lfd);
+    serve_json((int)(intptr_t)arg, body);
     return NULL;
 }
 
@@ -2091,15 +1767,11 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     ASSERT_NOT_NULL(zen);
     ASSERT_NOT_NULL(go);
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
     pthread_t th;
-    pthread_create(&th, NULL, opencode_zen_models_server_thread,
-                   (void *)(intptr_t)lfd);
-
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    ASSERT_EQ(server_start(opencode_zen_models_server_thread, &th, base,
+                           sizeof(base)),
+              0);
     size_t zn = 0;
     const NmModel *z = zen->models(zen, base, NULL, &zn);
     ASSERT_NOT_NULL(z);
@@ -2109,7 +1781,6 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     ASSERT_EQ(z[0].context_length, 200000);
     ASSERT_EQ(z[0].tools, 1);
     pthread_join(th, NULL);
-    close(lfd);
 
     /* Go's committed slot is still Go's (id set, and the label from
      * the GO coverage — the fetch test's row, not Zen's). */
