@@ -1416,33 +1416,53 @@ static void *openrouter_models_server_thread(void *arg)
     return NULL;
 }
 
-static void test_openrouter_chat_with_keepalive_comments(void)
+/* One canned OpenRouter chat round: the loopback server started, the
+ * provider's blocking chat driven against it, the server joined (the
+ * server thread owns and closes the listener). On return last_request
+ * holds the request the server received. No round here carries a
+ * system prompt, and every one authenticates with the test key. A
+ * setup failure comes back as a non-OK status, which is what the
+ * caller's ASSERT reports. */
+static NmChatResult openrouter_chat_round(const char *model,
+                                          const NmMessage *msgs, size_t n_msgs,
+                                          const char *conversation_id,
+                                          Capture *cap)
 {
+    NmChatResult r;
+    memset(&r, 0, sizeof(r));
     int port;
     int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    if (lfd < 0 || !p) {
+        if (lfd >= 0)
+            close(lfd);
+        r.status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(r.message, sizeof(r.message),
+                 "no canned server, or no openrouter provider");
+        return r;
+    }
     pthread_t th;
     pthread_create(&th, NULL, openrouter_chat_server_thread,
                    (void *)(intptr_t)lfd);
-
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
+    NmChatRequest req = { model, msgs, n_msgs, NULL, NULL, -1, -1,
+                          conversation_id, capture_delta, NULL, cap };
+    r = p->chat(p, &req, base, "sk-or-test");
+    pthread_join(th, NULL);
+    return r;
+}
 
+static void test_openrouter_chat_with_keepalive_comments(void)
+{
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = {
-        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
-        NULL, /* conversation_id */
-        capture_delta, NULL, &cap
-    };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
+                                           NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     /* Comment keep-alives between data events must not break the
      * delta assembly (live-observed framing, OPENROUTER-API.md §3). */
     ASSERT_STR_EQ(cap.text, "Hi there");
-    pthread_join(th, NULL);
 
     ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
     ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
@@ -1453,29 +1473,12 @@ static void test_openrouter_chat_with_keepalive_comments(void)
  * (a public GET needs no identity — an app is its chat traffic). */
 static void test_openrouter_chat_carries_app_attribution(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = {
-        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
-        NULL, /* conversation_id */
-        capture_delta, NULL, &cap
-    };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
+                                           NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hi there");
-    pthread_join(th, NULL);
 
     /* The app's identity: the referer IS the app's key, the title is
      * the display name, the category files it under cli-agent. */
@@ -1496,60 +1499,31 @@ static void test_openrouter_chat_carries_app_attribution(void)
  * than creating a junk app. */
 static void test_openrouter_app_url_env_knob(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = {
-        "~openai/gpt-astra-latest", &msg, 1, NULL, NULL, -1, -1,
-        NULL, /* conversation_id */
-        capture_delta, NULL, &cap
-    };
 
     /* A valid override rides the request instead of the shipped URL. */
     test_setenv(NM_APP_URL_ENV, "https://example.test/fork");
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
+                                           NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request,
                        "HTTP-Referer: https://example.test/fork") != NULL);
     ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) == NULL);
 
     /* A malformed one is refused: the shipped URL rides, so no junk
      * app is created on the provider's side. */
-    lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     test_setenv(NM_APP_URL_ENV, "not-a-url");
-    r = p->chat(p, &req, base, "sk-or-test");
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
     ASSERT_TRUE(strstr(last_request, "HTTP-Referer: not-a-url") == NULL);
 
     /* A value that would SPLIT the request (a CR/LF in a header
      * value) is refused too — the same rule, one more reason. */
-    lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
     test_setenv(NM_APP_URL_ENV, "https://a.test/x\r\nX-Evil: 1");
-    r = p->chat(p, &req, base, "sk-or-test");
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
     ASSERT_TRUE(strstr(last_request, "X-Evil") == NULL);
 
@@ -1561,25 +1535,11 @@ static void test_openrouter_app_url_env_knob(void)
  * body gains a byte. */
 static void test_openrouter_anthropic_chat_requests_caching(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "anthropic/claude-sonnet-5.5", &msg, 1, NULL,
-                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("anthropic/claude-sonnet-5.5", &msg,
+                                           1, NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request,
                        "\"cache_control\":{\"type\":\"ephemeral\"}") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"ttl\"") == NULL);
@@ -1587,25 +1547,11 @@ static void test_openrouter_anthropic_chat_requests_caching(void)
 
 static void test_openrouter_non_anthropic_chat_sends_no_marker(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
-                          -1, -1, NULL, capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
+                                           NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
 }
 
@@ -1613,26 +1559,12 @@ static void test_openrouter_non_anthropic_chat_sends_no_marker(void)
  * Hyper provider's HYPER_NO_SESSION_CACHE is the precedent. */
 static void test_openrouter_prompt_cache_opt_out(void)
 {
-    test_setenv("OPENROUTER_PROMPT_CACHE", "off");
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "anthropic/claude-sonnet-5.5", &msg, 1, NULL,
-                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    test_setenv("OPENROUTER_PROMPT_CACHE", "off");
+    NmChatResult r = openrouter_chat_round("anthropic/claude-sonnet-5.5", &msg,
+                                           1, NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     test_unsetenv("OPENROUTER_PROMPT_CACHE");
     ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
 }
@@ -1641,26 +1573,12 @@ static void test_openrouter_prompt_cache_opt_out(void)
  * price — §10.1); the alias family gets it too. */
 static void test_openrouter_prompt_cache_ttl_1h(void)
 {
-    test_setenv("OPENROUTER_PROMPT_CACHE", "1h");
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "~anthropic/claude-haiku-latest", &msg, 1, NULL,
-                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    test_setenv("OPENROUTER_PROMPT_CACHE", "1h");
+    NmChatResult r = openrouter_chat_round("~anthropic/claude-haiku-latest",
+                                           &msg, 1, NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     test_unsetenv("OPENROUTER_PROMPT_CACHE");
     ASSERT_TRUE(strstr(last_request,
                        "\"cache_control\":{\"type\":\"ephemeral\","
@@ -1671,26 +1589,12 @@ static void test_openrouter_prompt_cache_ttl_1h(void)
  * it is a routing/session fact, not a cache one. */
 static void test_openrouter_chat_carries_session_id(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
-                          -1, -1, "nm-0123456789abcdef0123456789abcdef",
-                          capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round(
+        "~openai/gpt-astra-latest", &msg, 1,
+        "nm-0123456789abcdef0123456789abcdef", &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request,
                        "\"session_id\":\"nm-0123456789abcdef0123456789"
                        "abcdef\"") != NULL);
@@ -1700,25 +1604,11 @@ static void test_openrouter_chat_carries_session_id(void)
  * field: empty and absent are the same on this wire. */
 static void test_openrouter_chat_without_session_id(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chat_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("openrouter");
-    ASSERT_NOT_NULL(p);
-
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
-                          -1, -1, NULL, capture_delta, NULL, &cap };
-    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
+                                           NULL, &cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    pthread_join(th, NULL);
     ASSERT_TRUE(strstr(last_request, "session_id") == NULL);
 }
 
