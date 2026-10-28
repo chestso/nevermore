@@ -2289,13 +2289,13 @@ static void test_agent_reasoning_echoed_by_default(void)
     remove(FIXTURE);
 }
 
-/* The provider's own wire requirement is the DEFAULT: opencode:go's
+/* The wire that NEEDS the echo gets it by default: opencode:go's
  * `deepseek` endpoint 400s a replayed tool-call turn that omits
- * `reasoning_content` (docs/OPENCODE-API.md §3), so the provider
- * declares NM_REASONING_ECHO_TOOLS and the agent honours it with NO
- * store key set — the requirement rides the wire, not the user's
- * config. Same scripted tool round as the opt-in test above. */
-static void test_agent_reasoning_echo_provider_default(void)
+ * `reasoning_content` (docs/OPENCODE-API.md §3), and with NO store key
+ * set the round goes back WITH the trace — the built-in default (`all`)
+ * covers that wire, and every other one. Same scripted tool round as
+ * the test above. */
+static void test_agent_reasoning_echo_default_on_the_wire_that_needs_it(void)
 {
     reset_capture();
     write_fixture();
@@ -2326,7 +2326,6 @@ static void test_agent_reasoning_echo_provider_default(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
-    ASSERT_EQ(p->reasoning_echo, NM_REASONING_ECHO_TOOLS);
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -2335,10 +2334,10 @@ static void test_agent_reasoning_echo_provider_default(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    /* No store key set: the provider's declaration is the mode. */
+    /* No store key set: the built-in default is the mode. */
     ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_REASONING_ECHO),
               NM_CFG_DEFAULT);
-    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
     int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
@@ -2351,7 +2350,7 @@ static void test_agent_reasoning_echo_provider_default(void)
     ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
-    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -2360,10 +2359,10 @@ static void test_agent_reasoning_echo_provider_default(void)
     remove(FIXTURE);
 }
 
-/* An explicit user setting OVERRIDES the provider default: `off` on
- * opencode:go (a provider that declares TOOLS) keeps the trace off the
- * wire. */
-static void test_agent_reasoning_echo_user_overrides_provider(void)
+/* An explicit user setting OVERRIDES the built-in default: `off` on
+ * opencode:go — the wire that 400s a replayed tool-call turn without
+ * the trace — keeps the trace off the wire. */
+static void test_agent_reasoning_echo_user_overrides_the_default(void)
 {
     reset_capture();
     write_fixture();
@@ -2373,10 +2372,10 @@ static void test_agent_reasoning_echo_user_overrides_provider(void)
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
 
-    /* No key: the provider default applies. */
-    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
-    ASSERT_EQ(nm_agent_reasoning_echo_next(agent), NM_REASONING_ECHO_TOOLS);
-    /* An explicit store value wins over the provider. */
+    /* No key: the built-in default applies. */
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_reasoning_echo_next(agent), NM_REASONING_ECHO_ALL);
+    /* An explicit store value wins over it. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
     ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_REASONING_ECHO),
               NM_CFG_RUNTIME);
@@ -3242,11 +3241,12 @@ static void test_agent_signature_echo_independent_of_reasoning_echo(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
 
-/* The provider declaration is the DEFAULT, and the user's key is the
- * OVERRIDE — the trace echo's rule, one layer over. On openrouter (which
- * declares `tools` for Gemini's thought signature) the array rides back
- * with no key set at all, and an explicit `off` silences it. */
-static void test_agent_signature_echo_provider_default(void)
+/* The wire that NEEDS the signature back gets it by default: on
+ * openrouter (whose Gemini models mint a thought signature that the
+ * upstream documents as required back WITH the tool result) the array
+ * rides back with no key set at all, and an explicit `off` silences
+ * it. */
+static void test_agent_signature_echo_default_on_the_wire_that_needs_it(void)
 {
     reset_capture();
     write_fixture();
@@ -3276,7 +3276,6 @@ static void test_agent_signature_echo_provider_default(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
-    ASSERT_EQ(p->signature_echo, NM_REASONING_ECHO_TOOLS);
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -3285,13 +3284,13 @@ static void test_agent_signature_echo_provider_default(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    /* No store key set: the provider's declaration is the mode. */
+    /* No store key set: the built-in default is the mode. */
     ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO),
               NM_CFG_DEFAULT);
-    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
-    /* The trace echo is off here: this provider declares nothing for
-     * the trace, and the test is about the signature's declaration. */
+    /* The trace echo is off here: the two knobs are independent, and
+     * this test is about the signature. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
               0);
 
@@ -3300,13 +3299,13 @@ static void test_agent_signature_echo_provider_default(void)
     ASSERT_STR_EQ(g_text, "read");
 
     /* The tool-call round goes back WITH the array, unprompted — and
-     * without the trace text, which this provider did not declare. */
+     * without the trace text, which was turned off. */
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "sig-prov") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
-    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -3316,9 +3315,9 @@ static void test_agent_signature_echo_provider_default(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
-/* ...and the user's `off` overrides the declaration: the provider says
- * what its wire wants, the person says what their conversation does. */
-static void test_agent_signature_echo_user_overrides_provider(void)
+/* ...and the user's `off` overrides the built-in default: the person
+ * says what their conversation does. */
+static void test_agent_signature_echo_user_overrides_the_default(void)
 {
     reset_capture();
     write_fixture();
@@ -7659,14 +7658,14 @@ int main(void)
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
     RUN_TEST(test_agent_reasoning_not_echoed_when_off);
     RUN_TEST(test_agent_reasoning_echoed_by_default);
-    RUN_TEST(test_agent_reasoning_echo_provider_default);
-    RUN_TEST(test_agent_reasoning_echo_user_overrides_provider);
+    RUN_TEST(test_agent_reasoning_echo_default_on_the_wire_that_needs_it);
+    RUN_TEST(test_agent_reasoning_echo_user_overrides_the_default);
     RUN_TEST(test_agent_reasoning_echo_tools_scope);
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
-    RUN_TEST(test_agent_signature_echo_provider_default);
-    RUN_TEST(test_agent_signature_echo_user_overrides_provider);
+    RUN_TEST(test_agent_signature_echo_default_on_the_wire_that_needs_it);
+    RUN_TEST(test_agent_signature_echo_user_overrides_the_default);
     RUN_TEST(test_agent_signature_echoed_under_tools);
     RUN_TEST(test_agent_signature_not_echoed_when_off);
     RUN_TEST(test_agent_signature_echoed_by_default);

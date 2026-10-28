@@ -247,7 +247,7 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
          * whether it does — nevermore's agent attaches the field to
          * the messages its echo mode says so (`tools`: on every
          * message carrying tool_calls; `all`: that plus every
-         * assistant message with a trace; off by default — see
+         * assistant message with a trace; `all` by default — see
          * nm_agent_reasoning_echo). The client serializes what it was
          * handed, nothing more. NULL omits the field; a non-NULL
          * string emits it, and "" is a deliberate empty string (the

@@ -48,10 +48,9 @@
  * precisely so the two can meet in one TU.) */
 #include "transport.h"
 
-/* NmReasoningEcho: the provider declares its wire's echo requirement
- * (reasoning_echo below) using the SAME value space the store's
- * `reasoning_echo` key resolves to — one vocabulary, so a provider
- * default and a user override cannot mean different things.
+/* NmReasoningEcho: the mode of an echo-back — the SAME value space the
+ * store's `reasoning_echo` / `signature_echo` keys resolve to (one
+ * vocabulary, so the knob and the wire agree on what a mode means).
  * conf.h is self-contained (stddef only), so this adds no cycle. */
 #include "conf.h"
 
@@ -151,7 +150,7 @@ typedef struct NmMessage
      * wire shape). Whether one is attached is the caller's decision —
      * nevermore's agent attaches it only when its echo mode says so
      * (`tools` on every tool-call message, `all` on those plus every
-     * assistant message with a trace; OFF by default —
+     * assistant message with a trace; `all` by default —
      * nm_agent_reasoning_echo / the store's `reasoning_echo` key).
      * The field is required by DeepSeek's thinking-mode replay check
      * on tool-call rounds (observed on opencode:go, docs/OPENCODE-API.md
@@ -434,44 +433,6 @@ struct NmProvider
      * NULL when the provider has no authinfo machine (ollama:local:
      * the daemon is keyless by construction). */
     const char *authinfo_machine;
-
-    /* Does this provider's WIRE need the reasoning trace echoed back
-     * on replayed assistant messages (an NmReasoningEcho from
-     * conf.h; the zero value NM_REASONING_ECHO_OFF = "no
-     * opinion", so a provider that says nothing leaves the key's own
-     * built-in default — `all` — in force)? A
-     * provider whose upstream refuses a replayed tool-call turn that
-     * omits `reasoning_content` declares NM_REASONING_ECHO_TOOLS
-     * here, so the requirement rides the wire instead of the user
-     * having to know it: agent.c's nm_agent_reasoning_echo takes this
-     * as the DEFAULT and the store's `reasoning_echo` key as the
-     * override (an explicit user setting always wins). Probed source:
-     * opencode:go's deepseek endpoint (docs/OPENCODE-API.md §3)
-     * requires it; every other provider declares OFF. */
-    NmReasoningEcho reasoning_echo;
-
-    /* Does this provider's WIRE need the round's STRUCTURED reasoning
-     * carrier echoed back on replayed assistant messages — the
-     * `reasoning_details` array (Gemini's thought signature, OpenAI's
-     * encrypted blob) — with the SAME value space and the SAME
-     * resolution rule as `reasoning_echo` above (provider declaration =
-     * DEFAULT, the store's `signature_echo` key = override, an explicit
-     * user setting always wins; zero value = no opinion, i.e. OFF).
-     *
-     * The two fields are deliberately separate and independent: they
-     * carry different bytes on the wire (prose vs an opaque carrier),
-     * they freeze on separate latches, and a provider may need one
-     * without the other. openrouter declares TOOLS — its Gemini models
-     * mint a thought signature on every function-calling round and the
-     * upstream documents the signature as required back with the tool
-     * result (docs/OPENROUTER-API.md §3.2: Google's own
-     * `missing thought_signature` / 400 INVALID_ARGUMENT rule) — while
-     * every other onboarded provider declares nothing (the key's own
-     * built-in default, `all`, then applies), and a model that
-     * never sends a `reasoning_details` element never receives the
-     * field whatever this says (the echo is STRICT: nevermore replays
-     * only elements the model itself sent). */
-    NmReasoningEcho signature_echo;
 
     /* Streaming chat completion. Blocking; on_delta fires from inside. */
     NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,

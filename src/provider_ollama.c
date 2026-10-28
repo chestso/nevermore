@@ -572,10 +572,6 @@ const struct NmProvider nm_ollama_provider = {
     "ollama:cloud",
     OLLAMA_CLOUD_DEFAULT,
     "ollama.com",
-    NM_REASONING_ECHO_OFF,
-    NM_REASONING_ECHO_OFF, /* no reasoning_details on this wire: unprobed,
-                            * no claim (the strict echo-back makes the
-                            * declaration moot where none is sent) */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,

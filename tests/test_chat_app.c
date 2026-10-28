@@ -4547,15 +4547,12 @@ static void test_config_signature_echo_row_and_freeze(void)
     remove(FIXTURE_PATH);
 }
 
-/* The same row when the PROVIDER dictates the mode: openrouter declares
- * `tools` (Gemini's thought signature has to ride back with the tool
- * result), so with the store at its built-in default the row shows
- * `tools` + "(provider default)" — the declaration is what the next
- * request uses, not the `off` the bare key would report. A user's key
- * overrides it, and then the row shows the store's value instead. */
-static void test_config_shows_provider_default_signature(void)
+/* The same row for the signature echo: the STORE's value — the
+ * built-in default (`all`) when nothing is set, the user's own value
+ * when it is. */
+static void test_config_shows_the_store_value_for_the_signature_echo(void)
 {
-    pin_cfg_paths("sig-provdefault");
+    pin_cfg_paths("sig-storevalue");
     AppHarness *h = harness_new("openrouter", "google/gemini-3.8-flash", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
@@ -4564,13 +4561,12 @@ static void test_config_shows_provider_default_signature(void)
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(strstr(out, "signature_echo"));
-    ASSERT_NOT_NULL(strstr(out, "signature_echo       tools"));
-    ASSERT_NOT_NULL(strstr(out, "(provider default)"));
+    ASSERT_NOT_NULL(strstr(out, "signature_echo       all"));
+    ASSERT_NULL(strstr(out, "(provider default)"));
 
-    /* The user overrides the declaration: the row goes back to the
-     * store's value (no provider-default label any more). Only the
-     * freshly printed block counts — harness_read hands back the whole
-     * transcript, earlier /config rows included. */
+    /* The user's own value is the row. Only the freshly printed block
+     * counts — harness_read hands back the whole transcript, earlier
+     * /config rows included. */
     size_t seen = strlen(out);
     store_set(NM_CFG_KEY_SIGNATURE_ECHO, "off");
     harness_type(h, "/config");
@@ -4578,7 +4574,6 @@ static void test_config_shows_provider_default_signature(void)
     out = harness_read(h);
     const char *tail = out + (seen < strlen(out) ? seen : 0);
     ASSERT_NOT_NULL(strstr(tail, "signature_echo       off"));
-    ASSERT_NULL(strstr(tail, "(provider default)"));
     store_clear(NM_CFG_KEY_SIGNATURE_ECHO);
 
     nm_config_free(cfg);
@@ -5742,14 +5737,13 @@ static void test_config_command_reports_and_resets(void)
     harness_free(h);
 }
 
-/* The /config row for a key the PROVIDER dictates: on opencode:go the
- * reasoning_echo row shows `tools` + "(provider default)", not the
- * `off` the bare key would report — the wire requirement is what the
- * next request uses. (The override path — a set value winning — is
- * covered by test_agent_reasoning_echo_user_overrides_provider.) */
-static void test_config_shows_provider_default_echo(void)
+/* The /config row for the reasoning echo: the STORE's value, and
+ * nothing else — the built-in default (`all`) when no layer sets the
+ * key, the user's own value when it does. (The override path is
+ * covered by test_agent_reasoning_echo_user_overrides_the_default.) */
+static void test_config_shows_the_store_value_for_the_reasoning_echo(void)
 {
-    pin_cfg_paths("provdefault");
+    pin_cfg_paths("storevalue");
     AppHarness *h = harness_new("opencode:go", "deepseek-v4.1-flash", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
@@ -5758,9 +5752,9 @@ static void test_config_shows_provider_default_echo(void)
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(strstr(out, "reasoning_echo"));
-    ASSERT_NOT_NULL(strstr(out, "(provider default)"));
-    /* The row reports the provider's mode, not the built-in `off`. */
-    ASSERT_NOT_NULL(strstr(out, "reasoning_echo       tools"));
+    ASSERT_NOT_NULL(strstr(out, "reasoning_echo       all"));
+    /* No provider layer any more: the row is the store's value. */
+    ASSERT_NULL(strstr(out, "(provider default)"));
 
     nm_config_free(cfg);
     harness_free(h);
@@ -9777,10 +9771,10 @@ int main(void)
     RUN_TEST(test_config_runtime_change_writes_shadow);
     RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
     RUN_TEST(test_config_signature_echo_row_and_freeze);
-    RUN_TEST(test_config_shows_provider_default_signature);
+    RUN_TEST(test_config_shows_the_store_value_for_the_signature_echo);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
-    RUN_TEST(test_config_shows_provider_default_echo);
+    RUN_TEST(test_config_shows_the_store_value_for_the_reasoning_echo);
     RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_model_memory_is_per_provider);
     RUN_TEST(test_send_without_model_is_refused);

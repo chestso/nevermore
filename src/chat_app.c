@@ -3111,30 +3111,15 @@ static void print_config(NmChatApp *app)
             if (nm_agent_reasoning_echo_frozen(app->agent)) {
                 v = nm_config_reasoning_echo_name(eff);
                 layer = "frozen this chat";
-            } else if (src == NM_CFG_DEFAULT && app->provider &&
-                       app->provider->reasoning_echo != NM_REASONING_ECHO_OFF) {
-                /* The store is at its built-in default, so the
-                 * provider's own wire requirement (opencode:go's
-                 * deepseek endpoint) is what the next request uses —
-                 * not the `all` the key would report. */
-                v = nm_config_reasoning_echo_name(eff);
-                layer = "provider default";
             }
         }
-        /* The signature echo freezes on its OWN latch, and its provider
-         * may declare a default (openrouter does: Gemini's thought
-         * signature must ride back with the tool result) — so it shows
-         * the frozen mode when latched, else the provider default when
-         * the store is at its built-in default. */
+        /* The signature echo freezes on its OWN latch — so it shows the
+         * frozen mode when latched, and the store's value otherwise. */
         if (strcmp(k, NM_CFG_KEY_SIGNATURE_ECHO) == 0 && app->agent) {
             NmReasoningEcho eff = nm_agent_signature_echo(app->agent);
             if (nm_agent_signature_echo_frozen(app->agent)) {
                 v = nm_config_reasoning_echo_name(eff);
                 layer = "frozen this chat";
-            } else if (src == NM_CFG_DEFAULT && app->provider &&
-                       app->provider->signature_echo != NM_REASONING_ECHO_OFF) {
-                v = nm_config_reasoning_echo_name(eff);
-                layer = "provider default";
             }
         }
         /* A latched family is INERT while the policy is off: the walk

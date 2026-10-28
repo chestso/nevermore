@@ -119,12 +119,10 @@ extern "C" {
  * the file, the shadow, the env layer and /config all read the same.
  * Env spelling: NEVERMORE_REASONING_ECHO.
  *
- * This key is the OVERRIDE; a provider whose WIRE needs the echo
- * declares it (NmProvider.reasoning_echo) and that declaration is the
- * DEFAULT. So the built-in default above applies only to a provider
- * with no opinion: opencode:go declares `tools` (its deepseek endpoint
- * is the one observed to 400), and an explicit value set here — any
- * layer above the built-in default — always wins. Resolution:
+ * THE KEY IS THE WHOLE CONTROL: the built-in default above applies
+ * unless a layer sets the key (the file, the shadow, the environment
+ * or the command line — any of them wins), and there is no provider
+ * layer: every wire is served by the mode the key names. Resolution:
  * nm_agent_reasoning_echo.
  *
  * Once a request has actually carried a trace, the mode is FROZEN for
@@ -154,14 +152,9 @@ extern "C" {
  * check demands). So a model that never speaks `reasoning_details`
  * never receives the field, whatever this says.
  *
- * This key is the OVERRIDE; a provider whose WIRE needs the echo
- * declares it (NmProvider.signature_echo) and that declaration is the
- * DEFAULT — exactly the trace echo's rule one layer over. openrouter
- * declares `tools`: its Gemini models mint a thought signature on every
- * function-calling round and the upstream documents it as required back
- * with the tool result (docs/OPENROUTER-API.md §3.2). Every other
- * provider declares nothing, so with no explicit setting this key
- * resolves to the built-in `all` there.
+ * THE KEY IS THE WHOLE CONTROL — exactly the trace echo's rule: the
+ * built-in default above applies unless a layer sets the key, and
+ * there is no provider layer.
  *
  * Like the trace echo, the mode FREEZES once a request has actually
  * carried the field (its own latch: a prefix that gains or loses either
@@ -676,11 +669,9 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
 /* The `signature_echo` key resolved and parsed: the same value space as
  * `reasoning_echo` (one vocabulary), applied to the round's
  * reasoning_details array. NM_REASONING_ECHO_ALL when no layer sets the
- * key (the built-in default) and for a NULL config. The provider's own
- * declaration is layered over it by the AGENT (nm_agent_signature_echo
- * takes NmProvider.signature_echo as the default and this key as the
- * override), so this function answers only "what does the store say".
- * The agent reads it at the point of use, before its own freeze latch. */
+ * key (the built-in default) and for a NULL config. This function
+ * answers only "what does the store say" — the agent reads it at the
+ * point of use, before its own freeze latch. */
 NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c);
 
 /* Is `value` a `kbd` mode: `auto` / `on` / `off` (case-insensitive, with

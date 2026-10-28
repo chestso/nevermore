@@ -666,13 +666,7 @@ const struct NmProvider nm_opencode_provider = {
     NM_PROVIDER_OPENCODE,
     "opencode:go", /* Go is the working tier; the noun carries it */
     OPENCODE_GO_DEFAULT,
-    "opencode.ai",           /* one authinfo line covers both tiers */
-    NM_REASONING_ECHO_TOOLS, /* the deepseek endpoint 400s a replayed
-                              * tool-call turn without the trace
-                              * (docs/OPENCODE-API.md §3) */
-    NM_REASONING_ECHO_OFF,   /* the deepseek wire carries the trace TEXT,
-                              * not a reasoning_details array: nothing to
-                              * echo back (docs/OPENCODE-API.md §3) */
+    "opencode.ai", /* one authinfo line covers both tiers */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,

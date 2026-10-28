@@ -235,8 +235,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 /* Reasoning echo-back: which assistant messages riding a later request
  * carry their trace as "reasoning_content" — the store's
  * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / ALL (see
- * conf.h for what each mode means), with the provider's own
- * declaration (NmProvider.reasoning_echo) as the DEFAULT. The agent
+ * conf.h for what each mode means). The agent
  * keeps no copy: it resolves at the point of use. The trace is
  * received, displayed and kept in the session in every mode — the mode
  * decides only what goes back on the wire. `tools`/`all` attach the
@@ -245,15 +244,12 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * a trace-less tool round must still ride back an empty
  * `reasoning_content` (docs/OPENCODE-API.md §3).
  *
- * THE PROVIDER DECIDES, THE USER OVERRIDES. A provider whose wire 400s
- * a replayed tool-call turn that omits the field declares it
- * (opencode:go: NM_REASONING_ECHO_TOOLS), and that declaration is the
- * default — the requirement rides the wire, so the user need not know
- * it. A provider that declares nothing (the zero value) leaves the
- * key's own built-in default in force: `all`, so the copies ride back
- * unless the user says otherwise. The store's `reasoning_echo` key is
- * the override: when any layer above the built-in default sets it, that
- * wins (so an explicit `off` on opencode:go is honoured).
+ * THE KNOB IS THE WHOLE CONTROL. There is no provider layer: a
+ * provider's wire is served by the mode the key names, and the key's
+ * built-in default is `all` — the copies ride back unless the user
+ * says otherwise. A user who wants the wire quiet sets `off` (or
+ * `tools`) at any layer; the store's `reasoning_echo` key is the only
+ * thing that decides.
  *
  * FROZEN ONCE SENT. The mode may change freely while no request has
  * carried a trace yet (there is nothing on the wire to invalidate).
@@ -276,8 +272,8 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 NmReasoningEcho nm_agent_reasoning_echo(const NmAgent *a);
 
 /* The mode the NEXT chat would use — nm_agent_reasoning_echo's
- * resolution (provider declaration as the default, the store's key as
- * the override) with the freeze ignored. What a UI needs to say what a
+ * resolution (the store's key, freeze ignored) with the freeze
+ * ignored. What a UI needs to say what a
  * change WOULD do: before the latch it equals nm_agent_reasoning_echo;
  * after it, comparing this to the frozen mode tells whether a change is
  * being overridden (see chat_app.c's note_frozen_echo). */
@@ -293,19 +289,13 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a);
  * reasoning carrier (Gemini's thought signature, OpenAI's encrypted
  * blob) — as a message-level field. The store's `signature_echo` key,
  * one of NM_REASONING_ECHO_OFF / TOOLS / ALL (the SAME value space as
- * `reasoning_echo`, see conf.h), with the provider's own declaration
- * (NmProvider.signature_echo) as the DEFAULT. The array is received and
+ * `reasoning_echo`, see conf.h). The array is received and
  * kept on the session message in every mode; the mode decides only what
  * goes back on the wire.
  *
- * THE PROVIDER DECIDES, THE USER OVERRIDES — the same rule as the trace
- * echo. openrouter declares NM_REASONING_ECHO_TOOLS because its Gemini
- * models mint a thought signature on every function-calling round and
- * the upstream documents the signature as required back WITH the tool
- * result (docs/OPENROUTER-API.md §3.2). Every other provider declares
- * nothing (the zero value), so on them the key's own built-in default
- * is in force: `all`. An explicit setting — any layer above the
- * built-in default — always wins, so `off` on openrouter is honoured.
+ * THE KNOB IS THE WHOLE CONTROL — the same rule as the trace echo: no
+ * provider layer, the built-in default is `all`, and an explicit
+ * setting at any layer wins.
  *
  * STRICT ECHO-BACK. Unlike the trace echo, the field is attached ONLY
  * to a message that actually has an array — the round's own elements,

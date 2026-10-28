@@ -1028,32 +1028,24 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
     return best;
 }
 
-/* The echo mode in force. Before anything has been sent this is the
- * provider's own declaration when the store is at its built-in default
- * — a provider whose wire 400s a replayed tool-call turn without the
- * trace declares it (opencode:go; docs/OPENCODE-API.md §3) — else the
- * store's `reasoning_echo` key, resolved at the point of use (`all` by
- * default: the copies ride back unless the user says otherwise; the
- * trace is received and displayed either way); from the first request
- * that actually carried a trace it is the mode frozen at that moment,
- * whatever the store says now. See agent.h for why the freeze is not
- * optional (a prefix that gains or loses the field is a different
- * prefix: prompt cache + the replay check the echo answers) and
- * docs/OPENCODE-API.md §3 for the observed failure behind `tools`.
+/* The echo mode in force. It is the store's `reasoning_echo` key,
+ * resolved at the point of use (`all` by default: the copies ride back
+ * unless the user says otherwise; the trace is received and displayed
+ * either way); from the first request that actually carried a trace it
+ * is the mode frozen at that moment, whatever the store says now. See
+ * agent.h for why the freeze is not optional (a prefix that gains or
+ * loses the field is a different prefix: prompt cache + the replay
+ * check the echo answers) and docs/OPENCODE-API.md §3 for the observed
+ * failure behind `tools`.
  *
- * The layer order is deliberate: an explicit user setting (any layer
- * above the built-in default) OVERRIDES the provider, so a user who
- * wants `off` on opencode:go gets it; the provider only fills the
- * default — and only where it HAS an opinion: a provider that says
- * nothing (the zero value, NM_REASONING_ECHO_OFF) leaves the key's
- * own built-in default (`all`) in force. */
+ * There is no provider layer: the knobs are the whole control, and a
+ * provider's wire is served by the widest mode the copy can take (the
+ * strict echo-back means a model that never sends `reasoning_details`
+ * never receives the field, whatever the mode says). */
 NmReasoningEcho nm_agent_reasoning_echo_next(const NmAgent *a)
 {
+    (void)a;
     NmConfig *c = nm_config_store();
-    if (c && nm_config_source(c, NM_CFG_KEY_REASONING_ECHO) != NM_CFG_DEFAULT)
-        return nm_config_reasoning_echo_mode(c);
-    if (a && a->provider && a->provider->reasoning_echo != NM_REASONING_ECHO_OFF)
-        return a->provider->reasoning_echo; /* the provider's own word */
     return c ? nm_config_reasoning_echo_mode(c) : NM_REASONING_ECHO_ALL;
 }
 
@@ -1069,25 +1061,16 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a)
     return a ? a->reasoning_echo_frozen : 0;
 }
 
-/* The signature echo mode in force. Same layer order as its trace twin:
- * the provider's own declaration is the DEFAULT (a provider whose WIRE
- * needs the round's `reasoning_details` array back declares it — today
- * openrouter, for Gemini's thought signature), and the store's
- * `signature_echo` key is the OVERRIDE: an explicit user setting at any
- * layer above the built-in default always wins, so a user who wants
- * `off` on openrouter gets it. A provider with no opinion (the zero
- * value) leaves the key's own built-in default (`all`) in force.
- * Resolution is at the point of use until a request actually carries
- * the field, which freezes the mode for the conversation (a prefix that
- * gains or loses it is a different prefix). See agent.h for the full
- * contract. */
+/* The signature echo mode in force. Same shape as its trace twin: the
+ * store's `signature_echo` key, resolved at the point of use (`all` by
+ * default), no provider layer. Resolution is at the point of use until
+ * a request actually carries the field, which freezes the mode for the
+ * conversation (a prefix that gains or loses it is a different prefix).
+ * See agent.h for the full contract. */
 NmReasoningEcho nm_agent_signature_echo_next(const NmAgent *a)
 {
+    (void)a;
     NmConfig *c = nm_config_store();
-    if (c && nm_config_source(c, NM_CFG_KEY_SIGNATURE_ECHO) != NM_CFG_DEFAULT)
-        return nm_config_signature_echo_mode(c);
-    if (a && a->provider && a->provider->signature_echo != NM_REASONING_ECHO_OFF)
-        return a->provider->signature_echo; /* the provider's own word */
     return c ? nm_config_signature_echo_mode(c) : NM_REASONING_ECHO_ALL;
 }
 

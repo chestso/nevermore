@@ -287,8 +287,6 @@ const struct NmProvider nm_hyper_provider = {
     "hyper",
     HYPER_DEFAULT_BASE,
     "hyper.charm.land",
-    NM_REASONING_ECHO_OFF, /* no opinion: no probed requirement */
-    NM_REASONING_ECHO_OFF, /* no opinion: no probed requirement */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,

@@ -284,11 +284,6 @@ const struct NmProvider nm_openrouter_provider = {
     "openrouter",
     OPENROUTER_DEFAULT_BASE,
     "openrouter.ai",
-    NM_REASONING_ECHO_OFF,
-    NM_REASONING_ECHO_TOOLS, /* Gemini mints the thought signature on every
-                              * function-calling round and the upstream
-                              * documents it as required back WITH the tool
-                              * result (docs/OPENROUTER-API.md §3.2) */
     nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,
