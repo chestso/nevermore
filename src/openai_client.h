@@ -84,10 +84,25 @@ typedef struct NmOpenaiEndpoint
      * that truncates silently is a model nevermore cannot see
      * (OpenRouter's /v1/models documents `limit`, default 500, max
      * 1000). The endpoint is the provider's wire fact, so the query
-     * rides with it. LAST in the struct: the endpoint's initializers
-     * are positional, and a field in the middle of them would shift
-     * every one. */
+     * rides with it. The cache seam below is the struct's tail for
+     * the same reason: the endpoint's initializers are positional,
+     * and a field in the middle of them would shift every one. */
     const char *catalog_query;
+    /* Prompt-cache opt-in (docs/OPENROUTER-API.md §10): 0 = send
+     * nothing (the shipped behavior, and what every implicit
+     * provider wants), 1 = a top-level
+     *   "cache_control": { "type": "ephemeral" }
+     * (the 5-minute TTL), 2 = the same with "ttl": "1h". The
+     * Anthropic-shaped upstreams are the only family that caches on
+     * request; a field any other provider ignores is bytes for
+     * nothing, so they leave this 0 and their bodies stay
+     * byte-identical to what they always were. */
+    int cache_control;
+    /* Provider session/route key, emitted as a top-level "session_id"
+     * body member (OpenRouter's sticky routing and session grouping,
+     * docs/OPENROUTER-API.md §10.1/§10.6). NULL or "" = no field.
+     * Borrowed: the value outlives the compose call. */
+    const char *session_id;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

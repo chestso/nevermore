@@ -279,6 +279,12 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         nm_json_push(messages, m);
     }
     nm_json_set(body, "model", nm_json_new_string(req->model));
+    /* The provider's session key (OpenRouter's body `session_id`):
+     * sticky upstream routing and session grouping, never part of the
+     * prompt prefix the cache keys on (docs/OPENROUTER-API.md §10.1).
+     * Borrowed value, emitted verbatim; NULL/"" sends no field. */
+    if (ep->session_id && *ep->session_id)
+        nm_json_set(body, "session_id", nm_json_new_string(ep->session_id));
     nm_json_set(body, "messages", messages);
     nm_json_set(body, "stream", nm_json_new_bool(1));
     /* stream_options.include_usage asks the provider to emit a usage
@@ -290,6 +296,19 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         NmJson *so = nm_json_new_object();
         nm_json_set(so, "include_usage", nm_json_new_bool(1));
         nm_json_set(body, "stream_options", so);
+    }
+    /* Prompt-cache opt-in (docs/OPENROUTER-API.md §10): the top-level
+     * `cache_control` the Anthropic family requires. 1 = the 5-minute
+     * TTL, 2 = the 1-hour one; 0 sends no field, so a provider that
+     * did not opt in composes exactly the body it always did.
+     * Top-level members are not part of the cache key (§10.1), so
+     * this changes no prefix byte either. */
+    if (ep->cache_control == 1 || ep->cache_control == 2) {
+        NmJson *cc = nm_json_new_object();
+        nm_json_set(cc, "type", nm_json_new_string("ephemeral"));
+        if (ep->cache_control == 2)
+            nm_json_set(cc, "ttl", nm_json_new_string("1h"));
+        nm_json_set(body, "cache_control", cc);
     }
     if (req->temperature >= 0)
         nm_json_set(body, "temperature", nm_json_new_number(req->temperature));
