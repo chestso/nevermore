@@ -12,7 +12,7 @@
  *     need byte-exact SGR strings: NM_SGR_*.
  *   - the markdown renderers (markdown_render.c) write through a
  *     boba TuiRowSink, which wants a TuiAttr: nm_attr_*().
- *   - the chat frame (prompt, popup, the input row's gutter) draws
+ *   - the chat frame (prompt, popup, the status row) draws
  *     through boba styles, which want a TuiColor: nm_color_*().
  *
  * Naming symmetry: every role has a TuiAttr constructor; only the
@@ -300,14 +300,13 @@ static inline int nm_popup_selected_reverse(NmColorDepth depth)
     return depth != NM_COLOR_RGB;
 }
 
-/* The input row's gutter (P2): the status chrome left of the prompt —
- * the spinner glyph and the context gauge. The gauge takes its tier from
- * how full the window is: Comment at rest, Orange at ~85 %, Red at
- * ~95 %. The spinner glyph's color is NOT here: it rides its own frame
- * (nm_spinner_tick), because the dot pulses and blinks and the stars
- * rotate — one live pixel with a color that changes per tick has no
- * business being a static role. */
-static inline TuiColor nm_color_gutter(NmColorDepth depth)
+/* The status row's context gauge (P2): the window gauge's counts. It
+ * takes its tier from how full the window is: Comment at rest, Orange
+ * at ~85 %, Red at ~95 %. The spinner glyph's color is NOT here: it
+ * rides its own frame (nm_spinner_tick), because the dot pulses and
+ * blinks and the stars rotate — one live pixel with a color that
+ * changes per tick has no business being a static role. */
+static inline TuiColor nm_color_gauge(NmColorDepth depth)
 {
     return nm_color_pick(depth, NM_DRACULA_COMMENT_R, NM_DRACULA_COMMENT_G,
                          NM_DRACULA_COMMENT_B, NM_DRACULA_ANSI_BRIGHT_BLACK);
@@ -321,13 +320,13 @@ static inline TuiColor nm_color_gutter(NmColorDepth depth)
  * two colors (Orange would otherwise be indistinguishable from Yellow's
  * slot 3), and not AnsiBrightRed, which is the error role. The gauge's
  * ladder therefore reads 8 (rest) → 11 (85 %) → 1 (95 %). */
-static inline TuiColor nm_color_gutter_warn(NmColorDepth depth)
+static inline TuiColor nm_color_gauge_warn(NmColorDepth depth)
 {
     return nm_color_pick(depth, NM_DRACULA_ORANGE_R, NM_DRACULA_ORANGE_G,
                          NM_DRACULA_ORANGE_B, NM_DRACULA_ANSI_BRIGHT_YELLOW);
 }
 
-static inline TuiColor nm_color_gutter_warn_hot(NmColorDepth depth)
+static inline TuiColor nm_color_gauge_warn_hot(NmColorDepth depth)
 {
     return nm_color_pick(depth, NM_DRACULA_RED_R, NM_DRACULA_RED_G,
                          NM_DRACULA_RED_B, NM_DRACULA_ANSI_RED);
@@ -352,7 +351,7 @@ static inline TuiColor nm_color_gauge_output(NmColorDepth depth)
 /* The status row's right-aligned identity block (`provider · model`):
  * Dracula Foreground. The rule and the chrome are structure; this is the
  * one hard fact the row states, so it reads as content, not as chrome
- * (nm_color_gutter's Comment is the row's own muted role). */
+ * (nm_color_gauge's Comment is the row's own muted role). */
 static inline TuiColor nm_color_status_identity(NmColorDepth depth)
 {
     return nm_color_pick(depth, NM_DRACULA_FG_R, NM_DRACULA_FG_G,

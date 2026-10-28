@@ -989,7 +989,7 @@ static char *status_row_bytes(const char *left, const char *identity)
 
 /* The gauge's fields as the row paints them: ONE SPAN PER FIELD, in
  * declaration order. The counts and the rate carry the TIER's color
- * (nm_color_gutter at rest, Orange/Red under pressure), while the output
+ * (nm_color_gauge at rest, Orange/Red under pressure), while the output
  * count carries its own (nm_color_gauge_output) — it is not a window
  * fact, so it must not change color with the window. An empty field is a
  * span that is simply not there.
@@ -1025,7 +1025,7 @@ static char *gauge_bytes(TuiColor tier, const char *counts, const char *out,
 static char *gauge_bytes_rest(const char *counts, const char *out,
                               const char *rate, NmColorDepth depth)
 {
-    return gauge_bytes(nm_color_gutter(depth), counts, out, rate, depth);
+    return gauge_bytes(nm_color_gauge(depth), counts, out, rate, depth);
 }
 
 /* The harness's identity for a provider/model pair: the ONE spelling the
@@ -1272,7 +1272,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * gathered (R1). What the turn is doing is the glyph's STYLE, so
      * there is no label beside it. */
     char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *rule =
         status_row_bytes("\xc2\xb7 -/- ", IDENT("ollama:local", "test-model"));
@@ -1570,7 +1570,7 @@ static void test_spinner_clears_when_round_completes(void)
     /* The status row is glyphless now: the gauge, the rule and the
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(gauge);
@@ -1640,7 +1640,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     ASSERT_TRUE(strstr(frame, "streaming tail") != NULL);
     ASSERT_TRUE(strstr(frame, "go") == NULL); /* submitted text cleared */
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, prompt) != NULL); /* the input row is here */
@@ -1710,7 +1710,7 @@ static void test_context_gauge_unknown_reads_as_dash(void)
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(gauge);
@@ -1759,7 +1759,7 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     ASSERT_NOT_NULL(frame);
 
     /* The status row (gauge + rule) appears exactly once. */
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     const char *seed = strstr(frame, gauge);
     ASSERT_NOT_NULL(seed);
@@ -2498,7 +2498,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *gauge = gauge_bytes(
-        nm_color_gutter_warn_hot(NM_COLOR_16), "4611686018427.3M/131k ",
+        nm_color_gauge_warn_hot(NM_COLOR_16), "4611686018427.3M/131k ",
         "\xe2\x86\x93"
         "4611686018427.3M ",
         "\xe2\x9a\xa1\xef\xb8\x8e"
@@ -2549,8 +2549,8 @@ static void test_context_gauge_warns_near_the_limit(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *warn =
-        gauge_bytes(nm_color_gutter_warn(NM_COLOR_16), "115k/131k ", "\xe2\x86\x93"
-                                                                     "1 ",
+        gauge_bytes(nm_color_gauge_warn(NM_COLOR_16), "115k/131k ", "\xe2\x86\x93"
+                                                                    "1 ",
                     NULL, NM_COLOR_16);
     ASSERT_NOT_NULL(warn);
     ASSERT_TRUE(strstr(frame, warn) != NULL);
@@ -2561,7 +2561,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *hot = gauge_bytes(nm_color_gutter_warn_hot(NM_COLOR_16), "126k/131k ",
+    char *hot = gauge_bytes(nm_color_gauge_warn_hot(NM_COLOR_16), "126k/131k ",
                             "\xe2\x86\x93"
                             "2 ",
                             NULL, NM_COLOR_16);
@@ -2689,7 +2689,7 @@ static void test_status_row_identity_elides_on_narrow_terminal(void)
     ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 46u);
 
     /* The gauge is untouched (its own span, at full text). */
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -2734,7 +2734,7 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_TRUE(strstr(row, sgr) == NULL);
     free(sgr);
     /* The chrome is whole and the rule fills what is left. */
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
     free(gauge);
@@ -4148,7 +4148,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     ASSERT_NOT_NULL(frame);
     ASSERT_TRUE(strstr(frame, "executing") == NULL);
     char *glyph = span_bytes(tui_color_ansi(11), "\xc2\xb7 ");
-    char *gauge = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(frame, glyph) != NULL);
@@ -6169,7 +6169,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 
     /* Cold: the static fallback does not carry the id, so the limit is
      * honestly unknown. */
-    char *cold = span_bytes(nm_color_gutter(NM_COLOR_16), "-/- ");
+    char *cold = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(cold);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), cold) != NULL);
     free(cold);
@@ -6185,7 +6185,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
     /* It lands and fills the cache: the gauge resolves the new row on
      * the spot. */
     ASSERT_EQ(harness_pump_catalog(h, 50), 0);
-    char *warm = span_bytes(nm_color_gutter(NM_COLOR_16), "-/1M ");
+    char *warm = span_bytes(nm_color_gauge(NM_COLOR_16), "-/1M ");
     ASSERT_NOT_NULL(warm);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), warm) != NULL);
     free(warm);

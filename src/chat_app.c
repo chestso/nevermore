@@ -4374,11 +4374,11 @@ static TuiColor gauge_color(const NmChatApp *app)
     NmColorDepth depth = color_depth(app);
     switch (nm_agent_context_tier(app->agent)) {
     case 2:
-        return nm_color_gutter_warn_hot(depth);
+        return nm_color_gauge_warn_hot(depth);
     case 1:
-        return nm_color_gutter_warn(depth);
+        return nm_color_gauge_warn(depth);
     default:
-        return nm_color_gutter(depth);
+        return nm_color_gauge(depth);
     }
 }
 
