@@ -216,14 +216,12 @@ KEPT, and can be REPLAYED.
 - _Replay_: the `signature_echo` knob (`off` / `tools` / `all`, the same
   value space as `reasoning_echo`, frozen once a request has carried the
   field) decides which replayed assistant messages carry their round's
-  array as a message-level `reasoning_details` field. On THIS provider
-  the default is `tools`: `provider_openrouter.c` declares
-  `NmProvider.signature_echo = NM_REASONING_ECHO_TOOLS`, because the
-  signature rule above is a wire requirement of the models this provider
-  serves, and a requirement should ride the wire rather than the user
-  having to know it. (Everywhere else the built-in default is `all`.)
-  The store's `signature_echo` key is the override —
-  an explicit `off` at any layer wins.
+  array as a message-level `reasoning_details` field. The default is
+  `all` — the copies ride back unless a layer says otherwise — because
+  the signature rule above is a wire requirement of the models this
+  provider serves: a requirement should ride the wire rather than the
+  user having to know it. The store's `signature_echo` key is the only
+  control: an explicit `off` (or `tools`) at any layer wins.
   STRICT ECHO-BACK: the field is emitted only from an array the model
   itself sent in this conversation — never synthesized, never an empty
   placeholder — so a model that never speaks `reasoning_details` never
@@ -258,7 +256,7 @@ turn failure with no recovery path, so on the models that mint one, the
 cheap, cacheable cost of replaying it is the right side of the bet —
 independent of whether it also reduces malformed calls. On every model
 that sends no `reasoning_details` the echo is inert by construction
-(strict echo-back), so the declaration costs them nothing.
+(strict echo-back), so the default costs them nothing.
 
 Its protocol: the same long tool session (a read-every-file task driven
 past ~84k prompt tokens, the §3.1 failure regime), run with

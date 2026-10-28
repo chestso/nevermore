@@ -161,15 +161,13 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   model memory (plain + every scoped spelling).
   **Two knobs are ECHO MODES, not bools** (`off` / `tools` / `all`,
   one vocabulary, one canon): `reasoning_echo` (the trace text) and
-  `signature_echo` (the round's `reasoning_details` array). Each has a
-  provider declaration as its DEFAULT (the wire requirement rides the
-  wire: `opencode:go` for the trace, `openrouter` for the signature;
-  a provider with no opinion leaves the built-in default, `all`, in
-  force),
-  each store key as its OVERRIDE, and each its own freeze latch in the
+  `signature_echo` (the round's `reasoning_details` array). Each is
+  decided by its store key alone — no provider layer — with the built-in
+  default `all` (the copies ride back unless a layer says otherwise),
+  and each has its own freeze latch in the
   agent. Every `/config` row shows what the NEXT request will send —
-  the frozen mode ("frozen this chat"), else the provider's declaration
-  ("provider default"), else the store's value — rather than what the
+  the frozen mode ("frozen this chat"), else the store's value —
+  rather than what the
   file says, because a conversation's request prefix must not change
   shape mid-flight.
 - **Listing plane** (`src/source.h` / `source.c`) — everything pickable
@@ -498,17 +496,13 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   attaches a trace to an outgoing message only when the echo mode says
   so (`nm_agent_reasoning_echo`), so the wire client stays a dumb
   serializer (it emits `reasoning_content` for whatever it is
-  handed). **The provider decides the mode, the user overrides it**:
-  a provider whose wire 400s a replayed tool-call turn that omits the
-  field declares it (`NmProvider.reasoning_echo` — `opencode:go` says
-  `tools`, the one route probed to need it, its deepseek endpoint);
-  the store's `reasoning_echo` key / `$NEVERMORE_REASONING_ECHO` is
-  the override and wins whenever any layer above the built-in default
-  sets it. The mode is granular — `off` (nothing goes back) / `tools`
+  handed). **The knob is the whole control**: the store's
+  `reasoning_echo` key / `$NEVERMORE_REASONING_ECHO` decides, and it
+  wins whenever any layer above the built-in default sets it. The mode
+  is granular — `off` (nothing goes back) / `tools`
   (only on assistant messages
   carrying `tool_calls`) / `all` (every assistant message with a
-  trace — the built-in default, so a provider with no opinion sends
-  the copies back) — and it is **frozen once a request has
+  trace — the built-in default) — and it is **frozen once a request has
   actually carried a trace** (`nm_agent_reasoning_echo_frozen`): a
   prefix that gains or loses the field is a different prefix, so a
   mid-conversation change would throw the prompt cache away (and can
@@ -545,16 +539,14 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   trace is the only reasoning the transcript shows; the wire dump is
   the human's window), and a VOID round's partial array dies with the
   round: the retry starts empty, because a signature is not an answer.
-  WHICH messages carry it is the provider's declaration and the user's
-  override, exactly like the trace echo: `NmProvider.signature_echo` is
-  the default (`openrouter` declares `tools` — Google documents the
-  signature as required back with the tool result, and a
-  `missing thought_signature` 400 is an unrecoverable turn), the store's
-  `signature_echo` key is the override, and the built-in default behind
-  both is `all` — the copies ride back unless a layer says otherwise,
-  and a provider with no opinion leaves that default in force. The A/B
+  WHICH messages carry it is the store's `signature_echo` key, exactly
+  like the trace echo: no provider layer, and the built-in default
+  behind the key is `all` — the copies ride back unless a layer says
+  otherwise. (Google documents the signature as required back with the
+  tool result, and a `missing thought_signature` 400 is an
+  unrecoverable turn, so the default is not optional there.) The A/B
   that ran (12 sessions per arm, 2026-10-27) is the reason the
-  declaration is not the same as a cure: 3 of 12 sessions hit a void
+  echo is not the same as a cure: 3 of 12 sessions hit a void
   round without the echo, 0 of 12 with it, which is directionally what
   the retry-cost argument predicts but not resolved at that sample size.
   The replay is wire-safe and leaves the prompt cache standing, and the

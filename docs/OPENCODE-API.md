@@ -272,19 +272,17 @@ Echoing is validation-safe everywhere probed: the tolerant endpoints
 and this one accept the field wherever it is present, including on
 plain assistant messages, and an empty string is enough for a round
 whose trace the client did not keep. Nevermore echoes the trace back by
-default (`all` — every assistant message with one), and its
-`opencode:go` provider **declares** this requirement itself
-(`NM_REASONING_ECHO_TOOLS`), so the smallest setting this route is
-probed to accept is what it uses there — the wire says what it needs,
-and the user does not have to know. It is granular — `off` / `tools`
+default (`all` — every assistant message with one), so this route's
+requirement is met without the user knowing anything about it. It is
+granular — `off` / `tools`
 (only the messages carrying `tool_calls`: the smallest setting this
 route accepts) / `all` (every assistant message with a trace) — and the
 store's `reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
-`/config set reasoning_echo off|tools|all` overrides the provider
-default. That is the exact shape of the bug this
+`/config set reasoning_echo off|tools|all` decides. That is the exact
+shape of the bug this
 section was probed for: a nevermore tool round on `opencode:go` +
 `deepseek-v4.1-flash` fails with that 400, the next attempt succeeds,
-and the failure returns a few rounds later; the provider default (or an
+and the failure returns a few rounds later; the default (or an
 explicit `reasoning_echo = tools`) ends it. One client-side caveat that
 follows from prefix caching: once a
 request has actually carried a trace, the mode must not change
@@ -508,8 +506,8 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   (`reasoning_echo = tools` is exactly this, and the smallest such
   setting; `all` also covers answer rounds), so the key must be
   `tools` or `all` for `opencode:go` DeepSeek routes — `all` is the
-  built-in default and `tools` is what this provider declares, and
-  the mode is frozen for a chat once a trace has been sent;
+  built-in default, and the mode is frozen for a chat once a trace has
+  been sent;
 - catalog `GET {base}/models`, tokenless, mapped id-only with a
   static fallback (a canned-wire test must assert the header set
   and the mapping, per the project's test conventions).

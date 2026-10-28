@@ -455,10 +455,9 @@ present (or empty) on assistant tool-call messages in the history. This
 paragraph is inherited from quoth and hand-written, and is not observed on
 Hyper. The rule is observed on another route — OpenCode Go's `deepseek`
 endpoint 400s a tool-call round replayed without the field (probed
-2026-09-22, `docs/OPENCODE-API.md` §3), and that provider declares the
-requirement itself (`NM_REASONING_ECHO_TOOLS`). nevermore's echo is granular
-(`off` / `tools` / `all`), defaults to `all` (hyper declares nothing, so
-the built-in default stands), and is frozen for a chat once a request
+2026-09-22, `docs/OPENCODE-API.md` §3). nevermore's echo is granular
+(`off` / `tools` / `all`), defaults to `all` (the built-in default
+stands on every wire), and is frozen for a chat once a request
 has carried a trace (`nm_agent_reasoning_echo`).
 
 **Tool-call round trip:** the assistant turn with `tool_calls` and
