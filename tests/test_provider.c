@@ -1556,6 +1556,117 @@ static void test_openrouter_app_url_env_knob(void)
     test_unsetenv(NM_APP_URL_ENV);
 }
 
+/* The cache opt-in is the Anthropic family's alone (OPENROUTER-API.md
+ * §10.6): the marker rides an anthropic id, and no other family's
+ * body gains a byte. */
+static void test_openrouter_anthropic_chat_requests_caching(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "anthropic/claude-sonnet-5.5", &msg, 1, NULL,
+                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "\"cache_control\":{\"type\":\"ephemeral\"}") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"ttl\"") == NULL);
+}
+
+static void test_openrouter_non_anthropic_chat_sends_no_marker(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
+                          -1, -1, NULL, capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
+}
+
+/* OPENROUTER_PROMPT_CACHE=off drops the marker for one run — the
+ * Hyper provider's HYPER_NO_SESSION_CACHE is the precedent. */
+static void test_openrouter_prompt_cache_opt_out(void)
+{
+    test_setenv("OPENROUTER_PROMPT_CACHE", "off");
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "anthropic/claude-sonnet-5.5", &msg, 1, NULL,
+                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    test_unsetenv("OPENROUTER_PROMPT_CACHE");
+    ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
+}
+
+/* OPENROUTER_PROMPT_CACHE=1h asks for the 1-hour TTL (2x the write
+ * price — §10.1); the alias family gets it too. */
+static void test_openrouter_prompt_cache_ttl_1h(void)
+{
+    test_setenv("OPENROUTER_PROMPT_CACHE", "1h");
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "~anthropic/claude-haiku-latest", &msg, 1, NULL,
+                          NULL, -1, -1, NULL, capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    test_unsetenv("OPENROUTER_PROMPT_CACHE");
+    ASSERT_TRUE(strstr(last_request,
+                       "\"cache_control\":{\"type\":\"ephemeral\","
+                       "\"ttl\":\"1h\"}") != NULL);
+}
+
 static void test_openrouter_models_fetch(void)
 {
     int port;
@@ -2169,6 +2280,10 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_chat_with_keepalive_comments);
     RUN_TEST(test_openrouter_chat_carries_app_attribution);
     RUN_TEST(test_openrouter_app_url_env_knob);
+    RUN_TEST(test_openrouter_anthropic_chat_requests_caching);
+    RUN_TEST(test_openrouter_non_anthropic_chat_sends_no_marker);
+    RUN_TEST(test_openrouter_prompt_cache_opt_out);
+    RUN_TEST(test_openrouter_prompt_cache_ttl_1h);
     RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
     RUN_TEST(test_opencode_chat_carries_session_header);

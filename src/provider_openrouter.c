@@ -154,6 +154,39 @@ static size_t openrouter_attribution_headers(
     return 3;
 }
 
+/* The prompt-cache knob (OPENROUTER-API.md §10.6): "off" sends no
+ * marker, "1h" asks for the 1-hour TTL (2x the write price, §10.1),
+ * and anything else — unset, "5m", "on" — asks for the default
+ * 5-minute one. Read at the point of use so a changed value reaches
+ * the next request; HYPER_NO_SESSION_CACHE is the precedent for a
+ * provider-local knob. */
+static int openrouter_prompt_cache(void)
+{
+    const char *v = getenv("OPENROUTER_PROMPT_CACHE");
+    if (!v)
+        return 1;
+    if (strcmp(v, "off") == 0 || strcmp(v, "no") == 0 ||
+        strcmp(v, "false") == 0 || strcmp(v, "0") == 0)
+        return 0;
+    if (strcmp(v, "1h") == 0)
+        return 2;
+    return 1;
+}
+
+/* Does the model id live in Anthropic's namespace? Caching on request
+ * is that family's rule (OPENROUTER-API.md §10); the vendor prefix
+ * decides, and a routing-variant suffix (":nitro", §7.2) never leads
+ * the id, so a prefix test is exact. "~anthropic/" is the same
+ * family's alias spelling (§2). */
+static int openrouter_model_is_anthropic(const char *id)
+{
+    if (!id)
+        return 0;
+    if (strncmp(id, "anthropic/", 10) == 0)
+        return 1;
+    return strncmp(id, "~anthropic/", 11) == 0;
+}
+
 /* The chat endpoint: the shared bearer shape plus the attribution
  * headers, so the blocking and the event-driven drives cannot drift
  * (they call the same builder). */
@@ -166,6 +199,12 @@ static void openrouter_chat_endpoint(const NmProvider *p,
     nm_openaicompat_bearer_chat_endpoint(p, req, api_key, hdrs, ep);
     ep->extra_headers = hdrs;
     ep->n_extra_headers = openrouter_attribution_headers(hdrs);
+    /* Prompt caching (§10): the marker rides only the Anthropic
+     * family — every implicit upstream caches with no field and
+     * ignores one (§10.4), so a field they do not read is bytes on
+     * the wire for nothing. */
+    if (openrouter_model_is_anthropic(req->model))
+        ep->cache_control = openrouter_prompt_cache();
 }
 
 /* Does the string array at `arr` carry `want`? The row's one
