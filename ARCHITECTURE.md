@@ -54,7 +54,10 @@ at its root (refactor the types and seams), not by patching around it.
   provider's prompt cache keys on. Anything that would alter earlier bytes
   mid-chat (the system prompt, the reasoning echo fields, an image's text
   marker, a reminder) is either frozen once, resolved while the prefix is cold,
-  appended at the end of the transcript, or edge-triggered.
+  appended at the end of the transcript, or edge-triggered. The cache is now
+  REQUESTED on the Anthropic family (docs/OPENROUTER-API.md §10), so the
+  guarantee is load-bearing on the bill and not only on the wire: a byte that
+  drifts is a paid-for cache miss.
 - **Transparency.** The transcript never diverges from what the model received.
   Anything the harness injects (a `<system-reminder>`, the escaped form of a
   forged tag, a synthetic user message, an image the provider will strip) is

@@ -3,8 +3,9 @@
 > Status: verified against the live wire (unauthenticated catalog +
 > authenticated chat probes, Sep 2026; the batch surface in §6 on
 > 2026-10-23; the routing surface in §7 on 2026-10-24; the app
-> attribution surface in §9 on 2026-10-26). Every claim
-> below was probed on the real endpoint unless marked otherwise.
+> attribution surface in §9 on 2026-10-26; the prompt-cache surface
+> in §10 on 2026-10-28). Every claim below was probed on the real
+> endpoint unless marked otherwise.
 > nevermore consumes OpenRouter through the shared OpenAI-compatible
 > client (`src/openai_client.c`) exactly as quoth does.
 
@@ -672,13 +673,17 @@ password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
 - The app's identity rides the chat round (§9): `HTTP-Referer`,
   `X-OpenRouter-Title` and `X-OpenRouter-Categories`, with the URL
   and the name from `src/identity.h` and `$NEVERMORE_APP_URL`.
-- **The request body has no seam for a provider's own fields.** It is
-  a fixed OpenAI-shaped set (`model`, `messages`, `stream`,
+- **The request body carries exactly two provider fields, both typed**
+  (§10): `cache_control` — the Anthropic family's prompt-cache opt-in,
+  a top-level member sent for `anthropic/*` and `~anthropic/*` ids
+  only — and `session_id`, the agent's conversation id, which rides
+  every round for sticky routing (§10.6). Beyond those two the set
+  stays the fixed OpenAI shape (`model`, `messages`, `stream`,
   `stream_options`, `temperature`, `max_tokens`, `tools`,
-  `tool_choice`), and `NmOpenaiEndpoint` carries no slot for more. So
-  the preferences object and `service_tier` cannot ride (§7): every
-  round gets OpenRouter's own routing (§7.4), with no `only`/`order`/
-  `ignore`/`sort`, no `max_price`, no `zdr` and no pinned tier.
+  `tool_choice`), so the preferences object and `service_tier` still
+  cannot ride (§7): every round gets OpenRouter's own routing (§7.4),
+  with no `only`/`order`/`ignore`/`sort`, no `max_price`, no `zdr`
+  and no pinned tier.
   MESSAGE-level reasoning fields are not provider fields and are no
   exception: `reasoning_content` and `reasoning_details` ride the
   assistant message shape itself (the OpenAI-compatible wire's own),
@@ -768,3 +773,204 @@ one shows `app_id: null`.
   the visibility header applies only when the request CREATES a
   brand-new app, so it can never hide an app that already exists
   (changing an existing app's visibility needs OpenRouter support).
+
+## 10. Prompt caching (live test, 2026-10-28)
+
+One model, many upstreams (§7) — and every upstream caches prompts by
+its own rule. Two facts decide the whole surface for nevermore:
+
+- **Most upstreams cache implicitly.** OpenAI, DeepSeek, Gemini,
+  Moonshot, Grok and Z.AI reuse a repeated prefix with NO request
+  field and no cache-write charge. Probed on `openai/gpt-5-nano`: the
+  second identical request reported `cached_tokens: 1408` with
+  `cache_write_tokens: 0`, prompt cost $0.0000381 -> $0.0000064. A
+  client that sends nothing gets these hits for free.
+- **The Anthropic family caches only on request.** With no marker the
+  upstream reports `cached_tokens: 0` and `cache_write_tokens: 0` on
+  every round — the control arm of every probe below, and the wire
+  shape behind a status row whose cache rate never moved (the
+  2026-10-28 capture: 13 usage-bearing rounds of
+  `anthropic/claude-sonnet-5.5`, `cached_tokens: 0` on every one,
+  prompts 5939 -> 24558 tokens).
+
+Two spellings opt in (upstream references:
+https://openrouter.ai/docs/guides/best-practices/prompt-caching and
+https://platform.claude.com/docs/en/build-with-claude/prompt-caching):
+
+```json
+{
+  "model": "anthropic/claude-sonnet-5.5",
+  "cache_control": { "type": "ephemeral" },
+  "messages": [{ "role": "system", "content": "…" }]
+}
+```
+
+The TOP-LEVEL field is "automatic caching": the upstream places the
+breakpoint at the last cacheable block and moves it forward as the
+conversation grows, plain-string `content` needs no shape change, and
+the field costs one of the four breakpoint slots. The per-block
+spelling (`cache_control` inside a content-parts array) is "explicit
+caching", and it is the only one Alibaba documents for Qwen — see
+§10.4 before sending it there.
+
+### 10.1 What a hit requires, and what it costs
+
+The cache covers `tools` -> `system` -> `messages`, in that order, and
+a hit needs byte-identical content up to the breakpoint — the prefix
+discipline ARCHITECTURE.md's "Prefix-cache stability" bullet already
+keeps. Probed facts the design rests on:
+
+- **Top-level body fields are NOT part of the key.** A body that
+  gained a `session_id` member still read the entry an earlier,
+  field-less body had written.
+- **Streaming shares entries with non-streaming.** A `stream:true`
+  request read the entry a `stream:false` request wrote.
+- **`prompt_tokens` stays the TOTAL on a hit** — a 2235-token prompt
+  that read 2231 still reported `prompt_tokens: 2235` — so the context
+  gauge and the cache-read rate need no redefinition.
+- **Below the model's minimum it is a silent no-op.** A 19-token
+  prompt with the field cached nothing and charged nothing. The
+  minimums are upstream-documented, not probed per model: 512 tokens
+  for the 5.5 family, Opus 5 and Fable, 1024 to 4096 for older
+  generations.
+- **Writes bill the covered prefix at 1.25x input for the 5-minute
+  TTL, 2x for the 1-hour one (`"ttl":"1h"`); reads at 0.05x**
+  (Sonnet 5.5, Opus 5.5) **or 0.1x** (every other Claude). The
+  catalog's `pricing.input_cache_read` / `input_cache_write` /
+  `input_cache_write_1h` are exactly these rates — all 30 `anthropic/*`
+  rows carry the three, 313 of the 464 rows fetched on 2026-10-28
+  carry the read rate — and every billed cent in the probes matched
+  them. The first marked round on `anthropic/claude-haiku-5.5`
+  ($0.10/M input): 2231 x $0.125/M + 4 x $0.10/M = $0.000279275, the
+  reported prompt cost to the digit; the hit round: 2231 x $0.01/M +
+  4 x $0.10/M = $0.00002271, again exact.
+
+### 10.2 The measured rounds
+
+Plain-string messages, `max_tokens: 16`, non-streaming;
+`anthropic/claude-haiku-5.5` ($0.10/M input), upstream `Google`,
+2235-token prompt unless the row says otherwise:
+
+| arm           | request                                                                                              | first call                        | second call             |
+| ------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------- | ----------------------- |
+| control       | no field, identical body twice                                                                       | cached 0, write 0, $0.0002315     | identical               |
+| automatic 5 m | top-level `cache_control`                                                                            | write 2231, $0.0002873 (+24%)     | cached 2231, $0.0000307 |
+| automatic 1 h | top-level + `"ttl":"1h"`                                                                             | write 2231, $0.0004546 (2x write) | cached 2231, $0.0000307 |
+| under minimum | top-level, 19-token prompt                                                                           | cached 0, write 0                 | identical               |
+| tool round    | nevermore's shape: assistant `content:""` + `tool_calls` + tool result + `tools` (2655-token prompt) | write 2653                        | cached 2653             |
+
+The automatic 5 m row is the whole design in two calls: the first pays
+the 1.25x write surcharge (+24% on the round; the four uncovered
+tokens and the completion bill normally), the second reads 2231 of
+2235 tokens at a tenth of the input rate, 87% cheaper than the control
+arm. The bug model itself: `anthropic/claude-sonnet-5.5` (upstream
+`Google`, the one that served the 2026-10-28 capture) wrote 2231 then
+read 2231, $0.0057455 -> $0.0003911. And an older generation needs no
+gate: `anthropic/claude-haiku-4.5` (upstream `Azure`, 4132-token
+prompt) accepted the top-level field — no 400 — and wrote 4129 then
+read 4129, $0.00519925 -> $0.0004559.
+
+### 10.3 Two upstreams, two temperaments
+
+An agent round does not repeat a body — it EXTENDS it, and there the
+upstreams differ:
+
+- **Azure is textbook.** A 3-round loop on `anthropic/claude-haiku-4.5`
+  (4191 / 4207 / 4223-token prompts, 20 s apart): `write 4188`, then
+  `cached 4188 + write 16`, then `cached 4204 + write 16` — read the
+  old prefix, write only the new tail, every round after the first.
+  The loop billed $0.0062 against $0.0126 of input at the uncached
+  rate (-51%).
+- **Google is opportunistic.** The same loop shape on
+  `anthropic/claude-haiku-5.5` (2270 -> 2331 tokens, 20 s apart):
+  `write 2266`, a MISS that wrote the whole prompt again at 1.25x,
+  then `cached 2281 + write 15`, `cached 2296 + write 15`,
+  `cached 2266 + write 61` — $0.00067 against $0.00115 of input
+  (-42%). At 5-second spacing the pattern was noisier still, and two
+  rounds READ MORE than any breakpoint had written (2323 read when
+  the largest prior write was 2308): the reading is that the Google
+  upstream reuses prefixes of its own on top of what the field asks
+  for.
+
+Stated plainly: the field switches caching ON, but a round whose
+covered prefix is not in the cache pays 1.25x on the WHOLE prompt —
+about a quarter more than not asking at all. On the Google upstream
+the first extension after a fresh write tends to miss, while an
+identical body always hits — every identical-body probe read at the
+cache price, 7.5x cheaper on haiku-5.5 ($0.0002315 -> $0.0000307) and
+15x on sonnet-5.5 ($0.0057455 -> $0.0003911), which is exactly the
+`round_is_void` retry path (§3.1). Over a multi-round turn the
+expected value is strongly positive (reads bill at 0.05-0.1x), but the
+per-round worst case is real: these numbers are a range, not a promise.
+
+Per-block explicit breakpoints bought NOTHING over the top-level field
+on the Google upstream — a 4-round loop with riding breakpoints on
+every user message performed no better than the automatic arm (write,
+write, write, read against write, read, write, read, at 5-second
+spacing). The per-block machinery — content-parts arrays, marker
+placement, the byte-stability risk of flipping a message's shape — is
+not worth its complexity for this family.
+
+### 10.4 Qwen: send nothing
+
+`qwen/qwen3.7-flash` (upstream `Alibaba`): a per-block marker on a
+text block wrote 1577 then read 1577, $0.0000622 -> $0.0000070 —
+explicit caching works there and bills the 1.25x write. The TOP-LEVEL
+field is silently IGNORED on the same model (no 400, cached 0, write
+0 on a fresh prefix), and one request with NO markers at all read 1280
+tokens with `cache_write_tokens: 0` — an implicit hit, free. The
+published rule says the Qwen family is explicit-only; the wire says
+implicit hits happen anyway. nevermore therefore sends nothing to
+`qwen/*`: paying 1.25x writes for hits the upstream sometimes gives
+away is the wrong side of the bet. One probe each — re-measure before
+relying on the implicit hit.
+
+### 10.5 Two refusal shapes worth knowing
+
+- **A request whose last message is an assistant message is a 400.**
+  The upstream answers `{"type":"error","error":{"type":
+"invalid_request_error","message":"This model does not support
+assistant message prefill. The conversation must end with a user
+message."}}`, wrapped in OpenRouter's `Provider returned error`
+  envelope. The request id prefix (`req_vrtx_…`) names Vertex — the
+  `Google` upstream for Anthropic models is Vertex AI's Claude serving.
+  nevermore never composes that shape (a round ends with the user's
+  text or a tool result), but a hand-edited transcript replay will
+  hit it.
+- **A refused round carries no usage at all.** `finish_reason:
+"content_filter"`, `native_finish_reason: "refusal"`, `content:
+null`, and NO usage object anywhere in the response (observed when
+  an upstream disliked probe filler text). The context gauge blanks
+  for that round. §3.1's empty-round family does not cover a refusal
+  — a distinct finish_reason nevermore does not name anywhere today;
+  small open gap on nevermore's side.
+
+### 10.6 The nevermore side
+
+- §8's "the request body has no seam for a provider's own fields" was
+  the gap, and two typed fields close it: a `cache_control` tri-state
+  (send nothing / 5-minute TTL / 1-hour TTL) and a borrowed
+  `session_id`, emitted by `compose_body` as top-level members.
+  Top-level members are not part of the cache key (§10.1), so neither
+  changes a prefix byte.
+- **Gate on the model namespace**: `anthropic/` and `~anthropic/` get
+  the top-level field — a prefix test is exact, because a
+  routing-variant suffix (`:nitro`, §7.2) never leads an id. Every
+  other family gets nothing: implicit upstreams need no field, Qwen
+  and OpenAI ignore it (§10.4, and the gpt-5-nano probe took the field
+  without complaint), and a field a provider does not read is bytes on
+  the wire for nothing.
+- **`session_id` rides every round**: the agent's existing
+  `conversation_id` (40 chars; OpenRouter caps the field at 256),
+  which pins the upstream from the FIRST request (sticky routing, §7)
+  — cache behavior is upstream-specific (§10.3), so one upstream per
+  conversation is one temperament per conversation — and groups the
+  session in the Logs view.
+- **One env knob, the Hyper precedent** (`HYPER_NO_SESSION_CACHE`):
+  `OPENROUTER_PROMPT_CACHE` = `off` / `5m` / `1h`, read at the point
+  of use, default `5m` for the Anthropic family and nothing for
+  everyone else.
+- **The observability already exists**: `cached_tokens` feeds the ⚡
+  rate, `cache_write_tokens` the `/context` write count, both parsed
+  by the shared client today. A round that pays the miss surcharge
+  shows as a write spike — exactly what the wire dump is for.
