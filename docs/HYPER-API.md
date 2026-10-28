@@ -204,11 +204,11 @@ provider-scoped one rather than omitting the headers — an absent header
 silently defeats caching, which is the failure mode worth designing against.
 The fallback id is one per process, so any turn driven without an agent id
 pins to a single cache node; Crush has no such path (its session id is always
-present), so this is nevermore-specific. `HYPER_NO_SESSION_CACHE` (non-empty)
-drops the two `x-session-*` headers (the C analog of quoth's
-`quoth-hyper-session-cache-p` defcustom); `x-crush-id` is identity rather than
-cache routing and stays. Catalog requests carry `x-crush-id` alone. All three
-are logged verbatim by the wire recorder (`secret = 0`) — they are routing
+present), so this is nevermore-specific. All three headers ride every chat
+request; there is no opt-out — the affinity pair is the caching, so dropping it
+would pay the miss surcharge on purpose. `x-crush-id` is identity rather than
+cache routing and rides the catalog requests too, which carry it alone. All
+three are logged verbatim by the wire recorder (`secret = 0`) — they are routing
 hashes, not secrets, and seeing them is the point of a wire dump.
 
 ### 3.2 Request body

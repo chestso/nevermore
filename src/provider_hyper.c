@@ -27,12 +27,9 @@
  * (NmChatRequest.conversation_id); a chat without one falls back to a
  * provider-scoped id so the affinity headers are never absent (a
  * missing value would silently defeat caching — the one failure mode
- * worth designing against, mirroring provider_opencode.c).
- *
- * Opt-out: HYPER_NO_SESSION_CACHE non-empty disables the two
- * x-session-* headers (x-crush-id is identity, not cache routing, and
- * stays). The env-var form is the C analog of quoth's
- * `quoth-hyper-session-cache-p` defcustom.
+ * worth designing against, mirroring provider_opencode.c). There is no
+ * opt-out: the affinity pair is what pins a conversation to its cache,
+ * so a turn without it would pay the miss surcharge on purpose.
  *
  * Catalog: GET /v1/models answers the standard {"object": "list",
  * "data": [...]} shape WITHOUT a token (HYPER-API.md §5), so the
@@ -147,23 +144,21 @@ static size_t hyper_affinity_headers(const NmChatRequest *req,
     size_t n = 0;
 
     /* x-session-id / x-session-affinity: same hash, two header names.
-     * Off when HYPER_NO_SESSION_CACHE is set. */
-    if (!getenv("HYPER_NO_SESSION_CACHE")) {
-        const char *hash = hyper_session_hash(req);
-        if (!hash) {
-            const char *conv = hyper_fallback_conversation();
-            nm_xxh3_64_hex(conv, strlen(conv), hyper_session_affinity);
-            hash = hyper_session_affinity;
-        }
-        out[n].name = "x-session-id";
-        out[n].value = hash;
-        out[n].secret = 0; /* routing hash, not a secret */
-        n++;
-        out[n].name = "x-session-affinity";
-        out[n].value = hash;
-        out[n].secret = 0;
-        n++;
+     * Always sent: the pair is the cache affinity itself. */
+    const char *hash = hyper_session_hash(req);
+    if (!hash) {
+        const char *conv = hyper_fallback_conversation();
+        nm_xxh3_64_hex(conv, strlen(conv), hyper_session_affinity);
+        hash = hyper_session_affinity;
     }
+    out[n].name = "x-session-id";
+    out[n].value = hash;
+    out[n].secret = 0; /* routing hash, not a secret */
+    n++;
+    out[n].name = "x-session-affinity";
+    out[n].value = hash;
+    out[n].secret = 0;
+    n++;
 
     /* x-crush-id: per-machine identity, always sent. */
     if (!hyper_crush_id_ready)

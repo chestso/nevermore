@@ -900,9 +900,10 @@ static void test_hyper_chat_null_conversation_id_falls_back(void)
                         16) == 0);
 }
 
-/* HYPER_NO_SESSION_CACHE drops the two cache headers; x-crush-id is
- * identity, not cache routing, and stays. */
-static void test_hyper_session_cache_opt_out(void)
+/* The affinity pair is unconditional. HYPER_NO_SESSION_CACHE is the
+ * retired opt-out; setting it must change nothing, so a reintroduced
+ * one is caught here. */
+static void test_hyper_affinity_headers_always_sent(void)
 {
     test_setenv("HYPER_NO_SESSION_CACHE", "1");
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
@@ -916,8 +917,8 @@ static void test_hyper_session_cache_opt_out(void)
     ASSERT_EQ(r.status, NM_CHAT_OK);
     test_unsetenv("HYPER_NO_SESSION_CACHE");
 
-    ASSERT_TRUE(strstr(last_request, "x-session-id:") == NULL);
-    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") == NULL);
+    ASSERT_TRUE(strstr(last_request, "x-session-id:") != NULL);
+    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") != NULL);
     ASSERT_TRUE(strstr(last_request, "x-crush-id:") != NULL);
 }
 
@@ -1883,7 +1884,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_hyper_chat_begin_step);
     RUN_TEST(test_hyper_chat_carries_affinity_headers);
     RUN_TEST(test_hyper_chat_null_conversation_id_falls_back);
-    RUN_TEST(test_hyper_session_cache_opt_out);
+    RUN_TEST(test_hyper_affinity_headers_always_sent);
     RUN_TEST(test_hyper_affinity_stable_across_paths);
     RUN_TEST(test_hyper_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
