@@ -27,6 +27,12 @@ conventions, and the traps that are not obvious from any single file.
   (Python), prettier (Markdown). **Run before every commit** — a clean
   tree is part of the gate, not a periodic cleanup; re-run `make check`
   afterwards if formatting touched anything.
+- `make format-check` — the same four formatters in dry-run mode, plus
+  `scripts/check-md-quotes.py` for the one construct prettier cannot
+  round-trip: an inline code span broken across lines inside a
+  blockquote, where prettier drops the `>` (CommonMark's lazy
+  continuation then hides the loss until a later edit lets the text
+  fall out of the quote). A gate, not a cleanup.
 - `make bear` — `compile_commands.json` for clangd.
 - `make regen-icon` — re-render `icons/nevermore.ico` (the six sizes,
   32bpp) from `icons/nevermore.svg`: `rsvg-convert` per size, then

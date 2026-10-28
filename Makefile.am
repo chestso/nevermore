@@ -62,6 +62,54 @@ format:
         echo "prettier not found - skipping Markdown formatting." >&2; \
     fi
 
+# Format CHECK — the same four formatters in dry-run mode, so drift is a
+# red line instead of a silent rewrite of files the change never touched,
+# plus the one construct prettier cannot round-trip: an inline code span
+# that crosses a line break inside a blockquote (check-md-quotes.py; the
+# `>` prefix is dropped, and lazy continuation hides it until a later
+# edit lets the text fall out of the quote). `make format` stays what you
+# run before a commit; this is what a gate runs.
+.PHONY: format-check
+format-check:
+	@status=0; \
+    if command -v clang-format >/dev/null 2>&1; then \
+        echo "Checking C with clang-format..."; \
+        find $(top_srcdir)/src $(top_srcdir)/tests \
+            \( -name '*.c' -o -name '*.h' \) -print0 \
+            | xargs -0 clang-format --dry-run --Werror || status=1; \
+    else \
+        echo "clang-format not found - skipping C check." >&2; \
+    fi; \
+    if command -v shfmt >/dev/null 2>&1; then \
+        echo "Checking shell scripts with shfmt..."; \
+        find $(top_srcdir)/scripts \
+            -name '*.sh' -print0 2>/dev/null \
+            | xargs -0 -r shfmt -d || status=1; \
+    else \
+        echo "shfmt not found - skipping shell check." >&2; \
+    fi; \
+    if command -v black >/dev/null 2>&1; then \
+        echo "Checking Python with black..."; \
+        find $(top_srcdir) -name '*.py' \
+            -not -path '$(top_srcdir)/build/*' \
+            -not -path '$(top_srcdir)/build-asan/*' -print0 \
+            | xargs -0 -r black --check --diff || status=1; \
+    else \
+        echo "black not found - skipping Python check." >&2; \
+    fi; \
+    if command -v prettier >/dev/null 2>&1; then \
+        echo "Checking Markdown with prettier..."; \
+        find $(top_srcdir) -maxdepth 2 -name '*.md' -print0 \
+            | xargs -0 -r prettier --check || status=1; \
+    else \
+        echo "prettier not found - skipping Markdown check." >&2; \
+    fi; \
+    echo "Checking quoted inline code spans..."; \
+    python3 "$(top_srcdir)/scripts/check-md-quotes.py" $$( \
+        find $(top_srcdir) -maxdepth 2 -name '*.md' -print0 \
+            | xargs -0 -r printf '%s\n') || status=1; \
+    exit $$status
+
 # The catalogs — ONE generator for every provider (tools/generate-catalogs.py).
 # It resolves each provider's catalog with FULL COVERAGE and writes the
 # generated tables (src/catalog_data.h) that the app falls back to until
