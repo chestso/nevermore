@@ -107,8 +107,8 @@ Source: https://ollama.com/pricing
 > monitor — the ollama-usage CLIs, CodexBar, Open WebUI extensions — currently
 > scrapes `ollama.com/settings` with a browser session cookie, exactly as
 > documented above). Note the settings page itself has moved to a monthly
-> **"Included usage"** dollar-credits layout (`$X
-> of $Y used`, per-model meter); the older session/hourly + weekly quota windows
+> **"Included usage"** dollar-credits layout (`$X of $Y used`,
+> per-model meter); the older session/hourly + weekly quota windows
 > are legacy (CodexBar still parses both).
 
 ---
@@ -753,9 +753,10 @@ curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
 > is a fragment-merge key, not a stable slot identity: merge on `(index, id)`,
 > or the second call's `arguments` get appended to the first slot and the
 > second `id` is lost — replaying that as the assistant `tool_calls` message
-> yields concatenated non-JSON arguments and a 400 `invalid tool call
-arguments`. (nevermore's openai_client keys its merge on `(index, id)` for
-> exactly this; a continuation delta that omits the id still finds its slot.)
+> yields concatenated non-JSON arguments and a 400
+> `invalid tool call arguments`. (nevermore's openai_client keys its merge
+> on `(index, id)` for exactly this; a continuation delta that omits the id
+> still finds its slot.)
 
 **Tool call flow:**
 
