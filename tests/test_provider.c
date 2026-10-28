@@ -1667,6 +1667,61 @@ static void test_openrouter_prompt_cache_ttl_1h(void)
                        "\"ttl\":\"1h\"}") != NULL);
 }
 
+/* session_id rides EVERY round (§10.6), not just the marked family's:
+ * it is a routing/session fact, not a cache one. */
+static void test_openrouter_chat_carries_session_id(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
+                          -1, -1, "nm-0123456789abcdef0123456789abcdef",
+                          capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request,
+                       "\"session_id\":\"nm-0123456789abcdef0123456789"
+                       "abcdef\"") != NULL);
+}
+
+/* A NULL conversation id (no agent, a bare models call path) sends no
+ * field: empty and absent are the same on this wire. */
+static void test_openrouter_chat_without_session_id(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, openrouter_chat_server_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
+                          -1, -1, NULL, capture_delta, NULL, &cap };
+    NmChatResult r = p->chat(p, &req, base, "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(last_request, "session_id") == NULL);
+}
+
 static void test_openrouter_models_fetch(void)
 {
     int port;
@@ -2284,6 +2339,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_non_anthropic_chat_sends_no_marker);
     RUN_TEST(test_openrouter_prompt_cache_opt_out);
     RUN_TEST(test_openrouter_prompt_cache_ttl_1h);
+    RUN_TEST(test_openrouter_chat_carries_session_id);
+    RUN_TEST(test_openrouter_chat_without_session_id);
     RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
     RUN_TEST(test_opencode_chat_carries_session_header);

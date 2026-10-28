@@ -205,6 +205,13 @@ static void openrouter_chat_endpoint(const NmProvider *p,
      * the wire for nothing. */
     if (openrouter_model_is_anthropic(req->model))
         ep->cache_control = openrouter_prompt_cache();
+    /* The conversation id rides as OpenRouter's body `session_id`
+     * (§10.1, §10.6): sticky upstream routing from the FIRST request
+     * — cache behavior is upstream-specific (§10.3), so one upstream
+     * per conversation is one temperament per conversation — plus the
+     * Logs view's session grouping. Borrowed; the agent's id outlives
+     * the compose call. Not part of the cache key (§10.1). */
+    ep->session_id = req->conversation_id;
 }
 
 /* Does the string array at `arr` carry `want`? The row's one
