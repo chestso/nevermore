@@ -138,7 +138,10 @@ static void test_defaults_without_files(void)
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_MODEL));
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_DEFAULT);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 25);
-    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_OFF);
+    /* The two echo knobs default to `all`: the copies ride back unless
+     * a layer says otherwise. */
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_config_signature_echo_mode(c), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     ASSERT_EQ(nm_config_user_present(c), 0);
     nm_config_free(c);
@@ -386,13 +389,13 @@ static void test_reasoning_mode_vocabulary(void)
     nm_config_free(c);
     test_unsetenv("NEVERMORE_REASONING_ECHO");
 
-    /* No config at all: the mode is off, never a stale value. */
-    ASSERT_EQ(nm_config_reasoning_echo_mode(NULL), NM_REASONING_ECHO_OFF);
+    /* No config at all: the built-in default, never a stale value. */
+    ASSERT_EQ(nm_config_reasoning_echo_mode(NULL), NM_REASONING_ECHO_ALL);
 }
 
 /* The `signature_echo` key: the SAME value space as `reasoning_echo`
  * (one vocabulary, one canon), applied to the round's
- * reasoning_details array. The built-in default is off, and the
+ * reasoning_details array. The built-in default is `all`, and the
  * resolver reads the winning layer (file < env < runtime). */
 static void test_signature_echo_key(void)
 {
@@ -409,10 +412,10 @@ static void test_signature_echo_key(void)
     test_unsetenv("NEVERMORE_SIGNATURE_ECHO");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    /* The built-in default: off, and nothing has to be set for it. */
+    /* The built-in default: `all`, and nothing has to be set for it. */
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_SIGNATURE_ECHO));
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_SIGNATURE_ECHO), NM_CFG_DEFAULT);
-    ASSERT_EQ(nm_config_signature_echo_mode(c), NM_REASONING_ECHO_OFF);
+    ASSERT_EQ(nm_config_signature_echo_mode(c), NM_REASONING_ECHO_ALL);
 
     /* The user file: normalized on read. */
     write_file_at(g_user, "signature_echo = TOOL-CALLS\n");
@@ -441,8 +444,8 @@ static void test_signature_echo_key(void)
     nm_config_free(c);
     test_unsetenv("NEVERMORE_SIGNATURE_ECHO");
 
-    /* No config at all: off, never a stale value. */
-    ASSERT_EQ(nm_config_signature_echo_mode(NULL), NM_REASONING_ECHO_OFF);
+    /* No config at all: the built-in default, never a stale value. */
+    ASSERT_EQ(nm_config_signature_echo_mode(NULL), NM_REASONING_ECHO_ALL);
 }
 
 /* The `void_retries` value space: one decimal 0-9, where `0` is a real
@@ -1105,7 +1108,9 @@ static void test_defaults_and_resolve(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     NmCfgSource s = NM_CFG_CLI;
-    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, &s), "off");
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, &s), "all");
+    ASSERT_EQ(s, NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SIGNATURE_ECHO, &s), "all");
     ASSERT_EQ(s, NM_CFG_DEFAULT);
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_FAMILY_SKIP, &s), "off");
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_SKIP_FAMILIES, &s), "none");

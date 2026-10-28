@@ -4375,16 +4375,19 @@ static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc,
     return harness_new("ollama:local", "test-model", base);
 }
 
-/* The provider hears no reasoning by default: the trace is received,
- * printed (dimmed, ahead of the answer) and kept in the session, but
- * round 2's request carries the assistant tool-call message WITHOUT
- * reasoning_content. */
-static void test_reasoning_not_echoed_by_default(void)
+/* The provider hears no reasoning when the user says so: the trace is
+ * received, printed (dimmed, ahead of the answer) and kept in the
+ * session, but round 2's request carries the assistant tool-call
+ * message WITHOUT reasoning_content. */
+static void test_reasoning_not_echoed_when_off(void)
 {
+    scratch_store_begin();
     struct ServerScript sc;
     pthread_t th;
     AppHarness *h = run_reasoning_tool_turn(&sc, &th);
     ASSERT_NOT_NULL(h);
+
+    store_set(NM_CFG_KEY_REASONING_ECHO, "off");
 
     harness_type(h, "read it");
     harness_enter(h);
@@ -4406,21 +4409,21 @@ static void test_reasoning_not_echoed_by_default(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE_PATH);
+    scratch_store_end();
 }
 
-/* Opted in, the same turn re-sends the trace as reasoning_content on
- * the request carrying the turn. `all` is the widest mode (every
- * assistant message with a trace); `tools` would cover this request
+/* The DEFAULT sends the trace back: the same turn re-sends it as
+ * reasoning_content on the request carrying the turn, with no key set
+ * anywhere. `all` is the widest mode (every assistant message with a
+ * trace) and the built-in default; `tools` would cover this request
  * too, since the assistant message carries the tool calls. */
-static void test_reasoning_echo_opt_in(void)
+static void test_reasoning_echoed_by_default(void)
 {
     scratch_store_begin();
     struct ServerScript sc;
     pthread_t th;
     AppHarness *h = run_reasoning_tool_turn(&sc, &th);
     ASSERT_NOT_NULL(h);
-
-    store_set(NM_CFG_KEY_REASONING_ECHO, "all");
 
     harness_type(h, "read it");
     harness_enter(h);
@@ -4506,15 +4509,18 @@ static void test_config_signature_echo_row_and_freeze(void)
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_NOT_NULL(strstr(out, "signature_echo"));
-    ASSERT_NOT_NULL(strstr(out, "signature_echo       off"));
+    ASSERT_NOT_NULL(strstr(out, "signature_echo       all"));
 
     store_set(NM_CFG_KEY_SIGNATURE_ECHO, "tools");
+    /* The trace echo is off here: this test is about the signature's
+     * row and its freeze. */
+    store_set(NM_CFG_KEY_REASONING_ECHO, "off");
     harness_type(h, "read it");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     /* Round 1's array rode back (the tool message carries the array, and
-     * nothing else: the trace echo stayed at its own default). */
+     * nothing else: the trace echo was turned off). */
     ASSERT_TRUE(strstr(g_request, "reasoning_details") != NULL);
     ASSERT_TRUE(strstr(g_request, "reasoning_content") == NULL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(nm_chat_app_agent(h->app)), 1);
@@ -9809,8 +9815,8 @@ int main(void)
     RUN_TEST(test_void_round_warning_is_a_red_system_error);
     RUN_TEST(test_notice_sites_each_close_their_block);
     RUN_TEST(test_tool_round_prints_panels);
-    RUN_TEST(test_reasoning_not_echoed_by_default);
-    RUN_TEST(test_reasoning_echo_opt_in);
+    RUN_TEST(test_reasoning_not_echoed_when_off);
+    RUN_TEST(test_reasoning_echoed_by_default);
     RUN_TEST(test_parallel_tool_calls_pair_plan_with_result);
     RUN_TEST(test_open_json_fence_before_tool_call_commits);
 #ifndef _WIN32

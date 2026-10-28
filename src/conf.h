@@ -103,16 +103,16 @@ extern "C" {
 /* Reasoning echo-back: which assistant messages re-send their thinking
  * trace to the provider as `reasoning_content`. Three modes:
  *
- *   `off`   (default) — none. The trace is still received, displayed
- *                       and kept in the session; it just never rides
- *                       back.
+ *   `off`   — none. The trace is still received, displayed and kept in
+ *              the session; it just never rides back.
  *   `tools` — every assistant message carrying `tool_calls`: the
  *             round's trace, or an empty string when the round streamed
  *             none. This is the mode DeepSeek's thinking-mode replay
  *             check demands (docs/OPENCODE-API.md §3): the upstream
  *             400s a tool-call turn replayed without the FIELD, and
  *             `""` satisfies it as well as a real trace.
- *   `all` — that, plus every other assistant message that has a trace.
+ *   `all`   (default) — that, plus every other assistant message that
+ *                       has a trace.
  *
  * The old bool spelling still parses: `on`/`true`/`1`/`yes` mean `all`,
  * `off`/`false`/`0`/`no` mean `off`. A mode is normalized on write, so
@@ -141,12 +141,12 @@ extern "C" {
  * three modes, same spellings, same canon (nm_config_reasoning_echo_canon),
  * one vocabulary:
  *
- *   `off` (default) — none. Nevermore still RECEIVES the array and
- *                     keeps it on the session message; it just never
- *                     rides back.
+ *   `off`   — none. Nevermore still RECEIVES the array and keeps it on
+ *              the session message; it just never rides back.
  *   `tools` — every assistant message carrying `tool_calls` that HAS an
  *             array.
- *   `all` — that, plus every other assistant message that has one.
+ *   `all`   (default) — that, plus every other assistant message that
+ *                       has one.
  *
  * STRICT ECHO-BACK: the field only ever carries elements the model
  * itself sent in this conversation — never synthesized, never an empty
@@ -161,7 +161,7 @@ extern "C" {
  * function-calling round and the upstream documents it as required back
  * with the tool result (docs/OPENROUTER-API.md §3.2). Every other
  * provider declares nothing, so with no explicit setting this key
- * resolves to the built-in `off` there.
+ * resolves to the built-in `all` there.
  *
  * Like the trace echo, the mode FREEZES once a request has actually
  * carried the field (its own latch: a prefix that gains or loses either
@@ -668,15 +668,15 @@ int nm_config_reasoning_echo_canon(const char *value, char *out, size_t cap);
 /* A mode's canonical spelling, for messages and /config. */
 const char *nm_config_reasoning_echo_name(NmReasoningEcho mode);
 /* The `reasoning_echo` key resolved and parsed: the winning layer's value as
- * a mode. NM_REASONING_ECHO_OFF when the key is unset, and for a NULL
- * config. This is what the agent reads at the point of use (before its
- * own freeze latches — see agent.h). */
+ * a mode. NM_REASONING_ECHO_ALL when no layer sets the key (the
+ * built-in default) and for a NULL config. This is what the agent reads
+ * at the point of use (before its own freeze latches — see agent.h). */
 NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c);
 
 /* The `signature_echo` key resolved and parsed: the same value space as
  * `reasoning_echo` (one vocabulary), applied to the round's
- * reasoning_details array. NM_REASONING_ECHO_OFF when the key is unset,
- * and for a NULL config — the built-in default. The provider's own
+ * reasoning_details array. NM_REASONING_ECHO_ALL when no layer sets the
+ * key (the built-in default) and for a NULL config. The provider's own
  * declaration is layered over it by the AGENT (nm_agent_signature_echo
  * takes NmProvider.signature_echo as the default and this key as the
  * override), so this function answers only "what does the store say".

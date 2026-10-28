@@ -249,9 +249,11 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * a replayed tool-call turn that omits the field declares it
  * (opencode:go: NM_REASONING_ECHO_TOOLS), and that declaration is the
  * default — the requirement rides the wire, so the user need not know
- * it. The store's `reasoning_echo` key is the override: when any layer
- * above the built-in default sets it, that wins (so an explicit `off`
- * on opencode:go is honoured).
+ * it. A provider that declares nothing (the zero value) leaves the
+ * key's own built-in default in force: `all`, so the copies ride back
+ * unless the user says otherwise. The store's `reasoning_echo` key is
+ * the override: when any layer above the built-in default sets it, that
+ * wins (so an explicit `off` on opencode:go is honoured).
  *
  * FROZEN ONCE SENT. The mode may change freely while no request has
  * carried a trace yet (there is nothing on the wire to invalidate).
@@ -301,9 +303,9 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a);
  * models mint a thought signature on every function-calling round and
  * the upstream documents the signature as required back WITH the tool
  * result (docs/OPENROUTER-API.md §3.2). Every other provider declares
- * nothing (the zero value), so on them this key is entirely the user's.
- * An explicit setting — any layer above the built-in default — always
- * wins, so `off` on openrouter is honoured.
+ * nothing (the zero value), so on them the key's own built-in default
+ * is in force: `all`. An explicit setting — any layer above the
+ * built-in default — always wins, so `off` on openrouter is honoured.
  *
  * STRICT ECHO-BACK. Unlike the trace echo, the field is attached ONLY
  * to a message that actually has an array — the round's own elements,

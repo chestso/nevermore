@@ -438,7 +438,8 @@ struct NmProvider
     /* Does this provider's WIRE need the reasoning trace echoed back
      * on replayed assistant messages (an NmReasoningEcho from
      * conf.h; the zero value NM_REASONING_ECHO_OFF = "no
-     * opinion", so a provider that says nothing is unchanged)? A
+     * opinion", so a provider that says nothing leaves the key's own
+     * built-in default — `all` — in force)? A
      * provider whose upstream refuses a replayed tool-call turn that
      * omits `reasoning_content` declares NM_REASONING_ECHO_TOOLS
      * here, so the requirement rides the wire instead of the user
@@ -465,7 +466,8 @@ struct NmProvider
      * upstream documents the signature as required back with the tool
      * result (docs/OPENROUTER-API.md §3.2: Google's own
      * `missing thought_signature` / 400 INVALID_ARGUMENT rule) — while
-     * every other onboarded provider declares nothing, and a model that
+     * every other onboarded provider declares nothing (the key's own
+     * built-in default, `all`, then applies), and a model that
      * never sends a `reasoning_details` element never receives the
      * field whatever this says (the echo is STRICT: nevermore replays
      * only elements the model itself sent). */

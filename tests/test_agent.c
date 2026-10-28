@@ -2112,10 +2112,9 @@ static void test_agent_reasoning_collected_and_echoed(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    /* Opt in: the echo is OFF unless asked for (see
-     * test_agent_reasoning_not_echoed_by_default). The echo mode is
-     * the store's `reasoning` key now; `all` is the widest mode (the
-     * pre-granularity "on"). */
+    /* The echo mode is the store's `reasoning_echo` key; `all` is the
+     * widest mode (the pre-granularity "on") and the built-in default
+     * — set here so the test does not lean on the default. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
@@ -2147,11 +2146,11 @@ static void test_agent_reasoning_collected_and_echoed(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
-/* The echo is OFF by default: the trace is still received and
- * displayed (the reasoning channel + the session's copy), it just
+/* The echo is OFF when the user says so: the trace is still received
+ * and displayed (the reasoning channel + the session's copy), it just
  * never rides back to the provider. Same scripted turn as the test
- * above, minus the opt-in. */
-static void test_agent_reasoning_not_echoed_by_default(void)
+ * above, with the key turned off. */
+static void test_agent_reasoning_not_echoed_when_off(void)
 {
     reset_capture();
     write_fixture();
@@ -2189,7 +2188,9 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
-    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF); /* default */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
+              0);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
     int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
@@ -2210,6 +2211,76 @@ static void test_agent_reasoning_not_echoed_by_default(void)
     ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
     ASSERT_TRUE(strstr(g_requests[1], "let me think") == NULL);
     ASSERT_TRUE(strstr(g_requests[1], "about the edit") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* The DEFAULT is `all`: with no key set anywhere the trace rides back,
+ * unprompted — the copy is what the provider's own wire wants on a
+ * replayed round, and the key is there to turn it off. Same scripted
+ * turn as the test above, with nothing set. */
+static void test_agent_reasoning_echoed_by_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"let me think \"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"about the edit\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_r\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* No key set anywhere: the built-in default is `all`. */
+    ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_REASONING_ECHO),
+              NM_CFG_DEFAULT);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    /* The tool-call message goes back with the round's trace. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "let me think about the edit") != NULL);
+    /* And the request that carried it froze the mode. */
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -2647,8 +2718,8 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
 
 /* Under `tools`, a tool-call round's array rides the SAME message that
  * carries its tool_calls — the thought signature goes back WITH the
- * tool result, which is the whole point. The trace echo stays off (the
- * two knobs are independent). */
+ * tool result, which is the whole point. The trace echo is turned off
+ * here (the two knobs are independent). */
 static void test_agent_signature_echoed_under_tools(void)
 {
     reset_capture();
@@ -2698,6 +2769,10 @@ static void test_agent_signature_echoed_under_tools(void)
 
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
               0);
+    /* The trace echo is off here: the two knobs are independent, and
+     * this test is about the signature's scope. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
+              0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
     ASSERT_EQ(nm_agent_turn(agent, "read it twice", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -2724,11 +2799,12 @@ static void test_agent_signature_echoed_under_tools(void)
     close(sc.fd);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
-/* The built-in default is off: the array is received and kept, but no
- * request carries it, and nothing freezes. */
-static void test_agent_signature_not_echoed_by_default(void)
+/* The echo is OFF when the user says so: the array is received and
+ * kept, but no request carries it, and nothing freezes. */
+static void test_agent_signature_not_echoed_when_off(void)
 {
     reset_capture();
     write_fixture();
@@ -2766,6 +2842,8 @@ static void test_agent_signature_not_echoed_by_default(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
+              0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_OFF);
     ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -2786,6 +2864,69 @@ static void test_agent_signature_not_echoed_by_default(void)
     }
     ASSERT_NOT_NULL(call_msg);
     ASSERT_NOT_NULL(call_msg->reasoning_details_json);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+}
+
+/* The DEFAULT is `all`: with no key set anywhere the array rides back
+ * with the tool result — the strict echo-back of what the model itself
+ * sent. Same scripted turn as the test above, with nothing set. */
+static void test_agent_signature_echoed_by_default(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-one\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_d1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    /* No key set anywhere: the built-in default is `all`. */
+    ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO),
+              NM_CFG_DEFAULT);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
+    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    /* The tool message goes back with the round's own array — the
+     * elements the model sent, byte for byte. */
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "sig-one") != NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -2914,6 +3055,10 @@ static void test_agent_signature_freezes_once_sent(void)
 
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "all"),
               0);
+    /* The trace echo is off here: the trace latch is its own, and this
+     * test is about the signature's. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
+              0);
     ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
     ASSERT_TRUE(strstr(g_requests[1], "sig-one") != NULL);
@@ -2937,6 +3082,7 @@ static void test_agent_signature_freezes_once_sent(void)
     close(sc.fd);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
 /* The prefix-cache guarantee, pinned: what a replayed round looks like on
@@ -3144,6 +3290,10 @@ static void test_agent_signature_echo_provider_default(void)
               NM_CFG_DEFAULT);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
+    /* The trace echo is off here: this provider declares nothing for
+     * the trace, and the test is about the signature's declaration. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
+              0);
 
     ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
@@ -3163,6 +3313,7 @@ static void test_agent_signature_echo_provider_default(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
 
 /* ...and the user's `off` overrides the declaration: the provider says
@@ -3226,7 +3377,7 @@ static void test_agent_signature_echo_user_overrides_provider(void)
  * blob) is KEPT on the session's assistant message, byte for byte: the
  * round's elements concatenated in arrival order, closed into one
  * array. (Whether it rides back is the signature_echo knob's call —
- * off by default, and pinned by its own tests below.)
+ * off here, so the wire stays clean; its own tests pin the default.)
  */
 static void test_agent_reasoning_details_kept_on_the_tool_message(void)
 {
@@ -3270,6 +3421,10 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
+    /* The echo is off here: this test is about what the session KEEPS,
+     * and the wire stays clean (replay has its own pins below). */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
+              0);
     ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all read");
@@ -3292,8 +3447,8 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
     /* The trace text still rides its own field. */
     ASSERT_STR_EQ(call_msg->reasoning, "thinking");
 
-    /* The default is off: no request carries it (replay has its own
-     * pins in the signature-echo tests below). */
+    /* The echo is off: no request carries it (replay has its own pins
+     * in the signature-echo tests below). */
     ASSERT_EQ(g_n_requests, 2);
     for (int i = 0; i < g_n_requests; i++)
         ASSERT_TRUE(strstr(g_requests[i], "reasoning_details") == NULL);
@@ -3303,6 +3458,7 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
     pthread_join(th, NULL);
     close(sc.fd);
     remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
 
 static void test_agent_cancel_then_next_turn_works(void)
@@ -7501,7 +7657,8 @@ int main(void)
     RUN_TEST(test_agent_stream_stall_times_out);
     RUN_TEST(test_agent_next_timeout_ms_reports_tool_deadline);
     RUN_TEST(test_agent_reasoning_collected_and_echoed);
-    RUN_TEST(test_agent_reasoning_not_echoed_by_default);
+    RUN_TEST(test_agent_reasoning_not_echoed_when_off);
+    RUN_TEST(test_agent_reasoning_echoed_by_default);
     RUN_TEST(test_agent_reasoning_echo_provider_default);
     RUN_TEST(test_agent_reasoning_echo_user_overrides_provider);
     RUN_TEST(test_agent_reasoning_echo_tools_scope);
@@ -7511,7 +7668,8 @@ int main(void)
     RUN_TEST(test_agent_signature_echo_provider_default);
     RUN_TEST(test_agent_signature_echo_user_overrides_provider);
     RUN_TEST(test_agent_signature_echoed_under_tools);
-    RUN_TEST(test_agent_signature_not_echoed_by_default);
+    RUN_TEST(test_agent_signature_not_echoed_when_off);
+    RUN_TEST(test_agent_signature_echoed_by_default);
     RUN_TEST(test_agent_signature_tools_scope);
     RUN_TEST(test_agent_signature_freezes_once_sent);
     RUN_TEST(test_agent_signature_replay_is_byte_stable);

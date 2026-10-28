@@ -129,8 +129,11 @@ static const struct
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
     { NM_CFG_KEY_VOID_RETRIES, "NEVERMORE_VOID_RETRIES",
       NM_STR(NM_AGENT_DEFAULT_VOID_RETRIES) },
-    { NM_CFG_KEY_REASONING_ECHO, "NEVERMORE_REASONING_ECHO", "off" },
-    { NM_CFG_KEY_SIGNATURE_ECHO, "NEVERMORE_SIGNATURE_ECHO", "off" },
+    /* The two echo knobs default to `all`: the copies ride back unless
+     * the user says otherwise (the provider's own declaration still
+     * fills the default where it has one — see agent.c). */
+    { NM_CFG_KEY_REASONING_ECHO, "NEVERMORE_REASONING_ECHO", "all" },
+    { NM_CFG_KEY_SIGNATURE_ECHO, "NEVERMORE_SIGNATURE_ECHO", "all" },
     { NM_CFG_KEY_TIMEOUT, "NEVERMORE_TIMEOUT_MS",
       NM_STR(NM_AGENT_DEFAULT_TIMEOUT_MS) },
     { NM_CFG_KEY_CONNECT_TIMEOUT, "NEVERMORE_CONNECT_TIMEOUT_MS",
@@ -727,8 +730,10 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c)
     const char *v =
         c ? nm_config_resolve(c, NM_CFG_KEY_REASONING_ECHO, NULL) : NULL;
     char canon[16];
+    /* Nothing resolved (no store at all): the key's built-in default,
+     * `all` — the same answer the store gives when no layer sets it. */
     if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
-        return NM_REASONING_ECHO_OFF;
+        return NM_REASONING_ECHO_ALL;
     return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
            : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
                                        : NM_REASONING_ECHO_OFF;
@@ -740,7 +745,7 @@ NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c)
         c ? nm_config_resolve(c, NM_CFG_KEY_SIGNATURE_ECHO, NULL) : NULL;
     char canon[16];
     if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
-        return NM_REASONING_ECHO_OFF;
+        return NM_REASONING_ECHO_ALL;
     return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
            : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
                                        : NM_REASONING_ECHO_OFF;

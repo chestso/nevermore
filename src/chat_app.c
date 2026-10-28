@@ -3116,7 +3116,7 @@ static void print_config(NmChatApp *app)
                 /* The store is at its built-in default, so the
                  * provider's own wire requirement (opencode:go's
                  * deepseek endpoint) is what the next request uses —
-                 * not the `off` the key would report. */
+                 * not the `all` the key would report. */
                 v = nm_config_reasoning_echo_name(eff);
                 layer = "provider default";
             }
