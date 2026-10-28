@@ -783,12 +783,24 @@ save [path]` writes session.c's markdown). Const on purpose: the
   whether or not nudges do — and every context file body is sanitized
   on the way in, so only the harness writes a tag anywhere in the
   prompt. **The image-transport clause is its unconditional sibling**:
-  an attached image arrives as an image content part inside the user's
-  message, never as a path to go read, which describes the request
-  nevermore builds and so is true for a text-only model too (the
-  provider strips the part; the `image-not-seen` reminder says why it
-  sees nothing). The capability half — "You can see images" — is the
-  catalog's answer and is resolved separately (see the catalog section).
+  an image arrives as an image content part inside a message, never as
+  text bytes to decode — one the user attaches rides their message, one
+  on disk is attached by reading it with `read_file` — which describes
+  the request nevermore builds and so is true for a text-only model too
+  (the provider strips the part; the `image-not-seen` reminder says why
+  it sees nothing). **Both transports are named, and the file half is
+  the one that is easy to lose**: a clause that spoke only of the pasted
+  image ("never as a file path") left a model holding an image PATH with
+  nothing to read as "look at it", and its "never hunt for a tool" line
+  argued against the one tool that works (gemini-3.8-flash answered "I
+  cannot see images" over a PNG it was handed). The capability half —
+  "You can see images", the two transports, and the standing "read it
+  and look" for a path or a screenshot — is the catalog's answer and is
+  resolved separately (see the catalog section). The same fact is said
+  a second time, in the model's own voice, in `read_file`'s description
+  (`tools_file.c`): that is the text a model reads while CHOOSING a
+  tool, and it carries the imperative ("a path the user gives you ...
+  is worth reading here") that the prompt states only once.
 - **Skills** (`src/skills.{c,h}`) — Agent Skills discovery, in the
   OPEN format at the OPEN locations: a skill is a directory holding a
   `SKILL.md` (YAML frontmatter `name` + `description`, markdown body,

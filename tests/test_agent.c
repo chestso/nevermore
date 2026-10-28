@@ -4904,7 +4904,7 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
 
     /* The harness clause is there (it is unconditional); the capability
      * is not claimed. */
-    ASSERT_EQ(count_substr(g_requests[0], "An image the user attaches"), 1);
+    ASSERT_EQ(count_substr(g_requests[0], "An image reaches you"), 1);
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 0);
 
     nm_agent_free(agent);
@@ -4962,7 +4962,7 @@ static void test_agent_vision_clause_follows_a_model_switch(void)
     nm_agent_set_model(agent, "stub-blind");
     ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
     ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
-    ASSERT_EQ(count_substr(g_requests[1], "An image the user attaches"), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "An image reaches you"), 1);
 
     /* And back: the original prompt, byte for byte. */
     nm_agent_set_model(agent, "stub-see");
@@ -5082,7 +5082,7 @@ static void test_agent_vision_clause_drops_for_an_unknown_model(void)
     ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
-    ASSERT_EQ(count_substr(g_requests[1], "An image the user attaches"), 1);
+    ASSERT_EQ(count_substr(g_requests[1], "An image reaches you"), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);

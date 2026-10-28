@@ -1175,7 +1175,14 @@ static void test_read_file_description_names_the_attachable_set(void)
  * file" opening reads as a text tool — the 2026-10-11 wire spent 116
  * requests on `magick ... txt:` pixel dumps and ASCII art with
  * read_file-on-a-PNG never once tried. The pin is the PROPERTY, not the
- * prose: the image case is stated before the text case. */
+ * prose: the image case is stated before the text case.
+ *
+ * The capability is stated as the model's own act ("you see it"), which
+ * is the second half of the same property: the 2026-10-28 wire had
+ * gemini-3.8-flash read a PNG here and answer "I cannot see images"
+ * with the picture in the next request, so a description that only says
+ * the image is "attached to the conversation" is not enough — the
+ * attachment has to be said to reach the model. */
 static void test_read_file_description_leads_with_the_image_case(void)
 {
     const char *desc = nm_tool_read_file.description;
@@ -1185,6 +1192,7 @@ static void test_read_file_description_leads_with_the_image_case(void)
     ASSERT_NOT_NULL(img);
     ASSERT_NOT_NULL(text);
     ASSERT_TRUE(img < text);
+    ASSERT_TRUE(strstr(desc, "shown to you") != NULL);
 }
 
 /* A text file carries no image (the common case: every textual tool). */

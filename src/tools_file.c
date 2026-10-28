@@ -2203,14 +2203,29 @@ const NmTool nm_tool_read_file = {
     /* The image case comes FIRST: the model reads this list to find out
      * how to look at something, and "Read a UTF-8 text file" reads as a
      * text tool (the 2026-10-11 wire: 116 requests of pixel archaeology
-     * with read_file on a PNG never once tried). */
-    .description = "Read a file. An image (PNG/JPEG/GIF) is attached to "
-                   "the conversation — never returned as bytes — so this is "
-                   "how you look at a rendering; another image container "
-                   "(WebP, BMP, ...) is named but not attached, so convert "
-                   "it to PNG/JPEG/GIF first. A UTF-8 text file is returned "
-                   "byte-exact, optionally line-numbered and windowed "
-                   "(offset/limit)",
+     * with read_file on a PNG never once tried).
+     *
+     * It is also stated as the model's OWN act, the way the harnesses
+     * that get this right say it ("This tool allows Claude Code to read
+     * images ... presented visually as Claude Code is a multimodal
+     * LLM"; Codex's "View a local image file ... when visual inspection
+     * is needed"; Gemini CLI's "Handles text, images (PNG, JPG, ...)").
+     * "Attached to the conversation" alone left the model to work out
+     * that the attachment reaches IT: gemini-3.8-flash read a PNG here
+     * and answered "I cannot see images" (wire, 2026-10-28) with the
+     * picture in the next request. The imperative is the same
+     * harnesses' — a path the user hands over is read, not described —
+     * and is stated here as well as in the system prompt's gated twin
+     * because THIS is the text a model reads while choosing a tool. */
+    .description = "Read a file. This reads images too: a PNG/JPEG/GIF is "
+                   "attached to the conversation and shown to you as a "
+                   "picture — you see it, it is never returned as bytes — "
+                   "so a path the user gives you (a screenshot, a diagram, "
+                   "a rendering) is worth reading here. Another image "
+                   "container (WebP, BMP, ...) is named but not attached, "
+                   "so convert it to PNG/JPEG/GIF first. A UTF-8 text file "
+                   "is returned byte-exact, optionally line-numbered and "
+                   "windowed (offset/limit)",
     .emoji = "📖",
     .params_schema = read_file_schema,
     .execute = read_file_exec,

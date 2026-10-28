@@ -70,11 +70,12 @@ typedef struct NmContext NmContext;
  * assembled prompt, so the model never has to infer its own vision
  * from the transcript. The reminder clause (reminder.h: how to read
  * a `&lt;system-reminder>` tag, and what an escaped one means) and the
- * image-transport clause (how an attached image arrives, never a
- * capability claim) are UNCONDITIONAL — the tag-escape boundary and
- * the image transport both run whether or not the harness injects
- * nudges. Never fails hard — an unreadable or absent AGENTS.md yields
- * the base prompt alone. Returns NULL only on allocation failure. */
+ * image-transport clause (how an image arrives — pasted inside the
+ * user's message, or attached by read_file — never a capability claim)
+ * are UNCONDITIONAL — the tag-escape boundary and the image transport
+ * both run whether or not the harness injects nudges. Never fails
+ * hard — an unreadable or absent AGENTS.md yields the base prompt
+ * alone. Returns NULL only on allocation failure. */
 NmContext *nm_context_new(const char *dir, int vision);
 void nm_context_free(NmContext *c);
 

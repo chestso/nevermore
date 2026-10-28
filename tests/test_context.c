@@ -443,11 +443,14 @@ static void test_null_dir_uses_process_cwd(void)
     nm_context_set_global_dir(NULL); /* restore the default chain */
 }
 
-/* The image-transport clause (how an attached image arrives) is
+/* The image-transport clause (how an image arrives) is
  * UNCONDITIONAL, like the reminder clause: it describes the request
  * nevermore builds, not the model's capability — so a text-only (0) or
  * unknown (-1) model gets it too, and it never carries the capability
- * claim (that stays the catalog's answer). */
+ * claim (that stays the catalog's answer). BOTH transports are named
+ * once: the pasted image and the image file read with read_file — a
+ * clause that named only the paste left an image PATH with no way to
+ * be looked at ("never as a file path" read as "not a path tool"). */
 static void test_image_clause_is_unconditional(void)
 {
     char proj[600];
@@ -457,8 +460,9 @@ static void test_image_clause_is_unconditional(void)
         NmContext *c = nm_context_new(proj, vision);
         ASSERT_NOT_NULL(c);
         const char *sp = nm_context_system_prompt(c);
-        ASSERT_EQ(count_substr(sp, "An image the user attaches"), 1);
-        ASSERT_EQ(count_substr(sp, "never hunt for a tool"), 1);
+        ASSERT_EQ(count_substr(sp, "An image reaches you"), 1);
+        ASSERT_EQ(count_substr(sp, "attached by reading it with read_file"), 1);
+        ASSERT_EQ(count_substr(sp, "Never hunt for a separate tool"), 1);
         ASSERT_EQ(count_substr(sp, "You can see images"), vision == 1 ? 1 : 0);
         nm_context_free(c);
     }
@@ -483,7 +487,7 @@ static void test_vision_clause_follows_the_identity(void)
      * then the capability clause the catalog gates. */
     const char *rem = strstr(sp + strlen(base), "system-reminder");
     ASSERT_NOT_NULL(rem);
-    const char *img = strstr(sp + strlen(base), "An image the user attaches");
+    const char *img = strstr(sp + strlen(base), "An image reaches you");
     ASSERT_NOT_NULL(img);
     const char *vis = strstr(sp + strlen(base), "\n\nYou can see images");
     ASSERT_NOT_NULL(vis);
