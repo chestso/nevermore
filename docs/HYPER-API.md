@@ -457,9 +457,9 @@ Hyper. The rule is observed on another route — OpenCode Go's `deepseek`
 endpoint 400s a tool-call round replayed without the field (probed
 2026-09-22, `docs/OPENCODE-API.md` §3), and that provider declares the
 requirement itself (`NM_REASONING_ECHO_TOOLS`). nevermore's echo is granular
-(`off` / `tools` / `all`), defaults from the provider's
-declaration, and is frozen for a chat once a request has carried a trace
-(`nm_agent_reasoning_echo`).
+(`off` / `tools` / `all`), defaults to `all` (hyper declares nothing, so
+the built-in default stands), and is frozen for a chat once a request
+has carried a trace (`nm_agent_reasoning_echo`).
 
 **Tool-call round trip:** the assistant turn with `tool_calls` and
 `finish_reason: "tool_calls"` is persisted and re-sent on the next request,

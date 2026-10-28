@@ -184,7 +184,7 @@ PRESENCE is the trigger, never the reasoning text's: elements arrive
 on chunks whose `reasoning`/`reasoning_content` is `null` (the
 trailing encrypted element), and on image rounds (§5.1).
 
-**What the `signature` IS**: Gemini's *thought signature* — the
+**What the `signature` IS**: Gemini's _thought signature_ — the
 encrypted carrier Google wants back WITH the tool result, so the model
 can continue the chain of thought behind the call it just made. Google
 documents it as mandatory for function calling (a missing one is a
@@ -221,7 +221,8 @@ KEPT, and can be REPLAYED.
   `NmProvider.signature_echo = NM_REASONING_ECHO_TOOLS`, because the
   signature rule above is a wire requirement of the models this provider
   serves, and a requirement should ride the wire rather than the user
-  having to know it. The store's `signature_echo` key is the override —
+  having to know it. (Everywhere else the built-in default is `all`.)
+  The store's `signature_echo` key is the override —
   an explicit `off` at any layer wins.
   STRICT ECHO-BACK: the field is emitted only from an array the model
   itself sent in this conversation — never synthesized, never an empty

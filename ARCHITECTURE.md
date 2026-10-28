@@ -163,7 +163,9 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   one vocabulary, one canon): `reasoning_echo` (the trace text) and
   `signature_echo` (the round's `reasoning_details` array). Each has a
   provider declaration as its DEFAULT (the wire requirement rides the
-  wire: `opencode:go` for the trace, `openrouter` for the signature),
+  wire: `opencode:go` for the trace, `openrouter` for the signature;
+  a provider with no opinion leaves the built-in default, `all`, in
+  force),
   each store key as its OVERRIDE, and each its own freeze latch in the
   agent. Every `/config` row shows what the NEXT request will send —
   the frozen mode ("frozen this chat"), else the provider's declaration
@@ -491,8 +493,8 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `nm_agent_fd` / `nm_agent_cancel`, with `nm_agent_turn` as the
   blocking pump over the same seam (one implementation, two drives).
   Tool execution is synchronous inside a step. Reasoning traces are
-  received + displayed like any other stream, but are **not echoed
-  back into the conversation by default**: `agent.c`'s `begin_round`
+  received + displayed like any other stream, and they ride back into
+  the conversation by default: `agent.c`'s `begin_round`
   attaches a trace to an outgoing message only when the echo mode says
   so (`nm_agent_reasoning_echo`), so the wire client stays a dumb
   serializer (it emits `reasoning_content` for whatever it is
@@ -502,10 +504,11 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   `tools`, the one route probed to need it, its deepseek endpoint);
   the store's `reasoning_echo` key / `$NEVERMORE_REASONING_ECHO` is
   the override and wins whenever any layer above the built-in default
-  sets it. The mode is granular — `off` (the built-in default for a
-  provider with no opinion) / `tools` (only on assistant messages
+  sets it. The mode is granular — `off` (nothing goes back) / `tools`
+  (only on assistant messages
   carrying `tool_calls`) / `all` (every assistant message with a
-  trace) — and it is **frozen once a request has
+  trace — the built-in default, so a provider with no opinion sends
+  the copies back) — and it is **frozen once a request has
   actually carried a trace** (`nm_agent_reasoning_echo_frozen`): a
   prefix that gains or loses the field is a different prefix, so a
   mid-conversation change would throw the prompt cache away (and can
@@ -548,7 +551,8 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   signature as required back with the tool result, and a
   `missing thought_signature` 400 is an unrecoverable turn), the store's
   `signature_echo` key is the override, and the built-in default behind
-  both is `off`, so a provider with no opinion never sends it. The A/B
+  both is `all` — the copies ride back unless a layer says otherwise,
+  and a provider with no opinion leaves that default in force. The A/B
   that ran (12 sessions per arm, 2026-10-27) is the reason the
   declaration is not the same as a cure: 3 of 12 sessions hit a void
   round without the echo, 0 of 12 with it, which is directionally what
@@ -595,9 +599,9 @@ shadow model > user model.P > user model`. `-m` / `$NEVERMORE_MODEL`
   **Every void round is reported to the human, whatever the knob says**
   (`nm_agent_on_warning`: red in the chat, stderr in ask mode) with the
   wire's own words verbatim — `void round: the model produced no output
-  (finish_reason: error, native: MALFORMED_FUNCTION_CALL) — retrying
-  (1/2)`, or `— retries spent (2/2), the turn ends`, or `— no retries
-  configured (void_retries = 0), the turn ends`. It is the UI's channel
+(finish_reason: error, native: MALFORMED_FUNCTION_CALL) — retrying
+(1/2)`, or `— retries spent (2/2), the turn ends`, or `— no retries
+configured (void_retries = 0), the turn ends`. It is the UI's channel
   on purpose: the model is told through the reminder note, never through
   this, and nothing about it rides the wire. When the retries are spent
   the turn ends in a REAL error carrying the same words — never in

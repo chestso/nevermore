@@ -218,8 +218,9 @@ provider         = opencode:go
 model            = glm-5.3
 rounds           = 40
 void_retries     = 2
-# The two echo knobs: unset, each follows the provider's own
-# declaration; a value here overrides it (see "the two echo knobs").
+# The two echo knobs: unset, the copies ride back (a provider's own
+# declaration narrows that where it has one); a value here overrides
+# it (see "the two echo knobs").
 # reasoning_echo = tools
 # signature_echo = tools
 timeout          = 300000
@@ -371,8 +372,8 @@ choice, and there are two independent choices for the two carriers:
 
 | carrier                                                                                              | where it arrives                                                        | knob                                           | who declares it                                |
 | ---------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------- |
-| **trace text** — `reasoning_content` / `reasoning`                                                   | reasoning stream; `### reasoning` in the transcript, dimmed in the chat | `reasoning_echo` / `$NEVERMORE_REASONING_ECHO` | `opencode:go` → `tools`; everyone else → `off` |
-| **structured carrier** — `reasoning_details[]` (Gemini's thought signature, OpenAI's encrypted blob) | its own stream channel, assembled once per round; never displayed       | `signature_echo` / `$NEVERMORE_SIGNATURE_ECHO` | `openrouter` → `tools`; everyone else → `off`  |
+| **trace text** — `reasoning_content` / `reasoning`                                                   | reasoning stream; `### reasoning` in the transcript, dimmed in the chat | `reasoning_echo` / `$NEVERMORE_REASONING_ECHO` | `opencode:go` → `tools`; everyone else → `all` |
+| **structured carrier** — `reasoning_details[]` (Gemini's thought signature, OpenAI's encrypted blob) | its own stream channel, assembled once per round; never displayed       | `signature_echo` / `$NEVERMORE_SIGNATURE_ECHO` | `openrouter` → `tools`; everyone else → `all`  |
 
 Both knobs take the same three values, with the old bool spellings
 folded in (`on`/`true`/`1` mean `all`, `off`/`false`/`0`/`no` mean
@@ -383,17 +384,19 @@ folded in (`on`/`true`/`1` mean `all`, `off`/`false`/`0`/`no` mean
 - `tools` — every assistant message that carries `tool_calls` re-sends
   its round's copy. This is where both carriers matter: the upstream
   replay check (and Google's signature rule) is about the tool result.
-- `all` — that, plus every other assistant message that has one.
+- `all` — that, plus every other assistant message that has one. **This
+  is the default**: unset, the copies ride back.
 
-**The provider decides the default; you decide otherwise.** A provider
-whose _wire_ refuses a replayed round declares the mode it needs
-(`NmProvider.reasoning_echo` / `.signature_echo`), and that declaration
-is what an unset key resolves to — the requirement rides the wire
-instead of you having to know it. Your config, the shadow file, the
-environment and the command line are all **overrides**: set the key at
-any layer and it wins, including a deliberate `off` on a provider that
-declares `tools`. The built-in default behind both is `off`, so a
-provider with no opinion never sends anything it did not ask for.
+**The default is `all`; a provider may narrow it, and you decide
+otherwise.** The knobs are how you turn the echo off, not on. A
+provider whose _wire_ refuses a replayed round declares the mode it
+needs (`NmProvider.reasoning_echo` / `.signature_echo`), and that
+declaration is what an unset key resolves to — the requirement rides
+the wire instead of you having to know it. A provider that says nothing
+leaves the built-in default (`all`) in force. Your config, the shadow
+file, the environment and the command line are all **overrides**: set
+the key at any layer and it wins, including a deliberate `off` on a
+provider that declares `tools`.
 
 What the providers declare today:
 
@@ -408,10 +411,11 @@ What the providers declare today:
   opinion — the two carriers are separate fields, and this provider
   needs the second, not the first.
 - `hyper`, `ollama:cloud`, `ollama:local`, `opencode:zen` — no opinion
-  on either; a declaration is a probe result, not a guess.
+  on either; a declaration is a probe result, not a guess. The
+  built-in default (`all`) applies there.
 
 `/config` tells you which of those is in force, not what your file
-says: a row reads `off` when nothing is set anywhere, `tools (provider
+says: a row reads `all` when nothing is set anywhere, `tools (provider
 default)` when the provider's declaration is what the next request will
 use, and `tools (frozen this chat)` once a conversation has actually
 carried the field.
@@ -442,11 +446,12 @@ in the conversation (the whole transcript rides each request). The
 signature array is the bigger one when a model sends visible reasoning
 elements — measured on a 95-file tool session, `reasoning_details` was
 8–11% of the request body at peak and grew with the transcript. It is
-cacheable, so most of it is billed as a cache read, and turning the knob
-on re-bills the tail once, at the freeze. If you are paying per token
-on a long session and nothing is failing, `off` is the cheaper answer;
-if a provider's declaration turned it on for you, that is because the
-alternative was a 400.
+cacheable, so most of it is billed as a cache read, and the first
+request that carries a copy re-bills the tail once, at the freeze. The
+knobs are therefore how you turn the echo _off_ — if you are paying per
+token on a long session and nothing is failing, `off` is the cheaper
+answer; if a provider's declaration narrows the mode for you, that is
+because the alternative was a 400.
 
 To see exactly what was sent, `NEVERMORE_DEBUG_WIRE=1` records every
 request body and stream event verbatim under

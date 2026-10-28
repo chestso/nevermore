@@ -271,13 +271,15 @@ lands on `deepseek` (roughly half the attempts during this probe).
 Echoing is validation-safe everywhere probed: the tolerant endpoints
 and this one accept the field wherever it is present, including on
 plain assistant messages, and an empty string is enough for a round
-whose trace the client did not keep. Nevermore's `opencode:go` provider
-**declares** this requirement itself (`NM_REASONING_ECHO_TOOLS`), so the
-echo is on by default there — the wire says what it needs, and the user
-does not have to know. It is granular — `off` / `tools` (only the
-messages carrying `tool_calls`: the smallest setting this route accepts)
-/ `all` (every assistant message with a trace) — and the store's
-`reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
+whose trace the client did not keep. Nevermore echoes the trace back by
+default (`all` — every assistant message with one), and its
+`opencode:go` provider **declares** this requirement itself
+(`NM_REASONING_ECHO_TOOLS`), so the smallest setting this route is
+probed to accept is what it uses there — the wire says what it needs,
+and the user does not have to know. It is granular — `off` / `tools`
+(only the messages carrying `tool_calls`: the smallest setting this
+route accepts) / `all` (every assistant message with a trace) — and the
+store's `reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
 `/config set reasoning_echo off|tools|all` overrides the provider
 default. That is the exact shape of the bug this
 section was probed for: a nevermore tool round on `opencode:go` +
@@ -505,8 +507,9 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   agent attaches the trace only when its echo mode says so
   (`reasoning_echo = tools` is exactly this, and the smallest such
   setting; `all` also covers answer rounds), so the key must be
-  `tools` or `all` for `opencode:go` DeepSeek routes — off by
-  default, and frozen for a chat once a trace has been sent;
+  `tools` or `all` for `opencode:go` DeepSeek routes — `all` is the
+  built-in default and `tools` is what this provider declares, and
+  the mode is frozen for a chat once a trace has been sent;
 - catalog `GET {base}/models`, tokenless, mapped id-only with a
   static fallback (a canned-wire test must assert the header set
   and the mapping, per the project's test conventions).
