@@ -10,8 +10,6 @@ instance. It is a first-class citizen of the
 [portty](https://github.com/chestso/portty) terminal (kitty keyboard protocol,
 sixel image attach) and degrades gracefully elsewhere.
 
-Pre-alpha. No backwards-compatibility constraint.
-
 - **Providers:** Charm Hyper, Ollama (`ollama:local`, `ollama:cloud`),
   OpenRouter, OpenCode (`opencode:go`, `opencode:zen`). The colon keeps the
   service and its endpoint tier distinct.
@@ -21,12 +19,31 @@ Pre-alpha. No backwards-compatibility constraint.
 - **Vision:** attach images to a prompt; image-output models render in the
   terminal.
 
+> **Status:** pre-alpha. There is no backwards-compatibility constraint.
+
+## Contents
+
+- [Documentation](#documentation)
+- [Install](#install)
+- [Build](#build)
+- [Usage](#usage)
+- [Configuration](#configuration)
+- [Skills](#skills)
+- [Images](#images)
+- [Session transcript](#session-transcript)
+- [Long-running commands](#long-running-commands)
+- [Smoke testing without a provider](#smoke-testing-without-a-provider)
+- [License](#license)
+
 ## Documentation
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): what each module is, why it is shaped that
   way, and the principles behind it
 - [CONTRIBUTING.md](CONTRIBUTING.md): gates, test conventions, CI, and traps
 - [docs/PORTTY.md](docs/PORTTY.md): the terminal-feature matrix
+- Provider API notes (live-probed wire behavior): [Hyper](docs/HYPER-API.md),
+  [Ollama Cloud](docs/OLLAMA-CLOUD-API.md), [OpenCode](docs/OPENCODE-API.md),
+  [OpenRouter](docs/OPENROUTER-API.md)
 - [Ask DeepWiki](https://deepwiki.com/chestso/nevermore): AI-generated wiki and
   code index
 
@@ -38,13 +55,18 @@ anywhere, and run `nevermore` / `nevermore.exe` from a terminal. There is no
 installer and no MSYS2 or Homebrew. Each ZIP carries a `README-PORTABLE.txt`
 that says where the two files nevermore writes live.
 
-**GNU/Linux:** build from the source tarball (below).
+**GNU/Linux:** build from the source tarball on the
+[releases](https://github.com/chestso/nevermore/releases) page (below).
 
 ## Build
 
+From the source tarball, `configure` is already generated. From a git checkout,
+run `./autogen.sh` first (it needs autoconf and automake).
+
 ```sh
-./autogen.sh
+./autogen.sh                         # git checkout only
 mkdir -p build && cd build
+# PKG_CONFIG_PATH: wherever boba was installed (here, under ~/.local)
 PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:$HOME/.local/lib64/pkgconfig" \
     ../configure --prefix="$HOME/.local"
 make -j$(nproc)
@@ -54,14 +76,16 @@ make install
 
 Dependencies:
 
-- **boba** (required): TUI runtime, text input, styles. A separate project, not
-  vendored. Build and install it first; `configure` finds it through pkg-config.
+- **[boba](https://chest.so/boba)** (required): TUI runtime, text input, styles.
+  A separate project, not vendored. Build and install it first; `configure`
+  finds it through pkg-config.
 - **TLS** (optional, per OS, never libcurl): Schannel on Windows, Secure
   Transport on macOS, mbedTLS (>= 2.28) or OpenSSL on Linux. `--with-tls=none`
   builds a plain-HTTP-only client, which is fine for a local Ollama daemon.
 - **stb** (image transcoding): single-file headers fetched into
-  `third_party/stb/` by the first `configure` (pinned commit, needs network,
-  never committed). By Sean Barrett, public domain.
+  `third_party/stb/` by the first `configure` of a git checkout (pinned commit,
+  needs network, never committed); the source tarball already includes them. By
+  Sean Barrett, public domain.
 
 ## Usage
 
@@ -83,7 +107,7 @@ Keys come from the environment (`HYPER_API_KEY`, `OLLAMA_API_KEY`,
 `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`) or, when the variable is unset, from
 `~/.authinfo` (override with `NEVERMORE_AUTHINFO`):
 
-```
+```text
 machine hyper.charm.land   login apikey password ...
 machine ollama.com         login apikey password ...
 machine openrouter.ai      login apikey password ...
@@ -111,7 +135,7 @@ switching to a provider with no key says so up front, before the first turn.
 - The app paints **foreground colors only**; the terminal keeps its own
   background.
 
-Slash commands:
+#### Slash commands
 
 - `/model`, `/provider`: switch model or provider (the model picker filters, see
   below)
@@ -155,6 +179,9 @@ instructions.
 
 ## Configuration
 
+`/config` shows every setting with its current value and where it came from; the
+reference below covers the same keys.
+
 Settings resolve lowest to highest:
 
 1. built-in defaults
@@ -178,7 +205,7 @@ The file format is `key = value`, one per line. `#` starts a comment line, the
 value is the rest of the line taken verbatim (no quoting, no inline comments),
 and unknown keys or bad values warn and are skipped. No secrets belong here.
 
-```
+```ini
 # ~/.config/nevermore/config
 provider = opencode:go
 model    = glm-5.3
@@ -195,10 +222,11 @@ another provider's catalog.
 - `model` (default none): model id, remembered per provider
 - `rounds` (default 25): max tool rounds in one turn; past it the turn stops
   with "too many tool rounds"
-- `void_retries` (default 2 (0-9)): how often a round that came back empty is
-  re-asked; every void round is shown in red, `0` ends the turn at the first one
-- `temperature` (default unset): 0-2; unset means the field is not sent and the
-  provider decides
+- `void_retries` (default 2, range 0-9): how often a void round (one that came
+  back with no text and no tool call) is re-asked; every void round is shown in
+  red, `0` ends the turn at the first one
+- `temperature` (default unset, range 0-2): unset means the field is not sent
+  and the provider decides
 - `max_tokens` (default unset): output cap per round; unset means not sent
 - `timeout` (default 300000 ms): stream inactivity budget; any wire byte
   (including SSE keep-alives) resets it; `off` disables
@@ -208,10 +236,11 @@ another provider's catalog.
   addresses in turn
 - `handshake_timeout` (default 10000 ms): TLS handshake budget; `off` restores
   the OS default
-- `family_skip` (default off): once one IP family burns the connect budget and
-  another answers, dial the slow family last for the session
-- `skip_families` (default `none`): the family latch `family_skip` writes at
-  runtime; inert while `family_skip` is off
+- `family_skip` (default off): once one IP family (IPv4 or IPv6) burns the
+  connect budget and the other answers, dial the slow family last for the
+  session
+- `skip_families` (default `none`): the latch `family_skip` writes at runtime to
+  remember which family to dial last; inert while `family_skip` is off
 - `searxng` (default `http://127.0.0.1:8888`): SearXNG endpoint for `web_search`
 - `searxng_enabled` (default on): set to off at runtime when the instance is
   unreachable; `/config reset searxng_enabled` re-arms it
@@ -228,8 +257,9 @@ another provider's catalog.
   `auto` goes by `COLORTERM`, and `rgb` is the escape hatch
 - `spinner_ramp` (default on): the thinking dot breathes `· • ● •`; off holds
   one `●`
-- `prism_notice` (default on): print which upstream Hyper's `prism` router
-  picked, once per routed round
+- `prism_notice` (default on): Hyper's `prism` models are a server-side router
+  that picks an upstream model per request; print which one answered, once per
+  routed round
 - `skills` (default on): skill discovery, read when a chat starts
 - `image_live` (default 1): how many requests an image rides before it becomes a
   text marker; `off` keeps it on every request
@@ -272,7 +302,7 @@ A skill is a folder holding a `SKILL.md` (YAML frontmatter with `name` and
 `description`, instructions in the body) in the open
 [Agent Skills](https://agentskills.io) format.
 
-```
+```text
 ~/.agents/skills/<name>/SKILL.md           yours, every project
 <dir>/.agents/skills/<name>/SKILL.md       the project's, from the repo root down to the cwd
 ```
@@ -314,7 +344,7 @@ images itself.
 
 ## Session transcript
 
-```
+```text
 /session              # shape: messages by role, size, images
 /session list         # every message, numbered
 /session save [path]  # markdown, default nevermore-session.md
