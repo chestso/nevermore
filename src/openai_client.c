@@ -162,6 +162,14 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
     NmJson *body = nm_json_new_object();
     NmJson *messages = nm_json_new_array();
 
+    /* The provider's own body fields FIRST (the seam's contract, see
+     * openai_client.h): every field nevermore sets below then wins over
+     * a colliding one, so a provider can add a field but never break the
+     * request's shape. The hook's provider may be NULL (a hand-built
+     * endpoint in a test) and must tolerate it. */
+    if (ep->body_extra)
+        ep->body_extra(ep->provider, body);
+
     if (req->system) {
         NmJson *m = nm_json_new_object();
         nm_json_set(m, "role", nm_json_new_string("system"));

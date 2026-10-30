@@ -188,6 +188,50 @@ static int openrouter_model_is_anthropic(const char *id)
     return strncmp(id, "~anthropic/", 11) == 0;
 }
 
+/* The provider's own request-body fields (§7.8/§7.10): the pinned
+ * `service_tier` and the `provider.max_price` ceiling. Both are
+ * top-level members (max_price nested under `provider`), neither is part
+ * of the `messages` prefix, so a mid-chat change never throws the
+ * provider's cache away. Values come from the store at the point of use
+ * — the request carries what /tier and /maxprice most recently wrote.
+ *
+ * The provider OBJECT is created here, once: a future preference (only,
+ * order, zdr, ...) must add members to the SAME object, never set a
+ * second `provider` key (nm_json_set replaces a member, it does not
+ * merge two objects). */
+static void openrouter_body_extra(const NmProvider *p, NmJson *body)
+{
+    (void)p;
+    if (!body)
+        return;
+    NmConfig *cfg = nm_config_store();
+    if (!cfg)
+        return;
+
+    const char *tier =
+        nm_config_scoped_for(cfg, NM_CFG_KEY_TIER, "openrouter", NULL);
+    if (tier && *tier)
+        nm_json_set(body, "service_tier", nm_json_new_string(tier));
+
+    const char *price =
+        nm_config_scoped_for(cfg, NM_CFG_KEY_MAX_PRICE, "openrouter", NULL);
+    if (!price || !*price)
+        return;
+    const char *comma = strchr(price, ',');
+    if (!comma)
+        return; /* the store validated it; a malformed value sends none */
+    NmJson *prefs = nm_json_new_object();
+    NmJson *ceiling = nm_json_new_object();
+    /* $/Mtokens is the wire's own unit for this field: no conversion,
+     * and the numbers are parsed once from the canonical store text —
+     * never a hand-formatted JSON string. */
+    nm_json_set(ceiling, "prompt", nm_json_new_number(strtod(price, NULL)));
+    nm_json_set(ceiling, "completion",
+                nm_json_new_number(strtod(comma + 1, NULL)));
+    nm_json_set(prefs, "max_price", ceiling);
+    nm_json_set(body, "provider", prefs);
+}
+
 /* The chat endpoint: the shared bearer shape plus the attribution
  * headers, so the blocking and the event-driven drives cannot drift
  * (they call the same builder). */
@@ -213,6 +257,9 @@ static void openrouter_chat_endpoint(const NmProvider *p,
      * Logs view's session grouping. Borrowed; the agent's id outlives
      * the compose call. Not part of the cache key (§10.1). */
     ep->session_id = req->conversation_id;
+    /* The pricing knobs (§7.8/§7.10): the service tier and the price
+     * ceiling ride the provider's own body seam. */
+    ep->body_extra = openrouter_body_extra;
 }
 
 /* Does the string array at `arr` carry `want`? The row's one

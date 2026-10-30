@@ -68,6 +68,10 @@ static void openaicompat_preset(const NmProvider *p, const char *base_url,
     memset(ep, 0, sizeof(*ep));
     ep->base_url = (base_url && *base_url) ? base_url : p->default_base_url;
     ep->user_agent = NM_USER_AGENT;
+    /* The endpoint knows the provider that built it: the body-extras hook
+     * takes it (a two-tier provider needs it), and the served-meta parse
+     * reads its name. Borrowed; the vtable outlives the endpoint. */
+    ep->provider = p;
 }
 
 NmChatResult nm_openaicompat_chat(const NmProvider *p,

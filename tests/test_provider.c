@@ -1985,6 +1985,82 @@ static void test_opencode_models_static_fallback_per_tier(void)
  * today's service list (see test_net_helpers.h). */
 TEST_OFFLINE_CATALOG_PIN_CHECK()
 
+/* The two body fields the seam carries (§7.8/§7.10): the pinned service
+ * tier (canonicalized — `fast` sends `priority`) and the `max_price`
+ * ceiling under `provider`, both read from the store at the point of
+ * use, alongside the session id that already rides. */
+static void test_openrouter_body_carries_the_pricing_knobs(void)
+{
+    NmConfig *cfg = nm_config_new();
+    ASSERT_NOT_NULL(cfg);
+    nm_config_set_store(cfg);
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+
+    /* Unset: neither member rides (the provider's own routing and its
+     * workspace's tier — the "no extras" case). */
+    NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg,
+                                           1, "conv-1", &cap);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hi there");
+    ASSERT_TRUE(strstr(last_request, "service_tier") == NULL);
+    ASSERT_TRUE(strstr(last_request, "\"provider\"") == NULL);
+    ASSERT_TRUE(strstr(last_request, "\"session_id\":\"conv-1\"") != NULL);
+
+    /* `fast` is the wire's alias: the body carries the canon. The scratch
+     * store has no shadow path, so the write answers -1 while the layer
+     * is set. */
+    nm_config_shadow_set(cfg, "tier.openrouter", "fast");
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
+                              &cap);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"priority\"") != NULL);
+    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"fast\"") == NULL);
+
+    /* max_price is $/Mtokens — the wire's own unit, no conversion. */
+    nm_config_shadow_set(cfg, "max_price.openrouter", "3,15");
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
+                              &cap);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_TRUE(strstr(last_request,
+                       "\"provider\":{\"max_price\":{\"prompt\":3,"
+                       "\"completion\":15}}") != NULL);
+    /* Both members ride the same round, and the session id still does. */
+    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"priority\"") != NULL);
+
+    nm_config_set_store(NULL);
+    nm_config_free(cfg);
+}
+
+/* A provider with no body seam sends neither field, whatever the store
+ * says for another provider: the seam is the endpoint's, not a global
+ * switch on the store. */
+static void test_hyper_round_carries_no_pricing_knobs(void)
+{
+    NmConfig *cfg = nm_config_new();
+    ASSERT_NOT_NULL(cfg);
+    nm_config_set_store(cfg);
+    nm_config_shadow_set(cfg, "tier.openrouter", "flex");
+    nm_config_shadow_set(cfg, "max_price.openrouter", "1,2");
+
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "gpt-oss-120b", &msg, 1, "you are terse", NULL, -1, -1,
+        NULL, /* conversation_id */
+        capture_delta, NULL, &cap
+    };
+    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
+                                       "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_TRUE(strstr(last_request, "service_tier") == NULL);
+    ASSERT_TRUE(strstr(last_request, "\"provider\"") == NULL);
+
+    nm_config_set_store(NULL);
+    nm_config_free(cfg);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -2000,12 +2076,18 @@ int main(int argc, char *argv[])
         fprintf(stderr, "test_provider: offline catalog pin failed\n");
         return 1;
     }
+    /* The provider-scoped value space is the provider's own data, and
+     * the real dispatcher is what main.c installs: the canned rounds
+     * then carry the canonical spelling (`fast` -> `priority`). */
+    nm_config_set_scoped_validator(nm_provider_knob_canon);
     printf("test_provider:\n");
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_knob_vocabulary);
     RUN_TEST(test_openrouter_catalog_model_grammar);
     RUN_TEST(test_openrouter_request_model_composition);
+    RUN_TEST(test_openrouter_body_carries_the_pricing_knobs);
+    RUN_TEST(test_hyper_round_carries_no_pricing_knobs);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_authinfo_machines);

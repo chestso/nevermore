@@ -103,6 +103,21 @@ typedef struct NmOpenaiEndpoint
      * docs/OPENROUTER-API.md §10.1/§10.6). NULL or "" = no field.
      * Borrowed: the value outlives the compose call. */
     const char *session_id;
+    /* THE seam for a provider's own request-body fields (OpenRouter's
+     * `service_tier` and `provider.max_price` today; ollama's
+     * `keep_alive`, a future provider's own field tomorrow). Called by
+     * the composer with the body object FIRST — before nevermore's own
+     * fields are set — so nevermore's shape always wins and a provider
+     * can never break the request. Compose values with nm_json (never a
+     * snprintf'd JSON string): an adopted built node is the same node,
+     * so a second writer merges into it rather than replacing it.
+     * NULL = the provider has no own body fields. */
+    void (*body_extra)(const NmProvider *p, NmJson *body);
+    /* The provider that built this endpoint (borrowed; it outlives the
+     * endpoint). `body_extra` needs it for a two-tier provider. NULL on
+     * a hand-built endpoint (a unit test): the hook must tolerate it.
+     * Set in openaicompat_preset, the ONE place every endpoint is born. */
+    const NmProvider *provider;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas
