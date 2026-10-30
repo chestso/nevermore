@@ -1712,6 +1712,23 @@ const char *nm_config_source_name(NmCfgSource s)
     }
 }
 
+NmCfgView nm_config_view(const char *value, NmCfgSource src)
+{
+    NmCfgView v;
+    if (value && *value) {
+        v.value = value;
+        v.layer = nm_config_source_name(src);
+        return v;
+    }
+    /* No value and no default text to blame it on: the key is unset,
+     * which is a state of its own. NM_CFG_DEFAULT would read as "a
+     * built-in default applies", and for a key whose `def` is NULL
+     * (`temperature`, `max_tokens`, an unset `model`) there is none. */
+    v.value = NM_CFG_VALUE_UNSET;
+    v.layer = NM_CFG_LAYER_UNSET;
+    return v;
+}
+
 int nm_config_shadow_count(const NmConfig *c)
 {
     return c ? c->shadow_count : 0;

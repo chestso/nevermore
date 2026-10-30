@@ -3226,6 +3226,39 @@ static int switch_provider(NmChatApp *app, const char *name)
 /* Config write-back (the shadow layer)                             */
 /* ---------------------------------------------------------------- */
 
+/* Persist one setting on the shadow layer and clear the machinery's
+ * runtime layer for it (that layer outranks the shadow, so a valid write
+ * must supersede it for the machinery to see the new value). Returns 0
+ * on success, -1 when the key or the value was refused, or the file
+ * could not be written — the caller owns the refusal's own words (a
+ * validation message, a file failure). */
+static int config_persist(NmChatApp *app, const char *key, const char *value)
+{
+    if (nm_config_shadow_set(app->cfg, key, value) != 0)
+        return -1;
+    nm_config_runtime_clear(app->cfg, key);
+    return 0;
+}
+
+/* The tail of every write report: where the change landed, and whether a
+ * higher layer (the environment, or the command line) pins this run —
+ * ONE sentence behind every command that changes a setting. `head` is
+ * the caller's own spelling of the fact ("config: rounds = 4",
+ * "model: m1"). */
+static void report_write(NmChatApp *app, const char *key, const char *head)
+{
+    NmCfgSource upper = nm_config_source(app->cfg, key);
+    if (upper == NM_CFG_ENV || upper == NM_CFG_CLI) {
+        const char *pin = upper == NM_CFG_ENV ? nm_config_env_name(key)
+                                              : "the command line";
+        sys_line(app, "%s — saved to the session shadow, but %s pins this "
+                      "run (unset it to make the choice effective)",
+                 head, pin ? pin : "a higher layer");
+    } else {
+        sys_line(app, "%s — saved to the session shadow", head);
+    }
+}
+
 /* Persist a runtime change and report it. The shadow records exactly
  * what the user typed (that is the file's whole meaning); the report
  * line then says where the change lands — and, when a higher layer
@@ -3249,20 +3282,11 @@ static void persist_and_report(NmChatApp *app, const char *key,
         snprintf(scoped, sizeof(scoped), "%s.%s", key, app->provider->name);
         write_key = scoped;
     }
-    NmCfgSource upper = nm_config_source(app->cfg, key);
-    if (nm_config_shadow_set(app->cfg, write_key, value) != 0) {
+    if (config_persist(app, write_key, value) != 0) {
         sys_line(app, "%s — not saved (shadow file unavailable)", line);
         return;
     }
-    if (upper == NM_CFG_ENV || upper == NM_CFG_CLI) {
-        const char *pin = upper == NM_CFG_ENV ? nm_config_env_name(key)
-                                              : "the command line";
-        sys_line(app, "%s — saved to the session shadow, but %s pins this "
-                      "run (unset it to make the choice effective)",
-                 line, pin ? pin : "a higher layer");
-    } else {
-        sys_line(app, "%s — saved to the session shadow", line);
-    }
+    report_write(app, key, line);
 }
 
 /* Resolve a config key the way THIS app sees it. Two families differ
@@ -3280,11 +3304,24 @@ static const char *app_config_resolve(const NmChatApp *app, const char *key,
     return nm_config_resolve(app->cfg, key, src);
 }
 
+/* One config row — the ONE spelling /config and the knob commands
+ * print: the key, the value, and the layer that dictates it. The layer
+ * is the view's own; a surface that knows better than the store (a
+ * frozen echo, an inert latch, the terminal's own answer) passes its
+ * own words. */
+static void config_row(NmChatApp *app, const char *key, NmCfgView view,
+                       const char *layer)
+{
+    sys_line(app, "  %-20s %-14s (%s)", key, view.value,
+             layer ? layer : view.layer);
+}
+
 /* /config: the store's current state. The paths first (that is the
  * question the command answers), then one row per key — the EFFECTIVE
  * value (including a machinery-written runtime latch) and the layer
- * that dictates it. `-` appears only for provider/model, which have no
- * store default (their own commands set them). */
+ * that dictates it. Every row goes through config_row over an
+ * nm_config_view, so a key with no built-in default reads `- (unset)`
+ * here exactly as it does from its own command. */
 static void print_config(NmChatApp *app)
 {
     if (!app->cfg) {
@@ -3300,7 +3337,10 @@ static void print_config(NmChatApp *app)
         const char *k = nm_config_key_at(i);
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = app_config_resolve(app, k, &src);
-        const char *layer = nm_config_source_name(src);
+        NmCfgView view = nm_config_view(v, src);
+        /* NULL = the view's own layer; a surface that knows better than
+         * the store names its own below. */
+        const char *layer = NULL;
         /* The reasoning echo can be FROZEN for this conversation: once
          * a request has carried a trace, the mode sent then holds (a
          * prefix that gains or loses the field is a different prefix —
@@ -3309,7 +3349,7 @@ static void print_config(NmChatApp *app)
         if (strcmp(k, NM_CFG_KEY_REASONING_ECHO) == 0 && app->agent) {
             NmReasoningEcho eff = nm_agent_reasoning_echo(app->agent);
             if (nm_agent_reasoning_echo_frozen(app->agent)) {
-                v = nm_config_reasoning_echo_name(eff);
+                view.value = nm_config_reasoning_echo_name(eff);
                 layer = "frozen this chat";
             }
         }
@@ -3318,7 +3358,7 @@ static void print_config(NmChatApp *app)
         if (strcmp(k, NM_CFG_KEY_SIGNATURE_ECHO) == 0 && app->agent) {
             NmReasoningEcho eff = nm_agent_signature_echo(app->agent);
             if (nm_agent_signature_echo_frozen(app->agent)) {
-                v = nm_config_reasoning_echo_name(eff);
+                view.value = nm_config_reasoning_echo_name(eff);
                 layer = "frozen this chat";
             }
         }
@@ -3340,7 +3380,7 @@ static void print_config(NmChatApp *app)
                         ? "terminal: kitty protocol"
                         : "terminal: legacy encodings";
         }
-        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-", layer);
+        config_row(app, k, view, layer);
     }
     /* The ACTIVE provider's pricing/routing knobs: the canonical place
      * for them (the value the next request will carry, `-` when unset),
@@ -3357,8 +3397,7 @@ static void print_config(NmChatApp *app)
             app_knob_key(app, base, k, sizeof(k));
             NmCfgSource src = NM_CFG_DEFAULT;
             const char *v = app_knob_value(app, base, &src);
-            sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
-                     v ? nm_config_source_name(src) : "unset");
+            config_row(app, k, nm_config_view(v, src), NULL);
         }
     }
     /* The provider-scoped keys actually set (`model.<provider>`), after
@@ -3375,8 +3414,7 @@ static void print_config(NmChatApp *app)
             continue;
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = nm_config_resolve(app->cfg, k, &src);
-        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
-                 nm_config_source_name(src));
+        config_row(app, k, nm_config_view(v, src), NULL);
     }
 }
 
@@ -3498,30 +3536,19 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
     }
     /* Validate + persist first: an invalid value must not disturb the
      * runtime layer (the machinery's value stands). */
-    if (nm_config_shadow_set(app->cfg, key, value) != 0) {
+    if (config_persist(app, key, value) != 0) {
         sys_role(app, NM_SGR_ERROR, "config: %s: invalid value '%s'",
                  key, value);
         return;
     }
-    /* The runtime layer is above the shadow, so a valid write must
-     * supersede it for the machinery to see the new value. */
-    nm_config_runtime_clear(app->cfg, key);
     /* Read back after the write: the value shown is the normalized
-     * one, and the source is the layer that actually decides it (the
-     * env/CLI pin is reported as inert, like every other write). */
-    NmCfgSource src = NM_CFG_DEFAULT;
-    const char *eff = nm_config_resolve(app->cfg, key, &src);
+     * one, and the layer that actually decides it is the one the report
+     * names (the env/CLI pin is reported as inert, like every other
+     * write). */
+    const char *eff = nm_config_resolve(app->cfg, key, NULL);
     char line[SYS_LINE_BUF];
     snprintf(line, sizeof(line), "config: %s = %s", key, eff ? eff : value);
-    if (src == NM_CFG_ENV || src == NM_CFG_CLI) {
-        const char *pin = src == NM_CFG_ENV ? nm_config_env_name(key)
-                                            : "the command line";
-        sys_line(app, "%s — saved to the session shadow, but %s pins this "
-                      "run (unset it to make the choice effective)",
-                 line, pin ? pin : "a higher layer");
-    } else {
-        sys_line(app, "%s — saved to the session shadow", line);
-    }
+    report_write(app, key, line);
     note_frozen_echo(app, key);
 }
 
@@ -3542,11 +3569,12 @@ static void knob_refuse_unknown(NmChatApp *app, const char *base)
 }
 
 /* One knob, the thin surface D12 of the routing plan asks for: with no
- * argument, print the current value and the accepted spellings; with
- * one, validate it, persist it to the shadow (the same
- * nm_config_shadow_set path /config uses) and report the resolved
- * value. The store owns the value and the layering; the command owns
- * the spelling list and the report line. */
+ * argument, print the row (config_row over an nm_config_view — the same
+ * spelling /config prints) and the accepted spellings; with one,
+ * validate it, persist it through config_persist (the same write path
+ * /config uses) and report the resolved value. The store owns the value
+ * and the layering; the command owns the spelling list and the head of
+ * its own report. */
 static void knob_command(NmChatApp *app, const char *base, const char *arg)
 {
     if (!app->provider || !app_knob_declared(app, base)) {
@@ -3560,8 +3588,7 @@ static void knob_command(NmChatApp *app, const char *base, const char *arg)
     if (!*arg) {
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = app_knob_value(app, base, &src);
-        sys_line(app, "%s: %s (%s)", key, v ? v : "-",
-                 v ? nm_config_source_name(src) : "unset");
+        config_row(app, key, nm_config_view(v, src), NULL);
         sys_line(app, "  accepted: %s", space);
         return;
     }
@@ -3570,7 +3597,7 @@ static void knob_command(NmChatApp *app, const char *base, const char *arg)
                  arg);
         return;
     }
-    if (nm_config_shadow_set(app->cfg, key, arg) != 0) {
+    if (config_persist(app, key, arg) != 0) {
         /* The ultrafast gate is a cross-key rule, so its refusal says
          * which other key it wants (D8): a bare "invalid value" would
          * send the user hunting for a spelling that does exist. */
@@ -3586,9 +3613,12 @@ static void knob_command(NmChatApp *app, const char *base, const char *arg)
                      "%s: invalid value '%s' — accepted: %s", key, arg, space);
         return;
     }
+    /* The report shows the RESOLVED value (`/tier fast` says
+     * `priority`), read back after the write. */
     const char *eff = app_knob_value(app, base, NULL);
-    sys_line(app, "%s = %s — saved to the session shadow", key,
-             eff ? eff : arg);
+    char head[SYS_LINE_BUF];
+    snprintf(head, sizeof(head), "%s = %s", key, eff ? eff : arg);
+    report_write(app, key, head);
 }
 
 /* The presets: one intent, two levers. `cheap` = `:floor` + `flex`,
@@ -3637,8 +3667,11 @@ static void preset_command(NmChatApp *app, const char *arg)
     }
     const char *r = app_knob_value(app, NM_CFG_KEY_ROUTING, NULL);
     const char *t = app_knob_value(app, NM_CFG_KEY_TIER, NULL);
-    sys_line(app, "preset %s: %s = %s, %s = %s — saved to the session shadow",
-             arg, kr, r ? r : "-", kt, t ? t : "-");
+    char head[SYS_LINE_BUF];
+    snprintf(head, sizeof(head),
+             "preset %s: %s = %s, %s = %s", arg, kr, r ? r : "-", kt,
+             t ? t : "-");
+    report_write(app, kr, head);
 }
 
 /* ---------------------------------------------------------------- */

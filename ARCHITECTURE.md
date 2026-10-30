@@ -306,6 +306,14 @@ only the shadow, never the user file.
 - Values are resolved at the point of use, so `/config set temperature 0`
   applies to the next round. A request field with no default (`temperature`,
   `max_tokens`) is not sent when unset.
+- **One presentation rule for a config fact.** `nm_config_view` (`NmCfgView`)
+  turns a resolution into the pair every surface prints: the value, and the
+  layer that dictates it. A resolution with no text is `-` and `unset` — never
+  "built-in default", which would claim a compiled-in value for the keys that
+  have none (`temperature`, `max_tokens`, an unset `model`). `/config`'s rows
+  and the knob commands' rows are one renderer (`config_row`) over that pair,
+  so the same fact cannot read two ways; every command that writes ends in one
+  sentence (`report_write`) over one write path (`config_persist`).
 
 ## Wire client and transport
 

@@ -952,6 +952,54 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_RUNTIME), "runtime");
 }
 
+/* The ONE presentation rule: a resolution with no text is `-` /
+ * `unset`, never a claimed layer. `temperature` and `max_tokens` have
+ * no built-in default, so naming `NM_CFG_DEFAULT` there would invent a
+ * compiled-in value — the one thing the /config view exists to answer. */
+static void test_view_separates_unset_from_a_default(void)
+{
+    /* A value with a layer: both halves are what was resolved. */
+    NmCfgView v = nm_config_view("25", NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(v.value, "25");
+    ASSERT_STR_EQ(v.layer, "built-in default");
+    v = nm_config_view("7", NM_CFG_SHADOW);
+    ASSERT_STR_EQ(v.value, "7");
+    ASSERT_STR_EQ(v.layer, "session shadow");
+
+    /* No value: `-` and `unset`, whatever layer was reported. */
+    v = nm_config_view(NULL, NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(v.value, NM_CFG_VALUE_UNSET);
+    ASSERT_STR_EQ(v.layer, NM_CFG_LAYER_UNSET);
+    /* An empty string is no value either: it would print a blank column
+     * where the reader expects a fact. */
+    v = nm_config_view("", NM_CFG_USER);
+    ASSERT_STR_EQ(v.value, NM_CFG_VALUE_UNSET);
+    ASSERT_STR_EQ(v.layer, NM_CFG_LAYER_UNSET);
+
+    /* The rule meets the key table: a key whose `def` is NULL resolves
+     * with NM_CFG_DEFAULT and no text, so the view says `unset` — while
+     * a key WITH a default names the layer. */
+    pin_paths("view");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    /* Resolve into the local FIRST: passing `src` to the view in the
+     * same expression reads it before the resolve writes it (argument
+     * order is unspecified). */
+    NmCfgSource src = NM_CFG_SHADOW;
+    const char *val = nm_config_resolve(c, NM_CFG_KEY_TEMPERATURE, &src);
+    v = nm_config_view(val, src);
+    ASSERT_STR_EQ(v.value, "-");
+    ASSERT_STR_EQ(v.layer, "unset");
+    ASSERT_EQ(src, NM_CFG_DEFAULT);
+    src = NM_CFG_SHADOW;
+    val = nm_config_resolve(c, NM_CFG_KEY_ROUNDS, &src);
+    v = nm_config_view(val, src);
+    ASSERT_EQ(src, NM_CFG_DEFAULT);
+    ASSERT_STR_EQ(v.layer, "built-in default");
+    ASSERT_TRUE(strcmp(v.value, "-") != 0);
+    nm_config_free(c);
+}
+
 /* The connect knobs (bounded walk budget + family skip) are durable
  * keys like the rest: file < env, a runtime change persists to the
  * shadow, and a garbage value is dropped — a typo must never yield a
@@ -1947,6 +1995,7 @@ int main(void)
     RUN_TEST(test_path_env_overrides);
     RUN_TEST(test_provider_validator_hook);
     RUN_TEST(test_key_vocabulary);
+    RUN_TEST(test_view_separates_unset_from_a_default);
     RUN_TEST(test_connect_knobs);
     RUN_TEST(test_duration_keys);
     RUN_TEST(test_image_live_key);

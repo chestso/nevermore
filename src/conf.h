@@ -582,6 +582,33 @@ const char *nm_config_default(const char *key);
 /* Human name of a layer, for /config and messages. */
 const char *nm_config_source_name(NmCfgSource s);
 
+/* The two spellings of "there is nothing here": no value, and no layer
+ * to blame it on. NM_CFG_LAYER_UNSET is NOT a layer name — see
+ * nm_config_view. */
+#define NM_CFG_VALUE_UNSET "-"
+#define NM_CFG_LAYER_UNSET "unset"
+
+/* The presentation of ONE resolved config value: the value text and the
+ * layer that dictates it — what every surface prints for a setting.
+ *
+ * A resolution with no text is NOT a default. `temperature`,
+ * `max_tokens` and an unset `model` have no built-in default at all, so
+ * there is nothing to name: the value column is `-` and the layer is
+ * `unset`. Calling that layer "built-in default" would claim a
+ * compiled-in value that does not exist — the one thing the /config view
+ * exists to answer. */
+typedef struct
+{
+    const char *value; /* never NULL: the value, else `-` */
+    const char *layer; /* never NULL: the source name, else `unset` */
+} NmCfgView;
+
+/* The ONE rule behind that pair: `value` is what a resolution returned
+ * (NULL/empty = nothing set the key), `src` the layer that dictates it.
+ * Every surface that prints a config fact goes through here, so the two
+ * cannot drift apart. */
+NmCfgView nm_config_view(const char *value, NmCfgSource src);
+
 /* The environment variable behind a key ("NEVERMORE_MODEL"), for
  * "why is my change inert" messages. NULL for an unknown key. */
 const char *nm_config_env_name(const char *key);

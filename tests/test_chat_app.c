@@ -5816,6 +5816,78 @@ static void test_config_command_reports_and_resets(void)
     harness_free(h);
 }
 
+/* The text from `needle` to the end of its line (a trailing CR
+ * trimmed), or NULL. Every row is one line, so a row's layer is
+ * asserted on its OWN line — a whole-transcript strstr could match
+ * another row's. The bytes BEFORE the needle are not used: the TUI
+ * repaints frames around a live row, so its line start is not the row's
+ * start. Caller frees. */
+static char *config_row_line(const char *text, const char *needle)
+{
+    const char *p = strstr(text, needle);
+    if (!p)
+        return NULL;
+    const char *end = strchr(p, '\n');
+    if (!end)
+        end = p + strlen(p);
+    while (end > p && (end[-1] == '\r' || end[-1] == '\n'))
+        end--;
+    size_t n = (size_t)(end - p);
+    char *line = malloc(n + 1);
+    if (!line)
+        return NULL;
+    memcpy(line, p, n);
+    line[n] = '\0';
+    return line;
+}
+
+/* The /config table separates the two kinds of "no layer set it": a key
+ * WITH a built-in default names that layer, and a key with NONE
+ * (`temperature`, `max_tokens`, an unset `model`) reads `-` with
+ * `unset`. One row spelling (config_row over an nm_config_view) means
+ * the same fact cannot read two ways in two places. */
+static void test_config_rows_separate_unset_from_a_default(void)
+{
+    pin_cfg_paths("rowunset");
+    AppHarness *h = harness_new("ollama:local", "m", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+
+    /* `provider` HAS a built-in default: its row names the layer. */
+    char *row = config_row_line(out, "  provider ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "ollama:local") != NULL);
+    ASSERT_TRUE(strstr(row, "(built-in default)") != NULL);
+    free(row);
+
+    /* The sampling knobs have none: `-` and `unset`, never a claimed
+     * compiled-in value. */
+    row = config_row_line(out, "  temperature ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "(unset)") != NULL);
+    ASSERT_NULL(strstr(row, "built-in default"));
+    free(row);
+
+    row = config_row_line(out, "  max_tokens ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "(unset)") != NULL);
+    ASSERT_NULL(strstr(row, "built-in default"));
+    free(row);
+
+    /* The model memory is the same: no layer, no default, no id. */
+    row = config_row_line(out, "  model ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "(unset)") != NULL);
+    free(row);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 /* The /config row for the reasoning echo: the STORE's value, and
  * nothing else — the built-in default (`all`) when no layer sets the
  * key, the user's own value when it does. (The override path is
@@ -9766,7 +9838,12 @@ static void test_knob_commands_print_and_persist(void)
     harness_type(h, "/routing");
     harness_enter(h);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "routing.openrouter: - (unset)") != NULL);
+    /* The row is the /config spelling (config_row over an
+     * nm_config_view): the key, `-`, and the layer word `unset`. */
+    char *row = config_row_line(out, "  routing.openrouter ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "(unset)") != NULL);
+    free(row);
     ASSERT_TRUE(strstr(out, "accepted: balanced|nitro|floor|exacto") != NULL);
 
     harness_type(h, "/routing nitro");
@@ -9805,7 +9882,23 @@ static void test_knob_commands_print_and_persist(void)
     ASSERT_EQ(count_substr(out, "routing.openrouter"), 1);
     ASSERT_EQ(count_substr(out, "tier.openrouter"), 1);
     ASSERT_EQ(count_substr(out, "max_price.openrouter"), 1);
-    ASSERT_TRUE(strstr(out, "routing.openrouter   nitro") != NULL);
+
+    /* And the row the TABLE prints is the row the COMMAND prints — one
+     * renderer over one nm_config_view, byte for byte. */
+    char *cfg_row = config_row_line(out, "  routing.openrouter ");
+    ASSERT_NOT_NULL(cfg_row);
+    ASSERT_TRUE(strstr(cfg_row, "nitro") != NULL);
+    ASSERT_TRUE(strstr(cfg_row, "(session shadow)") != NULL);
+
+    size_t seen2 = strlen(harness_read(h));
+    harness_type(h, "/routing");
+    harness_enter(h);
+    char *cmd_row =
+        config_row_line(harness_read(h) + seen2, "  routing.openrouter ");
+    ASSERT_NOT_NULL(cmd_row);
+    ASSERT_STR_EQ(cfg_row, cmd_row);
+    free(cfg_row);
+    free(cmd_row);
 
     nm_config_free(cfg);
     harness_free(h);
@@ -10099,6 +10192,7 @@ int main(void)
     RUN_TEST(test_config_shows_the_store_value_for_the_signature_echo);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
+    RUN_TEST(test_config_rows_separate_unset_from_a_default);
     RUN_TEST(test_config_shows_the_store_value_for_the_reasoning_echo);
     RUN_TEST(test_config_set_and_runtime_layer);
     RUN_TEST(test_model_memory_is_per_provider);
