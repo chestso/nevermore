@@ -50,12 +50,16 @@
 
 #define NM_CFG_NKEYS 26
 
-/* The scoped-key pool: `model.<provider>` is a family, not a fixed
- * list, but only the two PERSISTED layers have a scoped spelling (-m
- * and $NEVERMORE_MODEL are global by definition), so a small fixed
- * table suffices — the registry cap (NM_PROVIDER_MAX, 16). A file
- * naming more providers than this drops the extras with a warning. */
-#define NM_CFG_NSCOPED 16
+/* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
+ * list, and FOUR bases live in it — `model`, `routing`, `tier` and
+ * `max_price` — times the registry cap (NM_PROVIDER_MAX, 16). Only the
+ * two PERSISTED layers have a scoped spelling (-m and $NEVERMORE_MODEL
+ * are global by definition), so a fixed table suffices; but the cap is
+ * a DATA-LOSS boundary, not a scratch limit: past it the loader drops
+ * the overflow with a warning, and a real config (a model for a few
+ * providers plus one provider's three knobs) reaches 9-12. 32 holds a
+ * full knob set for every provider with room to spare. */
+#define NM_CFG_NSCOPED 32
 
 typedef struct
 {
@@ -189,13 +193,31 @@ static CfgKey *key_by_name(NmConfig *c, const char *name)
 }
 
 /* ---------------------------------------------------------------- */
-/* Provider-scoped keys (`model.<provider>`)                         */
+/* Provider-scoped keys (`<base>.<provider>`)                        */
 /* ---------------------------------------------------------------- */
 
-/* Is `name` a scoped key `<base>.<provider>`, with `base` a scoped base
- * (only `model` today) and `<provider>` a name the registry knows?
- * Fills `base` / `provider` when asked. The provider check goes through
- * the SAME validator hook `provider =` uses, so a scoped key can never
+/* The scoped bases, in the order /config and the hints name them. The
+ * first is the model MEMORY; the other three are a provider's pricing
+ * and routing vocabulary (see conf.h). */
+static const char *const SCOPED_BASES[] = {
+    NM_CFG_KEY_MODEL, NM_CFG_KEY_ROUTING, NM_CFG_KEY_TIER,
+    NM_CFG_KEY_MAX_PRICE, NULL
+};
+
+int nm_config_valid_scoped_base(const char *base)
+{
+    if (!base || !*base)
+        return 0;
+    for (size_t i = 0; SCOPED_BASES[i]; i++)
+        if (strcmp(base, SCOPED_BASES[i]) == 0)
+            return 1;
+    return 0;
+}
+
+/* Is `name` a scoped key `<base>.<provider>`, with `base` one of the
+ * scoped bases and `<provider>` a name the registry knows? Fills
+ * `base` / `provider` when asked. The provider check goes through the
+ * SAME validator hook `provider =` uses, so a scoped key can never
  * name a provider that does not exist. */
 static int scoped_split(const char *name, char *base, size_t base_cap,
                         char *provider, size_t prov_cap)
@@ -211,8 +233,8 @@ static int scoped_split(const char *name, char *base, size_t base_cap,
     char b[NM_CFG_SCOPED_KEY];
     memcpy(b, name, blen);
     b[blen] = '\0';
-    if (strcmp(b, NM_CFG_KEY_MODEL) != 0)
-        return 0; /* the only scoped base */
+    if (!nm_config_valid_scoped_base(b))
+        return 0; /* not a scoped base */
     const char *prov = dot + 1;
     if (!nm_config_valid_provider(prov))
         return 0;
@@ -228,13 +250,20 @@ int nm_config_scoped_key_ok(const char *key)
     return scoped_split(key, NULL, 0, NULL, 0);
 }
 
-/* The scoped slot for `provider`, or NULL when it was never set. */
-static CfgScoped *scoped_find(const NmConfig *c, const char *provider)
+/* The scoped slot for `base` + `provider`, or NULL when it was never
+ * set. */
+static CfgScoped *scoped_find_bs(const NmConfig *c, const char *base,
+                                 const char *provider)
 {
-    if (!c || !provider || !*provider)
+    if (!c || !base || !*base || !provider || !*provider)
         return NULL;
+    size_t bl = strlen(base), pl = strlen(provider);
+    if (bl + 1 + pl >= NM_CFG_SCOPED_KEY)
+        return NULL; /* not a name the store could hold */
     char want[NM_CFG_SCOPED_KEY];
-    snprintf(want, sizeof(want), "%s.%s", NM_CFG_KEY_MODEL, provider);
+    memcpy(want, base, bl);
+    want[bl] = '.';
+    memcpy(want + bl + 1, provider, pl + 1);
     for (int i = 0; i < c->n_scoped; i++)
         if (strcmp(c->scoped[i].name, want) == 0)
             return (CfgScoped *)&c->scoped[i];
@@ -253,18 +282,24 @@ static CfgScoped *scoped_find_name(const NmConfig *c, const char *name)
     return NULL;
 }
 
-/* Find or create the slot for `provider`; NULL when the pool is full
- * (a misconfiguration, warned at the point of use). */
-static CfgScoped *scoped_get_or_create(NmConfig *c, const char *provider)
+/* Find or create the slot for `base` + `provider`; NULL when the pool
+ * is full (a misconfiguration, warned at the point of use). */
+static CfgScoped *scoped_get_or_create(NmConfig *c, const char *base,
+                                       const char *provider)
 {
-    CfgScoped *s = scoped_find(c, provider);
+    CfgScoped *s = scoped_find_bs(c, base, provider);
     if (s)
         return s;
     if (c->n_scoped >= NM_CFG_NSCOPED)
         return NULL;
+    size_t bl = strlen(base), pl = strlen(provider);
+    if (bl + 1 + pl >= NM_CFG_SCOPED_KEY)
+        return NULL; /* a spelling the pool cannot hold */
     s = &c->scoped[c->n_scoped++];
     memset(s, 0, sizeof(*s));
-    snprintf(s->name, sizeof(s->name), "%s.%s", NM_CFG_KEY_MODEL, provider);
+    memcpy(s->name, base, bl);
+    s->name[bl] = '.';
+    memcpy(s->name + bl + 1, provider, pl + 1);
     return s;
 }
 
@@ -496,6 +531,125 @@ int nm_config_valid_temperature(const char *value)
 int nm_config_temperature_canon(const char *value, char *out, size_t cap)
 {
     return temperature_scan(value, out, cap, NULL);
+}
+
+/* ---------------------------------------------------------------- */
+/* Scoped values (the provider's vocabulary)                         */
+/* ---------------------------------------------------------------- */
+
+/* One side of a `max_price` value: a positive decimal, canonicalized
+ * (leading zeros gone, trailing fraction zeros gone). Its own scan, not
+ * temperature_scan's: the range here is a price, not 0-2, and only the
+ * grammar is shared. `0` (and `0.000`) is refused — a ceiling of zero
+ * admits no endpoint at all, which is a request that can only fail. */
+static int price_scan(const char *p, size_t n, char *out, size_t cap)
+{
+    size_t ni = 0, nf = 0, i = 0;
+    while (i < n && p[i] >= '0' && p[i] <= '9') {
+        i++;
+        ni++;
+    }
+    if (ni == 0 || ni > 9)
+        return 0; /* a bare '.5', or a longer run than a price needs */
+    const char *fs = NULL;
+    if (i < n && p[i] == '.') {
+        i++;
+        fs = p + i;
+        while (i < n && p[i] >= '0' && p[i] <= '9') {
+            i++;
+            nf++;
+        }
+        if (nf == 0 || nf > 9)
+            return 0; /* "3.", and more precision than $/Mtok carries */
+    }
+    if (i != n)
+        return 0; /* a sign, an exponent, a space: not this grammar */
+
+    int nonzero = 0;
+    for (size_t k = 0; k < ni; k++)
+        if (p[k] != '0')
+            nonzero = 1;
+    for (size_t k = 0; k < nf; k++)
+        if (fs[k] != '0')
+            nonzero = 1;
+    if (!nonzero)
+        return 0; /* a zero ceiling can never be served */
+
+    size_t first = 0;
+    while (first + 1 < ni && p[first] == '0')
+        first++;
+    size_t last = 0;
+    for (size_t k = 0; k < nf; k++)
+        if (fs[k] != '0')
+            last = k + 1;
+
+    char tmp[32];
+    size_t o = 0;
+    for (size_t k = first; k < ni; k++)
+        tmp[o++] = p[k];
+    if (last) {
+        tmp[o++] = '.';
+        for (size_t k = 0; k < last; k++)
+            tmp[o++] = fs[k];
+    }
+    tmp[o] = '\0';
+    if (out && cap)
+        snprintf(out, cap, "%s", tmp);
+    return 1;
+}
+
+int nm_config_max_price_canon(const char *raw, char *out, size_t cap)
+{
+    if (!raw || !*raw)
+        return 0;
+    const char *comma = strchr(raw, ',');
+    if (!comma)
+        return 0;
+    if (strchr(comma + 1, ','))
+        return 0; /* exactly two numbers, not three */
+    char a[32], b[32];
+    if (!price_scan(raw, (size_t)(comma - raw), a, sizeof(a)))
+        return 0;
+    if (!price_scan(comma + 1, strlen(comma + 1), b, sizeof(b)))
+        return 0;
+    if (out && cap)
+        snprintf(out, cap, "%s,%s", a, b);
+    return 1;
+}
+
+/* The scoped-value validator, installed by main.c (see conf.h). */
+static NmConfigScopedValidator g_scoped_validator;
+
+void nm_config_set_scoped_validator(NmConfigScopedValidator fn)
+{
+    g_scoped_validator = fn;
+}
+
+/* Validate + normalize ONE scoped key's value. `model` is any non-empty
+ * id (a local daemon may serve private ids the catalog does not know)
+ * and is this file's own shape; the three knob bases belong to the
+ * PROVIDER, so the installed validator answers — the store cannot know
+ * that `nitro` is a mode and `standard` is not. With no validator (a
+ * pure unit test) the one shape this file owns (`max_price`) is checked
+ * and everything else is accepted as typed. */
+static int normalize_scoped_value(const NmConfig *c, const char *base,
+                                  const char *provider, const char *raw,
+                                  char *out, size_t cap)
+{
+    if (strcmp(base, NM_CFG_KEY_MODEL) == 0) {
+        if (!raw || !*raw)
+            return 0;
+        snprintf(out, cap, "%s", raw);
+        return 1;
+    }
+    if (g_scoped_validator)
+        return g_scoped_validator(c, base, provider, raw, out, cap);
+    if (strcmp(base, NM_CFG_KEY_MAX_PRICE) == 0)
+        return nm_config_max_price_canon(raw, out, cap);
+    if (!raw || !*raw)
+        return 0;
+    snprintf(out, cap, "%s", raw);
+    return 1;
 }
 
 /* A bool spelling: 1/true/on/yes, 0/false/off/no (case-insensitive) —
@@ -1162,19 +1316,21 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
 
         CfgKey *k = key_by_name(c, key);
         if (!k) {
-            /* A scoped key (`model.<provider>`) is a key in its own
-             * right: the provider memory. */
+            /* A scoped key (`<base>.<provider>`) is a key in its own
+             * right: the model memory, or one of the provider's three
+             * pricing/routing knobs. */
             char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
             if (scoped_split(key, base, sizeof(base), provider,
                              sizeof(provider))) {
                 char norm[NM_CONFIG_VAL];
-                if (!normalize_value(base, val, norm, sizeof(norm))) {
+                if (!normalize_scoped_value(c, base, provider, val, norm,
+                                            sizeof(norm))) {
                     fprintf(stderr, "nevermore: %s: %s: invalid value "
                                     "'%s': ignored\n",
                             which, key, val);
                     continue;
                 }
-                CfgScoped *s = scoped_get_or_create(c, provider);
+                CfgScoped *s = scoped_get_or_create(c, base, provider);
                 if (!s) {
                     fprintf(stderr, "nevermore: %s: too many scoped keys "
                                     "(max %d): '%s' ignored\n",
@@ -1186,15 +1342,24 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
                 count++;
                 continue;
             }
-            /* The scoped SHAPE with an unknown provider is a more
-             * useful message than the generic unknown-key line. */
-            size_t plen = strlen(NM_CFG_KEY_MODEL);
-            if (strncmp(key, NM_CFG_KEY_MODEL, plen) == 0 &&
-                key[plen] == '.') {
-                fprintf(stderr, "nevermore: %s: unknown provider in key "
+            /* The scoped SHAPE with an unknown provider (or an unknown
+             * base) is a more useful message than the generic
+             * unknown-key line. */
+            const char *dot = strchr(key, '.');
+            if (dot && dot != key && dot[1]) {
+                char b[NM_CFG_SCOPED_KEY];
+                size_t blen = (size_t)(dot - key);
+                if (blen < sizeof(b)) {
+                    memcpy(b, key, blen);
+                    b[blen] = '\0';
+                    if (nm_config_valid_scoped_base(b)) {
+                        fprintf(stderr,
+                                "nevermore: %s: unknown provider in key "
                                 "'%s': ignored\n",
-                        which, key);
-                continue;
+                                which, key);
+                        continue;
+                    }
+                }
             }
             /* The key list is read off the one table, so it can never
              * drift out of the hint (it did: reasoning was missing). */
@@ -1202,6 +1367,10 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
                     which, key);
             for (int i = 0; i < NM_CFG_NKEYS; i++)
                 fprintf(stderr, "%s%s", i ? ", " : "", KEYS[i].name);
+            fprintf(stderr, "; scoped: ");
+            for (int i = 0; SCOPED_BASES[i]; i++)
+                fprintf(stderr, "%s%s.<provider>", i ? ", " : "",
+                        SCOPED_BASES[i]);
             fprintf(stderr, "): ignored\n");
             continue;
         }
@@ -1342,10 +1511,39 @@ static const char *resolve_slot(const NmConfig *c, const char *key,
 const char *nm_config_model_for(const NmConfig *c, const char *provider,
                                 NmCfgSource *src)
 {
+    return nm_config_scoped_for(c, NM_CFG_KEY_MODEL, provider, src);
+}
+
+/* The generalized scoped resolution (see conf.h): `model` keeps the
+ * layer chain a run-level decision needs; the three knob bases live in
+ * the two persisted layers only. */
+const char *nm_config_scoped_for(const NmConfig *c, const char *base,
+                                 const char *provider, NmCfgSource *src)
+{
     if (src)
         *src = NM_CFG_DEFAULT;
-    if (!c)
+    if (!c || !nm_config_valid_scoped_base(base))
         return NULL;
+
+    CfgScoped *s = scoped_find_bs(c, base, provider);
+    if (strcmp(base, NM_CFG_KEY_MODEL) != 0) {
+        /* A provider's pricing/routing knob: the shadow over the user
+         * file, within the ONE provider's slot. No env, no CLI, no
+         * plain fallback — the value space is provider-scoped by
+         * definition. */
+        if (s && s->shadow[0]) {
+            if (src)
+                *src = NM_CFG_SHADOW;
+            return s->shadow;
+        }
+        if (s && s->user[0]) {
+            if (src)
+                *src = NM_CFG_USER;
+            return s->user;
+        }
+        return NULL;
+    }
+
     CfgKey *k = key_by_name((NmConfig *)c, NM_CFG_KEY_MODEL);
     if (!k)
         return NULL;
@@ -1364,7 +1562,6 @@ const char *nm_config_model_for(const NmConfig *c, const char *provider,
             *src = NM_CFG_ENV;
         return k->env_v;
     }
-    CfgScoped *s = scoped_find(c, provider);
     if (s && s->shadow[0]) {
         if (src)
             *src = NM_CFG_SHADOW;
@@ -1686,39 +1883,105 @@ static int shadow_flush(NmConfig *c)
     return 0;
 }
 
-int nm_config_shadow_set(NmConfig *c, const char *key, const char *value)
+/* Does `value` pass THIS key's value space, canonical text into `out`?
+ * 1 = the write may proceed, 0 = unknown key or a refused value. The
+ * canonicalization is the one the file loader and the env layer use, so
+ * a value cannot be legal in one layer and illegal in another. */
+static int shadow_check(const NmConfig *c, const char *key, const char *value,
+                        char *out, size_t cap)
 {
-    if (!c)
-        return -1;
-    /* A scoped key (`model.<provider>`) writes its own slot. */
+    if (!key || !*key || !value || !*value)
+        return 0;
+    char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
+    if (scoped_split(key, base, sizeof(base), provider, sizeof(provider)))
+        return normalize_scoped_value(c, base, provider, value, out, cap);
+    CfgKey *k = key_by_name((NmConfig *)c, key);
+    if (!k)
+        return 0;
+    return normalize_value(k->name, value, out, cap);
+}
+
+/* Store one CHECKED write in the shadow layer (no flush). */
+static int shadow_store(NmConfig *c, const char *key, const char *norm)
+{
     char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
     if (scoped_split(key, base, sizeof(base), provider, sizeof(provider))) {
-        if (!value || !*value)
-            return nm_config_shadow_reset(c, key);
-        char norm[NM_CONFIG_VAL];
-        if (!normalize_value(base, value, norm, sizeof(norm)))
-            return -1;
-        CfgScoped *s = scoped_get_or_create(c, provider);
+        CfgScoped *s = scoped_get_or_create(c, base, provider);
         if (!s)
             return -1;
         if (!s->shadow[0])
             c->shadow_count++;
         snprintf(s->shadow, NM_CONFIG_VAL, "%s", norm);
-        return shadow_flush(c);
+        return 0;
     }
     CfgKey *k = key_by_name(c, key);
     if (!k)
         return -1;
-    if (!value || !*value)
-        return nm_config_shadow_reset(c, key);
-
-    char norm[NM_CONFIG_VAL];
-    if (!normalize_value(k->name, value, norm, sizeof(norm)))
-        return -1;
-
     if (!k->shadow[0])
         c->shadow_count++;
     snprintf(k->shadow, NM_CONFIG_VAL, "%s", norm);
+    return 0;
+}
+
+/* Drop one key's shadow line (no flush). `model`'s whole-memory
+ * semantics belong to nm_config_shadow_reset, not here. */
+static void shadow_remove_one(NmConfig *c, const char *key)
+{
+    char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
+    if (scoped_split(key, base, sizeof(base), provider, sizeof(provider))) {
+        CfgScoped *s = scoped_find_name(c, key);
+        if (s && s->shadow[0]) {
+            s->shadow[0] = '\0';
+            c->shadow_count--;
+        }
+        return;
+    }
+    CfgKey *k = key_by_name(c, key);
+    if (k && k->shadow[0]) {
+        k->shadow[0] = '\0';
+        c->shadow_count--;
+    }
+}
+
+int nm_config_shadow_set(NmConfig *c, const char *key, const char *value)
+{
+    if (!c)
+        return -1;
+    if (!value || !*value)
+        return nm_config_shadow_reset(c, key);
+    char norm[NM_CONFIG_VAL];
+    if (!shadow_check(c, key, value, norm, sizeof(norm)))
+        return -1;
+    if (shadow_store(c, key, norm) != 0)
+        return -1;
+    return shadow_flush(c);
+}
+
+int nm_config_shadow_set_many(NmConfig *c, const char *const *keys,
+                              const char *const *values, size_t n)
+{
+    if (!c || !keys || !values || n == 0 || n > NM_CFG_WRITE_SET)
+        return -1;
+    /* Validate EVERY value before storing any: a preset is one user
+     * intent, and a file that holds half of it is worse than one that
+     * holds none. */
+    char norm[NM_CFG_WRITE_SET][NM_CONFIG_VAL];
+    for (size_t i = 0; i < n; i++) {
+        if (!keys[i] || !*keys[i])
+            return -1;
+        if (!values[i] || !*values[i])
+            continue; /* a removal needs no value check */
+        if (!shadow_check(c, keys[i], values[i], norm[i], sizeof(norm[i])))
+            return -1;
+    }
+    for (size_t i = 0; i < n; i++) {
+        if (!values[i] || !*values[i]) {
+            shadow_remove_one(c, keys[i]);
+            continue;
+        }
+        if (shadow_store(c, keys[i], norm[i]) != 0)
+            return -1;
+    }
     return shadow_flush(c);
 }
 
@@ -1735,15 +1998,20 @@ int nm_config_shadow_reset(NmConfig *c, const char *key)
         return shadow_flush(c);
     }
     /* `model` clears the WHOLE model memory: the plain spelling and
-     * every provider's scoped one (what "forget my model" means). */
+     * every provider's scoped one (what "forget my model" means). The
+     * knob bases are NOT model memory, so a `model` reset leaves
+     * `routing.<p>` / `tier.<p>` / `max_price.<p>` alone. */
     if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
         CfgKey *k = key_by_name(c, key);
         if (k && k->shadow[0]) {
             k->shadow[0] = '\0';
             c->shadow_count--;
         }
+        size_t plen = strlen(NM_CFG_KEY_MODEL);
         for (int i = 0; i < c->n_scoped; i++) {
-            if (c->scoped[i].shadow[0]) {
+            if (c->scoped[i].shadow[0] &&
+                strncmp(c->scoped[i].name, NM_CFG_KEY_MODEL, plen) == 0 &&
+                c->scoped[i].name[plen] == '.') {
                 c->scoped[i].shadow[0] = '\0';
                 c->shadow_count--;
             }
@@ -1753,7 +2021,7 @@ int nm_config_shadow_reset(NmConfig *c, const char *key)
     /* A scoped key clears just its slot (idempotent: absent = done). */
     char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
     if (scoped_split(key, base, sizeof(base), provider, sizeof(provider))) {
-        CfgScoped *s = scoped_find(c, provider);
+        CfgScoped *s = scoped_find_name(c, key);
         if (s && s->shadow[0]) {
             s->shadow[0] = '\0';
             c->shadow_count--;

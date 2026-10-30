@@ -588,4 +588,5 @@ const struct NmProvider nm_ollama_provider = {
     nm_ollama_models_end,
     nm_ollama_needs_auth,
     ollama_env_key,
+    NULL, /* knobs: no pricing/routing vocabulary */
 };

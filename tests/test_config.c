@@ -51,7 +51,67 @@ static void test_unsetenv(const char *name)
  * Stand in for main.c's nm_provider_by_name check. */
 static int test_valid_provider(const char *name)
 {
-    return strcmp(name, "hyper") == 0 || strcmp(name, "ollama:local") == 0;
+    return strcmp(name, "hyper") == 0 || strcmp(name, "ollama:local") == 0 ||
+           strcmp(name, "openrouter") == 0;
+}
+
+/* The scoped-value validator is the second installed hook: stand in for
+ * main.c's nm_provider_knob_canon with openrouter's vocabulary and the
+ * same tier gate. `hyper` deliberately has none — a base it does not
+ * declare is refused. */
+typedef struct
+{
+    const char *spelling;
+    const char *canon;
+} TestKnob;
+
+static const TestKnob test_modes[] = {
+    { "balanced", "balanced" },
+    { "nitro", "nitro" },
+    { "floor", "floor" },
+    { "exacto", "exacto" },
+    { NULL, NULL },
+};
+static const TestKnob test_tiers[] = {
+    { "default", "default" },
+    { "flex", "flex" },
+    { "priority", "priority" },
+    { "fast", "priority" },
+    { "ultrafast", "ultrafast" },
+    { NULL, NULL },
+};
+
+static int test_knob_lookup(const TestKnob *tab, const char *raw, char *out,
+                            size_t cap)
+{
+    for (size_t i = 0; tab[i].spelling; i++) {
+        if (strcmp(tab[i].spelling, raw) == 0) {
+            snprintf(out, cap, "%s", tab[i].canon);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int test_knob_canon(const NmConfig *c, const char *base,
+                           const char *provider, const char *raw, char *out,
+                           size_t cap)
+{
+    if (strcmp(provider, "openrouter") != 0)
+        return 0; /* a provider with no vocabulary */
+    if (strcmp(base, NM_CFG_KEY_ROUTING) == 0)
+        return test_knob_lookup(test_modes, raw, out, cap);
+    if (strcmp(base, NM_CFG_KEY_TIER) == 0) {
+        if (!test_knob_lookup(test_tiers, raw, out, cap))
+            return 0;
+        if (strcmp(out, "ultrafast") == 0 &&
+            (c ? nm_config_resolve_int(c, NM_CFG_KEY_MAX_TOKENS, -1) : -1) < 1)
+            return 0;
+        return 1;
+    }
+    if (strcmp(base, NM_CFG_KEY_MAX_PRICE) == 0)
+        return nm_config_max_price_canon(raw, out, cap);
+    return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -1650,6 +1710,193 @@ static void test_no_model_hint(void)
     ASSERT_TRUE(strstr(buf, "/model") != NULL);
 }
 
+/* ---------------------------------------------------------------- */
+/* The provider-scoped pricing/routing knobs                        */
+/* ---------------------------------------------------------------- */
+
+/* The three keys' value spaces, one layer boundary each: the vocabulary
+ * is the provider's, `fast` folds to `priority` on write, and a base the
+ * provider does not declare is refused. */
+static void test_knob_value_spaces(void)
+{
+    pin_paths("knobs");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* routing: the four modes, nothing else. */
+    ASSERT_EQ(nm_config_shadow_set(c, "routing.openrouter", "nitro"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "nitro");
+    ASSERT_EQ(nm_config_shadow_set(c, "routing.openrouter", "balanced"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "balanced");
+    ASSERT_TRUE(nm_config_shadow_set(c, "routing.openrouter", "turbo") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "routing.openrouter", "Nitro") != 0);
+
+    /* tier: the wire's `fast` folds to `priority` ON WRITE, so every
+     * layer and /config read the one spelling the response reports. */
+    ASSERT_EQ(nm_config_shadow_set(c, "tier.openrouter", "fast"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL),
+                  "priority");
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "routing.openrouter = balanced\ntier.openrouter = priority\n");
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.openrouter", "standard") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.openrouter", "turbo") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.openrouter", "highspeed") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.openrouter", "prime") != 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "tier.openrouter", "default"), 0);
+
+    /* max_price: exactly two positive decimals, comma-separated. */
+    ASSERT_EQ(nm_config_shadow_set(c, "max_price.openrouter", "3,15"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_MAX_PRICE, "openrouter",
+                                       NULL),
+                  "3,15");
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "3") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "3,") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", ",15") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "-1,2") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "3,15,1") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "0,15") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "abc") != 0);
+
+    /* A base the provider does not declare is REFUSED, never clamped. */
+    ASSERT_TRUE(nm_config_shadow_set(c, "routing.hyper", "nitro") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.hyper", "flex") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.hyper", "3,15") != 0);
+    /* An unknown provider in a scoped key is not a key at all. */
+    ASSERT_FALSE(nm_config_scoped_key_ok("routing.nosuchprovider"));
+
+    nm_config_free(c);
+}
+
+/* `ultrafast` is GATED, not warned: with no output cap OpenRouter's own
+ * default limit fails the ultrafast balance check and the round
+ * silently serves priority, so the key is refused at the layer boundary
+ * until `max_tokens` is set. */
+static void test_ultrafast_gate(void)
+{
+    pin_paths("ultrafast");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.openrouter", "ultrafast") != 0);
+    ASSERT_NULL(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL));
+
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MAX_TOKENS, "2048"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "tier.openrouter", "ultrafast"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL),
+                  "ultrafast");
+
+    nm_config_free(c);
+}
+
+/* The knobs live in the two PERSISTED layers only: there is no env or
+ * CLI spelling for a scoped key (a flat NEVERMORE_ROUTING_openrouter is
+ * a name nobody would guess), and the shadow outranks the user file
+ * inside one provider's slot. */
+static void test_knob_scoping(void)
+{
+    pin_paths("knob-scoping");
+    write_file_at(g_user,
+                  "provider = openrouter\n"
+                  "routing.openrouter = floor\n"
+                  "tier.openrouter = flex\n");
+    test_setenv("NEVERMORE_ROUTING_OPENROUTER", "nitro");
+
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    nm_config_set_env(c);
+    ASSERT_NULL(nm_config_env_name("routing.openrouter"));
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "floor"); /* the env var has no spelling */
+    NmCfgSource src = NM_CFG_DEFAULT;
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", &src),
+                  "flex");
+    ASSERT_EQ(src, NM_CFG_USER);
+
+    /* The shadow wins inside the slot, and the CLI layer (a run-level
+     * decision for `model`/`provider`) is inert for a knob. */
+    ASSERT_EQ(nm_config_shadow_set(c, "routing.openrouter", "exacto"), 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       &src),
+                  "exacto");
+    ASSERT_EQ(src, NM_CFG_SHADOW);
+    nm_config_set_cli(c, NM_CFG_KEY_ROUTING, "nitro"); /* not a plain key */
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "exacto");
+
+    /* The pool holds a FULL openrouter knob set plus several providers'
+     * model memory without dropping the overflow (the cap is a
+     * data-loss boundary, not a scratch limit). */
+    ASSERT_EQ(nm_config_shadow_set(c, "max_price.openrouter", "2,10"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "glm-5.3"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.ollama:local", "qwen3"), 0);
+    ASSERT_EQ(nm_config_shadow_count(c), 5);
+    ASSERT_NOT_NULL(nm_config_scoped_for(c, NM_CFG_KEY_MAX_PRICE, "openrouter",
+                                         NULL));
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "gpt-x");
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "glm-5.3");
+
+    /* `model` reset clears the model MEMORY (plain + every provider) and
+     * leaves the three knob spelling alone; a scoped reset clears its
+     * own slot, not another base's. */
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
+    ASSERT_NULL(nm_config_model_for(c, "hyper", NULL));
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "exacto");
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL),
+                  "flex");
+    ASSERT_EQ(nm_config_shadow_reset(c, "tier.openrouter"), 0);
+    /* The user file's value shows through again (a reset drops the
+     * shadow line, it does not erase the preference). */
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL),
+                  "flex");
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_MAX_PRICE, "openrouter",
+                                       NULL),
+                  "2,10");
+
+    test_unsetenv("NEVERMORE_ROUTING_OPENROUTER");
+    nm_config_free(c);
+}
+
+/* A two-key preset is ONE write: the shadow file holds both lines (or
+ * neither — a refused key stores nothing), and `balanced` removes
+ * both. */
+static void test_knob_preset_write(void)
+{
+    pin_paths("knob-preset");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    const char *keys[2] = { "routing.openrouter", "tier.openrouter" };
+    const char *cheap[2] = { "floor", "flex" };
+    ASSERT_EQ(nm_config_shadow_set_many(c, keys, cheap, 2), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow),
+                  "routing.openrouter = floor\ntier.openrouter = flex\n");
+
+    /* One bad value: NOTHING is applied (not even the good half). */
+    const char *bad[2] = { "nitro", "ultrafast" };
+    ASSERT_TRUE(nm_config_shadow_set_many(c, keys, bad, 2) != 0);
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "floor");
+    ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_TIER, "openrouter", NULL),
+                  "flex");
+
+    /* `balanced` = unset + unset. */
+    const char *none[2] = { NULL, NULL };
+    ASSERT_EQ(nm_config_shadow_set_many(c, keys, none, 2), 0);
+    ASSERT_FALSE(file_present(g_shadow));
+    ASSERT_EQ(nm_config_shadow_count(c), 0);
+    nm_config_free(c);
+}
+
 int main(void)
 {
     /* A dev box or CI runner may export any of these; the matrix tests
@@ -1670,6 +1917,7 @@ int main(void)
 
     scratch_init();
     nm_config_set_provider_validator(test_valid_provider);
+    nm_config_set_scoped_validator(test_knob_canon);
     printf("test_config:\n");
 
     RUN_TEST(test_defaults_without_files);
@@ -1713,5 +1961,9 @@ int main(void)
     RUN_TEST(test_scoped_key_vocabulary);
     RUN_TEST(test_scoped_shadow_write_and_reset);
     RUN_TEST(test_no_model_hint);
+    RUN_TEST(test_knob_value_spaces);
+    RUN_TEST(test_ultrafast_gate);
+    RUN_TEST(test_knob_scoping);
+    RUN_TEST(test_knob_preset_write);
     TEST_SUMMARY();
 }

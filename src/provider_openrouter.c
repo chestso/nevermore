@@ -313,6 +313,46 @@ const NmOpenaiCompat nm_openrouter_compat = {
     openrouter_skip_entry, /* the ":batch" variants (OPENROUTER-API.md §6) */
 };
 
+/* ---------------------------------------------------------------- */
+/* The pricing/routing vocabulary                                    */
+/* ---------------------------------------------------------------- */
+
+/* The routing modes (docs/OPENROUTER-API.md §7.2/§7.5). A mode is a
+ * SUFFIX on the model id, not a body field: `nitro`/`floor`/`exacto`
+ * sort the upstreams AND admit that tier's endpoints, which
+ * `provider.sort` cannot do. `balanced` is the "no suffix" spelling —
+ * the router's own weighted choice (§7.4) — not `tier = default`. */
+static const NmKnobName openrouter_modes[] = {
+    { "balanced", "balanced" },
+    { "nitro", "nitro" },
+    { "floor", "floor" },
+    { "exacto", "exacto" },
+    { NULL, NULL },
+};
+
+/* The service tiers (§7.6/§7.8). `fast` is the wire's interchangeable
+ * spelling of `priority` and folds to it on write: the response always
+ * reports `priority`, never `fast`. The words the page names but does
+ * NOT accept as request values are refused rather than folded —
+ * `standard`, `turbo`, `highspeed`, `prime` are endpoint labels, or a
+ * description of the default tier, and a vocabulary that quietly
+ * accepts them would be lying about what it sent. `ultrafast` is
+ * accepted here and gated upstream (it needs `max_tokens`, D8). */
+static const NmKnobName openrouter_tiers[] = {
+    { "default", "default" },
+    { "flex", "flex" },
+    { "priority", "priority" },
+    { "fast", "priority" },
+    { "ultrafast", "ultrafast" },
+    { NULL, NULL },
+};
+
+static const NmProviderKnobs openrouter_knobs = {
+    openrouter_modes, /* `routing.openrouter` */
+    openrouter_tiers, /* `tier.openrouter` */
+    1,                /* `max_price.openrouter` */
+};
+
 static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
 {
     (void)p;
@@ -347,4 +387,5 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openaicompat_models_end,
     openrouter_needs_auth,
     openrouter_env_key,
+    &openrouter_knobs, /* routing / tier / max_price (§7) */
 };

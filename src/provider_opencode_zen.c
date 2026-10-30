@@ -42,4 +42,5 @@ const struct NmProvider nm_opencode_zen_provider = {
     nm_opencode_models_end,
     nm_opencode_needs_auth,
     opencode_zen_env_key,
+    NULL, /* knobs: no pricing/routing vocabulary */
 };

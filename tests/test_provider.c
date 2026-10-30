@@ -80,6 +80,52 @@ static void test_provider_registry_complete(void)
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENCODE_ZEN));
 }
 
+/* The scoped-key vocabulary is provider DATA: openrouter declares the
+ * three knob keys, every other provider declares none, and the registry
+ * dispatcher canonicalizes through that table (never through a name the
+ * store invented). */
+static void test_provider_knob_vocabulary(void)
+{
+    const NmProvider *or = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(or);
+    ASSERT_NOT_NULL(or->knobs);
+    ASSERT_NOT_NULL(or->knobs->modes);
+    ASSERT_NOT_NULL(or->knobs->tiers);
+    ASSERT_TRUE(or->knobs->max_price);
+
+    char out[32];
+    /* `fast` is the wire's interchangeable spelling: the canon is what
+     * the store and the request carry (the response always reports
+     * `priority`). */
+    ASSERT_TRUE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "openrouter",
+                                       "fast", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "priority");
+    /* A word the page names but does not accept as a request value is
+     * refused, never folded. */
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "openrouter",
+                                        "standard", out, sizeof(out)));
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "openrouter",
+                                        "turbo", out, sizeof(out)));
+    ASSERT_TRUE(nm_provider_knob_canon(NULL, NM_CFG_KEY_ROUTING, "openrouter",
+                                       "floor", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "floor");
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_ROUTING, "openrouter",
+                                        "fast", out, sizeof(out)));
+    ASSERT_TRUE(nm_provider_knob_canon(NULL, NM_CFG_KEY_MAX_PRICE, "openrouter",
+                                       "0.5,2", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "0.5,2");
+
+    /* Every other provider has no vocabulary at all: a line naming one
+     * of its keys is refused by the store. */
+    const NmProvider *hyper = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(hyper);
+    ASSERT_NULL(hyper->knobs);
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "hyper", "flex",
+                                        out, sizeof(out)));
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "nosuch",
+                                        "flex", out, sizeof(out)));
+}
+
 static void test_provider_lookup_by_name(void)
 {
     ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
@@ -1868,6 +1914,7 @@ int main(int argc, char *argv[])
     printf("test_provider:\n");
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_provider_registry_complete);
+    RUN_TEST(test_provider_knob_vocabulary);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_authinfo_machines);

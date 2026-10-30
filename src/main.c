@@ -540,6 +540,7 @@ int main(int argc, char *argv[])
      * session typed; the environment still wins over it so a scripted
      * run is reproducible. */
     nm_config_set_provider_validator(provider_name_is_known);
+    nm_config_set_scoped_validator(nm_provider_knob_canon);
     NmConfig *cfg = nm_config_load();
     if (!cfg) {
         fprintf(stderr, "nevermore: out of memory\n");

@@ -388,6 +388,44 @@ extern "C" {
  * presented. Env spelling: NEVERMORE_IMAGE_LIVE. */
 #define NM_CFG_KEY_IMAGE_LIVE "image_live"
 
+/* The three PRICING/ROUTING keys, all provider-scoped (the `model`
+ * family extended): `<base>.<provider>`, e.g.
+ * `routing.openrouter = nitro`. The value space is PER PROVIDER and is
+ * the provider's own data (NmProviderKnobs, provider.h) — the words
+ * mean nothing to a provider that does not declare them, and a line
+ * naming one for such a provider is REFUSED, never clamped.
+ *
+ *   routing.<p>    the routing variant: `balanced` / `nitro` / `floor`
+ *                  / `exacto`. `balanced` is "no suffix" (the
+ *                  provider's own routing). A mode rides the MODEL ID
+ *                  (the wire's own semantics for the sort + tier
+ *                  admission); it is not a body field.
+ *   tier.<p>       the service tier: `default` / `flex` / `priority` /
+ *                  `ultrafast`, plus the wire's interchangeable `fast`
+ *                  (canonicalized to `priority` on write — the response
+ *                  always reports `priority`). ABSENT means "whatever
+ *                  the provider's workspace says, else the router's
+ *                  own": it is not the same thing as `default`.
+ *   max_price.<p>  a price ceiling for the round: `<prompt>,<completion>`
+ *                  in $/Mtokens (the wire's own unit for the field),
+ *                  e.g. `3,15`. It PREVENTS a request that no endpoint
+ *                  can serve at or below the ceiling, so it is the one
+ *                  knob that can fail a round.
+ *
+ * There is NO environment spelling for a scoped key: the env family is
+ * one flat name per key, and `NEVERMORE_ROUTING_openrouter` is a
+ * spelling nobody would guess. A scripted run sets the user file; the
+ * shadow is what the TUI's commands write.
+ *
+ * NONE of the three is part of the request PREFIX (`messages`), so a
+ * change is never frozen: a mode, tier or ceiling change applies to the
+ * very next round without rotating the conversation id (explicit
+ * routing overrides the provider's session stickiness), and the
+ * provider's cached prefix is untouched. */
+#define NM_CFG_KEY_ROUTING   "routing"
+#define NM_CFG_KEY_TIER      "tier"
+#define NM_CFG_KEY_MAX_PRICE "max_price"
+
 typedef enum
 {
     NM_CFG_DEFAULT = 0, /* unset: the built-in default applies */
@@ -485,6 +523,19 @@ double nm_config_resolve_temperature(const NmConfig *c);
 const char *nm_config_model_for(const NmConfig *c, const char *provider,
                                 NmCfgSource *src);
 
+/* A scoped key resolution for ANY base (`model` / `routing` / `tier` /
+ * `max_price`), the generalized form behind nm_config_model_for.
+ *
+ * `model` is the only base with a plain fallback and env/CLI layers (a
+ * model id is a run-level decision as well as memory): runtime > cli >
+ * env > shadow `model.<p>` > user `model.<p>` > shadow `model` > user
+ * `model`. The three knob bases live ONLY in the two persisted layers —
+ * there is no env or CLI spelling for them — so their chain is shadow
+ * `routing.<p>` > user `routing.<p>`, else NULL. NULL for an unknown
+ * base, an unknown provider, or a config with no such value. */
+const char *nm_config_scoped_for(const NmConfig *c, const char *base,
+                                 const char *provider, NmCfgSource *src);
+
 /* Is `key` a scoped key — `model.<provider>` with a provider the
  * registry knows? The shape the file layer accepts, the shadow writes
  * and /config lists. */
@@ -555,6 +606,15 @@ NmConfig *nm_config_store(void);
  * changed). No shadow path (unresolvable home) = -1: no persistence. */
 int nm_config_shadow_set(NmConfig *c, const char *key, const char *value);
 
+/* A small SET of shadow writes as ONE write: every value is validated
+ * first, then all of them are stored and the file is flushed once. A
+ * preset is one user intent, so the file must never hold half of it.
+ * `value` NULL/"" removes that key. `n` is capped at NM_CFG_WRITE_SET
+ * (4). Same return contract as nm_config_shadow_set. */
+#define NM_CFG_WRITE_SET 4
+int nm_config_shadow_set_many(NmConfig *c, const char *const *keys,
+                              const char *const *values, size_t n);
+
 /* Drop one key from the shadow (NULL = every key). The file is
  * removed once it holds no keys. Same return contract. */
 int nm_config_shadow_reset(NmConfig *c, const char *key);
@@ -591,6 +651,38 @@ int nm_config_valid_provider(const char *name);
 /* Install the provider-name validator (NULL = restore "non-empty").
  * Call before nm_config_load. */
 void nm_config_set_provider_validator(int (*fn)(const char *name));
+
+/* The scoped-value validator: canonicalizes one scoped key's value.
+ * A scoped base's value space is the PROVIDER's (a tier vocabulary, a
+ * routing mode list), which this file cannot know — it links no
+ * registry. main.c installs the registry-side dispatcher
+ * (nm_provider_knob_canon); a unit test installs a stub or none.
+ *
+ * The store being written is passed in, because the tier gate is a
+ * cross-key check (`ultrafast` needs `max_tokens`) and must read the
+ * same config the write lands on — including during a file load,
+ * before the process store exists. With NO validator installed the
+ * shape is checked for `max_price` only (two decimals, this file's own
+ * grammar) and any other value is accepted as typed. Returns 1 on
+ * success (canonical text in `out`), 0 on refusal. */
+typedef int (*NmConfigScopedValidator)(const NmConfig *c, const char *base,
+                                       const char *provider, const char *raw,
+                                       char *out, size_t cap);
+void nm_config_set_scoped_validator(NmConfigScopedValidator fn);
+
+/* Is `base` one of the scoped bases (`model`, `routing`, `tier`,
+ * `max_price`)? The shape `<base>.<provider>`; anything else is not a
+ * key. */
+int nm_config_valid_scoped_base(const char *base);
+
+/* The `max_price` value space, shared by the file layer, the shadow
+ * write-back and the registry's own dispatcher so it lives once:
+ * exactly two positive decimals separated by ',' — `<prompt>,
+ * <completion>`, in $/Mtokens (the wire's own unit for the field).
+ * `3,15` is accepted and canonicalized (leading zeros gone, trailing
+ * fraction zeros gone); `3`, `3,`, `,15`, `-1,2`, `3,15,1`, `0,15` and
+ * `abc` are refused. Returns 1 on success. */
+int nm_config_max_price_canon(const char *raw, char *out, size_t cap);
 /* Is `value` a plain positive decimal (no sign, no fraction, 0
  * refused)? The shape `rounds` and `connect_timeout` share — a zero
  * tool-round cap is meaningless and a zero connect budget would fail

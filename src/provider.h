@@ -418,6 +418,34 @@ typedef enum
     NM_CATALOG_ERR
 } NmCatalogStatus;
 
+/* ---------------------------------------------------------------- */
+/* The provider's pricing/routing vocabulary                         */
+/* ---------------------------------------------------------------- */
+
+/* One accepted spelling and the canonical value it normalizes to. The
+ * canonical value is what the wire carries (a `fast` tier is reported
+ * as `priority` by the provider, so the store keeps `priority` too). */
+typedef struct NmKnobName
+{
+    const char *spelling;
+    const char *canon;
+} NmKnobName;
+
+/* The provider's scoped-key vocabulary: which of the three
+ * pricing/routing keys exist for it, and what each accepts. NULL on a
+ * provider with no such keys — every key is then ABSENT for it, and a
+ * config line naming one is REFUSED (refuse, never clamp).
+ *
+ * Why the vocabulary is provider DATA: the words are provider-specific.
+ * `nitro` means nothing to hyper, and a global `tier = flex` would be a
+ * lie for every other provider. The tables below are NULL-terminated. */
+typedef struct NmProviderKnobs
+{
+    const NmKnobName *modes; /* `routing` — NULL = no routing key */
+    const NmKnobName *tiers; /* `tier`    — NULL = no tier key */
+    int max_price;           /* nonzero = the `max_price` key exists */
+} NmProviderKnobs;
+
 /* Provider vtable */
 struct NmProvider
 {
@@ -543,7 +571,37 @@ struct NmProvider
      * One source of truth for both lookups and error hints — the
      * UI never hand-rolls a provider->env map. */
     const char *(*env_key)(const NmProvider *p);
+
+    /* The provider's pricing/routing vocabulary (NmProviderKnobs):
+     * which of `routing.<provider>` / `tier.<provider>` /
+     * `max_price.<provider>` exist, and the spellings each accepts.
+     * NULL = none of the three keys exist for this provider. Data
+     * beside name/default_base_url, not behavior: the conf store asks
+     * for it through the registry hook, so conf.c still links no
+     * registry. */
+    const NmProviderKnobs *knobs;
 };
+
+/* ---------------------------------------------------------------- */
+/* The provider's scoped-key vocabulary, resolved                    */
+/* ---------------------------------------------------------------- */
+
+/* Canonicalize one scoped key's value for `provider`: `base` is one of
+ * the scoped bases the store knows (`routing` / `tier` / `max_price`),
+ * `raw` the typed value, `c` the store the value is being written to.
+ * A provider with no `knobs`, or one that does not declare `base`,
+ * REFUSES. The tier gate lives here too (an `ultrafast` tier needs
+ * `max_tokens` set — D8 of the routing plan), because it is a
+ * cross-key check the store's own layer boundary cannot express: the
+ * store's validator hook has no store handle, so the config comes in
+ * with the call (during a file load the process store does not exist
+ * yet).
+ * Returns 1 on success (canonical text in `out`), 0 on refusal.
+ * Installed into the store by main.c; a unit test installs its own
+ * stub or none, exactly like nm_config_set_provider_validator. */
+int nm_provider_knob_canon(const NmConfig *c, const char *base,
+                           const char *provider, const char *raw, char *out,
+                           size_t cap);
 
 /* Provider API key: $<env_key> when set/non-empty, else the authinfo
  * password for authinfo_machine. Borrowed (env var storage, or

@@ -9747,6 +9747,138 @@ static void test_load_skill_round_shows_the_body(void)
     }
 }
 
+/* ---------------------------------------------------------------- */
+/* The pricing/routing commands (routing / tier / maxprice / preset) */
+/* ---------------------------------------------------------------- */
+
+/* The commands are the documented surface; the keys are the store's
+ * memory. No argument prints the value and the accepted spellings, an
+ * argument validates + persists to the shadow and reports the RESOLVED
+ * value (so `/tier fast` reports `priority`). */
+static void test_knob_commands_print_and_persist(void)
+{
+    pin_cfg_paths("knobs");
+    AppHarness *h = harness_new("openrouter", "openai/gpt-5.2", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    harness_type(h, "/routing");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "routing.openrouter: - (unset)") != NULL);
+    ASSERT_TRUE(strstr(out, "accepted: balanced|nitro|floor|exacto") != NULL);
+
+    harness_type(h, "/routing nitro");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "routing.openrouter = nitro — saved to the "
+                            "session shadow") != NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(), "routing.openrouter = nitro\n");
+
+    /* `fast` is the wire's alias: the store keeps the canon. */
+    harness_type(h, "/tier fast");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "tier.openrouter = priority — saved") != NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(),
+                  "routing.openrouter = nitro\ntier.openrouter = priority\n");
+
+    harness_type(h, "/maxprice 3,15");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "max_price.openrouter = 3,15 — saved") != NULL);
+
+    /* A refused spelling changes nothing. */
+    harness_type(h, "/tier standard");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "tier.openrouter: invalid value 'standard'") !=
+                NULL);
+
+    /* /config shows the three active-provider rows ONCE each: the
+     * generic scoped loop skips them. */
+    size_t seen = strlen(harness_read(h));
+    harness_type(h, "/config");
+    harness_enter(h);
+    out = harness_read(h) + seen;
+    ASSERT_EQ(count_substr(out, "routing.openrouter"), 1);
+    ASSERT_EQ(count_substr(out, "tier.openrouter"), 1);
+    ASSERT_EQ(count_substr(out, "max_price.openrouter"), 1);
+    ASSERT_TRUE(strstr(out, "routing.openrouter   nitro") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* A preset names an INTENT and writes both levers in one shadow flush;
+ * `balanced` drops both (the provider's own routing). Both halves are
+ * visible in the file, never one. */
+static void test_preset_writes_both_keys(void)
+{
+    pin_cfg_paths("presets");
+    AppHarness *h = harness_new("openrouter", "openai/gpt-5.2", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    harness_type(h, "/preset cheap");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "preset cheap: routing.openrouter = floor, "
+                            "tier.openrouter = flex") != NULL);
+    ASSERT_STR_EQ(cfg_read_shadow(),
+                  "routing.openrouter = floor\ntier.openrouter = flex\n");
+
+    harness_type(h, "/preset fast");
+    harness_enter(h);
+    ASSERT_STR_EQ(cfg_read_shadow(),
+                  "routing.openrouter = nitro\ntier.openrouter = priority\n");
+
+    harness_type(h, "/preset balanced");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "preset balanced: routing.openrouter = -") != NULL);
+    ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    harness_type(h, "/preset expensive");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "preset: expected 'cheap', 'fast' or "
+                            "'balanced'") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* The vocabulary is the provider's, so a provider without one refuses
+ * through the hook — not with a hardcoded provider name, and not by
+ * silently writing a key that would never reach a wire. */
+static void test_knob_commands_refuse_a_provider_without_knobs(void)
+{
+    pin_cfg_paths("knobs-hyper");
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    harness_type(h, "/routing nitro");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "routing: provider 'ollama:local' has no "
+                            "'routing' key") != NULL);
+    ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
+
+    harness_type(h, "/preset cheap");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "preset: provider 'ollama:local' has no "
+                            "routing/tier vocabulary") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -9786,6 +9918,10 @@ int main(void)
     /* Provider names in config files are validated through the registry
      * hook main.c installs (config.c links no registry of its own). */
     nm_config_set_provider_validator(chat_valid_provider);
+    /* The provider-scoped value space is the provider's own data; the
+     * real dispatcher is what main.c installs, so the knob commands are
+     * driven against openrouter's actual vocabulary. */
+    nm_config_set_scoped_validator(nm_provider_knob_canon);
     /* No config paths leak in from the real home directory: every
      * config test pins both, and the others never set one. */
     nm_config_set_paths("/nonexistent/nm-chat-app-config",
@@ -9966,5 +10102,8 @@ int main(void)
      * provider catalogs are process-global — every test after it would
      * read the canned catalog instead of the static fallback it pins. */
     RUN_TEST(test_startup_warm_fills_the_gauge_without_a_popup);
+    RUN_TEST(test_knob_commands_print_and_persist);
+    RUN_TEST(test_preset_writes_both_keys);
+    RUN_TEST(test_knob_commands_refuse_a_provider_without_knobs);
     TEST_SUMMARY();
 }

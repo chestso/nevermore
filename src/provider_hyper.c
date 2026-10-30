@@ -298,4 +298,5 @@ const struct NmProvider nm_hyper_provider = {
     nm_openaicompat_models_end,
     hyper_needs_auth,
     hyper_env_key,
+    NULL, /* knobs: no pricing/routing vocabulary */
 };

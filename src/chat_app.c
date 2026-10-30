@@ -2153,6 +2153,108 @@ static void format_tokens_exact(long n, char *dst, size_t cap)
 /* Commands (character-level scans, no regex)                       */
 /* ---------------------------------------------------------------- */
 
+/* ---------------------------------------------------------------- */
+/* The active provider's pricing/routing knobs                      */
+/* ---------------------------------------------------------------- */
+
+/* The active provider's spelling table for a scoped base, or NULL when
+ * the provider has no such key. The table IS the vocabulary: a command
+ * that printed `nitro|floor` for every provider would be lying for
+ * every provider but one. */
+static const NmKnobName *app_knob_names(const NmChatApp *app, const char *base)
+{
+    if (!app->provider || !app->provider->knobs)
+        return NULL;
+    if (strcmp(base, NM_CFG_KEY_ROUTING) == 0)
+        return app->provider->knobs->modes;
+    if (strcmp(base, NM_CFG_KEY_TIER) == 0)
+        return app->provider->knobs->tiers;
+    return NULL;
+}
+
+/* Does the active provider declare this knob key at all? */
+static int app_knob_declared(const NmChatApp *app, const char *base)
+{
+    if (!app->provider || !app->provider->knobs)
+        return 0;
+    if (strcmp(base, NM_CFG_KEY_ROUTING) == 0)
+        return app->provider->knobs->modes != NULL;
+    if (strcmp(base, NM_CFG_KEY_TIER) == 0)
+        return app->provider->knobs->tiers != NULL;
+    if (strcmp(base, NM_CFG_KEY_MAX_PRICE) == 0)
+        return app->provider->knobs->max_price != 0;
+    return 0;
+}
+
+/* The three scoped knob bases, in report order. */
+static const char *const APP_KNOB_BASES[] = {
+    NM_CFG_KEY_ROUTING, NM_CFG_KEY_TIER, NM_CFG_KEY_MAX_PRICE, NULL
+};
+
+/* The scoped spelling for the active provider: `routing.openrouter`. */
+static void app_knob_key(const NmChatApp *app, const char *base, char *out,
+                         size_t cap)
+{
+    const char *p = app->provider ? app->provider->name : "?";
+    size_t bl = strlen(base), pl = strlen(p);
+    if (bl + 1 + pl >= cap) {
+        out[0] = '\0'; /* cannot happen: the bases and names are short */
+        return;
+    }
+    memcpy(out, base, bl);
+    out[bl] = '.';
+    memcpy(out + bl + 1, p, pl + 1);
+}
+
+/* Is `key` one of the three knob spellings for the ACTIVE provider? */
+static int app_knob_key_is_this_provider(const NmChatApp *app,
+                                         const char *key)
+{
+    if (!app->provider || !key)
+        return 0;
+    for (size_t i = 0; APP_KNOB_BASES[i]; i++) {
+        char k[NM_CFG_SCOPED_KEY];
+        app_knob_key(app, APP_KNOB_BASES[i], k, sizeof(k));
+        if (strcmp(k, key) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* A value space as one line, for the commands' reports and refusals:
+ * the spelling table joined by '|', or the max_price shape. */
+static void knob_value_space(const NmChatApp *app, const char *base, char *out,
+                             size_t cap)
+{
+    out[0] = '\0';
+    if (strcmp(base, NM_CFG_KEY_MAX_PRICE) == 0) {
+        snprintf(out, cap,
+                 "<prompt>,<completion> in $/Mtokens (e.g. 3,15)");
+        return;
+    }
+    const NmKnobName *tab = app_knob_names(app, base);
+    size_t off = 0;
+    for (size_t i = 0; tab && tab[i].spelling; i++) {
+        int n = snprintf(out + off, off < cap ? cap - off : 0, "%s%s",
+                         i ? "|" : "", tab[i].spelling);
+        if (n > 0)
+            off += (size_t)n;
+        if (off + 1 >= cap)
+            break;
+    }
+}
+
+/* The active provider's effective value for a scoped base (`-` when
+ * the key is unset, which is a real state: the provider's own routing /
+ * its workspace's tier / no ceiling). */
+static const char *app_knob_value(const NmChatApp *app, const char *base,
+                                  NmCfgSource *src)
+{
+    if (!app->cfg || !app->provider)
+        return NULL;
+    return nm_config_scoped_for(app->cfg, base, app->provider->name, src);
+}
+
 static void print_help(NmChatApp *app)
 {
     sys_text(app, "commands:\n"
@@ -2168,6 +2270,11 @@ static void print_help(NmChatApp *app)
                   "  /config            every setting, its value + source\n"
                   "  /config set <k> <v>  write one key to the session shadow\n"
                   "  /config reset [k|all]  drop a shadow line + runtime value\n"
+                  "  /routing [mode]    the routing variant (:nitro/:floor/:exacto)\n"
+                  "  /tier [name]       the service tier (flex/priority/...)\n"
+                  "  /maxprice [p,c]    a price ceiling in $/Mtokens\n"
+                  "  /preset <intent>   cheap (:floor+flex), fast (:nitro+priority)\n"
+                  "                     or balanced (neither)\n"
                   "  /context           context-window usage (provider-reported)\n"
                   "  /skills            discovered Agent Skills (and any\n"
                   "                     refusals); load_skill reads one\n"
@@ -3067,15 +3174,17 @@ static void persist_and_report(NmChatApp *app, const char *key,
     }
 }
 
-/* Resolve a config key the way THIS app sees it. Only `model` differs
- * from the store's plain resolution: it is scoped by the app's ACTIVE
- * provider (a /provider switch, or a pinned run, can move that away
- * from the store's own `provider`), so /config shows the value the next
- * request will actually use — never a stale scoped one. */
+/* Resolve a config key the way THIS app sees it. Two families differ
+ * from the store's plain resolution: `model` is scoped by the app's
+ * ACTIVE provider (a /provider switch, or a pinned run, can move that
+ * away from the store's own `provider`), and the three pricing/routing
+ * knob bases are scoped the same way. /config and the commands then
+ * show the value the next request will actually use — never a stale
+ * scoped one. */
 static const char *app_config_resolve(const NmChatApp *app, const char *key,
                                       NmCfgSource *src)
 {
-    if (strcmp(key, NM_CFG_KEY_MODEL) == 0 && app->provider)
+    if (app->provider && strcmp(key, NM_CFG_KEY_MODEL) == 0)
         return nm_config_model_for(app->cfg, app->provider->name, src);
     return nm_config_resolve(app->cfg, key, src);
 }
@@ -3142,13 +3251,41 @@ static void print_config(NmChatApp *app)
         }
         sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-", layer);
     }
+    /* The ACTIVE provider's pricing/routing knobs: the canonical place
+     * for them (the value the next request will carry, `-` when unset),
+     * so the generic scoped loop below skips these three bases for this
+     * provider — one fact, one row. */
+    for (size_t b = 0; b < 3; b++) {
+        static const char *const bases[] = { NM_CFG_KEY_ROUTING,
+                                             NM_CFG_KEY_TIER,
+                                             NM_CFG_KEY_MAX_PRICE };
+        const char *base = bases[b];
+        if (!app->provider)
+            break;
+        char k[NM_CFG_SCOPED_KEY];
+        app_knob_key(app, base, k, sizeof(k));
+        if (!app_knob_declared(app, base)) {
+            sys_line(app, "  %-20s %-14s (no such key for this provider)", k,
+                     "-");
+            continue;
+        }
+        NmCfgSource src = NM_CFG_DEFAULT;
+        const char *v = app_knob_value(app, base, &src);
+        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
+                 v ? nm_config_source_name(src) : "unset");
+    }
     /* The provider-scoped keys actually set (`model.<provider>`), after
      * the plain ones: the per-provider model memory. The plain `model`
-     * row above shows the effective value for the ACTIVE provider. */
+     * row above shows the effective value for the ACTIVE provider, and
+     * the three knob rows above already carry this provider's, so those
+     * are skipped here (a `model.<p>` row for another provider is still
+     * a fact worth listing). */
     for (size_t i = 0;; i++) {
         const char *k = nm_config_scoped_key_at(app->cfg, i);
         if (!k)
             break;
+        if (app->provider && app_knob_key_is_this_provider(app, k))
+            continue;
         NmCfgSource src = NM_CFG_DEFAULT;
         const char *v = nm_config_resolve(app->cfg, k, &src);
         sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
@@ -3251,13 +3388,17 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
         sys_line(app, "no config: this session does not persist settings");
         return;
     }
-    if (!nm_config_env_name(key)) {
+    /* A scoped key (`<base>.<provider>`) is a key in its own right: the
+     * model memory and the active provider's three pricing/routing
+     * knobs are all written this way. */
+    int scoped = nm_config_scoped_key_ok(key);
+    if (!scoped && !nm_config_env_name(key)) {
         sys_role(app, NM_SGR_ERROR, "config: unknown key '%s'",
                  key);
         return;
     }
-    if (strcmp(key, NM_CFG_KEY_PROVIDER) == 0 ||
-        strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+    if (!scoped && (strcmp(key, NM_CFG_KEY_PROVIDER) == 0 ||
+                    strcmp(key, NM_CFG_KEY_MODEL) == 0)) {
         sys_role(app, NM_SGR_ERROR, "config: use /provider or /model for "
                                     "'%s'",
                  key);
@@ -3298,7 +3439,123 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
 }
 
 /* ---------------------------------------------------------------- */
-/* Process jobs: /ps and /kill (the human's window)             */
+/* /routing, /tier, /maxprice and /preset (the friendly surface)     */
+/* ---------------------------------------------------------------- */
+
+/* One refusal for a provider with no such vocabulary: the words are the
+ * provider's OWN, so a hyper profile has no routing mode to name — the
+ * refusal comes from the vocabulary hook, never from a hardcoded
+ * provider name. */
+static void knob_refuse_unknown(NmChatApp *app, const char *base)
+{
+    sys_role(app, NM_SGR_ERROR,
+             "%s: provider '%s' has no '%s' key — the pricing and routing "
+             "knobs are the provider's own vocabulary",
+             base, app->provider ? app->provider->name : "?", base);
+}
+
+/* One knob, the thin surface D12 of the routing plan asks for: with no
+ * argument, print the current value and the accepted spellings; with
+ * one, validate it, persist it to the shadow (the same
+ * nm_config_shadow_set path /config uses) and report the resolved
+ * value. The store owns the value and the layering; the command owns
+ * the spelling list and the report line. */
+static void knob_command(NmChatApp *app, const char *base, const char *arg)
+{
+    if (!app->provider || !app_knob_declared(app, base)) {
+        knob_refuse_unknown(app, base);
+        return;
+    }
+    char key[NM_CFG_SCOPED_KEY], space[256];
+    app_knob_key(app, base, key, sizeof(key));
+    knob_value_space(app, base, space, sizeof(space));
+
+    if (!*arg) {
+        NmCfgSource src = NM_CFG_DEFAULT;
+        const char *v = app_knob_value(app, base, &src);
+        sys_line(app, "%s: %s (%s)", key, v ? v : "-",
+                 v ? nm_config_source_name(src) : "unset");
+        sys_line(app, "  accepted: %s", space);
+        return;
+    }
+    if (!app->cfg) {
+        sys_line(app, "%s: %s (this session does not persist settings)", key,
+                 arg);
+        return;
+    }
+    if (nm_config_shadow_set(app->cfg, key, arg) != 0) {
+        /* The ultrafast gate is a cross-key rule, so its refusal says
+         * which other key it wants (D8): a bare "invalid value" would
+         * send the user hunting for a spelling that does exist. */
+        if (strcmp(base, NM_CFG_KEY_TIER) == 0 &&
+            strcmp(arg, "ultrafast") == 0)
+            sys_role(app, NM_SGR_ERROR,
+                     "%s: 'ultrafast' needs an output cap — set "
+                     "'max_tokens' first (without one the round silently "
+                     "serves priority)",
+                     key);
+        else
+            sys_role(app, NM_SGR_ERROR,
+                     "%s: invalid value '%s' — accepted: %s", key, arg, space);
+        return;
+    }
+    const char *eff = app_knob_value(app, base, NULL);
+    sys_line(app, "%s = %s — saved to the session shadow", key,
+             eff ? eff : arg);
+}
+
+/* The presets: one intent, two levers. `cheap` = `:floor` + `flex`,
+ * `fast` = `:nitro` + `priority`, `balanced` = neither (the provider's
+ * own routing and its workspace's tier). Both keys go in ONE shadow
+ * flush — a half-written preset is a different intent. */
+static void preset_command(NmChatApp *app, const char *arg)
+{
+    if (!app->provider || !app_knob_declared(app, NM_CFG_KEY_ROUTING) ||
+        !app_knob_declared(app, NM_CFG_KEY_TIER)) {
+        sys_role(app, NM_SGR_ERROR,
+                 "preset: provider '%s' has no routing/tier vocabulary",
+                 app->provider ? app->provider->name : "?");
+        return;
+    }
+    const char *mode = NULL, *tier = NULL;
+    if (strcmp(arg, "cheap") == 0) {
+        mode = "floor";
+        tier = "flex";
+    } else if (strcmp(arg, "fast") == 0) {
+        mode = "nitro";
+        tier = "priority";
+    } else if (strcmp(arg, "balanced") == 0) {
+        mode = NULL; /* both keys dropped: the provider's own routing */
+        tier = NULL;
+    } else {
+        sys_role(app, NM_SGR_ERROR,
+                 "preset: expected 'cheap', 'fast' or 'balanced'");
+        return;
+    }
+    char kr[NM_CFG_SCOPED_KEY], kt[NM_CFG_SCOPED_KEY];
+    app_knob_key(app, NM_CFG_KEY_ROUTING, kr, sizeof(kr));
+    app_knob_key(app, NM_CFG_KEY_TIER, kt, sizeof(kt));
+    if (!app->cfg) {
+        sys_line(app, "preset %s: %s = %s, %s = %s (this session does not "
+                      "persist settings)",
+                 arg, kr, mode ? mode : "-", kt, tier ? tier : "-");
+        return;
+    }
+    const char *keys[2] = { kr, kt };
+    const char *vals[2] = { mode, tier };
+    if (nm_config_shadow_set_many(app->cfg, keys, vals, 2) != 0) {
+        sys_role(app, NM_SGR_ERROR,
+                 "preset %s: could not save the session shadow", arg);
+        return;
+    }
+    const char *r = app_knob_value(app, NM_CFG_KEY_ROUTING, NULL);
+    const char *t = app_knob_value(app, NM_CFG_KEY_TIER, NULL);
+    sys_line(app, "preset %s: %s = %s, %s = %s — saved to the session shadow",
+             arg, kr, r ? r : "-", kt, t ? t : "-");
+}
+
+/* ---------------------------------------------------------------- */
+/* Process jobs: /ps and /kill (the human's window)                  */
 /* ---------------------------------------------------------------- */
 
 /* Display budget for a /ps command column; the id/state columns and the
@@ -3823,6 +4080,22 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         sys_role(app, NM_SGR_ERROR, "config: expected 'set <key> <value>' or 'reset [key|all]'");
         return;
     }
+    if (NAME_IS("routing")) {
+        knob_command(app, NM_CFG_KEY_ROUTING, arg);
+        return;
+    }
+    if (NAME_IS("tier")) {
+        knob_command(app, NM_CFG_KEY_TIER, arg);
+        return;
+    }
+    if (NAME_IS("maxprice")) {
+        knob_command(app, NM_CFG_KEY_MAX_PRICE, arg);
+        return;
+    }
+    if (NAME_IS("preset")) {
+        preset_command(app, arg);
+        return;
+    }
     if (NAME_IS("context")) {
         print_context(app);
         return;
@@ -3962,8 +4235,9 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/context", "/skills",
-        "/image", "/session", "/ps", "/kill", "/quit", NULL
+        "/help", "/model", "/provider", "/config", "/context",
+        "/skills", "/image", "/session", "/ps", "/kill", "/quit",
+        "/routing", "/tier", "/maxprice", "/preset", NULL
     };
     const char *matches[16];
     size_t n_matches = 0;
