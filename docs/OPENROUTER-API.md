@@ -650,6 +650,116 @@ means earlier upstreams failed and the router fell back), and the
 endpoints' `selected` flag names the winner. The legacy header name
 `X-OpenRouter-Experimental-Metadata` is still accepted.
 
+### 7.8 `ultrafast`, and the three spellings of priority (2026-10-30)
+
+Six facts from the service-tier page that the 2026-10-24 probe did not
+have.
+
+- **`ultrafast` exists**, a tier above priority. It is OpenAI-only and
+  opt-in only: `:nitro`, `service_tier: "priority"` and
+  `provider.sort` never reach it. An `ultrafast` request tries
+  ultrafast, then priority, then standard endpoints, and is billed at
+  the tier that served it.
+- **Priority has three request spellings**: `service_tier` takes
+  `"priority"`, or `"fast"` (OpenAI's Fast mode), and Anthropic's
+  native `speed: "fast"` is the third. The response ALWAYS reports
+  `priority`, never `fast`. Provider labels (`turbo`, `highspeed`,
+  `prime`) are endpoint names, not request values.
+- **An explicit `service_tier: "default"` cancels `:nitro`/`:floor`
+  tier admission and keeps their sorting.** OpenRouter documents it as
+  a feature — "use `:nitro` purely for its sort, pinned to standard" —
+  so the two levers do not conflict.
+- **A flex request's fallback is price-bounded**: it falls back only to
+  endpoints whose input AND output prices are at or below a flex
+  endpoint's. Where the flex endpoint is already the cheapest option
+  for its model nothing qualifies, and a **flex capacity error**
+  surfaces — a hard failure, not a quiet upgrade to the standard rate.
+- **A workspace default service tier fills `service_tier` in** for
+  requests that send none (the dashboard's Routing settings). An unset
+  tier is therefore NOT "OpenRouter's balanced routing": it is "the
+  workspace's default, else the router's own". Only a pinned value is
+  a client's to promise.
+- **Tier endpoints are addressable by slug** in `provider.order` /
+  `provider.only`: `openai/fast`, `openai/ultrafast`,
+  `google-vertex/global/flex`, `baseten/fp4/us/priority`. The `tag` is
+  `provider[/region]/tier` — a `/`-joined slug, never the model id's
+  `:` suffix — and `service_tier` is the provider-agnostic spelling.
+
+### 7.9 The tier is an endpoint property (endpoints list, 2026-10-30)
+
+`GET /api/v1/models/{id}/endpoints` (tokenless) reports one row per
+served endpoint, and the tier an endpoint serves on is a property of
+that row — with the tier's own price. Probed live:
+
+```
+openai/gpt-5.2       openai/flex              tier flex        0.875 / 7
+                     openai                   tier null        1.75 / 14
+                     openai/fast              tier priority    3.5 / 28
+openai/gpt-6-astra   openai/flex              tier flex        5 / 25
+                     amazon-bedrock/global    tier null        10 / 50
+                     openai/fast              tier priority    20 / 100
+                     openai/ultrafast         tier ultrafast   60 / 300
+```
+
+Prices in $/Mtok (prompt / completion). Two shapes to remember:
+`service_tier` is `null` — not absent — on a standard endpoint, and
+the `tag` carries the region segment (when there is one) before the
+tier.
+
+This is why `service_tier` (pin the grade) and the routing variants
+(admit the grade into a sort) are different levers, and why the tier a
+round actually used is a response fact worth printing.
+
+### 7.10 `max_price` is a ceiling, not a preference (2026-10-30)
+
+`provider.max_price` is in **$/Mtokens**, the wire's own unit:
+`{"prompt": 1, "completion": 2}` means at most $1/Mtok in and $2/Mtok
+out, with optional `request` and `image` members. Unlike the
+`preferred_*` fields, which only reorder the candidates, `max_price`
+_PREVENTS_ the request from running when no endpoint is at or below the
+ceiling — so it is the one preference that can fail a request.
+
+### 7.11 Explicit routing overrides session stickiness (2026-10-30)
+
+`session_id` (§10.6) pins one upstream per conversation. Probed on the
+real wire (same `session_id`, non-streamed, three sequential rounds on
+`openai/gpt-4o-mini`):
+
+```
+round   model                      upstream   tier
+1       openai/gpt-4o-mini         Azure      default
+2       openai/gpt-4o-mini:nitro   OpenAI     default
+3       openai/gpt-4o-mini         Azure      default
+```
+
+The `:nitro` round moved the upstream despite the same `session_id`,
+and round 3 fell back to Azure. So an explicit routing preference
+(`:nitro`, and by the same precedence `service_tier` and the
+`provider` object) OVERRIDES the stickiness pin, which re-asserts the
+moment the explicit preference is dropped. A mode or tier change
+therefore applies mid-chat; the conversation id need not rotate, and
+the prefix cache is untouched either way — neither the model id nor
+`session_id` is part of `messages` (§10.1).
+
+### 7.12 The provider monitor schema v2 is an ingest contract
+
+`https://openrouter.ai/docs/assets/provider-monitor-schema-v2.openapi.json`
+(version 2.4) is the document an UPSTREAM PROVIDER submits to declare
+an endpoint to OpenRouter. It has **no `paths`**: only
+`components.schemas`, whose root is `ModelDocumentV2` — one document
+per served endpoint, with `input_modalities` / `output_modalities`
+owning their own `pricing[]` and `capacity[]`, plus `service_tier`
+(`flex`/`priority`/`fast`), `deployment_region`, `variant: batch`, the
+`openrouter.slug` and `discount_to_user`. The endpoints list (§7.9) is
+its read-side projection.
+
+A client must not build against it: it is not fetchable (no endpoint,
+no auth), its pricing grammar is per-modality with `overrides` keyed on
+item counts, image detail and UTC windows (which is why a client-side
+cost estimate is a guess), and it already lags the live API — its tier
+enum has no `ultrafast` while the endpoints list reports one. It is
+vocabulary, never a target.
+
 ## 8. Provider notes for the nevermore side
 
 - `provider_openrouter.c` only supplies base URL, auth, the app
