@@ -116,10 +116,11 @@ static void test_provider_knob_vocabulary(void)
     ASSERT_STR_EQ(out, "0.5,2");
 
     /* Every other provider has no vocabulary at all: a line naming one
-     * of its keys is refused by the store. */
-    const NmProvider *hyper = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(hyper);
-    ASSERT_NULL(hyper->knobs);
+     * of its keys is refused by the store. (The variable is not named
+     * `hyper`: MinGW's headers define that as an integer type.) */
+    const NmProvider *hyper_provider = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(hyper_provider);
+    ASSERT_NULL(hyper_provider->knobs);
     ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "hyper", "flex",
                                         out, sizeof(out)));
     ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "nosuch",
