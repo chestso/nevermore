@@ -350,10 +350,20 @@ static const NmModel *model_entry(const NmProvider *p, const char *model)
 {
     if (!p || !p->models_cached || !model || !*model)
         return NULL;
+    /* The catalog id the provider resolves `model` to (D4): a routing
+     * variant is not an entry, so a hand-typed `vendor/model:nitro`
+     * still answers with the base row's window, badges and tool claim,
+     * while a catalog variant (`:free`) resolves to itself. With no
+     * hook the lookup is an exact match, which is every other provider.
+     */
+    char resolved[NM_MODEL_ID_MAX];
+    const char *want = model;
+    if (p->catalog_model)
+        want = p->catalog_model(p, model, resolved, sizeof(resolved));
     size_t n = 0;
     const NmModel *models = p->models_cached(p, &n);
     for (size_t i = 0; i < n; i++) {
-        if (models[i].id && strcmp(models[i].id, model) == 0)
+        if (models[i].id && strcmp(models[i].id, want) == 0)
             return &models[i];
     }
     return NULL;
@@ -1715,8 +1725,14 @@ static int begin_round(NmAgent *a)
     long max_tokens =
         cfg ? nm_config_resolve_int(cfg, NM_CFG_KEY_MAX_TOKENS, -1) : -1;
 
+    char wire_model[NM_MODEL_ID_MAX];
+    const char *req_model = a->model;
+    if (a->provider->request_model && a->model)
+        req_model = a->provider->request_model(a->provider, a->model,
+                                               wire_model,
+                                               sizeof(wire_model));
     NmChatRequest req = {
-        a->model,
+        req_model,
         msgs,
         n_msgs,
         NULL, /* system prompt rides in the session transcript */

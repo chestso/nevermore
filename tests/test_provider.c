@@ -126,6 +126,95 @@ static void test_provider_knob_vocabulary(void)
                                         "flex", out, sizeof(out)));
 }
 
+/* The two colon rules on one id (docs/OPENROUTER-API.md §7.5): a routing
+ * variant is not a catalog entry and is dropped for the LOOKUP; a
+ * catalog variant is an entry of its own and stays. Dropping every
+ * suffix would resolve `:free` to the paid entry. */
+static void test_openrouter_catalog_model_grammar(void)
+{
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+    ASSERT_NOT_NULL(p->catalog_model);
+    ASSERT_NOT_NULL(p->request_model);
+
+    char buf[NM_MODEL_ID_MAX];
+    ASSERT_STR_EQ(p->catalog_model(p, "openai/gpt-5.2:nitro", buf, sizeof(buf)),
+                  "openai/gpt-5.2");
+    ASSERT_STR_EQ(p->catalog_model(p, "poolside/laguna-s-2.1:free:nitro", buf,
+                                   sizeof(buf)),
+                  "poolside/laguna-s-2.1:free");
+    ASSERT_STR_EQ(p->catalog_model(p, "poolside/laguna-s-2.1:free", buf,
+                                   sizeof(buf)),
+                  "poolside/laguna-s-2.1:free");
+    ASSERT_STR_EQ(p->catalog_model(p, "openai/gpt-5.2:online", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2");
+    ASSERT_STR_EQ(p->catalog_model(p, "openai/gpt-5.2:exacto:floor", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2");
+    /* A catalog variant nevermore VETOES is still not a routing variant:
+     * the resolution is not the veto (§6). */
+    ASSERT_STR_EQ(p->catalog_model(p, "openai/gpt-5.2:batch", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2:batch");
+    /* An id with nothing to drop is handed back as the caller's own
+     * pointer (the hook's "unchanged" spelling). */
+    const char *same = p->catalog_model(p, "openai/gpt-5.2", buf, sizeof(buf));
+    ASSERT_STR_EQ(same, "openai/gpt-5.2");
+    ASSERT_TRUE(same != buf);
+}
+
+/* The wire id: the catalog id plus the active mode as the LAST suffix.
+ * `balanced`/unset is no suffix; a typed variant is REPLACED by the
+ * mode; a catalog variant survives in front of it. */
+static void test_openrouter_request_model_composition(void)
+{
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    NmConfig *cfg = nm_config_new();
+    ASSERT_NOT_NULL(cfg);
+    nm_config_set_store(cfg);
+
+    char buf[NM_MODEL_ID_MAX];
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2", buf, sizeof(buf)),
+                  "openai/gpt-5.2");
+
+    /* The scratch store has no shadow PATH (nm_config_new is pure
+     * memory), so the write answers -1 while the layer is set: the
+     * value is what the next request reads. */
+    nm_config_shadow_set(cfg, "routing.openrouter", "balanced");
+    ASSERT_STR_EQ(nm_config_scoped_for(cfg, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "balanced");
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2", buf, sizeof(buf)),
+                  "openai/gpt-5.2");
+
+    nm_config_shadow_set(cfg, "routing.openrouter", "floor");
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2", buf, sizeof(buf)),
+                  "openai/gpt-5.2:floor");
+    /* The typed variant is replaced: the mode is the last word. */
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2:nitro", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2:floor");
+    /* A catalog variant stays, and the mode rides after it. */
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2:free", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2:free:floor");
+
+    nm_config_shadow_set(cfg, "routing.openrouter", "nitro");
+    ASSERT_STR_EQ(p->request_model(p, "poolside/laguna-s-2.1:free:nitro", buf,
+                                   sizeof(buf)),
+                  "poolside/laguna-s-2.1:free:nitro");
+
+    /* No store installed at all: the plain id (a unit test's world). */
+    nm_config_set_store(NULL);
+    ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2:nitro", buf,
+                                   sizeof(buf)),
+                  "openai/gpt-5.2:nitro");
+    nm_config_free(cfg);
+}
+
 static void test_provider_lookup_by_name(void)
 {
     ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
@@ -1915,6 +2004,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_knob_vocabulary);
+    RUN_TEST(test_openrouter_catalog_model_grammar);
+    RUN_TEST(test_openrouter_request_model_composition);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_authinfo_machines);

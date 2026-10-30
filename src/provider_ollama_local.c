@@ -53,4 +53,6 @@ const struct NmProvider nm_ollama_local_provider = {
     nm_ollama_needs_auth,
     ollama_local_env_key,
     NULL, /* knobs: no pricing/routing vocabulary */
+    NULL, /* request_model: the id rides verbatim */
+    NULL, /* catalog_model: exact match */
 };

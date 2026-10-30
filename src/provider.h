@@ -580,7 +580,27 @@ struct NmProvider
      * for it through the registry hook, so conf.c still links no
      * registry. */
     const NmProviderKnobs *knobs;
+
+    /* The id a WIRE REQUEST carries: the catalog id composed with the
+     * provider's active routing mode (a `:nitro`-style suffix). Writes
+     * into buf; returns buf, or `id` unchanged. NULL = the id is the
+     * request's model, verbatim. Called once per round, on the request
+     * path, so a mode change applies to the next round. */
+    const char *(*request_model)(const NmProvider *p, const char *id,
+                                 char *buf, size_t cap);
+    /* The CATALOG id a wire id resolves to: a routing variant is not a
+     * catalog entry, so `vendor/model:nitro` must resolve to
+     * `vendor/model` for the window/vision/tool claims — while a
+     * CATALOG variant (`:free`) is a real entry of its own and stays.
+     * Same contract. NULL = exact match. */
+    const char *(*catalog_model)(const NmProvider *p, const char *id,
+                                 char *buf, size_t cap);
 };
+
+/* The largest model id a provider hook may compose: a catalog id plus
+ * one routing suffix ("vendor/model-name:free:nitro"), far longer than
+ * any id a catalog serves today. */
+#define NM_MODEL_ID_MAX 192
 
 /* ---------------------------------------------------------------- */
 /* The provider's scoped-key vocabulary, resolved                    */

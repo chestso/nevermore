@@ -299,4 +299,6 @@ const struct NmProvider nm_hyper_provider = {
     hyper_needs_auth,
     hyper_env_key,
     NULL, /* knobs: no pricing/routing vocabulary */
+    NULL, /* request_model: the id rides verbatim */
+    NULL, /* catalog_model: exact match */
 };

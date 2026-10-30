@@ -7538,6 +7538,74 @@ static void test_agent_imagegen_aged_image_drops_the_array(void)
     close(sc.fd);
 }
 
+/* The request carries the mode-composed id while the CATALOG readers
+ * stay on the catalog id: a routing mode is a wire fact, never a display
+ * fact (the status row, the transcript and the session keep the model
+ * the user chose). A hand-typed variant resolves to its base row too. */
+static void test_openrouter_round_carries_the_mode_composed_id(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+
+    /* The scratch store is pure memory (no shadow path), so the write
+     * answers -1 while the layer is set: the value is what the next
+     * request reads. */
+    nm_config_shadow_set(g_cfg, "routing.openrouter", "floor");
+    ASSERT_STR_EQ(nm_config_scoped_for(g_cfg, NM_CFG_KEY_ROUTING, "openrouter",
+                                       NULL),
+                  "floor");
+
+    NmAgent *agent = nm_agent_new(p, "openai/gpt-4o-mini", NULL, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-or-test");
+    int rc = nm_agent_turn(agent, "hi", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(strstr(g_requests[0],
+                       "\"model\":\"openai/gpt-4o-mini:floor\"") != NULL);
+    /* The catalog readers answer for the CATALOG id (the static row's
+     * window), so the gauge is not lost to a routing suffix. */
+    ASSERT_EQ(nm_agent_context_limit(agent), 128000);
+    nm_agent_free(agent);
+
+    /* A hand-typed variant resolves to the same row, and the mode
+     * REPLACES it on the wire (the mode is the last word). */
+    NmAgent *typed =
+        nm_agent_new(p, "openai/gpt-4o-mini:nitro", NULL, NULL);
+    ASSERT_NOT_NULL(typed);
+    ASSERT_EQ(nm_agent_context_limit(typed), 128000);
+    nm_agent_set_endpoint(typed, base, "sk-or-test");
+    rc = nm_agent_turn(typed, "hi", NULL, 0);
+    ASSERT_EQ(rc, 0);
+    ASSERT_TRUE(strstr(g_requests[1],
+                       "\"model\":\"openai/gpt-4o-mini:floor\"") != NULL);
+    nm_agent_free(typed);
+
+    nm_config_shadow_reset(g_cfg, "routing.openrouter");
+    ASSERT_NULL(nm_config_scoped_for(g_cfg, NM_CFG_KEY_ROUTING, "openrouter",
+                                     NULL));
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -7677,5 +7745,6 @@ int main(void)
     RUN_TEST(test_agent_reasoning_details_kept_on_answer_and_image_rounds);
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);
+    RUN_TEST(test_openrouter_round_carries_the_mode_composed_id);
     TEST_SUMMARY();
 }

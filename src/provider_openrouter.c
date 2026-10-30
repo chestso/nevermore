@@ -353,6 +353,108 @@ static const NmProviderKnobs openrouter_knobs = {
     1,                /* `max_price.openrouter` */
 };
 
+/* ---------------------------------------------------------------- */
+/* The model-id grammar (docs/OPENROUTER-API.md §7.5)                */
+/* ---------------------------------------------------------------- */
+
+/* Is this `:`-separated segment a ROUTING variant — one that is not a
+ * catalog entry and only changes the routing? Exactly these four, no
+ * more: the docs are explicit ("Do not rely on any other suffix"), and
+ * stripping every suffix would resolve `:free` to the PAID entry, whose
+ * window and price are not what is served. */
+static int openrouter_routing_variant(const char *seg, size_t len)
+{
+    static const char *const names[] = { "nitro", "floor", "exacto",
+                                         "online", NULL };
+    for (size_t i = 0; names[i]; i++) {
+        if (strlen(names[i]) == len && strncmp(seg, names[i], len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* The CATALOG id: drop the routing variants off the END of the id, in
+ * order, and stop at the first segment that is not one — so
+ * `vendor/model:nitro` is `vendor/model` and `vendor/model:free:nitro`
+ * is `vendor/model:free`. Character-level, no regex. */
+static const char *openrouter_catalog_model_id(const NmProvider *p,
+                                               const char *id, char *buf,
+                                               size_t cap)
+{
+    (void)p;
+    if (!id || !*id)
+        return id;
+    size_t n = strlen(id), full = n;
+    while (n > 0) {
+        const char *colon = NULL;
+        for (size_t i = n; i > 0; i--) {
+            if (id[i - 1] == ':') {
+                colon = id + i - 1;
+                break;
+            }
+        }
+        if (!colon)
+            break;
+        if (!openrouter_routing_variant(colon + 1,
+                                        n - (size_t)(colon - id) - 1))
+            break;
+        n = (size_t)(colon - id);
+    }
+    if (n == full || n >= cap)
+        return id; /* unchanged, or too long for the caller's buffer */
+    memcpy(buf, id, n);
+    buf[n] = '\0';
+    return buf;
+}
+
+/* Copy a resolved id into the caller's buffer; returns `buf`, or `id`
+ * unchanged when the buffer cannot hold it. */
+static const char *openrouter_copy_id(const char *id, const char *resolved,
+                                      char *buf, size_t cap)
+{
+    if (resolved == id)
+        return id;
+    size_t n = strlen(resolved);
+    if (n >= cap)
+        return id;
+    memcpy(buf, resolved, n + 1);
+    return buf;
+}
+
+/* The WIRE id: the catalog id plus the active mode as its LAST suffix.
+ * `balanced` (and an unset key) is "no suffix" — the router's own
+ * weighted choice, not `tier = default`. A typed variant is REPLACED by
+ * the mode (the mode is the last word, which is OpenRouter's own rule
+ * for two sorting variants), while the catalog variant stays. */
+static const char *openrouter_request_model_id(const NmProvider *p,
+                                               const char *id, char *buf,
+                                               size_t cap)
+{
+    (void)p;
+    if (!id || !*id)
+        return id;
+    char base[NM_MODEL_ID_MAX];
+    const char *cat =
+        openrouter_catalog_model_id(p, id, base, sizeof(base));
+    const char *mode = NULL;
+    NmConfig *cfg = nm_config_store();
+    if (cfg)
+        mode = nm_config_scoped_for(cfg, NM_CFG_KEY_ROUTING, "openrouter",
+                                    NULL);
+    if (!mode || !*mode || strcmp(mode, "balanced") == 0)
+        /* No mode: the id rides as typed (a hand-typed variant is the
+         * user's own routing decision, and it reaches the wire — the
+         * lookup resolves it, not the request). */
+        return id;
+    size_t cn = strlen(cat), mn = strlen(mode);
+    if (cn + 1 + mn >= cap)
+        return openrouter_copy_id(id, cat, buf, cap);
+    memcpy(buf, cat, cn);
+    buf[cn] = ':';
+    memcpy(buf + cn + 1, mode, mn + 1);
+    return buf;
+}
+
 static int openrouter_needs_auth(const NmProvider *p, const char *base_url)
 {
     (void)p;
@@ -387,5 +489,7 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openaicompat_models_end,
     openrouter_needs_auth,
     openrouter_env_key,
-    &openrouter_knobs, /* routing / tier / max_price (§7) */
+    &openrouter_knobs,           /* routing / tier / max_price (§7) */
+    openrouter_request_model_id, /* the wire id carries the mode */
+    openrouter_catalog_model_id, /* the lookup resolves it back */
 };
