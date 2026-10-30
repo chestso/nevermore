@@ -331,6 +331,19 @@ typedef struct NmRoundMeta
      * / -Dollar-Savings), verbatim, empty when not reported. */
     char hc_savings[NM_ROUND_META_STR_MAX];
     char usd_savings[NM_ROUND_META_STR_MAX];
+    /* The reporting provider's own name ("openrouter"), from the
+     * endpoint that read the fact — so the notice can name the
+     * vocabulary it speaks. Empty when no provider reported one. */
+    char source[NM_ROUND_META_STR_MAX];
+    /* The UPSTREAM that served the round (the response's own
+     * `provider` field: "OpenAI", "Azure") and the service TIER it was
+     * billed at (`service_tier`: "default", "flex", "priority",
+     * "ultrafast"). Response-body facts, not headers, and read only by
+     * an endpoint whose dialect declares them (OpenRouter today, §7.9),
+     * so another wire's generic `provider` is never misread. Empty =
+     * not reported. */
+    char served_provider[NM_ROUND_META_STR_MAX];
+    char service_tier[NM_ROUND_META_STR_MAX];
 } NmRoundMeta;
 
 /* A chat call's outcome. message is ALWAYS set when status is an

@@ -366,6 +366,18 @@ struct NmChatStream
      * can fill result->meta from the retained response headers. NULL
      * for a provider with no such metadata. */
     void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
+    /* The served-upstream parse is this endpoint's dialect fact (copied
+     * at begin). 0 = the client never reads a top-level `provider` /
+     * `service_tier`: the words are generic and another wire's
+     * `provider` means something else. */
+    int parse_served_meta;
+    /* What the round's chunks reported: the upstream that served it and
+     * the tier, first non-empty value each (an empty string = not
+     * reported). The source name is the endpoint provider's own
+     * (copied at begin, so it outlives the endpoint). */
+    char source[NM_ROUND_META_STR_MAX];
+    char served_provider[NM_ROUND_META_STR_MAX];
+    char service_tier[NM_ROUND_META_STR_MAX];
     int done;             /* stream finished: a fatal error, or the OK path
                            * (framing end reached). NOT "[DONE] seen" — that is
                            * saw_done, because a chunked response's trailers
@@ -568,6 +580,23 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
         NmUsage u;
         parse_usage(uobj, &u);
         st->on_usage(&u, st->userdata);
+    }
+
+    /* The served upstream and the tier (D6): every chunk of an
+     * OpenRouter round carries a top-level `provider`, and the final one
+     * carries `service_tier`. BOTH are generic words ("provider" is
+     * echoed by other wires meaning something else), so the parse is
+     * gated by the endpoint's flag: only the builder that knows the
+     * dialect turns it on. A non-string value is not a report
+     * (nm_json_str answers NULL for an object/array). */
+    if (st->parse_served_meta) {
+        const char *prov = nm_json_str(nm_json_get(obj, "provider"));
+        if (prov && *prov && !st->served_provider[0])
+            snprintf(st->served_provider, sizeof(st->served_provider), "%s",
+                     prov);
+        const char *tier = nm_json_str(nm_json_get(obj, "service_tier"));
+        if (tier && *tier && !st->service_tier[0])
+            snprintf(st->service_tier, sizeof(st->service_tier), "%s", tier);
     }
 
     NmJson *choices = nm_json_get(obj, "choices");
@@ -1104,6 +1133,20 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
      * connection is still open here (every caller publishes before
      * stream_teardown). */
     memset(&result->meta, 0, sizeof(result->meta));
+    /* The round's served upstream and tier (D6), captured whatever the
+     * keys say — the notice's key gates the LINE, never the capture
+     * (the Prism contract). Empty = the wire reported none, and then the
+     * source name is empty too: the meta records a REPORT, not a
+     * provider's willingness to report. */
+    if (h->served_provider[0] || h->service_tier[0]) {
+        snprintf(result->meta.source, sizeof(result->meta.source), "%s",
+                 h->source);
+        snprintf(result->meta.served_provider,
+                 sizeof(result->meta.served_provider), "%s",
+                 h->served_provider);
+        snprintf(result->meta.service_tier, sizeof(result->meta.service_tier),
+                 "%s", h->service_tier);
+    }
     if (h->read_response_meta && h->conn)
         h->read_response_meta(h->conn, result);
     switch (h->status) {
@@ -1243,6 +1286,9 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     st->on_usage = req->on_usage;
     st->userdata = req->userdata;
     st->read_response_meta = ep->read_response_meta;
+    st->parse_served_meta = ep->parse_served_meta;
+    if (ep->provider && ep->provider->name)
+        snprintf(st->source, sizeof(st->source), "%s", ep->provider->name);
     st->status = NM_CHAT_OK;
 
     /* Queue the request; the connect/send phases drain inside

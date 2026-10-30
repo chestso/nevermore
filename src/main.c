@@ -319,23 +319,28 @@ static void ask_on_warning(const char *msg, void *userdata)
     nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", msg);
 }
 
-/* A round Hyper's Prism model router answered: the same notice the TUI
- * prints on its system stream, dimmed to STDERR — the answer on stdout
- * stays pipe-clean, exactly like the reasoning trace. Gated by the
- * `prism_notice` key (resolved from the process store, which main.c
- * installs before any turn runs). The text is one spelling with the
- * TUI's (nm_agent_round_meta_text) and so is the block: a notice closes
+/* A round's provider response metadata: two notices from two sources,
+ * each under its OWN key. Hyper's Prism router answers the first (which
+ * model actually did the work, plus the savings), OpenRouter's served
+ * upstream and tier the second — the same notice the TUI prints on its
+ * system stream, dimmed to STDERR so the answer on stdout stays
+ * pipe-clean, exactly like the reasoning trace. The text spellings are
+ * shared with the TUI (nm_agent_round_meta_text /
+ * nm_agent_round_meta_served_text), and so is the block: a notice closes
  * itself with a blank row on either carrier (nm_sysout_notice). */
 static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
 {
     (void)userdata;
     NmConfig *c = nm_config_store();
-    if (c && !nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1))
-        return;
     char line[512];
-    if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
-        return;
-    nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);
+    if (!c || nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1)) {
+        if (nm_agent_round_meta_text(meta, line, sizeof(line)))
+            nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);
+    }
+    if (!c || nm_config_resolve_bool(c, NM_CFG_KEY_SERVED_NOTICE, 1)) {
+        if (nm_agent_round_meta_served_text(meta, line, sizeof(line)))
+            nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);
+    }
 }
 
 /* The registry check config.c validates provider names through (it

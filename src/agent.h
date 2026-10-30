@@ -158,6 +158,28 @@ void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out);
  * fields itself. Returns snprintf's would-be length. */
 int nm_agent_round_meta_text(const NmRoundMeta *meta, char *out, size_t cap);
 
+/* The SERVED line's text, the same one spelling for both entry paths:
+ *
+ *   openrouter: served by Azure (flex tier)
+ *   openrouter: served by Azure (tier unknown)
+ *   openrouter: served at the flex tier
+ *
+ * An unreported tier reads `tier unknown` — a fact, not an invented
+ * `default` (a workspace default fills the field in server-side, so
+ * "absent" is not "default"). `out` is empty when the round reported
+ * neither the upstream nor the tier, so a caller may print whatever this
+ * returns. Returns snprintf's would-be length.
+ *
+ * The FIRE RULE (when a round is worth a line at all) lives in the
+ * agent: every OpenRouter chunk carries `provider`, so a per-round line
+ * would print "served by OpenAI (default tier)" on every round of a
+ * coding turn and train people to ignore it — and the valuable "upstream
+ * changed" signal is exactly what that noise buries. The listener fires
+ * only when the tier is non-`default` OR the upstream differs from the
+ * previous completed round's. */
+int nm_agent_round_meta_served_text(const NmRoundMeta *meta, char *out,
+                                    size_t cap);
+
 /* Session accounting: the provider-agnostic ledger over COMPLETED
  * rounds (the facts in NmUsage — see the contract there). The agent
  * owns the only conversation, so it owns the accumulation; the UI never

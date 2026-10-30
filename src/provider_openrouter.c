@@ -260,6 +260,10 @@ static void openrouter_chat_endpoint(const NmProvider *p,
     /* The pricing knobs (§7.8/§7.10): the service tier and the price
      * ceiling ride the provider's own body seam. */
     ep->body_extra = openrouter_body_extra;
+    /* The response's own routing report (§7.9): read the served upstream
+     * and the tier into the round's meta. OpenRouter-only by flag — the
+     * word `provider` is generic. */
+    ep->parse_served_meta = 1;
 }
 
 /* Does the string array at `arr` carry `want`? The row's one

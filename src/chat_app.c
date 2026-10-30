@@ -1767,16 +1767,17 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-/* A round Hyper's Prism model router answered (nm_agent_on_round_meta):
- * which model actually did the work, on the SYSTEM stream — the same
- * seam the connect notice uses. The line is terminal-only by
- * construction: it joins neither the conversation (so it cannot shift
- * the request prefix or the gateway's cached prefix) nor the saved
- * transcript. The `prism_notice` key silences the LINE, never the
- * capture: `/context` still reports routing with the key off.
+/* A round's provider response metadata (nm_agent_on_round_meta): TWO
+ * facts from TWO sources, each composed under its OWN key and printed on
+ * the SYSTEM stream — the same seam the connect notice uses. Both lines
+ * are terminal-only by construction: they join neither the conversation
+ * (so they cannot shift the request prefix or the provider's cached
+ * prefix) nor the saved transcript. `prism_notice` gates Hyper's routed
+ * line, `served_notice` the served-by one; each gates the LINE only, never
+ * the capture (`/context` still reports both with the keys off).
  *
  * Called from inside nm_agent_step at the round's finish, which is
- * BEFORE the round's own text is committed — so the notice closes the
+ * BEFORE the round's own text is committed — so a notice closes the
  * agent's streams first (what nm_sysout_notice's close_run is,
  * idempotent, the same thing on_tool's START does before it draws a
  * panel): a RAW line posted into a live region lands in the middle of
@@ -1785,23 +1786,42 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
  * the notice, in the same step — glued to it, the panel header reads as
  * part of the notice. Both halves are the notice's contract, not this
  * call site's memory (sysout.h). The step's flush then commits the lot
- * with the rest of that step's units. */
+ * with the rest of that step's units.
+ *
+ * The agent has already applied the served line's FIRE RULE (a
+ * non-default tier, or an upstream that moved): a same-upstream `default`
+ * round composes nothing here. */
+static void notice_print(NmChatApp *app, const char *line)
+{
+    if (!line || !*line)
+        return;
+    nm_sysout_notice(&app->sysout, "%s%s%s",
+                     nm_sgr(NM_SGR_TOOL, color_depth(app)), line,
+                     NM_SGR_RESET);
+    tui_runtime_wakeup(app->rt);
+}
+
 void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
 {
     (void)userdata;
     NmChatApp *app = s_app;
     if (!app || !meta)
         return;
-    if (app->cfg && !nm_config_resolve_bool(app->cfg, NM_CFG_KEY_PRISM_NOTICE,
-                                            1))
-        return;
+
     char line[SYS_LINE_BUF];
-    if (!nm_agent_round_meta_text(meta, line, sizeof(line)))
-        return;
-    nm_sysout_notice(&app->sysout, "%s%s%s",
-                     nm_sgr(NM_SGR_TOOL, color_depth(app)), line,
-                     NM_SGR_RESET);
-    tui_runtime_wakeup(app->rt);
+    /* Hyper's Prism router: the model that actually answered, plus the
+     * savings when the gateway reported them (docs/HYPER-API.md §3.5.2). */
+    if (!app->cfg ||
+        nm_config_resolve_bool(app->cfg, NM_CFG_KEY_PRISM_NOTICE, 1)) {
+        if (nm_agent_round_meta_text(meta, line, sizeof(line)))
+            notice_print(app, line);
+    }
+    /* The served upstream and tier (docs/OPENROUTER-API.md §7.9). */
+    if (!app->cfg ||
+        nm_config_resolve_bool(app->cfg, NM_CFG_KEY_SERVED_NOTICE, 1)) {
+        if (nm_agent_round_meta_served_text(meta, line, sizeof(line)))
+            notice_print(app, line);
+    }
 }
 
 /* A reminder the harness injected (reminder.h). TRANSPARENCY: the
@@ -2255,6 +2275,25 @@ static const char *app_knob_value(const NmChatApp *app, const char *base,
     return nm_config_scoped_for(app->cfg, base, app->provider->name, src);
 }
 
+/* Bounded append for the /context setting line: advances `off` by what
+ * actually landed, so a long value loses its tail and nothing else. */
+static size_t context_append(char *out, size_t cap, size_t off,
+                             const char *fmt, ...)
+{
+    if (off + 1 >= cap)
+        return off;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(out + off, cap - off, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+        return off;
+    size_t adv = (size_t)n;
+    if (adv > cap - off - 1)
+        adv = cap - off - 1;
+    return off + adv;
+}
+
 static void print_help(NmChatApp *app)
 {
     sys_text(app, "commands:\n"
@@ -2331,6 +2370,54 @@ static void print_context(NmChatApp *app)
             sys_line(app, "context: routing saved %s hypercredits / $%s",
                      meta.hc_savings[0] ? meta.hc_savings : "0",
                      meta.usd_savings[0] ? meta.usd_savings : "0");
+    }
+
+    /* The served upstream and tier (docs/OPENROUTER-API.md §7.9): the
+     * always-available record, printed whatever `served_notice` says —
+     * the key gates the live line, not the capture (the Prism contract).
+     * The source prefix is dropped here because the sentence names the
+     * round ("last round served by ..."), not the vocabulary. */
+    if (meta.served_provider[0] || meta.service_tier[0]) {
+        NmRoundMeta served = meta;
+        served.source[0] = '\0';
+        char line[SYS_LINE_BUF];
+        if (nm_agent_round_meta_served_text(&served, line, sizeof(line)))
+            sys_line(app, "context: last round %s", line);
+    }
+
+    /* What the NEXT round will carry, before the user spends: the active
+     * provider's pricing/routing knobs, with every unset part omitted
+     * (an unset key has a real meaning of its own — the provider's own
+     * routing, its workspace's tier, no ceiling — so it is not printed as
+     * "default"). */
+    if (app->provider && app->provider->knobs) {
+        char line[256];
+        size_t off = 0;
+        line[0] = '\0';
+        const char *v = app_knob_value(app, NM_CFG_KEY_ROUTING, NULL);
+        if (v && *v)
+            off = context_append(line, sizeof(line), off, "%srouting %s",
+                                 off ? ", " : "", v);
+        v = app_knob_value(app, NM_CFG_KEY_TIER, NULL);
+        if (v && *v)
+            off = context_append(line, sizeof(line), off, "%stier %s",
+                                 off ? ", " : "", v);
+        v = app_knob_value(app, NM_CFG_KEY_MAX_PRICE, NULL);
+        if (v && *v) {
+            /* The store's spelling is `prompt,completion` (the comma is
+             * the field's delimiter); the display form is `prompt/
+             * completion $/Mtok`, the unit the wire uses. */
+            char shown[64];
+            snprintf(shown, sizeof(shown), "%s", v);
+            for (char *p = shown; *p; p++)
+                if (*p == ',')
+                    *p = '/';
+            off = context_append(line, sizeof(line), off,
+                                 "%smax price %s $/Mtok", off ? ", " : "",
+                                 shown);
+        }
+        if (off)
+            sys_line(app, "context: %s", line);
     }
 
     if (!nm_agent_context_has_usage(app->agent) || used < 0) {

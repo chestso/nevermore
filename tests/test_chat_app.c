@@ -9879,6 +9879,115 @@ static void test_knob_commands_refuse_a_provider_without_knobs(void)
     harness_free(h);
 }
 
+/* ---------------------------------------------------------------- */
+/* The served-by notice and the /context setting line               */
+/* ---------------------------------------------------------------- */
+
+/* A round that reports its upstream and tier gets a system line, and the
+ * `served_notice` key silences the LINE alone: /context still answers
+ * with the last round's facts (the Prism contract). The line joins
+ * neither the conversation nor the saved transcript, so the request
+ * prefix is untouched. */
+static void test_served_notice_prints_and_the_key_gates_it(void)
+{
+    pin_cfg_paths("served-notice");
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
+        "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"again\"}}],"
+        "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-4o-mini", base);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "openrouter: served by Azure (flex tier)") != NULL);
+
+    /* The conversation is untouched: user, assistant, the system prompt. */
+    harness_type(h, "/session");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "session: 3 messages — 1 user, 1 assistant, "
+                            "0 tool, 1 system") != NULL);
+
+    /* The key off: the next (again non-default tier) round prints no line,
+     * and /context still reports what served. */
+    ASSERT_EQ(nm_config_shadow_set(cfg, NM_CFG_KEY_SERVED_NOTICE, "off"), 0);
+    size_t seen = strlen(harness_read(h));
+    harness_type(h, "again");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    out = harness_read(h) + seen;
+    ASSERT_TRUE(strstr(out, "served by Azure") == NULL);
+
+    harness_type(h, "/context");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: last round served by Azure (flex tier)") !=
+                NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* /context states what the NEXT round will carry, before the user spends:
+ * the active provider's knobs, with every unset part omitted (an unset
+ * tier means "the provider's workspace, else its own", not `default`). */
+static void test_context_states_the_active_knobs(void)
+{
+    pin_cfg_paths("context-knobs");
+    AppHarness *h = harness_new("openrouter", "openai/gpt-4o-mini", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+
+    ASSERT_EQ(nm_config_shadow_set(cfg, "routing.openrouter", "nitro"), 0);
+    ASSERT_EQ(nm_config_shadow_set(cfg, "tier.openrouter", "flex"), 0);
+    ASSERT_EQ(nm_config_shadow_set(cfg, "max_price.openrouter", "3,15"), 0);
+
+    harness_type(h, "/context");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "context: routing nitro, tier flex, max price "
+                            "3/15 $/Mtok") != NULL);
+
+    /* Unset parts are omitted, not filled in. */
+    ASSERT_EQ(nm_config_shadow_reset(cfg, "tier.openrouter"), 0);
+    ASSERT_EQ(nm_config_shadow_reset(cfg, "max_price.openrouter"), 0);
+    size_t seen = strlen(harness_read(h));
+    harness_type(h, "/context");
+    harness_enter(h);
+    out = harness_read(h) + seen;
+    ASSERT_TRUE(strstr(out, "context: routing nitro") != NULL);
+    ASSERT_TRUE(strstr(out, "tier ") == NULL);
+    ASSERT_TRUE(strstr(out, "max price") == NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -10105,5 +10214,7 @@ int main(void)
     RUN_TEST(test_knob_commands_print_and_persist);
     RUN_TEST(test_preset_writes_both_keys);
     RUN_TEST(test_knob_commands_refuse_a_provider_without_knobs);
+    RUN_TEST(test_served_notice_prints_and_the_key_gates_it);
+    RUN_TEST(test_context_states_the_active_knobs);
     TEST_SUMMARY();
 }

@@ -898,11 +898,12 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_COLOR);
     ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SPINNER_RAMP);
     ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_SKILLS);
-    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_TEMPERATURE);
-    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_NULL(nm_config_key_at(26));
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_SERVED_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_SKILLS);
+    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_NULL(nm_config_key_at(27));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -943,6 +944,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_MAX_TOKENS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_IMAGE_LIVE),
                   "NEVERMORE_IMAGE_LIVE");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SERVED_NOTICE),
+                  "NEVERMORE_SERVED_NOTICE");
     ASSERT_NULL(nm_config_env_name("bogus"));
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_DEFAULT), "built-in default");
     ASSERT_STR_EQ(nm_config_source_name(NM_CFG_SHADOW), "session shadow");

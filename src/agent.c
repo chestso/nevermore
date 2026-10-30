@@ -308,11 +308,16 @@ struct NmAgent
         sess_write_seen;
 
     /* The last COMPLETED round's provider response metadata (Hyper's
-     * Prism routing: which model actually answered, savings — §3.5.2).
-     * Zeroed at round start and on a failed round; set at finish_round
-     * from the result. All-empty = the provider reported none (the
-     * "direct" case). Read through nm_agent_round_meta. */
+     * Prism routing: which model actually answered, savings — §3.5.2;
+     * and the served upstream + tier, §7.9). Zeroed at round start and
+     * on a failed round; set at finish_round from the result. All-empty
+     * = the provider reported none (the "direct" case). Read through
+     * nm_agent_round_meta. */
     NmRoundMeta round_meta;
+    /* The previous COMPLETED round's served upstream, for the notice's
+     * fire rule (D6): a round whose upstream did not move and whose tier
+     * is `default` is not worth a line. Empty until one is reported. */
+    char prev_served_provider[NM_ROUND_META_STR_MAX];
 };
 
 static void set_state(NmAgent *a, NmAgentState st)
@@ -853,6 +858,37 @@ int nm_agent_round_meta_text(const NmRoundMeta *meta, char *out, size_t cap)
         if (usd[0])
             off = round_meta_append(out, cap, off, "%s$%s", hc[0] ? " / " : " ",
                                     usd);
+    }
+    return (int)off;
+}
+
+/* The SERVED line (D6), one spelling for both carriers. See agent.h for
+ * the shapes and the fire rule's home (the agent, not here). */
+int nm_agent_round_meta_served_text(const NmRoundMeta *meta, char *out,
+                                    size_t cap)
+{
+    if (!out || !cap)
+        return 0;
+    out[0] = '\0';
+    if (!meta || (!meta->served_provider[0] && !meta->service_tier[0]))
+        return 0;
+    size_t off = 0;
+    if (meta->source[0])
+        off = round_meta_append(out, cap, off, "%s: ", meta->source);
+    if (meta->served_provider[0]) {
+        off = round_meta_append(out, cap, off, "served by %s",
+                                meta->served_provider);
+        /* A tier the wire never named is UNKNOWN, not `default`: a
+         * workspace default fills the field in server-side, so absent
+         * means "the provider did not say". */
+        if (meta->service_tier[0])
+            off = round_meta_append(out, cap, off, " (%s tier)",
+                                    meta->service_tier);
+        else
+            off = round_meta_append(out, cap, off, " (tier unknown)");
+    } else {
+        off = round_meta_append(out, cap, off, "served at the %s tier",
+                                meta->service_tier);
     }
     return (int)off;
 }
@@ -1987,8 +2023,26 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
      * each tool round of one turn is its own request with its own
      * routing decision. */
     a->round_meta = r->meta;
-    if (a->on_round_meta && r->meta.routed_model[0])
+    /* Hand it to the UI too, once per round that has something to say. A
+     * Hyper routed round is always worth a line; an OpenRouter round is
+     * worth one only when it carries SIGNAL (D6) — a non-`default` tier,
+     * or an upstream that differs from the previous completed round's.
+     * Every OpenRouter chunk carries `provider`, so a line per round
+     * would print "served by OpenAI (default tier)" on every round of a
+     * coding turn and bury the interesting case: the upstream changed
+     * (a fallback, or a routing decision landing elsewhere). */
+    int served_signal = 0;
+    if (r->meta.service_tier[0] || r->meta.served_provider[0]) {
+        served_signal =
+            (r->meta.service_tier[0] &&
+             strcmp(r->meta.service_tier, "default") != 0) ||
+            strcmp(r->meta.served_provider, a->prev_served_provider) != 0;
+    }
+    if (a->on_round_meta && (r->meta.routed_model[0] || served_signal))
         a->on_round_meta(&r->meta, a->userdata);
+    if (r->meta.served_provider[0])
+        snprintf(a->prev_served_provider, sizeof(a->prev_served_provider),
+                 "%s", r->meta.served_provider);
 
     /* A VOID round: nothing in it. It is not an answer and not a tool
      * round — the turn goes on (the round is asked again), the

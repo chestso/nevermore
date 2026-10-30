@@ -118,6 +118,13 @@ typedef struct NmOpenaiEndpoint
      * a hand-built endpoint (a unit test): the hook must tolerate it.
      * Set in openaicompat_preset, the ONE place every endpoint is born. */
     const NmProvider *provider;
+    /* Nonzero = this endpoint's response dialect carries the served
+     * upstream (a top-level `provider` on every chunk) and the tier
+     * (`service_tier` on the final one), and the client may read them
+     * into NmChatResult.meta (OpenRouter, docs/OPENROUTER-API.md §7.9).
+     * 0 = never read them: `provider` is a generic word, and another
+     * wire's means something else. Set only by the openrouter builder. */
+    int parse_served_meta;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

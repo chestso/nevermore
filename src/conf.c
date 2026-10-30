@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 26
+#define NM_CFG_NKEYS 27
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -160,6 +160,9 @@ static const struct
     { NM_CFG_KEY_COLOR, "NEVERMORE_COLOR", "auto" },
     { NM_CFG_KEY_SPINNER_RAMP, "NEVERMORE_SPINNER_RAMP", "on" },
     { NM_CFG_KEY_PRISM_NOTICE, "NEVERMORE_PRISM_NOTICE", "on" },
+    /* The served-by line's own key (the Prism contract, another
+     * source): a terminal-only notice, gated separately. */
+    { NM_CFG_KEY_SERVED_NOTICE, "NEVERMORE_SERVED_NOTICE", "on" },
     { NM_CFG_KEY_SKILLS, "NEVERMORE_SKILLS", "on" },
     /* The sampling knobs have NO built-in default: unset is the value
      * that keeps the field off the request (the provider's own default
@@ -1078,6 +1081,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_SPINNER_RAMP) == 0 ||
                strcmp(key, NM_CFG_KEY_PRISM_NOTICE) == 0 ||
+               strcmp(key, NM_CFG_KEY_SERVED_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SKILLS) == 0 ||
                strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {
         if (!nm_config_valid_bool(raw))

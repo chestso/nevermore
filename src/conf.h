@@ -332,6 +332,31 @@ extern "C" {
  * Env spelling: NEVERMORE_PRISM_NOTICE. */
 #define NM_CFG_KEY_PRISM_NOTICE "prism_notice"
 
+/* Whether a completed round prints the SERVED-by line: which upstream
+ * answered and at which service tier (`openrouter: served by Azure (flex
+ * tier)`). A bool, default on. Its OWN key, not `prism_notice`: the two
+ * facts have two sources and two vocabularies — Prism is a gateway
+ * HEADER (Hyper), the served upstream and tier are response BODY fields
+ * (OpenRouter) — and one listener composes two lines.
+ *
+ * Same contract as `prism_notice`: a terminal-only SYSTEM line, echoed to
+ * the terminal and joined to neither the conversation nor the saved
+ * transcript, which is what makes it free to print. It gates the LINE
+ * only, never the capture: `/context` reports the last round's served
+ * upstream and tier with this key off.
+ *
+ * The line is SIGNAL-GATED (the agent decides): a round whose tier is
+ * `default` and whose upstream is the same as the previous completed
+ * round's prints nothing. Every provider chunk carries the upstream, so a
+ * per-round line would be noise that trains people to ignore it — and the
+ * valuable "the upstream changed" case is what that noise buries.
+ *
+ * A mode/tier change is NOT frozen like `reasoning_echo`: the served
+ * fields ride the response and the knobs ride the model id / top-level
+ * body members, so nothing here is part of the request prefix and no
+ * cache is thrown away. Env spelling: NEVERMORE_SERVED_NOTICE. */
+#define NM_CFG_KEY_SERVED_NOTICE "served_notice"
+
 /* Whether Agent Skills discovery may run: a bool, default ON. Skills are
  * folders of instructions in the open SKILL.md format, discovered from
  * `~/.agents/skills/` and every `<dir>/.agents/skills/` from the repo

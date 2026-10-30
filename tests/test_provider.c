@@ -2061,6 +2061,145 @@ static void test_hyper_round_carries_no_pricing_knobs(void)
     nm_config_free(cfg);
 }
 
+/* A canned round whose chunks carry the routing report
+ * (docs/OPENROUTER-API.md §7.9): every chunk names the upstream as a
+ * TOP-LEVEL `provider`, the last one adds `service_tier`. The chunk
+ * sizes are computed — a hand-counted string length is a bug. */
+/* Serve ONE chunked SSE round made of `events` (each a complete
+ * "data: ...\n\n"), with the chunk sizes COMPUTED — a hand-counted
+ * string length is a bug. */
+static void serve_sse_events(int lfd, const char *const *events, size_t n)
+{
+    int cfd = canned_accept(lfd, NULL, 0);
+    if (cfd >= 0) {
+        static const char head[] = "HTTP/1.1 200 OK\r\n"
+                                   "Content-Type: text/event-stream\r\n"
+                                   "Transfer-Encoding: chunked\r\n\r\n";
+        send_all(cfd, head, sizeof(head) - 1);
+        for (size_t i = 0; i < n; i++) {
+            char chunk[512];
+            size_t bl = strlen(events[i]);
+            int hl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
+            memcpy(chunk + hl, events[i], bl);
+            memcpy(chunk + hl + bl, "\r\n", 2);
+            send_all(cfd, chunk, (size_t)hl + bl + 2);
+        }
+        send_all(cfd, "0\r\n\r\n", 5);
+    }
+    canned_close(cfd, lfd);
+}
+
+static void *openrouter_served_server_thread(void *arg)
+{
+    static const char *const events[] = {
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],"
+        "\"provider\":\"Azure\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}],"
+        "\"provider\":\"Azure\"}\n\n",
+        "data: {\"choices\":[{\"delta\":{}, \"finish_reason\":\"stop\"}],"
+        "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n",
+        "data: [DONE]\n\n",
+    };
+    serve_sse_events((int)(intptr_t)arg, events,
+                     sizeof(events) / sizeof(events[0]));
+    return NULL;
+}
+
+/* A chunk that LIES with a generic top-level `provider` on a wire whose
+ * endpoint leaves the parse off (hyper): the gate is the endpoint's
+ * flag, not a check of what the other providers happen to send. */
+static void *hyper_lying_provider_server_thread(void *arg)
+{
+    static const char *const events[] = {
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
+        "\"provider\":\"NotAProvider\",\"service_tier\":\"priority\"}"
+        "\n\n",
+        "data: [DONE]\n\n",
+    };
+    serve_sse_events((int)(intptr_t)arg, events,
+                     sizeof(events) / sizeof(events[0]));
+    return NULL;
+}
+
+/* A `provider` member that is an OBJECT (a made-up provider dialect):
+ * not a report, never a misread string. */
+static void *openrouter_object_provider_server_thread(void *arg)
+{
+    static const char *const events[] = {
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
+        "\"provider\":{\"name\":\"Azure\"},\"service_tier\":\"flex\"}"
+        "\n\n",
+        "data: [DONE]\n\n",
+    };
+    serve_sse_events((int)(intptr_t)arg, events,
+                     sizeof(events) / sizeof(events[0]));
+    return NULL;
+}
+
+/* One canned OpenRouter round on the served-meta server. */
+static NmChatResult openrouter_served_round(const char *model,
+                                            const NmMessage *msgs,
+                                            size_t n_msgs, Capture *cap)
+{
+    NmChatRequest req = { model, msgs, n_msgs, NULL, NULL, -1, -1,
+                          NULL, capture_delta, NULL, cap };
+    return canned_chat_round("openrouter", openrouter_served_server_thread,
+                             &req, "sk-or-test");
+}
+
+/* The served upstream and tier the chunks report land in the round's
+ * meta (D6), whatever the notice keys say — the key gates the LINE, not
+ * the capture. A round whose wire reports neither stays empty. */
+static void test_openrouter_round_reports_the_served_meta(void)
+{
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatResult r = openrouter_served_round("~openai/gpt-astra-latest", &msg,
+                                             1, &cap);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(cap.text, "Hi there");
+    ASSERT_STR_EQ(r.meta.served_provider, "Azure");
+    ASSERT_STR_EQ(r.meta.service_tier, "flex");
+    ASSERT_STR_EQ(r.meta.source, "openrouter");
+    /* A routing fact is not a routing NOTICE: Prism's fields stay empty
+     * (the two sources are separate). */
+    ASSERT_STR_EQ(r.meta.routed_model, "");
+
+    /* The plain canned round carries neither field. */
+    Capture cap2 = { 0 };
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
+                              &cap2);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.meta.served_provider, "");
+    ASSERT_STR_EQ(r.meta.service_tier, "");
+    ASSERT_STR_EQ(r.meta.source, "");
+
+    /* A `provider` that is an OBJECT is not a report. */
+    Capture cap3 = { 0 };
+    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
+                          -1, -1, NULL,
+                          capture_delta, NULL, &cap3 };
+    r = canned_chat_round("openrouter",
+                          openrouter_object_provider_server_thread, &req,
+                          "sk-or-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.meta.served_provider, "");
+    /* The tier on the same chunk IS a report. */
+    ASSERT_STR_EQ(r.meta.service_tier, "flex");
+
+    /* A wire whose endpoint leaves the parse off (hyper) reports nothing,
+     * however its chunks lie about a top-level `provider`. */
+    Capture cap4 = { 0 };
+    NmChatRequest hreq = { "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1, NULL,
+                           capture_delta, NULL, &cap4 };
+    r = canned_chat_round("hyper", hyper_lying_provider_server_thread, &hreq,
+                          "sk-hyper-test");
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_STR_EQ(r.meta.served_provider, "");
+    ASSERT_STR_EQ(r.meta.service_tier, "");
+    ASSERT_STR_EQ(r.meta.source, "");
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -2088,6 +2227,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_request_model_composition);
     RUN_TEST(test_openrouter_body_carries_the_pricing_knobs);
     RUN_TEST(test_hyper_round_carries_no_pricing_knobs);
+    RUN_TEST(test_openrouter_round_reports_the_served_meta);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
     RUN_TEST(test_provider_authinfo_machines);

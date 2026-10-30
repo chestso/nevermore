@@ -7606,6 +7606,131 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     close(sc.fd);
 }
 
+/* The served line's shapes (D6): a reported tier, an UNREPORTED one (a
+ * fact — a workspace default fills the field server-side, so absent is
+ * not `default`), the tier-without-upstream case, and no line at all. */
+static void test_agent_round_meta_served_text_shapes(void)
+{
+    NmRoundMeta m;
+    char line[256];
+    memset(&m, 0, sizeof(m));
+    ASSERT_EQ(nm_agent_round_meta_served_text(&m, line, sizeof(line)), 0);
+    ASSERT_STR_EQ(line, "");
+
+    snprintf(m.source, sizeof(m.source), "openrouter");
+    snprintf(m.served_provider, sizeof(m.served_provider), "Azure");
+    snprintf(m.service_tier, sizeof(m.service_tier), "flex");
+    ASSERT_TRUE(nm_agent_round_meta_served_text(&m, line, sizeof(line)) > 0);
+    ASSERT_STR_EQ(line, "openrouter: served by Azure (flex tier)");
+
+    m.service_tier[0] = '\0';
+    ASSERT_TRUE(nm_agent_round_meta_served_text(&m, line, sizeof(line)) > 0);
+    ASSERT_STR_EQ(line, "openrouter: served by Azure (tier unknown)");
+
+    m.served_provider[0] = '\0';
+    snprintf(m.service_tier, sizeof(m.service_tier), "priority");
+    ASSERT_TRUE(nm_agent_round_meta_served_text(&m, line, sizeof(line)) > 0);
+    ASSERT_STR_EQ(line, "openrouter: served at the priority tier");
+
+    m.source[0] = '\0';
+    ASSERT_TRUE(nm_agent_round_meta_served_text(&m, line, sizeof(line)) > 0);
+    ASSERT_STR_EQ(line, "served at the priority tier");
+}
+
+/* A listener that records every served line the agent composes. */
+static int g_meta_calls;
+static char g_meta_lines[8][256];
+static int g_meta_n_lines;
+
+static void cap_served_meta(const NmRoundMeta *meta, void *userdata)
+{
+    (void)userdata;
+    g_meta_calls++;
+    char line[256];
+    if (nm_agent_round_meta_served_text(meta, line, sizeof(line)) &&
+        g_meta_n_lines < (int)(sizeof(g_meta_lines) / sizeof(g_meta_lines[0]))) {
+        snprintf(g_meta_lines[g_meta_n_lines], sizeof(g_meta_lines[0]), "%s",
+                 line);
+        g_meta_n_lines++;
+    }
+}
+
+/* The FIRE RULE (D6): a `default` round whose upstream did not move is
+ * not worth a line — every OpenRouter chunk carries `provider`, so a line
+ * per round is noise — while a non-default TIER or a MOVED upstream is.
+ * Four separate turns on one agent: Azure/default (the first report, a
+ * change from nothing), Azure/default (silent), OpenAI/default (moved),
+ * OpenAI/flex (tier). */
+static void test_agent_served_notice_fire_rule(void)
+{
+    reset_capture();
+    g_meta_calls = 0;
+    g_meta_n_lines = 0;
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 4;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"a\"}}],"
+        "\"provider\":\"Azure\",\"service_tier\":\"default\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"b\"}}],"
+        "\"provider\":\"Azure\",\"service_tier\":\"default\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"c\"}}],"
+        "\"provider\":\"OpenAI\",\"service_tier\":\"default\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[3] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"d\"}}],"
+        "\"provider\":\"OpenAI\",\"service_tier\":\"flex\"}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("openrouter");
+    ASSERT_NOT_NULL(p);
+    NmAgent *agent = nm_agent_new(p, "openai/gpt-4o-mini", NULL, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-or-test");
+    nm_agent_on_round_meta(agent, cap_served_meta);
+
+    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "four", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+
+    /* Three lines from four rounds: the repeated Azure/default round is
+     * silent. */
+    ASSERT_EQ(g_meta_calls, 3);
+    ASSERT_EQ(g_meta_n_lines, 3);
+    ASSERT_STR_EQ(g_meta_lines[0], "openrouter: served by Azure (default tier)");
+    ASSERT_STR_EQ(g_meta_lines[1], "openrouter: served by OpenAI (default tier)");
+    ASSERT_STR_EQ(g_meta_lines[2], "openrouter: served by OpenAI (flex tier)");
+
+    /* The last completed round's facts are captured whatever fired —
+     * /context's always-available record. */
+    NmRoundMeta meta;
+    nm_agent_round_meta(agent, &meta);
+    ASSERT_STR_EQ(meta.served_provider, "OpenAI");
+    ASSERT_STR_EQ(meta.service_tier, "flex");
+    ASSERT_STR_EQ(meta.source, "openrouter");
+
+    nm_agent_free(agent);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -7746,5 +7871,7 @@ int main(void)
     RUN_TEST(test_agent_conversation_id_shape_and_uniqueness);
     RUN_TEST(test_agent_conversation_id_many_distinct);
     RUN_TEST(test_openrouter_round_carries_the_mode_composed_id);
+    RUN_TEST(test_agent_round_meta_served_text_shapes);
+    RUN_TEST(test_agent_served_notice_fire_rule);
     TEST_SUMMARY();
 }
