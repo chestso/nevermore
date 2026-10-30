@@ -2832,7 +2832,11 @@ static void format_model_meta(const NmEntry *m, char *buf, size_t cap)
     buf[0] = '\0';
     size_t off = 0;
     if (m->context_length > 0) {
-        char ctx[16];
+        /* Sized for the worst a long can print (19 digits + '.' +
+         * fraction + unit + NUL = 23), like the status row's gauge: a
+         * 16-byte buffer truncated a count past ~10^14 silently, which
+         * -Wformat-truncation names at the snprintf. */
+        char ctx[24];
         format_tokens(m->context_length, ctx, sizeof(ctx));
         meta_append(buf, cap, &off, ctx);
     }
@@ -3341,25 +3345,21 @@ static void print_config(NmChatApp *app)
     /* The ACTIVE provider's pricing/routing knobs: the canonical place
      * for them (the value the next request will carry, `-` when unset),
      * so the generic scoped loop below skips these three bases for this
-     * provider — one fact, one row. */
-    for (size_t b = 0; b < 3; b++) {
-        static const char *const bases[] = { NM_CFG_KEY_ROUTING,
-                                             NM_CFG_KEY_TIER,
-                                             NM_CFG_KEY_MAX_PRICE };
-        const char *base = bases[b];
-        if (!app->provider)
-            break;
-        char k[NM_CFG_SCOPED_KEY];
-        app_knob_key(app, base, k, sizeof(k));
-        if (!app_knob_declared(app, base)) {
-            sys_line(app, "  %-20s %-14s (no such key for this provider)", k,
-                     "-");
-            continue;
+     * provider — one fact, one row. A provider with no vocabulary has no
+     * such rows at all: three "no such key" lines on every profile would
+     * be noise. */
+    if (app->provider && app->provider->knobs) {
+        for (size_t b = 0; APP_KNOB_BASES[b]; b++) {
+            const char *base = APP_KNOB_BASES[b];
+            if (!app_knob_declared(app, base))
+                continue;
+            char k[NM_CFG_SCOPED_KEY];
+            app_knob_key(app, base, k, sizeof(k));
+            NmCfgSource src = NM_CFG_DEFAULT;
+            const char *v = app_knob_value(app, base, &src);
+            sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
+                     v ? nm_config_source_name(src) : "unset");
         }
-        NmCfgSource src = NM_CFG_DEFAULT;
-        const char *v = app_knob_value(app, base, &src);
-        sys_line(app, "  %-20s %-14s (%s)", k, v ? v : "-",
-                 v ? nm_config_source_name(src) : "unset");
     }
     /* The provider-scoped keys actually set (`model.<provider>`), after
      * the plain ones: the per-provider model memory. The plain `model`
