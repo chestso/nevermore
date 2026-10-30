@@ -695,11 +695,6 @@ typedef int (*NmConfigScopedValidator)(const NmConfig *c, const char *base,
                                        char *out, size_t cap);
 void nm_config_set_scoped_validator(NmConfigScopedValidator fn);
 
-/* Is `base` one of the scoped bases (`model`, `routing`, `tier`,
- * `max_price`)? The shape `<base>.<provider>`; anything else is not a
- * key. */
-int nm_config_valid_scoped_base(const char *base);
-
 /* The `max_price` value space, shared by the file layer, the shadow
  * write-back and the registry's own dispatcher so it lives once:
  * exactly two positive decimals separated by ',' — `<prompt>,

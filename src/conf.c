@@ -207,7 +207,7 @@ static const char *const SCOPED_BASES[] = {
     NM_CFG_KEY_MAX_PRICE, NULL
 };
 
-int nm_config_valid_scoped_base(const char *base)
+static int scoped_base_ok(const char *base)
 {
     if (!base || !*base)
         return 0;
@@ -236,7 +236,7 @@ static int scoped_split(const char *name, char *base, size_t base_cap,
     char b[NM_CFG_SCOPED_KEY];
     memcpy(b, name, blen);
     b[blen] = '\0';
-    if (!nm_config_valid_scoped_base(b))
+    if (!scoped_base_ok(b))
         return 0; /* not a scoped base */
     const char *prov = dot + 1;
     if (!nm_config_valid_provider(prov))
@@ -1356,7 +1356,7 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
                 if (blen < sizeof(b)) {
                     memcpy(b, key, blen);
                     b[blen] = '\0';
-                    if (nm_config_valid_scoped_base(b)) {
+                    if (scoped_base_ok(b)) {
                         fprintf(stderr,
                                 "nevermore: %s: unknown provider in key "
                                 "'%s': ignored\n",
@@ -1526,7 +1526,7 @@ const char *nm_config_scoped_for(const NmConfig *c, const char *base,
 {
     if (src)
         *src = NM_CFG_DEFAULT;
-    if (!c || !nm_config_valid_scoped_base(base))
+    if (!c || !scoped_base_ok(base))
         return NULL;
 
     CfgScoped *s = scoped_find_bs(c, base, provider);
