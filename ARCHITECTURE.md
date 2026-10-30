@@ -141,6 +141,34 @@ order so the blocking and event-driven drives cannot drift. A value must outlive
 the queue call: a literal, a process-static slot, or the environment's own
 string.
 
+**Request BODY fields** a provider needs go through the endpoint's one
+`body_extra` hook (`void (*)(const NmProvider *p, NmJson *body)`), set where the
+endpoint is built (OpenRouter's `service_tier` and `provider.max_price` today;
+ollama's `keep_alive` or a future provider's field tomorrow). The composer calls
+it with the body object FIRST, before nevermore's own fields, so nevermore's
+shape always wins: a provider can add a field but never repoint `model` or
+`messages`. The hook composes with `nm_json` (never a `snprintf`'d JSON string),
+and a built node that is grafted is the same node, so a second writer merges
+into an existing object instead of creating a rival member. The endpoint
+carries its own provider (`NmOpenaiEndpoint.provider`) for a two-tier provider,
+set by `openaicompat_preset` — the one place every endpoint is born; a
+hand-built endpoint (a unit test) leaves it NULL and the hook tolerates it.
+
+**The model id is the provider's grammar**, not the client's. Two vtable hooks
+on `NmProvider` own it: `request_model` composes the id a WIRE request carries
+(the catalog id plus the provider's active routing mode — a `:nitro`-style
+suffix), and `catalog_model` resolves a wire id back to the catalog id a lookup
+uses (OpenRouter's four ROUTING variants are dropped; its CATALOG variants such
+as `:free` are entries of their own and stay). NULL on both means "the id is the
+request's model, verbatim", which every other provider uses. `model_entry` (the
+ONE catalog lookup behind the window, the vision claim, the tool-use claim and
+the image-gen badge) asks `catalog_model` first, so a suffixed id keeps its row,
+while the agent's `a->model`, the status row and the session keep the catalog
+id — a wire id is never a display fact. The provider's pricing/routing
+vocabulary (`NmProviderKnobs`: which scoped keys exist, and the canonical
+spelling of each value) is the third tail field, read only through the store's
+installed scoped-value validator.
+
 **Auth preflight:** a provider that `needs_auth` with no key configured is
 announced before the turn (`warn_missing_key`, at startup and on `/provider`).
 It uses the same `nm_provider_api_key` seam as the request, so an `~/.authinfo`
@@ -323,15 +351,28 @@ non-streamed responses).
   transport's retained headers (`nm_response_header`, case-insensitive across
   head headers and chunked trailers). Fields are copied verbatim, and all-empty
   means "not routed".
+- The same metadata carries a SECOND provider's facts: the upstream that served
+  the round and the tier it was billed at (OpenRouter's chunk-level `provider`
+  and final-chunk `service_tier`), read by the client only when the endpoint's
+  `parse_served_meta` is set — `provider` is a generic word, and another wire's
+  means something else, so the gate is structural rather than a check of what
+  the other providers happen to send. `NmRoundMeta.source` names the reporting
+  provider, and it is set only when the wire actually reported something.
 - The agent keeps the last completed round's copy (`nm_agent_round_meta`, zeroed
-  at round start) and fires `nm_agent_on_round_meta` once per routed round,
-  since each tool round is routed on its own. The text has one spelling for both
-  entry paths (`nm_agent_round_meta_text`) and prints through
-  `nm_sysout_notice`, so a tool panel never starts on the notice's heels on
-  either carrier.
-- `prism_notice` gates the **line**, not the capture: the hook, the meta and
-  `/context` ignore it. The notice is a system message that joins neither the
-  conversation nor the saved transcript. Savings are never computed client-side.
+  at round start) and fires `nm_agent_on_round_meta` once per round that has
+  something to say, since each tool round is a request of its own. A Prism
+  routed round always speaks; a served-by round speaks only when it carries
+  SIGNAL (a non-`default` tier, or an upstream different from the previous
+  completed round's), because every chunk carries the upstream and a line per
+  round is noise that buries the fallback it should reveal. The text has one
+  spelling for both entry paths (`nm_agent_round_meta_text`,
+  `nm_agent_round_meta_served_text`) and prints through `nm_sysout_notice`, so a
+  tool panel never starts on the notice's heels on either carrier.
+- `prism_notice` and `served_notice` each gate their **line**, not the capture:
+  the hooks, the meta and `/context` ignore them. The notice is a system message
+  that joins neither the conversation nor the saved transcript. Savings are
+  never computed client-side, and an unreported tier reads "tier unknown" — a
+  workspace default fills the field in server-side, so absent is not `default`.
 - **A trailer that lands after `[DONE]` is still captured, on a bounded wait**
   (`tail_step`, 250 ms): a chunked response's terminator and trailers can arrive
   in a later segment than the marker. The deadline rides `chat_stream_wait_ms`,

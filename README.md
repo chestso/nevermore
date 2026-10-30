@@ -141,6 +141,11 @@ switching to a provider with no key says so up front, before the first turn.
   below)
 - `/config`, `/config set <key> <value>`, `/config reset [key|all]`: show every
   setting and where it came from; change or reset one
+- `/routing [mode]`, `/tier [name]`, `/maxprice [prompt,completion]`: the
+  provider's routing mode, service tier and price ceiling (OpenRouter today; no
+  argument prints the value and the accepted spellings)
+- `/preset cheap|fast|balanced`: both levers at once — `cheap` is `:floor` on the
+  `flex` tier, `fast` `:nitro` on `priority`, `balanced` neither
 - `/context`: the exact token breakdown (last round, session totals, cache read
   rate)
 - `/session`, `/session list`, `/session save [path]`: inspect or save the
@@ -260,6 +265,10 @@ another provider's catalog.
 - `prism_notice` (default on): Hyper's `prism` models are a server-side router
   that picks an upstream model per request; print which one answered, once per
   routed round
+- `served_notice` (default on): print which upstream served a round and at which
+  service tier (`openrouter: served by Azure (flex tier)`), when it carries
+  signal — a non-`default` tier, or an upstream that changed. `/context` reports
+  the same facts with the key off
 - `skills` (default on): skill discovery, read when a chat starts
 - `image_live` (default 1): how many requests an image rides before it becomes a
   text marker; `off` keeps it on every request
@@ -271,6 +280,44 @@ absolute `http(s)` URL, else ignored), `OPENROUTER_PROMPT_CACHE=off|5m|1h` picks
 the prompt-cache TTL OpenRouter's Anthropic models are asked for (`off` sends
 no marker), and `NEVERMORE_DEBUG_WIRE=1` records every request body and stream
 event verbatim under `$XDG_STATE_HOME/nevermore/wire/`.
+
+### Routing, tier and price
+
+OpenRouter hosts one model on many upstreams and routes each request to one of
+them. nevermore can steer that, with three keys that belong to a provider (so
+each is spelled `<key>.<provider>`, and a provider that has no such vocabulary
+refuses them):
+
+- `routing.<provider>`: `balanced` (the provider's own routing), `nitro` (sort
+  by throughput, admitting priority-tier endpoints), `floor` (sort by price,
+  admitting flex-tier endpoints) or `exacto` (quality signals tuned for tool
+  use). The mode rides the model ID as its last suffix, never the body: the
+  suffix is the provider's own semantics, and the catalog lookup drops it again,
+  so a routed model keeps its window and badges.
+- `tier.<provider>`: the service tier the round is billed at: `default`, `flex`,
+  `priority` (the wire's `fast` means the same and is stored as `priority`), or
+  `ultrafast`. Unset is NOT `default`: it means whatever the provider's
+  workspace says, else the router's own. `ultrafast` is refused unless
+  `max_tokens` is set, because without an output cap the provider silently falls
+  back to `priority` — a knob that mostly lies is worse than none.
+- `max_price.<provider>`: a ceiling as `<prompt>,<completion>` in $/Mtok, e.g.
+  `3,15` means at most $3 per million input tokens and $15 per million output
+  tokens. Unlike a preference it can PREVENT the request: if no endpoint fits,
+  the round fails with the provider's own message.
+
+```ini
+routing.openrouter = nitro
+tier.openrouter    = flex
+max_price.openrouter = 3,15
+```
+
+In the TUI the same three are `/routing`, `/tier` and `/maxprice` (no argument
+prints the value and the accepted spellings), and `/preset cheap|fast|balanced`
+writes the two common pairs at once. There is no environment spelling for these
+keys: a scoped key is the provider's, and a scripted run writes the user config.
+A change applies to the very next round — none of the three is part of the
+prompt, so the provider's cache is untouched and the conversation id is not
+rotated.
 
 ### Reasoning echo
 

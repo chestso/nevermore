@@ -762,11 +762,12 @@ vocabulary, never a target.
 
 ## 8. Provider notes for the nevermore side
 
-- `provider_openrouter.c` only supplies base URL, auth, the app
-  attribution headers (§9) and the
-  model catalog; all wire logic lives in openai_client.c (verified:
-  the SSE tool-call framing is byte-identical, so no client changes
-  are needed).
+- `provider_openrouter.c` supplies the provider's own wire truth: base
+  URL, auth, the app attribution headers (§9), the model catalog, the
+  pricing/routing VOCABULARY (`routing` / `tier` / `max_price`), the
+  model-id grammar and the body-extras hook. The shared client still
+  owns the wire itself (verified: the SSE tool-call framing is
+  byte-identical, so no client changes are needed for chat).
 - Catalog: `GET /v1/models` at runtime via `nm_openai_models`
   (tokenless), the generated table in `src/catalog_data.h` as the
   offline fallback.
@@ -783,37 +784,72 @@ password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
 - The app's identity rides the chat round (§9): `HTTP-Referer`,
   `X-OpenRouter-Title` and `X-OpenRouter-Categories`, with the URL
   and the name from `src/identity.h` and `$NEVERMORE_APP_URL`.
-- **The request body carries exactly two provider fields, both typed**
-  (§10): `cache_control` — the Anthropic family's prompt-cache opt-in,
-  a top-level member sent for `anthropic/*` and `~anthropic/*` ids
-  only — and `session_id`, the agent's conversation id, which rides
-  every round for sticky routing (§10.6). Beyond those two the set
-  stays the fixed OpenAI shape (`model`, `messages`, `stream`,
-  `stream_options`, `temperature`, `max_tokens`, `tools`,
-  `tool_choice`), so the preferences object and `service_tier` still
-  cannot ride (§7): every round gets OpenRouter's own routing (§7.4),
-  with no `only`/`order`/`ignore`/`sort`, no `max_price`, no `zdr`
-  and no pinned tier.
+- **The request body carries four provider fields** (§10 and §7): two
+  typed in earlier — `cache_control`, the Anthropic family's
+  prompt-cache opt-in, a top-level member sent for `anthropic/*` and
+  `~anthropic/*` ids only, and `session_id`, the agent's conversation
+  id, which rides every round for sticky routing (§10.6) — and two
+  driven by provider-scoped keys: `service_tier` (§7.8) and
+  `provider.max_price` (§7.10). All four enter through ONE seam on the
+  endpoint (the provider's own body fields, composed first so
+  nevermore's shape always wins), which is also where ollama's
+  `keep_alive` or a future provider's own field would ride.
+  Beyond those the set stays the fixed OpenAI shape (`model`,
+  `messages`, `stream`, `stream_options`, `temperature`,
+  `max_tokens`, `tools`, `tool_choice`). The preferences object's other
+  members (`only`, `order`, `ignore`, `allow_fallbacks`,
+  `data_collection`, `zdr`, `require_parameters`, `sort`) still do not
+  ride.
   MESSAGE-level reasoning fields are not provider fields and are no
   exception: `reasoning_content` and `reasoning_details` ride the
   assistant message shape itself (the OpenAI-compatible wire's own),
   and the composer emits both — the trace text per `reasoning_echo`,
   the structured array per `signature_echo` (§3.2).
-- **A hand-typed routing variant DOES ride the wire** — the model id
-  is passed through as typed, so `vendor/model:nitro` reaches
-  OpenRouter as a routing variant (probed live through nevermore:
-  `nevermore ask --model 'openai/gpt-4o-mini:nitro'` answered, and the
-  stream's chunks named the upstream that served it). It is offered
-  nowhere, though: the picker and `nevermore models` list catalog rows
-  only, and the routing variants are not catalog rows (§7.5).
-- **A suffixed id misses the catalog.** nevermore's lookup is an exact
-  match, so `vendor/model:nitro` has no row: no context window, no
-  vision claim, and the toolset KEPT (the catalog says nothing about
-  an unknown model, and an unknown model keeps its tools).
-- **The upstream that answered is not read.** Every chunk carries
-  `provider` (§7.7) and nevermore does not parse it, so the transcript
-  cannot name the upstream that served the round — the Prism-style
-  notice Hyper has does not exist here.
+- **The routing mode rides the MODEL ID** (`routing.openrouter` =
+  `balanced` / `nitro` / `floor` / `exacto`): `balanced` is the plain
+  catalog id (OpenRouter's own routing, §7.4), the others append the
+  variant as the id's LAST suffix — the wire's exact semantics for the
+  sort plus the tier admission, which `provider.sort` cannot express
+  (§7.2). A hand-typed variant still rides the wire as typed, and the
+  mode replaces it when one is set (the mode is the last word).
+- **The catalog lookup resolves the id** (§7.5): the four ROUTING
+  variants are dropped for the lookup and the CATALOG variants
+  (`:free`) are kept, so `vendor/model:nitro` and
+  `vendor/model:free:nitro` answer with the row they really serve. The
+  context window, the vision badge and the tool-use claim therefore
+  follow a suffixed id, and a `:batch` id stays vetoed (§6.3). The
+  TRANSCRIPT and the picker keep showing the catalog id: the wire id is
+  never a display fact.
+- **The tier is one key** (`tier.openrouter`): `default` / `flex` /
+  `priority` (the wire's `fast` folds to it on write) / `ultrafast`.
+  It sends `service_tier`, and it is the provider-agnostic spelling
+  (§7.8). `ultrafast` is REFUSED unless `max_tokens` is set: without an
+  output cap OpenRouter's own large default fails the ultrafast balance
+  check and the round silently serves priority. The three knobs are
+  provider-scoped keys with a friendly surface — `/routing`, `/tier`,
+  `/maxprice`, and the `/preset cheap|fast|balanced` compositions —
+  and no environment spelling (a scoped key has none by design).
+- **The price ceiling is one key with two numbers**
+  (`max_price.openrouter = 3,15`): `<prompt>,<completion>` in
+  $/Mtokens, the wire's own unit for `provider.max_price` (§7.10). It
+  is the one knob that can PREVENT a request rather than merely prefer
+  an endpoint, so a refusal from the provider is surfaced verbatim.
+- **The round reports who served it, at which tier** (§7.9): every
+  chunk's `provider` and the final chunk's `service_tier` land in the
+  round's metadata, and the parse is gated by the endpoint's own flag —
+  `provider` is a generic word, and another wire's means something else.
+  The human sees a terminal-only system line
+  (`openrouter: served by Azure (flex tier)`) under the round, gated by
+  its OWN key `served_notice` and fired only when the line carries
+  signal: a non-`default` tier, or an upstream that differs from the
+  previous completed round's. `/context` reports the last round's
+  upstream and tier whatever the key says, plus what the NEXT round will
+  carry (the active `routing` / `tier` / `max_price`).
+- A mode, tier or ceiling change is NOT frozen the way the echo modes
+  are: none of the three is part of `messages`, and explicit routing
+  overrides the `session_id` sticky pin (§7.11), so a change applies to
+  the next round without rotating the conversation id or throwing the
+  provider's cached prefix away.
 
 ## 9. App attribution (live test, 2026-10-26)
 
