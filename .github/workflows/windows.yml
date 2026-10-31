@@ -144,11 +144,17 @@ jobs:
         # run reading `boba 0.4.0`). The rebuild costs ~26 s of a ~6 min
         # job; linux.yml and macos.yml have always paid it (6-15 s) and
         # cannot drift for the same reason.
+        #
+        # --enable-release: boba is the DEPENDENCY, not the subject under
+        # test here (MinGW has no sanitizer runtime, so its default build
+        # is already uninstrumented — but it is -O0 -g3). Its own CI owns
+        # its suite; nothing here runs boba's `make check`, and nothing
+        # should.
         run: |
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$HOME/.local" --enable-release
           make -j && make install
 
       - name: Build (Schannel TLS — native, no deps)

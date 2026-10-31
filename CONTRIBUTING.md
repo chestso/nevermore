@@ -55,11 +55,12 @@ Commit style is `scope: lowercase summary`, one behavior per commit (see
   build dir configured `--enable-release`, because a sanitized binary is not
   portable. **The dependency must be release-built too:** boba defaults to
   ASan+UBSan on macOS and Linux, and an unsanitized nevermore cannot resolve the
-  sanitizer symbols in its archive (`ld: symbol(s) not found`). The macOS job
-  builds a second, release boba into its own prefix. Windows needs no second
-  build (MinGW has no sanitizer runtime). `DIST_TARGET=windows` packs a tree
-  cross-built by the wine pre-flight. Linux is deliberately not packaged;
-  `make dist` is its artifact.
+  sanitizer symbols in its archive (`ld: symbol(s) not found`). CI therefore
+  builds boba `--enable-release` and installs it once per job: the sanitized
+  tests and the ZIP's release build link the same archive, so there is no
+  second boba build anywhere. `DIST_TARGET=windows` packs a tree cross-built by
+  the wine pre-flight. Linux is deliberately not packaged; `make dist` is its
+  artifact.
 
 `make -j` does **not** rebuild test binaries. Use `make -C build/tests test_x`
 or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
@@ -216,6 +217,12 @@ prerequisite (skip).
   installs: nevermore links whichever is **installed**, so install the ASan lib
   for nevermore's ASan suite and restore the release lib after. boba's real gate
   is its ASan tree (a release tree compiles `assert()` out).
+- **boba, the CI build is release:** every workflow builds boba
+  `--enable-release` and never runs its `make check` — the dependency's suite is
+  boba's own CI, and a copy here would gate this repo on boba's schedule. Read a
+  green run accordingly: CI covers nevermore against a boba whose `assert()`s are
+  compiled out. The ASan tree belongs to the dev box (the wine pre-flight builds
+  the same release boba the runners do; see the stale-install bullet above).
 - **boba, the pin:** all three workflow files (linux, macOS, Windows-MSYS2)
   carry the same boba ref, so bump them together. Push the boba commit
   **before** the nevermore commit that bumps the pin, or CI's checkout fails. A
@@ -348,9 +355,10 @@ AGENTS.md has the rest of the release rules.
 - **One tag, one run.** Platform workflows carry no `tags:` trigger; adding one
   silently doubles every release's CI.
 - **The tested binary and the shipped one differ.** Tests gate the sanitized
-  build, the ZIP carries `--enable-release`, and the macOS ZIP links a second,
-  release-built boba. All of it is built in the same job, so a packaging failure
-  is red on every push, not first at release time.
+  build, the ZIP carries `--enable-release`, and boba — the dependency — is
+  built release in every job, so the ZIP links it without a second build. All of
+  it is built in the same job, so a packaging failure is red on every push, not
+  first at release time.
 - **Green master before the tag.** A red required job skips the release job, and
   no release appears. Move the tag to the fixed commit only after master is
   green.

@@ -126,11 +126,17 @@ jobs:
           brew install autoconf automake libtool pkg-config
 
       - name: Build and install boba
+        # --enable-release: boba is the DEPENDENCY, not the subject under
+        # test here (its default build is ASan+UBSan). Its own CI owns its
+        # suite; nothing here runs boba's `make check`, and nothing
+        # should. The installed archive also carries no __asan_/__ubsan_
+        # references, which is what lets the ZIP step below link a release
+        # nevermore against it without a second boba build.
         run: |
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$HOME/.local" --enable-release
           make -j"$(sysctl -n hw.ncpu)" && make install
 
       - name: Checkout coffer (cfr-debug, the E2E PTY inspector)
@@ -203,22 +209,14 @@ jobs:
         # not portable. Second out-of-tree build dir, release mode, src
         # only — the ZIP carries one file.
         #
-        # boba is rebuilt for it, release mode, into its own prefix. Its
-        # default build is ASan+UBSan too — that is what the tests link —
-        # and an unsanitized nevermore cannot resolve the __asan_/__ubsan_
-        # calls its static archive still holds: the first link of this step
-        # died with `ld: symbol(s) not found for architecture arm64` on
-        # exactly that. (Windows needs no second build: MinGW has no
-        # sanitizer runtime, so boba's default there is already
-        # unsanitized.) Same reason coffer is built --enable-release above.
+        # No second boba build: boba is installed --enable-release above,
+        # so its archive holds no __asan_/__ubsan_ references and the
+        # release nevermore links cleanly. (Before that it was rebuilt
+        # release here, into its own prefix, precisely because the tested
+        # boba was sanitized and the link died with `ld: symbol(s) not
+        # found for architecture arm64`.)
         run: |
-          cd boba
-          ./autogen.sh
-          mkdir -p build-rel && cd build-rel
-          ../configure --enable-release --prefix="$RUNNER_TEMP/boba-rel"
-          make -j"$(sysctl -n hw.ncpu)" && make install
-          cd "$GITHUB_WORKSPACE"
-          export PKG_CONFIG_PATH="$RUNNER_TEMP/boba-rel/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
+          export PKG_CONFIG_PATH="$HOME/.local/lib/pkgconfig:/opt/homebrew/lib/pkgconfig"
           mkdir build-rel && cd build-rel
           ../configure --enable-release
           make -j"$(sysctl -n hw.ncpu)" -C src

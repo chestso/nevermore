@@ -143,11 +143,19 @@ jobs:
           fi
 
       - name: Build and install boba
+        # --enable-release: boba is the DEPENDENCY, not the subject under
+        # test here. Its default build is ASan+UBSan, which every one of
+        # this job's test binaries would then carry link-time and
+        # startup-time, and which buys no coverage this repo owns — boba's
+        # own CI is where boba's suite runs. Nothing here runs boba's
+        # `make check` (make install does not), and nothing should: a
+        # second copy of that suite in this repo's CI is a duplicate gate
+        # that fails on boba's schedule, not this repo's.
         run: |
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$HOME/.local" --enable-release
           make -j"$(nproc)" && make install
 
       - name: Checkout coffer (cfr-debug, the E2E PTY inspector)
@@ -239,11 +247,19 @@ jobs:
             autoconf automake libtool make pkg-config
 
       - name: Build and install boba
+        # --enable-release: boba is the DEPENDENCY, not the subject under
+        # test here. Its default build is ASan+UBSan, which every one of
+        # this job's test binaries would then carry link-time and
+        # startup-time, and which buys no coverage this repo owns — boba's
+        # own CI is where boba's suite runs. Nothing here runs boba's
+        # `make check` (make install does not), and nothing should: a
+        # second copy of that suite in this repo's CI is a duplicate gate
+        # that fails on boba's schedule, not this repo's.
         run: |
           cd boba
           ./autogen.sh
           mkdir build && cd build
-          ../configure --prefix="$HOME/.local"
+          ../configure --prefix="$HOME/.local" --enable-release
           make -j"$(nproc)" && make install
 
       - name: Create distribution tarball

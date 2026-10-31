@@ -133,9 +133,13 @@ else
 	fi
 
 	echo "==> boba: cross-building for Windows"
+	# --enable-release, the same mode every CI job builds: boba is the
+	# dependency, its own suite is boba's CI, and a pre-flight that linked
+	# a different boba than the runners do would be answering another
+	# question.
 	(cd "$boba_build" &&
 		"$boba_src/configure" --host=x86_64-w64-mingw32 \
-			--prefix="$boba_prefix") \
+			--prefix="$boba_prefix" --enable-release) \
 		>"$builddir/boba-configure.log" 2>&1 || {
 		echo "FAIL: boba configure (see $builddir/boba-configure.log)"
 		tail -20 "$builddir/boba-configure.log"
