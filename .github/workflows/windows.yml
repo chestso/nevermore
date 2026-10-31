@@ -113,9 +113,9 @@ jobs:
           # mid-work. NOTE: this tag must exist on the boba remote
           # BEFORE nevermore, or CI cannot fetch it. It also names the
           # version the packaged binaries print (git describe reads
-          # v0.5.3; nevermore reports boba 0.5.3). Bump it in all three
+          # v0.5.4; nevermore reports boba 0.5.4). Bump it in all three
           # platform workflows at once.
-          ref: v0.5.3
+          ref: v0.5.4
           path: boba
           fetch-depth: 0
 
