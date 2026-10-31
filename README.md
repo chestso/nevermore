@@ -228,9 +228,6 @@ for this run only, for the provider the run resolved.
 - `model.<provider>` (default none): model id, remembered per provider
 - `rounds` (default 25): max tool rounds in one turn; past it the turn stops
   with "too many tool rounds"
-- `void_retries` (default 2, range 0-9): how often a void round (one that came
-  back with no text and no tool call) is re-asked; every void round is shown in
-  red, `0` ends the turn at the first one
 - `temperature` (default unset, range 0-2): unset means the field is not sent
   and the provider decides
 - `max_tokens` (default unset): output cap per round; unset means not sent

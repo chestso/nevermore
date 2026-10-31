@@ -158,16 +158,16 @@ says what it is about to do), the provider calls the round finished,
 and the human sees a turn that stops in the middle of a sentence with
 nothing said. nevermore's answer is the agent's `round_is_void`
 (`src/agent.c`): a round with no text, no tool call and no image is
-not an answer — it is asked again, and the turn never ends on one
-(the retry and the note are the agent's; see ARCHITECTURE.md, "Agent
-loop").
+not an answer, so the turn ends in a real error naming the wire's own
+words — never in silence, and never with a retry (see ARCHITECTURE.md,
+"Void rounds").
 
 Observed 8 times in one 26-minute session, all with
 `google/gemini-3.8-flash`, all above ~84k prompt tokens and none
 below: the model's function calling is what degrades with a long
 context. The round right after a void one answered normally in five
-of the eight — which is why a retry is worth more than a "continue"
-from the human.
+of the eight — but that is a measurement, not a licence to re-ask: the
+turn ends, and the human decides what comes next.
 
 ## 3.2 The thought signature — the structured reasoning carrier (live, 2026-10-27)
 
@@ -245,10 +245,8 @@ from every round of that session, not just the failing ones. A cause
 present in 100% of rounds cannot explain a failure in 7% of them, so
 the missing signature is at most an AGGRAVATING factor on the
 `MALFORMED_FUNCTION_CALL` rounds — which is why the echo is NOT
-justified as their cure, and why the empty-round retry (the agent's
-`round_is_void`, ARCHITECTURE.md) stays exactly as it is: the two are
-independent, and the retry is the one that has been observed to recover
-a turn.
+justified as their cure: the empty round ends the turn (the agent's
+`round_is_void`, ARCHITECTURE.md), and the two are independent.
 
 The signature echo is justified instead by the rule Google documents
 and nevermore has no counter-evidence for: the signature is REQUIRED
@@ -1044,8 +1042,7 @@ about a quarter more than not asking at all. On the Google upstream
 the first extension after a fresh write tends to miss, while an
 identical body always hits — every identical-body probe read at the
 cache price, 7.5x cheaper on haiku-5.5 ($0.0002315 -> $0.0000307) and
-15x on sonnet-5.5 ($0.0057455 -> $0.0003911), which is exactly the
-`round_is_void` retry path (§3.1). Over a multi-round turn the
+15x on sonnet-5.5 ($0.0057455 -> $0.0003911). Over a multi-round turn the
 expected value is strongly positive (reads bill at 0.05-0.1x), but the
 per-round worst case is real: these numbers are a range, not a promise.
 

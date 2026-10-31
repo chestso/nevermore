@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 26
+#define NM_CFG_NKEYS 25
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -141,8 +141,6 @@ static const struct
      * $NEVERMORE_MODEL, never a plain key (see conf.h). */
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
-    { NM_CFG_KEY_VOID_RETRIES, "NEVERMORE_VOID_RETRIES",
-      NM_STR(NM_AGENT_DEFAULT_VOID_RETRIES) },
     /* The two echo knobs default to `all`: the copies ride back unless
      * the user says otherwise (the provider's own declaration still
      * fills the default where it has one — see agent.c). */
@@ -380,38 +378,6 @@ int nm_config_valid_positive_int(const char *value)
 int nm_config_valid_rounds(const char *value)
 {
     return nm_config_valid_positive_int(value);
-}
-
-/* The `void_retries` value space: one plain decimal 0-9. `0` is a real
- * choice ("never retry"), which is why the positive-int shape above is
- * not reused; the ceiling is 9 because a retry run past that is a stuck
- * model, and the note the model gets is latched per turn. */
-int nm_config_void_retries_canon(const char *value, char *out, size_t cap)
-{
-    if (!value || !*value || value[1] != '\0')
-        return 0;
-    if (value[0] < '0' || value[0] > '9')
-        return 0;
-    if (!out || cap == 0)
-        return 0;
-    snprintf(out, cap, "%c", value[0]);
-    return 1;
-}
-
-int nm_config_valid_void_retries(const char *value)
-{
-    char tmp[4];
-    return nm_config_void_retries_canon(value, tmp, sizeof(tmp));
-}
-
-int nm_config_resolve_void_retries(const NmConfig *c)
-{
-    const char *v = c ? nm_config_resolve(c, NM_CFG_KEY_VOID_RETRIES, NULL)
-                      : NULL;
-    char canon[4];
-    if (!v || !nm_config_void_retries_canon(v, canon, sizeof(canon)))
-        return NM_AGENT_DEFAULT_VOID_RETRIES;
-    return canon[0] - '0';
 }
 
 /* The `image_live` value space: a positive decimal (the number of
@@ -1051,9 +1017,6 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_MAX_TOKENS) == 0) {
         if (!nm_config_valid_positive_int(raw))
             return 0;
-    } else if (strcmp(key, NM_CFG_KEY_VOID_RETRIES) == 0) {
-        /* 0-9, and `0` is meaningful (never retry). */
-        return nm_config_void_retries_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_IMAGE_LIVE) == 0) {
         /* A positive decimal (the number of requests an image rides) or
          * `off` (every request carries the image). `0` is refused. */

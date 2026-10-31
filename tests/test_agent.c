@@ -998,33 +998,21 @@ static const char *request_body(const char *req)
     return sep ? sep + 4 : req;
 }
 
-static void test_agent_void_round_is_retried(void)
+/* A round that came back with NOTHING in it ends the turn. There is no
+ * retry: the round produced nothing, the transcript does not grow an
+ * empty assistant message, the all-zero usage report never reaches the
+ * gauge, and the human is told twice — a warning naming the wire's own
+ * words, and the turn's own error carrying the same reason. */
+static void test_agent_void_round_ends_the_turn(void)
 {
-    /* A round that came back with NOTHING in it is not an answer: the
-     * turn must not end on it, the transcript must not grow an empty
-     * assistant message, and the round must be asked again. */
     reset_capture();
-    g_notice_calls = 0;
-    g_notice_text[0] = '\0';
-    write_fixture();
+    g_warn_calls = 0;
+    g_warn_text[0] = '\0';
 
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 3;
+    sc.n_rounds = 1; /* the void round only: none is asked again */
     sc.sse[0] = VOID_ROUND_SSE;
-    /* The retry: a tool call, as if the model had answered the second
-     * time it was asked. */
-    sc.sse[1] =
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
-        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
-        "{\"name\":\"edit_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
-        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
-        "\\\"slow red\\\"}\"}}]}}]}\n\n"
-        "data: [DONE]\n\n";
-    /* And the round after the tool: the answer. */
-    sc.sse[2] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
-        "data: [DONE]\n\n";
     sc.fd = server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
 
@@ -1040,34 +1028,25 @@ static void test_agent_void_round_is_retried(void)
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
-    nm_agent_on_notice(agent, cap_notice);
     nm_agent_on_warning(agent, cap_warning);
 
-    int rc = nm_agent_turn(agent, "change quick to slow in the fixture", NULL,
-                           0);
+    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
 
-    /* The turn ran on: the void round did not end it. */
-    ASSERT_EQ(rc, 0);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_STR_EQ(g_text, "done");
-    ASSERT_EQ(g_tool_starts, 1);
-    ASSERT_EQ(g_tool_ends, 1);
+    ASSERT_EQ(rc, -1);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
+    ASSERT_EQ(g_n_requests, 1); /* one round, never asked again */
 
-    /* Three requests: the void one, its retry, and the round after the
-     * tool. */
-    ASSERT_EQ(g_n_requests, 3);
-
-    /* The void round left NO trace in the transcript: the retry's
-     * request carries no assistant message at all (an empty one is not
-     * a message). The round's reasoning_details array died with it too
-     * (D7: a signature is not an answer, and a stale one must never ride
-     * the retry). */
-    ASSERT_TRUE(strstr(request_body(g_requests[1]), "\"role\":\"assistant\"") ==
-                NULL);
-    ASSERT_TRUE(strstr(request_body(g_requests[1]), "reasoning_details") ==
-                NULL);
+    /* The transcript did not grow an empty assistant message: the system
+     * prompt and the user's message are the only entries. */
+    const NmSession *sess = nm_agent_session(agent);
+    ASSERT_NOT_NULL(sess);
+    ASSERT_EQ(nm_session_len(sess), (size_t)2);
+    for (size_t i = 0; i < nm_session_len(sess); i++) {
+        const NmSessionMessage *m = nm_session_get(sess, i);
+        ASSERT_NOT_NULL(m);
+        ASSERT_TRUE(m->role != NM_ROLE_ASSISTANT);
+    }
 
     /* The human was told: a void round is never silent, and it is told on
      * the WARNING channel (a system error, not a dim notice) with the
@@ -1076,184 +1055,18 @@ static void test_agent_void_round_is_retried(void)
     ASSERT_TRUE(strstr(g_warn_text, "void round:") != NULL);
     ASSERT_TRUE(strstr(g_warn_text, "no output") != NULL);
     ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
-    ASSERT_TRUE(strstr(g_warn_text, "retrying (1/2)") != NULL);
+    ASSERT_TRUE(strstr(g_warn_text, "retrying") == NULL);
 
-    /* The void round's all-zero usage report is the error envelope's,
-     * not a measurement: it never reached the gauge. The later rounds
-     * reported no usage at all, so the gauge is still unknown. */
-    ASSERT_EQ(nm_agent_context_used_tokens(agent), -1);
-    ASSERT_EQ(nm_agent_context_has_usage(agent), 0);
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-    remove(FIXTURE);
-}
-
-/* `void_retries = 0`: never retry. The first empty round ends the turn
- * — one request, no note in any body, and the user is told in the terms
- * that matter: a system error naming the wire's own words, plus the
- * turn's own error. The failure surfaces instead of being absorbed. */
-static void test_agent_void_retries_zero_fails_at_once(void)
-{
-    reset_capture();
-    g_warn_calls = 0;
-    g_warn_text[0] = '\0';
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 1; /* the void round only: none is retried */
-    sc.sse[0] = VOID_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
-    ASSERT_NOT_NULL(p);
-
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    nm_agent_set_endpoint(agent, base, NULL);
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_state(agent, cap_state);
-    nm_agent_on_warning(agent, cap_warning);
-
-    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_VOID_RETRIES, "0"), 0);
-    ASSERT_EQ(nm_agent_void_retries(agent), 0);
-
-    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
-
-    ASSERT_EQ(rc, -1);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
-    ASSERT_EQ(g_n_requests, 1); /* one round, no retry */
-
-    /* The report says exactly why no retry happened, and carries the
-     * wire's own words. */
-    ASSERT_EQ(g_warn_calls, 1);
-    ASSERT_TRUE(strstr(g_warn_text, "void round:") != NULL);
-    ASSERT_TRUE(strstr(g_warn_text, "void_retries = 0") != NULL);
-    ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
-    const char *err = nm_agent_last_error(agent);
-    ASSERT_NOT_NULL(err);
-    ASSERT_TRUE(strstr(err, "MALFORMED_FUNCTION_CALL") != NULL);
-
-    /* And the retry note never rode a request: there was no retry. */
-    ASSERT_TRUE(strstr(g_requests[0],
-                       "Your previous round produced no content") == NULL);
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_VOID_RETRIES);
-}
-
-/* `void_retries = 1`: one retry, then the turn ends. Pins the bound
- * itself rather than the default's shape. */
-static void test_agent_void_retries_caps_the_run(void)
-{
-    reset_capture();
-    g_warn_calls = 0;
-    g_warn_text[0] = '\0';
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 2; /* the round and its ONE retry */
-    sc.sse[0] = VOID_ROUND_SSE;
-    sc.sse[1] = VOID_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
-    ASSERT_NOT_NULL(p);
-
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    nm_agent_set_endpoint(agent, base, NULL);
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_state(agent, cap_state);
-    nm_agent_on_warning(agent, cap_warning);
-
-    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_VOID_RETRIES, "1"), 0);
-    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
-
-    ASSERT_EQ(rc, -1);
-    ASSERT_EQ(g_n_requests, 2);
-    ASSERT_EQ(g_warn_calls, 2);
-    ASSERT_TRUE(strstr(g_warn_text, "retries spent (1/1)") != NULL);
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_VOID_RETRIES);
-}
-
-static void test_agent_void_round_retries_exhausted_is_an_error(void)
-{
-    /* When the retries are spent the turn ends in a REAL error, with
-     * the wire's own words in it — never in silence, which is what the
-     * 2026-10-27 dump showed (eight rounds that stopped the turn with
-     * nothing said and nothing shown). Every one of the three voids is
-     * reported to the user; the last says the retries are spent. */
-    reset_capture();
-    g_notice_calls = 0;
-    g_notice_text[0] = '\0';
-    g_warn_calls = 0;
-    g_warn_text[0] = '\0';
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 3; /* the round, and its two retries */
-    sc.sse[0] = VOID_ROUND_SSE;
-    sc.sse[1] = VOID_ROUND_SSE;
-    sc.sse[2] = VOID_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
-    ASSERT_NOT_NULL(p);
-
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    nm_agent_set_endpoint(agent, base, NULL);
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_state(agent, cap_state);
-    nm_agent_on_notice(agent, cap_notice);
-    nm_agent_on_warning(agent, cap_warning);
-
-    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
-
-    ASSERT_EQ(rc, -1);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
-    ASSERT_EQ(g_n_requests, 3); /* the round, and its two retries */
-
-    /* Three void rounds, three reports; the last one names the spent
-     * budget rather than promising another try. */
-    ASSERT_EQ(g_warn_calls, 3);
-    ASSERT_TRUE(strstr(g_warn_text, "retries spent (2/2)") != NULL);
-    ASSERT_TRUE(strstr(g_warn_text, "MALFORMED_FUNCTION_CALL") != NULL);
-
-    /* The error names the fact and the wire's own reason for it. */
+    /* The turn's own error names the same reason. */
     const char *err = nm_agent_last_error(agent);
     ASSERT_NOT_NULL(err);
     ASSERT_TRUE(strstr(err, "no output") != NULL);
     ASSERT_TRUE(strstr(err, "MALFORMED_FUNCTION_CALL") != NULL);
+
+    /* The void round's all-zero usage report is the error envelope's,
+     * not a measurement: it never reached the gauge. */
+    ASSERT_EQ(nm_agent_context_used_tokens(agent), -1);
+    ASSERT_EQ(nm_agent_context_has_usage(agent), 0);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -6373,79 +6186,6 @@ static void test_agent_output_cut_reminder(void)
     close(sc.fd);
 }
 
-static void test_agent_void_note_speaks_once_per_turn(void)
-{
-    /* The note that tells the model what the provider rejected rides
-     * the FIRST retry — the failures cluster (four of the 2026-10-27
-     * session's eight void rounds came in one run of four, and the
-     * "continue"s in between did not break it), so the retry is asked
-     * with the reason rather than with the same question again. It
-     * speaks once per turn: the second retry carries the same note in
-     * the transcript, and the note does not pile up. */
-    reset_capture();
-    g_reminder_calls = 0;
-    g_reminder_names[0] = '\0';
-    g_warn_calls = 0;
-    g_warn_text[0] = '\0';
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 3;
-    sc.sse[0] = VOID_ROUND_SSE;
-    sc.sse[1] = VOID_ROUND_SSE;
-    sc.sse[2] = "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}"
-                "\n\n"
-                "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("ollama:local");
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
-    nm_agent_set_endpoint(agent, base, NULL);
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_reminder(agent, cap_reminder);
-    nm_agent_on_warning(agent, cap_warning);
-
-    ASSERT_EQ(nm_agent_turn(agent, "do a thing", NULL, 0), 0);
-    ASSERT_EQ(g_n_requests, 3);
-
-    /* The first retry carries the note — on the USER channel, and the
-     * human sees it too. It names the wire's own reason. */
-    ASSERT_EQ(g_reminder_calls, 1);
-    ASSERT_STR_EQ(g_reminder_names, "void-round,");
-    ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
-    ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
-    ASSERT_TRUE(strstr(g_requests[1], "MALFORMED_FUNCTION_CALL") != NULL);
-    ASSERT_TRUE(strstr(g_requests[1], "no content and no tool call") != NULL);
-
-    /* The second retry: the note is already in the transcript, so the
-     * request is the same one — and the note did not speak twice. */
-    ASSERT_EQ(g_reminder_calls, 1);
-    ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
-    ASSERT_STR_EQ(request_body(g_requests[2]), request_body(g_requests[1]));
-
-    /* Both channels fired, and they are different channels: the model
-     * got the note ONCE (it rides the retry's request), the human got a
-     * system error for EACH void round (two here) — the report is per
-     * event, the note is per turn. */
-    ASSERT_EQ(g_warn_calls, 2);
-    ASSERT_TRUE(strstr(g_warn_text, "retrying (2/2)") != NULL);
-
-    /* And the turn ends normally once the model answers. */
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_STR_EQ(g_text, "recovered");
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-}
-
 /* The boundary for EXTERNAL content: a tool whose output came from
  * outside the machine (the web_search shape) declares it, and the note
  * rides THAT result — the model is told where the untrusted text is,
@@ -7787,11 +7527,7 @@ int main(void)
     RUN_TEST(test_agent_sampling_knobs_ride_the_request);
     RUN_TEST(test_agent_omits_tools_when_the_catalog_says_so);
     RUN_TEST(test_agent_connect_notice_names_the_family);
-    RUN_TEST(test_agent_void_round_is_retried);
-    RUN_TEST(test_agent_void_note_speaks_once_per_turn);
-    RUN_TEST(test_agent_void_retries_zero_fails_at_once);
-    RUN_TEST(test_agent_void_retries_caps_the_run);
-    RUN_TEST(test_agent_void_round_retries_exhausted_is_an_error);
+    RUN_TEST(test_agent_void_round_ends_the_turn);
     RUN_TEST(test_agent_system_message_carries_agents_md);
     RUN_TEST(test_agent_round_meta_from_prism);
     RUN_TEST(test_agent_round_meta_from_late_trailer);

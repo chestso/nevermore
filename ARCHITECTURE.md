@@ -518,20 +518,16 @@ Google's `native_finish_reason: "MALFORMED_FUNCTION_CALL"` with
 `finish_reason: "error"` and an all-zero usage object. Without handling, a turn
 stopped mid-sentence with nothing shown.
 
-- A void round does not end the turn, does not enter the transcript, does not
-  move the usage gauge (its zeros are the error envelope's), and does not spend
-  the round budget.
-- It is asked again with a **note** (`void-round` reminder) telling the model
-  what the provider rejected, because failures cluster and the same question
-  again does not break the run. The note goes at the end of the transcript, so
-  the cached prefix is untouched.
-- `void_retries` (0-9, default `NM_AGENT_DEFAULT_VOID_RETRIES` = 2, resolved at
-  the point of use) bounds the retries. `0` means the first empty round ends the
-  turn, for someone who wants the failure to surface.
-- **Every void round is reported to the human whatever the knob says**
-  (`nm_agent_on_warning`: red in the chat, stderr in ask mode), quoting the
-  wire's own words. When retries are spent the turn ends in a real error with
-  the same words. The model hears it through the reminder, never this channel.
+- A void round ends the turn in a real error — it is never retried: the round
+  produced nothing, and asking the same question again is what the human was
+  reduced to in the 2026-10-27 session ("continue" after "continue").
+- It does not enter the transcript (an empty assistant message is not a
+  message) and does not move the usage gauge (its zeros are the error
+  envelope's).
+- The human is told twice, in the same words: `nm_agent_on_warning` (red in the
+  chat, stderr in ask mode) carries the wire's own account of why the round was
+  empty, and the turn's own error carries the same reason. A void round never
+  passes in silence.
 
 ## Conversation state
 
@@ -695,9 +691,7 @@ turns facts into text, so policy is testable without a provider or terminal.
   results); `file-already-read` and `file-changed` (the file ledger). On the
   USER channel: `context-pressure`, `background-jobs`, `round-budget`,
   `output-cut` (rounds cut by the output limit, from
-  `NmChatResult.finish_reason`, noted on the next request and latched) and
-  `void-round` (once per turn, so the note stays in the transcript and a run of
-  void rounds does not pile up notes).
+  `NmChatResult.finish_reason`, noted on the next request and latched).
 - Per-result facts are the tool's own plus the active model's vision flag, read
   through `models_cached`, never the blocking drive, because the tool-result
   path runs on the UI thread.

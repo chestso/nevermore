@@ -136,24 +136,6 @@ struct NmAgent
      * cumulative: the fact the output-cut rule latches on (a new cut is
      * a new edge). */
     unsigned output_cuts;
-    /* VOID rounds — the ones that came back with nothing in them (no
-     * text, no tool call, no image: see round_is_void). Two facts,
-     * each with its own lifetime:
-     *
-     *   void_streak  consecutive voids THIS turn: the gate for the note
-     *                the model gets (the first void of a turn speaks
-     *                once; a good round ends the streak).
-     *   void_retries retries spent this turn: the bound on how often a
-     *                void round may be asked again (a void round is not
-     *                a tool round, so it never counts against the
-     *                round cap — the cap's own words are "too many
-     *                tool rounds without a final answer"). */
-    int void_streak;
-    int void_retries;
-    /* The wire's own account of the LAST void round ("finish_reason:
-     * error, native: MALFORMED_FUNCTION_CALL"), kept so the note the
-     * model gets can name what happened instead of guessing. */
-    char void_reason[128];
     void *userdata;
 
     /* Stable per-conversation routing id, seeded once at new (never
@@ -652,10 +634,6 @@ static void reminder_facts(NmAgent *a, NmReminderFacts *f)
     f->round = a->round;
     f->round_cap = nm_agent_max_rounds(a);
     f->output_cuts = a->output_cuts;
-    /* The void rounds: how many in a row this turn (the gate) and the
-     * wire's own account of the last one (the note names it). */
-    f->void_streak = a->void_streak;
-    f->void_reason = a->void_reason[0] ? a->void_reason : NULL;
     /* The process registry: the jobs the MODEL started. nevermore's own
      * machinery (the context <env> git stage) is hidden and is not the
      * model's business — a reminder naming it would be noise the model
@@ -760,14 +738,6 @@ int nm_agent_max_rounds(const NmAgent *a)
     return c ? nm_config_resolve_int(c, NM_CFG_KEY_ROUNDS,
                                      NM_AGENT_DEFAULT_MAX_ROUNDS)
              : NM_AGENT_DEFAULT_MAX_ROUNDS;
-}
-
-int nm_agent_void_retries(const NmAgent *a)
-{
-    (void)a;
-    NmConfig *c = nm_config_store();
-    return c ? nm_config_resolve_void_retries(c)
-             : NM_AGENT_DEFAULT_VOID_RETRIES;
 }
 
 /* ---- context-usage gauge (provider-reported) ---- */
@@ -1894,11 +1864,11 @@ static int round_was_cut(const NmChatResult *r)
  * it streams — so the turn looked like the model announced an action
  * and then stopped. Nothing happened because nothing came back.
  *
- * A void round is not an answer: it must not end the turn, must not
- * ride the transcript (an empty assistant message is not a message),
- * and must not move the usage gauge (its zeros are the error
- * envelope's, not a measurement). The round is asked again instead —
- * see void_round. */
+ * A void round is not an answer: it must not ride the transcript (an
+ * empty assistant message is not a message), must not move the usage
+ * gauge (its zeros are the error envelope's, not a measurement), and
+ * must not pass in silence. It ends the turn in a real error — see
+ * void_round. */
 static int round_is_void(const NmAgent *a)
 {
     if (a->n_calls > 0 || a->n_round_images > 0)
@@ -1924,82 +1894,38 @@ static void void_round_reason(const NmChatResult *r, char *out, size_t cap)
         snprintf(out, cap, "finish_reason: %s", r->finish_reason);
 }
 
-/* A void round: the turn does not end, the transcript does not grow,
- * the gauge does not move — the round is asked again.
+/* A void round ends the turn. There is no retry: the round produced
+ * nothing, and asking again is what the 2026-10-27 session's human was
+ * reduced to — "continue" after "continue" — while the failures
+ * CLUSTERED (four of that session's eight void rounds came in one run
+ * of four, and the "continue"s in between did not break it). So the
+ * turn fails here, in a REAL error — never in silence, which is what
+ * that dump showed: eight rounds that stopped the turn with nothing
+ * said and nothing shown.
  *
- * The retry carries the NOTE that tells the model what the provider
- * rejected (the void rule, reminder.c): the model's own "continue" —
- * what the 2026-10-27 session was reduced to — carries no such
- * information, and the failures CLUSTER (four of that session's eight
- * void rounds came in one run of four, and the "continue"s in between
- * did not break it), so the retry is asked with the reason rather than
- * with the same question again. The note is appended at the END of the
- * transcript, so the provider's cached prefix is untouched: the retry
- * re-reads the note, not the conversation.
- *
- * When the retries are spent the turn ends in a REAL error — never in
- * silence, which is what the 2026-10-27 dump showed: eight rounds
- * that stopped the turn with nothing said and nothing shown.
- *
- * A void round is not a tool round: it never counts against the round
- * cap (whose own words are "too many tool rounds without a final
- * answer"), and the retry count is what bounds it. */
+ * The human is told twice, in the same words: the warning channel (a
+ * system error in the chat, stderr in ask mode) carries the wire's own
+ * account of why the round was empty, and the turn's own error carries
+ * the same reason, so an exit path that reads only the last error still
+ * names it. */
 static int void_round(NmAgent *a, const NmChatResult *r)
 {
-    a->void_streak++;
-
     char reason[128];
     void_round_reason(r, reason, sizeof(reason));
-    snprintf(a->void_reason, sizeof(a->void_reason), "%s", reason);
 
-    int cap = nm_agent_void_retries(a);
-    int spent = a->void_retries >= cap;
-
-    /* ALWAYS tell the human, on every void round, whether or not it will
-     * be retried: the round produced nothing, and silence about that is
-     * what let the 2026-10-27 session stop eight turns with nothing said
-     * and nothing shown. This is the UI's warning channel (the model is
-     * not told through it — the model gets the reminder note instead);
-     * the wire's own words ride it verbatim. */
     if (a->on_warning) {
         char msg[256];
-        if (spent && cap == 0)
-            snprintf(msg, sizeof(msg),
-                     "void round: the model produced no output (%s) — no "
-                     "retries configured (void_retries = 0), the turn ends",
-                     reason);
-        else if (spent)
-            snprintf(msg, sizeof(msg),
-                     "void round: the model produced no output (%s) — "
-                     "retries spent (%d/%d), the turn ends",
-                     reason, a->void_retries, cap);
-        else
-            snprintf(msg, sizeof(msg),
-                     "void round: the model produced no output (%s) — "
-                     "retrying (%d/%d)",
-                     reason, a->void_retries + 1, cap);
+        snprintf(msg, sizeof(msg),
+                 "void round: the model produced no output (%s)", reason);
         a->on_warning(msg, a->userdata);
     }
 
-    if (spent) {
-        char msg[NM_CHAT_MSG_MAX + 96];
-        snprintf(msg, sizeof(msg),
-                 "the model produced no output: no text, no tool call (%s)",
-                 reason);
-        set_error(a, msg);
-        return -1;
-    }
-
-    a->void_retries++;
-    /* The void round's own budget: it opened a stream, so it counted
-     * as a round — undo that, so a round that produced nothing cannot
-     * spend the turn's round budget. */
-    if (a->round > 0)
-        a->round--;
-
-    /* The same transcript, asked again — with the note appended (the
-     * reminder rides the retry's request), and nothing else changed. */
-    return begin_round(a) == 0 ? 0 : -1;
+    char msg[NM_CHAT_MSG_MAX + 96];
+    snprintf(msg, sizeof(msg),
+             "the model produced no output: no text, no tool call (%s)",
+             reason);
+    set_error(a, msg);
+    return -1;
 }
 
 static int finish_round(NmAgent *a, const NmChatResult *r)
@@ -2045,15 +1971,11 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
                  "%s", r->meta.served_provider);
 
     /* A VOID round: nothing in it. It is not an answer and not a tool
-     * round — the turn goes on (the round is asked again), the
-     * transcript stays as it was, and the usage report (the error
-     * envelope's zeros) is dropped rather than published. */
+     * round — the transcript stays as it was, the usage report (the
+     * error envelope's zeros) is dropped rather than published, and the
+     * turn ends in a real error. */
     if (round_is_void(a))
         return void_round(a, r);
-
-    /* A round that produced something ends the void streak: the model is
-     * answering again. */
-    a->void_streak = 0;
 
     /* A round the output limit cut short is incomplete by construction:
      * the model was still writing when the cap landed and nothing was
@@ -2492,12 +2414,6 @@ int nm_agent_start(NmAgent *a, const char *user_input,
         nm_session_append(a->session, NM_ROLE_USER, user_input);
     }
     a->round = 0;
-    /* A new turn: the void-round budget is per turn (a turn that asked
-     * again twice has spent it; the next turn starts fresh), and the
-     * streak of consecutive voids starts over too — a turn that ends
-     * with a good round has nothing to escalate. */
-    a->void_retries = 0;
-    a->void_streak = 0;
     /* A new turn: state reminders (context pressure, jobs still running)
      * ride their own user message right after the user's own, before the
      * first round is built — the prefix before this point is untouched,

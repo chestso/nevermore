@@ -9313,7 +9313,7 @@ static void test_void_round_warning_is_a_red_system_error(void)
 
     nm_chat_app_on_warning("void round: the model produced no output "
                            "(finish_reason: error, native: "
-                           "MALFORMED_FUNCTION_CALL) — retrying (1/2)",
+                           "MALFORMED_FUNCTION_CALL)",
                            NULL);
     tui_runtime_flush(h->rt);
     tui_runtime_flush(h->rt);
