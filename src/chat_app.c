@@ -3245,12 +3245,20 @@ static int config_persist(NmChatApp *app, const char *key, const char *value)
  * ONE sentence behind every command that changes a setting. `head` is
  * the caller's own spelling of the fact ("config: rounds = 4",
  * "model: m1"). */
+static const char *app_config_resolve(const NmChatApp *app, const char *key,
+                                      NmCfgSource *src);
 static void report_write(NmChatApp *app, const char *key, const char *head)
 {
-    NmCfgSource upper = nm_config_source(app->cfg, key);
+    NmCfgSource upper = NM_CFG_DEFAULT;
+    app_config_resolve(app, key, &upper);
     if (upper == NM_CFG_ENV || upper == NM_CFG_CLI) {
-        const char *pin = upper == NM_CFG_ENV ? nm_config_env_name(key)
-                                              : "the command line";
+        const char *pin;
+        if (upper == NM_CFG_CLI)
+            pin = "the command line";
+        else if (strcmp(key, NM_CFG_KEY_MODEL) == 0)
+            pin = NM_ENV_MODEL; /* the model has no key's env name */
+        else
+            pin = nm_config_env_name(key);
         sys_line(app, "%s — saved to the session shadow, but %s pins this "
                       "run (unset it to make the choice effective)",
                  head, pin ? pin : "a higher layer");
@@ -3275,7 +3283,8 @@ static void persist_and_report(NmChatApp *app, const char *key,
     /* A model is persisted per provider (`model.<provider>`): a model id
      * belongs to ONE provider, so the scoped spelling is the memory.
      * The report still keys off `model`, whose resolution sees the
-     * global env/CLI pin (-m / $NEVERMORE_MODEL are not memory). */
+     * run-level pin (-m / $NEVERMORE_MODEL are not memory, and they
+     * belong to the provider they were bound to). */
     char scoped[NM_CFG_SCOPED_KEY];
     const char *write_key = key;
     if (strcmp(key, NM_CFG_KEY_MODEL) == 0 && app->provider) {
@@ -3400,16 +3409,35 @@ static void print_config(NmChatApp *app)
             config_row(app, k, nm_config_view(v, src), NULL);
         }
     }
-    /* The provider-scoped keys actually set (`model.<provider>`), after
-     * the plain ones: the per-provider model memory. The plain `model`
-     * row above shows the effective value for the ACTIVE provider, and
-     * the three knob rows above already carry this provider's, so those
-     * are skipped here (a `model.<p>` row for another provider is still
-     * a fact worth listing). */
+    /* The ACTIVE provider's model — the value the next request will use,
+     * with the layer that dictates it (a `-m` / $NEVERMORE_MODEL pin
+     * included). It is the ONLY row for this provider's model: the
+     * scoped loop below skips it, and other providers' memories still
+     * list as facts. */
+    if (app->provider) {
+        char k[NM_CFG_SCOPED_KEY];
+        snprintf(k, sizeof(k), "%s.%s", NM_CFG_KEY_MODEL,
+                 app->provider->name);
+        NmCfgSource src = NM_CFG_DEFAULT;
+        const char *v =
+            nm_config_model_for(app->cfg, app->provider->name, &src);
+        config_row(app, k, nm_config_view(v, src), NULL);
+    }
+    /* The provider-scoped keys actually set, after the plain ones: the
+     * per-provider model memory and the other providers' knobs. This
+     * provider's own rows (its model above, its three knobs above) are
+     * skipped here — one fact, one row. */
+    char own_model[NM_CFG_SCOPED_KEY];
+    own_model[0] = '\0';
+    if (app->provider)
+        snprintf(own_model, sizeof(own_model), "%s.%s", NM_CFG_KEY_MODEL,
+                 app->provider->name);
     for (size_t i = 0;; i++) {
         const char *k = nm_config_scoped_key_at(app->cfg, i);
         if (!k)
             break;
+        if (app->provider && strcmp(k, own_model) == 0)
+            continue;
         if (app->provider && app_knob_key_is_this_provider(app, k))
             continue;
         NmCfgSource src = NM_CFG_DEFAULT;
@@ -3487,6 +3515,12 @@ static void config_reset(NmChatApp *app, const char *key)
         sys_line(app, "no config: this session does not persist settings");
         return;
     }
+    if (key && strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+        sys_role(app, NM_SGR_ERROR,
+                 "config: 'model' is remembered per provider — reset "
+                 "'model.<provider>'");
+        return;
+    }
     if (key && !nm_config_env_name(key) && !nm_config_scoped_key_ok(key)) {
         sys_role(app, NM_SGR_ERROR, "config: unknown key '%s'",
                  key);
@@ -3513,6 +3547,14 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
         sys_line(app, "no config: this session does not persist settings");
         return;
     }
+    /* `model` is not a key: it is remembered per provider, so the only
+     * write paths are /model and the scoped spelling. */
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+        sys_role(app, NM_SGR_ERROR,
+                 "config: 'model' is remembered per provider — use /model, "
+                 "or 'model.<provider>'");
+        return;
+    }
     /* A scoped key (`<base>.<provider>`) is a key in its own right: the
      * model memory and the active provider's three pricing/routing
      * knobs are all written this way. */
@@ -3522,10 +3564,8 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
                  key);
         return;
     }
-    if (!scoped && (strcmp(key, NM_CFG_KEY_PROVIDER) == 0 ||
-                    strcmp(key, NM_CFG_KEY_MODEL) == 0)) {
-        sys_role(app, NM_SGR_ERROR, "config: use /provider or /model for "
-                                    "'%s'",
+    if (!scoped && strcmp(key, NM_CFG_KEY_PROVIDER) == 0) {
+        sys_role(app, NM_SGR_ERROR, "config: use /provider for '%s'",
                  key);
         return;
     }

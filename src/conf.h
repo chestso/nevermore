@@ -63,20 +63,26 @@ extern "C" {
 /* The knobs. One spelling each — no aliases, no NEVERMORE_ prefix in
  * the file. */
 #define NM_CFG_KEY_PROVIDER "provider"
-/* The model key is PROVIDER-SCOPED: a model id belongs to ONE provider
- * (a value saved under `ollama:local` is a 404 under `openrouter`), so
- * the store remembers it per provider. A scoped spelling
- * `model.<provider>` — `<provider>` a name the registry knows, checked
- * with the same hook `provider =` uses — is a key in its own right,
- * and the plain `model` still resolves, below the scoped ones:
+/* The model is PROVIDER-SCOPED: a model id belongs to ONE provider (a
+ * value saved under `ollama:local` is a 404 under `openrouter`, and the
+ * same id can carry a different window on two tiers of one service), so
+ * the store remembers it per provider. `model.<provider>` — with
+ * `<provider>` a name the registry knows, checked with the same hook
+ * `provider =` uses — is the key. There is NO plain `model` key: a
+ * persisted global id can only ever fire on a provider with no memory,
+ * which is exactly the state that must ASK instead of guessing.
  *
- *   runtime > -m > $NEVERMORE_MODEL > shadow model.P > shadow model
- *           > user model.P > user model > (none)
+ * `-m` and $NEVERMORE_MODEL are not keys either: they are the CLI and
+ * environment layers of the ONE provider this run resolved, bound once
+ * by nm_config_bind_model. So the chain is
  *
- * `-m` and $NEVERMORE_MODEL stay GLOBAL: an explicit flag is not
- * memory. With every layer empty there is no model — ask mode exits
- * before any traffic, the TUI refuses the send until /model sets one.
- * See nm_config_model_for. */
+ *   model.P: -m > $NEVERMORE_MODEL > shadow model.P > user model.P
+ *   model.Q (Q another provider): shadow model.Q > user model.Q
+ *
+ * and a /provider switch never carries the pin to the new provider.
+ * With every layer empty there is no model — ask mode exits before any
+ * traffic, the TUI refuses the send until /model sets one. See
+ * nm_config_model_for. */
 #define NM_CFG_KEY_MODEL  "model"
 #define NM_CFG_KEY_ROUNDS "rounds"
 /* How many times a VOID round — a round that came back with nothing in
@@ -100,6 +106,11 @@ extern "C" {
 /* Longest scoped-key spelling ("model." + a provider name), for a
  * caller that builds one (the TUI writes `model.<provider>`). */
 #define NM_CFG_SCOPED_KEY 128
+
+/* The environment spelling of the run-level model override. It is not a
+ * key's env name — the key is `model.<provider>` — so it is declared
+ * here rather than read from the key table (see the `model` comment). */
+#define NM_ENV_MODEL "NEVERMORE_MODEL"
 /* Reasoning echo-back: which assistant messages re-send their thinking
  * trace to the provider as `reasoning_content`. Three modes:
  *
@@ -540,22 +551,24 @@ int nm_config_resolve_duration_ms(const NmConfig *c, const char *key,
  * sentinel.) */
 double nm_config_resolve_temperature(const NmConfig *c);
 
-/* The model id for `provider` (see the `model` key's comment): the
- * scoped spellings outrank the plain one, in the same layer order. This
- * is the ONE implementation behind the `model` key's resolution, which
- * scopes by the store's own resolved `provider`. NULL when no layer
- * sets one (the caller then asks). */
+/* The model id for `provider` (see the `model` comment): the run's
+ * overrides when `provider` is the one they were bound to, then that
+ * provider's own memory. This is the ONE implementation behind every
+ * model read. NULL when no layer sets one (the caller then asks). */
 const char *nm_config_model_for(const NmConfig *c, const char *provider,
                                 NmCfgSource *src);
 
 /* A scoped key resolution for ANY base (`model` / `routing` / `tier` /
  * `max_price`), the generalized form behind nm_config_model_for.
  *
- * `model` is the only base with a plain fallback and env/CLI layers (a
- * model id is a run-level decision as well as memory): runtime > cli >
- * env > shadow `model.<p>` > user `model.<p>` > shadow `model` > user
- * `model`. The three knob bases live ONLY in the two persisted layers —
- * there is no env or CLI spelling for them — so their chain is shadow
+ * `model` is the only base with run-level overrides (-m /
+ * $NEVERMORE_MODEL), and they belong to ONE provider — the one this run
+ * resolved, captured by nm_config_bind_model — because a model id is
+ * that provider's. For that provider the chain is cli > env > shadow
+ * `model.<p>` > user `model.<p>`; for any other provider it is just the
+ * two persisted layers, so a /provider switch never inherits the pin.
+ * The three knob bases live ONLY in the two persisted layers — there is
+ * no env or CLI spelling for them — so their chain is shadow
  * `routing.<p>` > user `routing.<p>`, else NULL. NULL for an unknown
  * base, an unknown provider, or a config with no such value. */
 const char *nm_config_scoped_for(const NmConfig *c, const char *base,
@@ -609,8 +622,9 @@ typedef struct
  * cannot drift apart. */
 NmCfgView nm_config_view(const char *value, NmCfgSource src);
 
-/* The environment variable behind a key ("NEVERMORE_MODEL"), for
- * "why is my change inert" messages. NULL for an unknown key. */
+/* The environment variable behind a key ("NEVERMORE_REMINDERS"), for
+ * "why is my change inert" messages. NULL for an unknown key — and the
+ * model has no key, so its env spelling is NM_ENV_MODEL. */
 const char *nm_config_env_name(const char *key);
 
 /* Key vocabulary, for a view that does not want to repeat the list.
@@ -627,6 +641,14 @@ void nm_config_set_env(NmConfig *c);
  * provider name is the invoker's explicit intent and the consumer
  * reports it loudly. `value` NULL/empty clears the layer. */
 void nm_config_set_cli(NmConfig *c, const char *key, const char *value);
+
+/* Bind the run's model overrides (-m and $NEVERMORE_MODEL) to the
+ * provider now resolved: they are that provider's top layers, not a
+ * global id. main.c calls this AFTER the provider layers (file, env,
+ * -p) are in place, because before that "the run's provider" is not
+ * settled. A later /provider switch does NOT move the pin — it stays
+ * with the provider it was given for (see nm_config_scoped_for). */
+void nm_config_bind_model(NmConfig *c, const char *cli_model);
 
 /* The RUNTIME layer: transient machinery values, above every persisted
  * layer, NEVER written to a file. The machinery (the connect walk, the

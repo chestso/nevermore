@@ -212,19 +212,20 @@ and unknown keys or bad values warn and are skipped. No secrets belong here.
 
 ```ini
 # ~/.config/nevermore/config
-provider = opencode:go
-model    = glm-5.3
-rounds   = 40
-searxng  = http://127.0.0.1:8888
+provider          = opencode:go
+model.opencode:go = glm-5.3
+rounds            = 40
+searxng           = http://127.0.0.1:8888
 ```
 
-`model` is remembered **per provider** (`model.opencode:go = glm-5.3` is what
-the chat writes when you pick one). With no model set for the active provider,
-nevermore asks you to choose one with `/model` instead of guessing an id from
-another provider's catalog.
+A model is remembered **per provider** — `model.<provider>` is the only
+spelling; there is no plain `model` key. With no model set for the active
+provider, nevermore asks you to choose one with `/model` instead of guessing an
+id from another provider's catalog. `-m ID` / `$NEVERMORE_MODEL` set the model
+for this run only, for the provider the run resolved.
 
 - `provider` (default `ollama:local`): active provider
-- `model` (default none): model id, remembered per provider
+- `model.<provider>` (default none): model id, remembered per provider
 - `rounds` (default 25): max tool rounds in one turn; past it the turn stops
   with "too many tool rounds"
 - `void_retries` (default 2, range 0-9): how often a void round (one that came

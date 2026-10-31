@@ -81,7 +81,7 @@ static void usage(FILE *out)
             "\n"
             "environment:\n"
             "  NEVERMORE_PROVIDER      default provider (as -p)\n"
-            "  NEVERMORE_MODEL         default model (as -m)\n"
+            "  NEVERMORE_MODEL         model id for this run (as -m)\n"
             "  NEVERMORE_BASE_URL      override the provider's endpoint\n"
             "                          (e.g. a wire-replay server)\n"
             "  NEVERMORE_TLS_CA_FILE   extra TLS trust anchor (PEM), for a\n"
@@ -553,7 +553,10 @@ int main(int argc, char *argv[])
     }
     nm_config_set_env(cfg);
     nm_config_set_cli(cfg, NM_CFG_KEY_PROVIDER, args.provider);
-    nm_config_set_cli(cfg, NM_CFG_KEY_MODEL, args.model);
+    /* The run's model overrides (-m, $NEVERMORE_MODEL) belong to the
+     * provider the layers above just settled: a model id is that
+     * provider's, never a global one. */
+    nm_config_bind_model(cfg, args.model);
 
     /* Publish the store: the machinery (connect walk, web_search probe,
      * agent round cap + reasoning echo) resolves its settings from it
@@ -563,11 +566,11 @@ int main(int argc, char *argv[])
     nm_config_set_store(cfg);
 
     /* The store owns both values: `provider` has a built-in default
-     * (the zero-config local daemon), and `model` resolves
-     * provider-scoped (a model id belongs to ONE provider). */
+     * (the zero-config local daemon), and the model resolves through
+     * the provider's own slot plus this run's overrides. */
     const char *provider_name =
         nm_config_resolve(cfg, NM_CFG_KEY_PROVIDER, NULL);
-    const char *model = nm_config_resolve(cfg, NM_CFG_KEY_MODEL, NULL);
+    const char *model = nm_config_model_for(cfg, provider_name, NULL);
 
     const NmProvider *provider = nm_provider_by_name(provider_name);
     if (!provider) {

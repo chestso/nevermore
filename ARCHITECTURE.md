@@ -284,16 +284,19 @@ Sources:
 machinery resolves each value from the store at its point of use. The app writes
 only the shadow, never the user file.
 
-- **`model` is provider-scoped.** A model id belongs to one provider, so the
-  `model.<provider>` spelling (validated through the registry hook that
-  `provider =` uses) is the memory and plain `model` resolves below it:
-  `runtime > -m > $NEVERMORE_MODEL > shadow model.P > shadow model > user model.P > user model`.
-  `-m` and `$NEVERMORE_MODEL` stay global, because an explicit flag is not
-  memory. `nm_config_model_for` is the single implementation. `/model` and the
-  picker write `model.<provider>`; a `/provider` switch re-resolves for the new
-  provider (no memory means ask, never the previous provider's id);
-  `/config reset model` clears the plain and every scoped spelling.
-- `provider` has a built-in default (`ollama:local`); `model` has none. With
+- **`model` is provider-scoped, and only `model.<provider>` is a key.** A model
+  id belongs to one provider (the same id can even carry a different window on
+  two tiers of one service), so the scoped spelling (validated through the
+  registry hook that `provider =` uses) is the memory:
+  `-m > $NEVERMORE_MODEL > shadow model.P > user model.P` for the provider the
+  run resolved, and just the two persisted layers for any other. There is no
+  plain `model` key at all — a persisted global id could only fire on a
+  provider with no memory, which is exactly the state that must ask.
+  `-m` and `$NEVERMORE_MODEL` are that provider's top layers, bound once by
+  `nm_config_bind_model`; a `/provider` switch never carries the pin.
+  `nm_config_model_for` is the single implementation. `/model` and the picker
+  write `model.<provider>`; `/config` shows the active provider's scoped row.
+- `provider` has a built-in default (`ollama:local`); the model has none. With
   every layer empty, ask mode exits 1 before any traffic and the TUI refuses the
   send until `/model` sets one (one hint spelling, `nm_config_no_model_hint`).
 - **The echo knobs are modes, not bools** (`off` / `tools` / `all`, one

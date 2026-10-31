@@ -48,13 +48,14 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 27
+#define NM_CFG_NKEYS 26
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
  * `max_price` — times the registry cap (NM_PROVIDER_MAX, 16). Only the
  * two PERSISTED layers have a scoped spelling (-m and $NEVERMORE_MODEL
- * are global by definition), so a fixed table suffices; but the cap is
+ * are run-level overrides, bound to the resolved provider, never
+ * stored), so a fixed table suffices; but the cap is
  * a DATA-LOSS boundary, not a scratch limit: past it the loader drops
  * the overflow with a warning, and a real config (a model for a few
  * providers plus one provider's three knobs) reaches 9-12. 32 holds a
@@ -92,6 +93,13 @@ struct NmConfig
     char shadow_path[NM_CONFIG_PATH];
     int user_present;
     int shadow_count;
+    /* The run-level model overrides (-m and $NEVERMORE_MODEL): the CLI
+     * and environment layers of ONE provider's model, bound after the
+     * provider layers are set (nm_config_bind_model). Empty scope = no
+     * override. */
+    char model_cli[NM_CONFIG_VAL];
+    char model_env[NM_CONFIG_VAL];
+    char model_scope[NM_CFG_SCOPED_KEY];
     /* Reused rewrite scratch (serialization). */
     char *out;
     size_t out_cap;
@@ -128,7 +136,9 @@ static const struct
      * the scoped `model.<provider>` lookup keys on, so it must always
      * resolve (main.c used to hardcode the same fallback). */
     { NM_CFG_KEY_PROVIDER, "NEVERMORE_PROVIDER", "ollama:local" },
-    { NM_CFG_KEY_MODEL, "NEVERMORE_MODEL", NULL },
+    /* There is deliberately NO `model` entry: the model is a scoped key
+     * (`model.<provider>`) plus the run-level overrides -m /
+     * $NEVERMORE_MODEL, never a plain key (see conf.h). */
     { NM_CFG_KEY_ROUNDS, "NEVERMORE_MAX_ROUNDS",
       NM_STR(NM_AGENT_DEFAULT_MAX_ROUNDS) },
     { NM_CFG_KEY_VOID_RETRIES, "NEVERMORE_VOID_RETRIES",
@@ -1091,9 +1101,9 @@ static int normalize_value(const char *key, const char *raw, char *out,
     } else if (strcmp(key, NM_CFG_KEY_SKIP_FAMILIES) == 0) {
         return nm_config_family_set_canon(raw, out, cap);
     }
-    /* model: any non-empty id (a local daemon may serve private ids
-     * the static catalog does not know); searxng: any non-empty URL
-     * (an endpoint). */
+    /* searxng: any non-empty URL (an endpoint). The model is not a key
+     * of this table at all — it is `model.<provider>` (see
+     * NM_CFG_KEY_MODEL). */
     snprintf(out, cap, "%s", raw);
     return 1;
 }
@@ -1320,6 +1330,16 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
 
         CfgKey *k = key_by_name(c, key);
         if (!k) {
+            /* The plain model spelling is GONE: a model id belongs to
+             * ONE provider, so the files carry `model.<provider>` only
+             * (see conf.h). A stale line says why it is ignored. */
+            if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
+                fprintf(stderr,
+                        "nevermore: %s: 'model' is provider-scoped: use "
+                        "'model.<provider>': ignored\n",
+                        which);
+                continue;
+            }
             /* A scoped key (`<base>.<provider>`) is a key in its own
              * right: the model memory, or one of the provider's three
              * pricing/routing knobs. */
@@ -1366,7 +1386,9 @@ static int scan_file(NmConfig *c, const char *path, const char *which,
                 }
             }
             /* The key list is read off the one table, so it can never
-             * drift out of the hint (it did: reasoning was missing). */
+             * drift out of the hint (it did: reasoning was missing).
+             * The model is not a plain key, so it is advertised only in
+             * the scoped half below. */
             fprintf(stderr, "nevermore: %s: unknown key '%s' (keys: ",
                     which, key);
             for (int i = 0; i < NM_CFG_NKEYS; i++)
@@ -1465,13 +1487,6 @@ static const char *resolve_slot(const NmConfig *c, const char *key,
             *src = NM_CFG_DEFAULT;
         return NULL;
     }
-    /* `model` is provider-scoped: the scoped spellings outrank the
-     * plain one. The active provider is the store's own resolved
-     * `provider` (a built-in default, so it always answers). */
-    if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
-        const char *prov = resolve_slot(c, NM_CFG_KEY_PROVIDER, NULL);
-        return nm_config_model_for(c, prov, src);
-    }
     CfgKey *k = key_by_name((NmConfig *)c, key);
     if (!k) {
         if (src)
@@ -1530,42 +1545,24 @@ const char *nm_config_scoped_for(const NmConfig *c, const char *base,
         return NULL;
 
     CfgScoped *s = scoped_find_bs(c, base, provider);
-    if (strcmp(base, NM_CFG_KEY_MODEL) != 0) {
-        /* A provider's pricing/routing knob: the shadow over the user
-         * file, within the ONE provider's slot. No env, no CLI, no
-         * plain fallback — the value space is provider-scoped by
-         * definition. */
-        if (s && s->shadow[0]) {
+    /* The run-level overrides (-m / $NEVERMORE_MODEL) are the top layers
+     * of the ONE provider this run resolved — a model id is that
+     * provider's, so another provider never inherits the pin. */
+    if (strcmp(base, NM_CFG_KEY_MODEL) == 0 && provider &&
+        c->model_scope[0] && strcmp(provider, c->model_scope) == 0) {
+        if (c->model_cli[0]) {
             if (src)
-                *src = NM_CFG_SHADOW;
-            return s->shadow;
+                *src = NM_CFG_CLI;
+            return c->model_cli;
         }
-        if (s && s->user[0]) {
+        if (c->model_env[0]) {
             if (src)
-                *src = NM_CFG_USER;
-            return s->user;
+                *src = NM_CFG_ENV;
+            return c->model_env;
         }
-        return NULL;
     }
-
-    CfgKey *k = key_by_name((NmConfig *)c, NM_CFG_KEY_MODEL);
-    if (!k)
-        return NULL;
-    if (k->runtime[0]) {
-        if (src)
-            *src = NM_CFG_RUNTIME;
-        return k->runtime;
-    }
-    if (k->cli[0]) {
-        if (src)
-            *src = NM_CFG_CLI;
-        return k->cli;
-    }
-    if (k->env_v[0]) {
-        if (src)
-            *src = NM_CFG_ENV;
-        return k->env_v;
-    }
+    /* Every base, model included: the provider's own memory, shadow over
+     * user. No plain spelling exists for any of them. */
     if (s && s->shadow[0]) {
         if (src)
             *src = NM_CFG_SHADOW;
@@ -1576,19 +1573,7 @@ const char *nm_config_scoped_for(const NmConfig *c, const char *base,
             *src = NM_CFG_USER;
         return s->user;
     }
-    if (k->shadow[0]) {
-        if (src)
-            *src = NM_CFG_SHADOW;
-        return k->shadow;
-    }
-    if (k->user[0]) {
-        if (src)
-            *src = NM_CFG_USER;
-        return k->user;
-    }
-    if (src)
-        *src = NM_CFG_DEFAULT;
-    return k->def;
+    return NULL;
 }
 
 NmCfgSource nm_config_source(const NmConfig *c, const char *key)
@@ -1770,6 +1755,29 @@ void nm_config_set_cli(NmConfig *c, const char *key, const char *value)
     snprintf(k->cli, NM_CONFIG_VAL, "%s", value && *value ? value : "");
 }
 
+void nm_config_bind_model(NmConfig *c, const char *cli_model)
+{
+    if (!c)
+        return;
+    c->model_cli[0] = '\0';
+    c->model_env[0] = '\0';
+    c->model_scope[0] = '\0';
+
+    /* The provider is settled by now (file, environment, -p). Without
+     * one there is nothing to bind the overrides to — and with none the
+     * store cannot name a model at all. */
+    const char *prov = resolve_slot(c, NM_CFG_KEY_PROVIDER, NULL);
+    if (!prov || !*prov)
+        return;
+    snprintf(c->model_scope, sizeof(c->model_scope), "%s", prov);
+
+    const char *env = getenv(NM_ENV_MODEL);
+    if (env && *env)
+        snprintf(c->model_env, sizeof(c->model_env), "%s", env);
+    if (cli_model && *cli_model)
+        snprintf(c->model_cli, sizeof(c->model_cli), "%s", cli_model);
+}
+
 /* ---------------------------------------------------------------- */
 /* Shadow write-back                                                 */
 /* ---------------------------------------------------------------- */
@@ -1913,6 +1921,11 @@ static int shadow_check(const NmConfig *c, const char *key, const char *value,
 {
     if (!key || !*key || !value || !*value)
         return 0;
+    /* `model` has no persisted spelling: an id belongs to ONE provider,
+     * so the files carry `model.<provider>` (the env/CLI layers are the
+     * run-level overrides, never the shadow). */
+    if (strcmp(key, NM_CFG_KEY_MODEL) == 0)
+        return 0;
     char base[NM_CFG_SCOPED_KEY], provider[NM_CFG_SCOPED_KEY];
     if (scoped_split(key, base, sizeof(base), provider, sizeof(provider)))
         return normalize_scoped_value(c, base, provider, value, out, cap);
@@ -2016,27 +2029,6 @@ int nm_config_shadow_reset(NmConfig *c, const char *key)
         for (int i = 0; i < c->n_scoped; i++)
             c->scoped[i].shadow[0] = '\0';
         c->shadow_count = 0;
-        return shadow_flush(c);
-    }
-    /* `model` clears the WHOLE model memory: the plain spelling and
-     * every provider's scoped one (what "forget my model" means). The
-     * knob bases are NOT model memory, so a `model` reset leaves
-     * `routing.<p>` / `tier.<p>` / `max_price.<p>` alone. */
-    if (strcmp(key, NM_CFG_KEY_MODEL) == 0) {
-        CfgKey *k = key_by_name(c, key);
-        if (k && k->shadow[0]) {
-            k->shadow[0] = '\0';
-            c->shadow_count--;
-        }
-        size_t plen = strlen(NM_CFG_KEY_MODEL);
-        for (int i = 0; i < c->n_scoped; i++) {
-            if (c->scoped[i].shadow[0] &&
-                strncmp(c->scoped[i].name, NM_CFG_KEY_MODEL, plen) == 0 &&
-                c->scoped[i].name[plen] == '.') {
-                c->scoped[i].shadow[0] = '\0';
-                c->shadow_count--;
-            }
-        }
         return shadow_flush(c);
     }
     /* A scoped key clears just its slot (idempotent: absent = done). */

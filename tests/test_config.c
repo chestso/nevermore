@@ -195,7 +195,9 @@ static void test_defaults_without_files(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_PROVIDER));
-    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_MODEL));
+    /* The model is not a key: it resolves through a provider's slot,
+     * and the default provider has no memory. */
+    ASSERT_NULL(nm_config_model_for(c, "ollama:local", NULL));
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_DEFAULT);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 25);
     /* The two echo knobs default to `all`: the copies ride back unless
@@ -214,16 +216,16 @@ static void test_user_file_parses(void)
                   "# nevermore config\n"
                   "\n"
                   "provider  = hyper\n"
-                  "model     = glm-5.3\n"
+                  "model.hyper = glm-5.3\n"
                   "rounds    = 40\n"
                   "reasoning_echo = on\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "glm-5.3");
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "glm-5.3");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "40");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_USER);
+    ASSERT_EQ(nm_config_source(c, "model.hyper"), NM_CFG_USER);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 40);
     ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_config_user_present(c), 1);
@@ -236,10 +238,10 @@ static void test_user_file_parses(void)
 static void test_value_is_verbatim(void)
 {
     pin_paths("verbatim");
-    write_file_at(g_user, "model =  a b  c  \n");
+    write_file_at(g_user, "searxng =  a b  c  \n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "a b  c");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG), "a b  c");
     nm_config_free(c);
 }
 
@@ -283,13 +285,18 @@ static void test_bad_lines_are_skipped(void)
                   "provider = not-a-provider\n"
                   "rounds = abc\n"
                   "reasoning_echo = maybe\n"
-                  "model = good-id\n");
+                  "model = good-id\n"
+                  "searxng = good-url\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_PROVIDER));
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_ROUNDS));
     ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO));
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "good-id");
+    /* The plain model spelling is gone: the line warns and is ignored
+     * (a model id belongs to ONE provider, so the files carry
+     * `model.<provider>`). */
+    ASSERT_NULL(nm_config_model_for(c, "ollama:local", NULL));
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG), "good-url");
     nm_config_free(c);
 }
 
@@ -300,14 +307,14 @@ static void test_bad_lines_are_skipped(void)
 static void test_shadow_overrides_user(void)
 {
     pin_paths("shadow-over-user");
-    write_file_at(g_user, "provider = hyper\nmodel = from-user\n");
-    write_file_at(g_shadow, "model = from-shadow\n");
+    write_file_at(g_user, "provider = hyper\nrounds = 4\n");
+    write_file_at(g_shadow, "rounds = 9\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_USER);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-shadow");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "9");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_ROUNDS), NM_CFG_SHADOW);
     ASSERT_EQ(nm_config_shadow_count(c), 1);
     nm_config_free(c);
 }
@@ -315,16 +322,22 @@ static void test_shadow_overrides_user(void)
 static void test_env_overrides_shadow(void)
 {
     pin_paths("env-over-shadow");
-    write_file_at(g_user, "model = from-user\n");
-    write_file_at(g_shadow, "model = from-shadow\nprovider = hyper\n");
+    write_file_at(g_user, "provider = hyper\nmodel.hyper = from-user\n");
+    write_file_at(g_shadow, "model.hyper = from-shadow\n");
     test_setenv("NEVERMORE_MODEL", "from-env");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-env");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_ENV);
+    nm_config_bind_model(c, NULL);
+    /* The env override is the TOP layer of the provider it was bound
+     * to (the run's provider), above the scoped shadow. */
+    NmCfgSource src = NM_CFG_DEFAULT;
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-env");
+    ASSERT_EQ(src, NM_CFG_ENV);
+    /* It is NOT a global id: a provider with no memory stays empty. */
+    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
     /* Untouched keys still resolve below. */
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_USER);
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MODEL");
 }
@@ -336,9 +349,12 @@ static void test_cli_overrides_env(void)
     test_setenv("NEVERMORE_PROVIDER", "hyper");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
-    nm_config_set_cli(c, NM_CFG_KEY_MODEL, "from-flag");
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-flag");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_CLI);
+    nm_config_bind_model(c, "from-flag");
+    NmCfgSource src = NM_CFG_DEFAULT;
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-flag");
+    ASSERT_EQ(src, NM_CFG_CLI);
+    /* -m is scoped the same way: another provider never inherits it. */
+    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_ENV);
     nm_config_free(c);
@@ -736,7 +752,7 @@ static void test_shadow_write_leaves_user_file_alone(void)
     write_file_at(g_user, "provider = hyper\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "glm-5.3"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "glm-5.3"), 0);
     ASSERT_STR_EQ(read_file_at(g_user), "provider = hyper\n");
     nm_config_free(c);
 }
@@ -744,24 +760,24 @@ static void test_shadow_write_leaves_user_file_alone(void)
 static void test_shadow_reset_key_and_all(void)
 {
     pin_paths("reset");
-    write_file_at(g_user, "model = from-user\n");
+    write_file_at(g_user, "searxng = http://user\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "from-shadow"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "9"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SEARXNG, "http://shadow"),
+              0);
 
     /* Resetting one key reveals the user config again. */
-    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "from-user");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_USER);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_ROUNDS), 0);
+    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_ROUNDS));
     ASSERT_EQ(nm_config_shadow_count(c), 1);
-    ASSERT_STR_EQ(read_file_at(g_shadow), "rounds = 9\n");
+    ASSERT_STR_EQ(read_file_at(g_shadow), "searxng = http://shadow\n");
 
     /* Resetting everything removes the file. */
     ASSERT_EQ(nm_config_shadow_reset(c, NULL), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     ASSERT_FALSE(file_present(g_shadow));
-    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_ROUNDS));
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_SEARXNG), "http://user");
     nm_config_free(c);
 }
 
@@ -776,6 +792,9 @@ static void test_shadow_set_validates(void)
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "bogus"), -1);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "maybe"), -1);
     ASSERT_EQ(nm_config_shadow_set(c, "nosuchkey", "1"), -1);
+    /* The model has no persisted spelling: the scoped key is the memory
+     * and the plain one is refused like any unknown key. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "m"), -1);
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     ASSERT_FALSE(file_present(g_shadow));
 
@@ -799,9 +818,9 @@ static void test_shadow_creates_directory(void)
 
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "m"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "9"), 0);
     ASSERT_TRUE(file_present(g_shadow));
-    ASSERT_STR_EQ(read_file_at(g_shadow), "model = m\n");
+    ASSERT_STR_EQ(read_file_at(g_shadow), "rounds = 9\n");
     nm_config_free(c);
 }
 
@@ -827,9 +846,9 @@ static void test_unwritable_path_is_reported(void)
 
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MODEL, "m"), -1);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_MODEL), "m");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "9"), -1);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "9");
+    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_ROUNDS), NM_CFG_SHADOW);
     /* Nothing was created beside the blocker. */
     ASSERT_FALSE(file_present(shadow));
     nm_config_free(c);
@@ -877,33 +896,35 @@ static void test_provider_validator_hook(void)
 static void test_key_vocabulary(void)
 {
     ASSERT_STR_EQ(nm_config_key_at(0), NM_CFG_KEY_PROVIDER);
-    ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_MODEL);
-    ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_ROUNDS);
-    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_VOID_RETRIES);
-    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_REASONING_ECHO);
-    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_SIGNATURE_ECHO);
-    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_CONNECT_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_FAMILY_SKIP);
-    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_SKIP_FAMILIES);
-    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_REMINDERS);
-    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_SEARXNG);
-    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_SEARXNG_ENABLED);
-    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_SEARXNG_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_POLL_TIMEOUT);
-    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_LOGIN_SHELL);
-    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_KBD);
-    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_COLOR);
-    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SPINNER_RAMP);
-    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_SERVED_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_SKILLS);
-    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_TEMPERATURE);
-    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_NULL(nm_config_key_at(27));
+    ASSERT_STR_EQ(nm_config_key_at(1), NM_CFG_KEY_ROUNDS);
+    ASSERT_STR_EQ(nm_config_key_at(2), NM_CFG_KEY_VOID_RETRIES);
+    ASSERT_STR_EQ(nm_config_key_at(3), NM_CFG_KEY_REASONING_ECHO);
+    ASSERT_STR_EQ(nm_config_key_at(4), NM_CFG_KEY_SIGNATURE_ECHO);
+    ASSERT_STR_EQ(nm_config_key_at(5), NM_CFG_KEY_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(6), NM_CFG_KEY_CONNECT_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(7), NM_CFG_KEY_HANDSHAKE_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(8), NM_CFG_KEY_FAMILY_SKIP);
+    ASSERT_STR_EQ(nm_config_key_at(9), NM_CFG_KEY_SKIP_FAMILIES);
+    ASSERT_STR_EQ(nm_config_key_at(10), NM_CFG_KEY_REMINDERS);
+    ASSERT_STR_EQ(nm_config_key_at(11), NM_CFG_KEY_SEARXNG);
+    ASSERT_STR_EQ(nm_config_key_at(12), NM_CFG_KEY_SEARXNG_ENABLED);
+    ASSERT_STR_EQ(nm_config_key_at(13), NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(14), NM_CFG_KEY_RUN_COMMAND_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(15), NM_CFG_KEY_POLL_TIMEOUT);
+    ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_LOGIN_SHELL);
+    ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_KBD);
+    ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_COLOR);
+    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SPINNER_RAMP);
+    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_PRISM_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_SERVED_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_SKILLS);
+    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_NULL(nm_config_key_at(26));
+    /* The model is not a key: no plain spelling, no env name of its own
+     * (the run-level override's spelling is NM_ENV_MODEL). */
+    ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_ROUNDS),
                   "NEVERMORE_MAX_ROUNDS");
     /* The env spelling follows the key: reasoning_echo, not the old
@@ -1231,6 +1252,8 @@ static void test_defaults_and_resolve(void)
     ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_PROVIDER, &s),
                   "ollama:local");
     ASSERT_EQ(s, NM_CFG_DEFAULT);
+    /* The model is not a key (the scoped spelling is), so a plain read
+     * of it is an unknown key, like any other. */
     ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_MODEL, &s));
     ASSERT_NULL(nm_config_resolve(c, "bogus", &s));
 
@@ -1642,9 +1665,9 @@ static void test_sampling_knobs(void)
     nm_config_free(c);
 }
 
-/* The model key is PROVIDER-SCOPED: `model.<provider>` is the memory,
- * the plain `model` resolves below it, and -m / $NEVERMORE_MODEL stay
- * global. The precedence matrix, cell by cell. */
+/* The model is PROVIDER-SCOPED: `model.<provider>` is the memory and
+ * the only key, and -m / $NEVERMORE_MODEL are the bound provider's top
+ * layers. The precedence matrix, cell by cell. */
 static void test_scoped_model_resolution(void)
 {
     pin_paths("scoped");
@@ -1656,33 +1679,36 @@ static void test_scoped_model_resolution(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
 
-    /* The active provider (hyper) picks its scoped value, and the
-     * scoped spelling outranks the plain one. */
-    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL), "scoped-user");
+    /* The active provider (hyper) picks its scoped value; the plain
+     * line is not a key at all (it warned and was skipped). */
     ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-user");
+    ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL));
 
     /* Another provider with a scoped value of its own uses it; one with
-     * NO memory falls through to the plain spelling. */
+     * NO memory has none — it asks, never falls back to another id. */
     ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
-    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "plain-user");
+    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
 
     /* The shadow's scoped spelling outranks the user's. */
     ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "scoped-shadow"), 0);
     ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-shadow");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_source(c, "model.hyper"), NM_CFG_SHADOW);
 
-    /* -m / $NEVERMORE_MODEL are GLOBAL: an explicit flag is not memory,
-     * so it beats the scoped value on every provider. */
-    nm_config_set_cli(c, NM_CFG_KEY_MODEL, "from-cli");
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "from-cli");
-    ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "from-cli");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_CLI);
-    nm_config_set_cli(c, NM_CFG_KEY_MODEL, "");
+    /* -m / $NEVERMORE_MODEL are the run's overrides for the provider
+     * they were bound to: they beat its memory, and no other provider
+     * inherits them. */
+    nm_config_bind_model(c, "from-cli");
+    NmCfgSource src = NM_CFG_DEFAULT;
+    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-cli");
+    ASSERT_EQ(src, NM_CFG_CLI);
+    ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
+    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
 
-    /* Switching the active provider re-scopes the plain `model` read. */
+    /* Switching the provider does not carry the pin: the new provider
+     * resolves from its own memory (and asks when it has none). */
     nm_config_set_cli(c, NM_CFG_KEY_PROVIDER, "openrouter");
-    ASSERT_STR_EQ(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL), "plain-user");
-    ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_MODEL), NM_CFG_USER);
+    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
+    ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
     nm_config_free(c);
 }
 
@@ -1741,9 +1767,11 @@ static void test_scoped_shadow_write_and_reset(void)
     ASSERT_STR_EQ(read_file_at(g_shadow), "model.ollama:local = local-x\n");
     ASSERT_EQ(nm_config_shadow_count(c), 1);
 
-    /* Resetting `model` clears every scoped spelling. */
+    /* The plain spelling is not a key, so it has no reset either. */
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), -1);
     ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "gpt-x"), 0);
-    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
+    /* `reset all` is the way to forget every provider at once. */
+    ASSERT_EQ(nm_config_shadow_reset(c, NULL), 0);
     ASSERT_FALSE(file_present(g_shadow));
     ASSERT_EQ(nm_config_shadow_count(c), 0);
     nm_config_free(c);
@@ -1893,10 +1921,8 @@ static void test_knob_scoping(void)
     ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "gpt-x");
     ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "glm-5.3");
 
-    /* `model` reset clears the model MEMORY (plain + every provider) and
-     * leaves the three knob spelling alone; a scoped reset clears its
-     * own slot, not another base's. */
-    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), 0);
+    /* A scoped reset clears its own slot, not another base's. */
+    ASSERT_EQ(nm_config_shadow_reset(c, "model.hyper"), 0);
     ASSERT_NULL(nm_config_model_for(c, "hyper", NULL));
     ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
                                        NULL),

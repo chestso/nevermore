@@ -5712,7 +5712,7 @@ static void test_image_data_uri_degrades_to_marker(void)
 static void test_config_runtime_change_writes_shadow(void)
 {
     pin_cfg_paths("write");
-    write_file_at(g_cfg_user, "model = from-user\n");
+    write_file_at(g_cfg_user, "model.ollama:local = from-user\n");
 
     AppHarness *h = harness_new("ollama:local", "from-user", NULL);
     ASSERT_NOT_NULL(h);
@@ -5735,7 +5735,7 @@ static void test_config_runtime_change_writes_shadow(void)
     ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning_echo = all\n");
     /* The user file is byte-identical: the app wrote exactly one file. */
     ASSERT_TRUE(cfg_file_present(g_cfg_user));
-    ASSERT_STR_EQ(cfg_user_bytes(), "model = from-user\n");
+    ASSERT_STR_EQ(cfg_user_bytes(), "model.ollama:local = from-user\n");
 
     nm_config_free(cfg);
     harness_free(h);
@@ -5772,7 +5772,7 @@ static void test_config_env_pin_is_reported(void)
 static void test_config_command_reports_and_resets(void)
 {
     pin_cfg_paths("report");
-    write_file_at(g_cfg_user, "model = from-user\n");
+    write_file_at(g_cfg_user, "model.ollama:local = from-user\n");
 
     AppHarness *h = harness_new("ollama:local", "from-user", NULL);
     ASSERT_NOT_NULL(h);
@@ -5798,9 +5798,10 @@ static void test_config_command_reports_and_resets(void)
     ASSERT_NOT_NULL(strstr(out, "  timeout "));
     ASSERT_NOT_NULL(strstr(out, "run_command_timeout"));
 
-    harness_type(h, "/config reset model");
+    harness_type(h, "/config reset model.ollama:local");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "config: model reset") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "config: model.ollama:local reset") != NULL);
     ASSERT_FALSE(cfg_file_present(g_cfg_shadow));
 
     /* Resetting all removes the file. */
@@ -5841,6 +5842,36 @@ static char *config_row_line(const char *text, const char *needle)
     return line;
 }
 
+/* The /config row for the ACTIVE provider's model is the SCOPED spelling
+ * — there is no plain `model` row — and it names the run-level override
+ * when one pins this provider. */
+static void test_config_shows_the_pinned_model(void)
+{
+    pin_cfg_paths("pinned");
+    write_file_at(g_cfg_user, "model.ollama:local = from-user\n");
+    test_setenv("NEVERMORE_MODEL", "from-env");
+
+    AppHarness *h = harness_new("ollama:local", "from-env", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    nm_config_bind_model(cfg, NULL);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    char *row = config_row_line(out, "  model.ollama:local ");
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "from-env") != NULL);
+    ASSERT_TRUE(strstr(row, "(env)") != NULL);
+    free(row);
+    /* The plain spelling is not a row (and not a key). */
+    ASSERT_NULL(config_row_line(out, "  model "));
+
+    test_unsetenv("NEVERMORE_MODEL");
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 /* The /config table separates the two kinds of "no layer set it": a key
  * WITH a built-in default names that layer, and a key with NONE
  * (`temperature`, `max_tokens`, an unset `model`) reads `-` with
@@ -5878,8 +5909,9 @@ static void test_config_rows_separate_unset_from_a_default(void)
     ASSERT_NULL(strstr(row, "built-in default"));
     free(row);
 
-    /* The model memory is the same: no layer, no default, no id. */
-    row = config_row_line(out, "  model ");
+    /* The model memory is the same: no layer, no default, no id. Its
+     * row is the scoped spelling — the only one there is. */
+    row = config_row_line(out, "  model.ollama:local ");
     ASSERT_NOT_NULL(row);
     ASSERT_TRUE(strstr(row, "(unset)") != NULL);
     free(row);
@@ -6723,7 +6755,12 @@ static void test_config_set_and_runtime_layer(void)
     /* provider/model go through their own commands, never here. */
     harness_type(h, "/config set model from-user");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "use /provider or /model") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "is remembered per provider") !=
+                NULL);
+    harness_type(h, "/config reset model");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "is remembered per provider") !=
+                NULL);
 
     /* The image window is a plain key like any other: validated,
      * normalized, persisted, and read by the agent at the point of use
@@ -10192,6 +10229,7 @@ int main(void)
     RUN_TEST(test_config_shows_the_store_value_for_the_signature_echo);
     RUN_TEST(test_config_env_pin_is_reported);
     RUN_TEST(test_config_command_reports_and_resets);
+    RUN_TEST(test_config_shows_the_pinned_model);
     RUN_TEST(test_config_rows_separate_unset_from_a_default);
     RUN_TEST(test_config_shows_the_store_value_for_the_reasoning_echo);
     RUN_TEST(test_config_set_and_runtime_layer);
