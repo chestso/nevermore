@@ -507,6 +507,43 @@ static void parse_usage(NmJson *uobj, NmUsage *u)
     NmJson *cw = details ? nm_json_get(details, "cache_write_tokens") : NULL;
     u->cached_tokens = cr ? (long)nm_json_num(cr) : -1;
     u->cache_write_tokens = cw ? (long)nm_json_num(cw) : -1;
+
+    u->cost_usd = -1.0;
+    u->cost_credits = -1.0;
+    u->remaining_credits = -1.0;
+    u->opencode_list_cost = -1.0;
+    u->opencode_allowance = -1.0;
+
+    NmJson *cost = nm_json_get(uobj, "cost");
+    if (cost) {
+        if (nm_json_type(cost) == NM_JSON_OBJECT) {
+            NmJson *usd = nm_json_get(cost, "usd");
+            NmJson *hc = nm_json_get(cost, "hypercredits");
+            if (usd && nm_json_type(usd) == NM_JSON_NUMBER)
+                u->cost_usd = nm_json_num(usd);
+            if (hc && nm_json_type(hc) == NM_JSON_NUMBER)
+                u->cost_credits = nm_json_num(hc);
+        } else if (nm_json_type(cost) == NM_JSON_NUMBER) {
+            u->cost_usd = nm_json_num(cost);
+        }
+    }
+
+    NmJson *rem = nm_json_get(uobj, "remaining");
+    if (rem && nm_json_type(rem) == NM_JSON_OBJECT) {
+        NmJson *hc = nm_json_get(rem, "hypercredits");
+        if (hc && nm_json_type(hc) == NM_JSON_NUMBER)
+            u->remaining_credits = nm_json_num(hc);
+    }
+
+    NmJson *oc = nm_json_get(uobj, "opencode");
+    if (oc && nm_json_type(oc) == NM_JSON_OBJECT) {
+        NmJson *lc = nm_json_get(oc, "list_cost");
+        NmJson *al = nm_json_get(oc, "allowance");
+        if (lc && nm_json_type(lc) == NM_JSON_NUMBER)
+            u->opencode_list_cost = nm_json_num(lc);
+        if (al && nm_json_type(al) == NM_JSON_NUMBER)
+            u->opencode_allowance = nm_json_num(al);
+    }
 }
 
 /* Append one raw byte sequence onto the stream's reasoning_details
@@ -1133,6 +1170,10 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
      * connection is still open here (every caller publishes before
      * stream_teardown). */
     memset(&result->meta, 0, sizeof(result->meta));
+    result->meta.req_limit_day = -1;
+    result->meta.req_remaining_day = -1;
+    result->meta.req_limit_hour = -1;
+    result->meta.req_remaining_hour = -1;
     /* The round's served upstream and tier (D6), captured whatever the
      * keys say — the notice's key gates the LINE, never the capture
      * (the Prism contract). Empty = the wire reported none, and then the
@@ -1400,6 +1441,10 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         result->finish_reason[0] = '\0';
         result->native_finish_reason[0] = '\0';
         memset(&result->meta, 0, sizeof(result->meta));
+        result->meta.req_limit_day = -1;
+        result->meta.req_remaining_day = -1;
+        result->meta.req_limit_hour = -1;
+        result->meta.req_remaining_hour = -1;
     }
     if (!h) {
         if (result) {
@@ -1995,6 +2040,21 @@ void nm_fetch_end(NmFetchStream *f)
     free(f->keep);
     free(f->body);
     free(f);
+}
+
+int nm_fetch_http_status(const NmFetchStream *f)
+{
+    if (!f || !f->conn)
+        return 0;
+    const NmResponse *resp = nm_response(f->conn);
+    return resp ? resp->status : 0;
+}
+
+const char *nm_fetch_header(const NmFetchStream *f, const char *name)
+{
+    if (!f || !f->conn || !name)
+        return NULL;
+    return nm_response_header(f->conn, name);
 }
 
 /* ---------------------------------------------------------------- */

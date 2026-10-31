@@ -94,6 +94,10 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
  * unconditionally. */
 void nm_chat_app_warm_catalog(NmChatApp *app);
 
+/* Background warm for the provider's credit balance. Gated on the
+ * live-catalog knob (nm_live_catalog_enabled), and rate-limited. */
+void nm_chat_app_warm_credits(NmChatApp *app);
+
 /* Tool-call round cap, reasoning echo mode and stream-inactivity
  * timeout are NOT app state: they are config values (the store's
  * `rounds`, `reasoning_echo` and `timeout` keys) that the agent

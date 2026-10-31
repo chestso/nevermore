@@ -348,6 +348,16 @@ static inline TuiColor nm_color_gauge_output(NmColorDepth depth)
                          NM_DRACULA_CYAN_B, NM_DRACULA_ANSI_CYAN);
 }
 
+/* The status row's credit cluster base role (Foreground). Muted/spent
+ * cells use Comment (nm_color_gauge); under-pressure cells borrow the
+ * gauge's warn/warn_hot roles (Orange/Red); exhausted cells use Red
+ * (nm_color_gauge_warn_hot). */
+static inline TuiColor nm_color_credit(NmColorDepth depth)
+{
+    return nm_color_pick(depth, NM_DRACULA_FG_R, NM_DRACULA_FG_G,
+                         NM_DRACULA_FG_B, NM_DRACULA_ANSI_WHITE);
+}
+
 /* The status row's right-aligned identity block (`provider · model`):
  * Dracula Foreground. The rule and the chrome are structure; this is the
  * one hard fact the row states, so it reads as content, not as chrome

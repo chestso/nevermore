@@ -406,6 +406,11 @@ extern "C" {
  * mid-chat change is harmless: it only changes how OLD images are
  * presented. Env spelling: NEVERMORE_IMAGE_LIVE. */
 #define NM_CFG_KEY_IMAGE_LIVE "image_live"
+/* Background credit balance refresh TTL in seconds.
+ * A positive decimal or `off` (disables post-turn background refresh;
+ * /credits still fetches on demand). Built-in default 300 seconds.
+ * Env spelling: NEVERMORE_CREDITS_TTL. */
+#define NM_CFG_KEY_CREDITS_TTL "credits_ttl"
 
 /* The three PRICING/ROUTING keys, all provider-scoped (the `model`
  * family extended): `<base>.<provider>`, e.g.
@@ -758,6 +763,9 @@ int nm_config_image_live_canon(const char *value, char *out, size_t cap);
  * spelling. Unset resolves to the built-in default (1). This is what
  * the agent reads at the point of use. */
 int nm_config_resolve_image_live(const NmConfig *c);
+/* The `credits_ttl` key resolved and parsed: background refresh TTL in seconds,
+ * or 0 for `off` (background refresh disabled). Unset resolves to default (300). */
+int nm_config_resolve_credits_ttl(const NmConfig *c);
 /* Is `value` a `temperature` spelling — a decimal in `0`–`2` (digits,
  * optionally '.' + digits; no sign, no exponent, no bare `.5`, no
  * trailing dot)? The range is the OpenAI-compatible one the gateways

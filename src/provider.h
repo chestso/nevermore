@@ -66,8 +66,9 @@ typedef enum
     NM_PROVIDER_OLLAMA,       /* Ollama Cloud */
     NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
     NM_PROVIDER_OPENROUTER,
-    NM_PROVIDER_OPENCODE,    /* OpenCode Go (subscription tier) */
-    NM_PROVIDER_OPENCODE_ZEN /* OpenCode Zen (credits tier) */
+    NM_PROVIDER_OPENCODE,     /* OpenCode Go (subscription tier) */
+    NM_PROVIDER_OPENCODE_ZEN, /* OpenCode Zen (credits tier) */
+    NM_PROVIDER_COUNT
 } NmProviderId;
 
 typedef struct NmModel
@@ -262,14 +263,9 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n);
  *                      vs pricing.cache_hit; Anthropic-shaped upstreams
  *                      bill cache creation separately) — never conflate
  *                      them. Reported by only some providers (the
- *                      Anthropic-shaped upstreams behind opencode);
- *                      tracked here but not yet rated or displayed
- *                      beyond an absolute count.
- *
- * Deliberately OUT of the canonical set for now: cost/credits (Hyper's
- * cost.usd, OpenRouter's cost, hypercredits) — a later tier on this
- * same object. Dialect mapping lives in one place, openai_client.c's
- * parse_usage. */
+ * Anthropic-shaped upstreams behind opencode);
+ * tracked here but not yet rated or displayed
+ * beyond an absolute count. */
 typedef struct NmUsage
 {
     long prompt_tokens;      /* input sent this round; -1 unknown */
@@ -277,6 +273,12 @@ typedef struct NmUsage
     long total_tokens;       /* wire total, else prompt+completion; -1 */
     long cached_tokens;      /* cache READ (prefix replayed); -1 unknown */
     long cache_write_tokens; /* cache WRITE (prefix stored); -1 unknown */
+    /* Credit tier: -1.0 = not reported */
+    double cost_usd;
+    double cost_credits;
+    double remaining_credits;
+    double opencode_list_cost;
+    double opencode_allowance;
 } NmUsage;
 
 /* Fired whenever a streamed event carries a usage object. May fire more
@@ -344,6 +346,11 @@ typedef struct NmRoundMeta
      * not reported. */
     char served_provider[NM_ROUND_META_STR_MAX];
     char service_tier[NM_ROUND_META_STR_MAX];
+    /* Rate-window members: -1 = unknown */
+    long req_limit_day;
+    long req_remaining_day;
+    long req_limit_hour;
+    long req_remaining_hour;
 } NmRoundMeta;
 
 /* A chat call's outcome. message is ALWAYS set when status is an
@@ -458,6 +465,35 @@ typedef struct NmProviderKnobs
     const NmKnobName *tiers; /* `tier`    — NULL = no tier key */
     int max_price;           /* nonzero = the `max_price` key exists */
 } NmProviderKnobs;
+
+/* Forward declarations for credit integration */
+struct NmCreditBracket;
+struct NmJson;
+
+/* Provider credits descriptor on the vtable */
+typedef struct NmProviderCredits
+{
+    /* Path for credit endpoint GET (e.g. "/v1/credits", "/api/balance",
+     * "/usage"), or NULL if no credit endpoint exists. */
+    const char *endpoint;
+    /* Auth format string (e.g. "Bearer %s"), or NULL if tokenless. */
+    const char *auth_header;
+    /* Minimum interval in seconds between out-of-band fetches (e.g. 60 s for
+     * Ollama Cloud), or 0 for default. */
+    double min_interval_sec;
+    /* Multi-GET step count (1 for single GET, 2 for OpenRouter). */
+    int n_steps;
+    /* Endpoint path for step 1 (OpenRouter's "/api/v1/key"), or NULL. */
+    const char *step1_endpoint;
+    /* Initialize the provider's bracket ladder slots. */
+    void (*init_brackets)(struct NmCreditBracket *brackets, size_t max_brackets,
+                          size_t *n_brackets);
+    /* Endpoint JSON mapper: parses the endpoint response into the
+     * provider's bracket ladder. Returns 1 on success, 0 on parse failure. */
+    int (*map_endpoint)(const struct NmJson *doc, int step,
+                        struct NmCreditBracket *brackets, size_t max_brackets,
+                        size_t *n_brackets);
+} NmProviderCredits;
 
 /* Provider vtable */
 struct NmProvider
@@ -593,6 +629,10 @@ struct NmProvider
      * for it through the registry hook, so conf.c still links no
      * registry. */
     const NmProviderKnobs *knobs;
+
+    /* Credit endpoints and ladder mappers.
+     * NULL for providers with no credit meters (e.g. ollama:local). */
+    const NmProviderCredits *credits;
 
     /* The id a WIRE REQUEST carries: the catalog id composed with the
      * provider's active routing mode (a `:nitro`-style suffix). Writes

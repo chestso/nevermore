@@ -238,6 +238,12 @@ NmJson *nm_fetch_take(NmFetchStream *f);
 /* Close the connection and free everything (cancel any time). */
 void nm_fetch_end(NmFetchStream *f);
 
+/* HTTP status code of the response (0 if not yet received or error). */
+int nm_fetch_http_status(const NmFetchStream *f);
+
+/* Header value from the response (NULL if absent or not yet received). */
+const char *nm_fetch_header(const NmFetchStream *f, const char *name);
+
 /* ---------------------------------------------------------------- */
 /* A provider's one-request catalog fetch                            */
 /* ---------------------------------------------------------------- */

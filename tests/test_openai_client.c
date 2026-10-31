@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 #include <pthread.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -428,6 +429,95 @@ static void test_usage_reported_zero_is_not_absent(void)
     ASSERT_EQ(cap.last_usage.cached_tokens, 0);
     /* and the write key was absent on this shape. */
     ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
+    /* Credit tier absent => -1.0 */
+    ASSERT_TRUE(cap.last_usage.cost_usd < 0);
+    ASSERT_TRUE(cap.last_usage.cost_credits < 0);
+    ASSERT_TRUE(cap.last_usage.remaining_credits < 0);
+    ASSERT_TRUE(cap.last_usage.opencode_list_cost < 0);
+    ASSERT_TRUE(cap.last_usage.opencode_allowance < 0);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* Hyper-shaped usage object: cost.usd, cost.hypercredits, remaining.hypercredits */
+static void test_usage_credit_members_hyper(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
+        "\"completion_tokens\":32,\"cost\":{\"usd\":0.0012,\"hypercredits\":0.12},"
+        "\"remaining\":{\"hypercredits\":5.43}}}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    ASSERT_EQ(pthread_create(&th, NULL, sse_server_thread, &s), 0);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 1, NULL, NULL, 0, NULL, NULL, NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "prism", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, capture_usage, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_usage, 1);
+    ASSERT_TRUE(fabs(cap.last_usage.cost_usd - 0.0012) < 1e-6);
+    ASSERT_TRUE(fabs(cap.last_usage.cost_credits - 0.12) < 1e-6);
+    ASSERT_TRUE(fabs(cap.last_usage.remaining_credits - 5.43) < 1e-6);
+    ASSERT_TRUE(cap.last_usage.opencode_list_cost < 0);
+    ASSERT_TRUE(cap.last_usage.opencode_allowance < 0);
+
+    pthread_join(th, NULL);
+    close(lfd);
+}
+
+/* OpenCode-shaped usage object: flat cost, opencode.list_cost and allowance */
+static void test_usage_credit_members_opencode(void)
+{
+    int port;
+    int lfd = server_listen(&port);
+    ASSERT_TRUE(lfd >= 0);
+    SseServer s = {
+        lfd,
+        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":31,"
+        "\"completion_tokens\":4,\"cost\":0,"
+        "\"opencode\":{\"billing_source\":\"go\",\"list_cost\":0.00000705,"
+        "\"allowance\":0.00000423}}}\n\n"
+        "data: [DONE]\n\n"
+    };
+    pthread_t th;
+    ASSERT_EQ(pthread_create(&th, NULL, sse_server_thread, &s), 0);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 1, NULL, NULL, 0, NULL, NULL, NULL, 0 };
+    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
+    Capture cap = { 0 };
+    NmChatRequest req = {
+        "deepseek", &msg, 1, NULL, NULL, -1, -1, NULL,
+        capture_delta, capture_usage, &cap
+    };
+
+    NmChatResult r = nm_openai_chat(&ep, &req);
+    ASSERT_EQ(r.status, NM_CHAT_OK);
+    ASSERT_EQ(cap.n_usage, 1);
+    ASSERT_TRUE(fabs(cap.last_usage.cost_usd - 0.0) < 1e-6);
+    ASSERT_TRUE(fabs(cap.last_usage.opencode_list_cost - 0.00000705) < 1e-8);
+    ASSERT_TRUE(fabs(cap.last_usage.opencode_allowance - 0.00000423) < 1e-8);
+    ASSERT_TRUE(cap.last_usage.cost_credits < 0);
+    ASSERT_TRUE(cap.last_usage.remaining_credits < 0);
 
     pthread_join(th, NULL);
     close(lfd);
@@ -3527,6 +3617,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_usage_standalone_chunk);
     RUN_TEST(test_usage_cache_read_and_write_are_distinct);
     RUN_TEST(test_usage_reported_zero_is_not_absent);
+    RUN_TEST(test_usage_credit_members_hyper);
+    RUN_TEST(test_usage_credit_members_opencode);
     RUN_TEST(test_usage_absent_fires_nothing);
     RUN_TEST(test_usage_null_chunk_fires_nothing);
     RUN_TEST(test_finish_reason_is_published);

@@ -6951,6 +6951,138 @@ static void test_agent_round_meta_notice_silent_when_direct(void)
     close(sc.fd);
 }
 
+static int g_fold_fires;
+static int g_fold_last_http_status;
+static NmRoundMeta g_fold_last_meta;
+
+static void cap_credit_fold(const NmUsage *usage, const NmRoundMeta *meta,
+                            int http_status, const char *error_msg,
+                            void *userdata)
+{
+    (void)usage;
+    (void)error_msg;
+    (void)userdata;
+    g_fold_fires++;
+    g_fold_last_http_status = http_status;
+    if (meta)
+        g_fold_last_meta = *meta;
+}
+
+static void test_agent_credit_fold_fires_per_round(void)
+{
+    reset_capture();
+    write_fixture();
+    g_fold_fires = 0;
+    g_fold_last_http_status = 0;
+    memset(&g_fold_last_meta, 0, sizeof(g_fold_last_meta));
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_prism_two_round_thread,
+                   (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "prism", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_on_credit_fold(agent, cap_credit_fold);
+
+    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(g_fold_fires, 2);
+    ASSERT_EQ(g_fold_last_http_status, 200);
+
+    NmUsage u;
+    nm_agent_last_usage(agent, &u);
+    /* The mock did not emit usage, so all fields remain -1 */
+    ASSERT_EQ(u.prompt_tokens, -1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+}
+
+static void *agent_402_server_thread(void *arg)
+{
+    int lfd = (int)(intptr_t)arg;
+    struct sockaddr_in sin;
+    socklen_t slen = sizeof(sin);
+    int cfd = accept(lfd, (struct sockaddr *)&sin, &slen);
+    if (cfd < 0) {
+        close(lfd);
+        return NULL;
+    }
+    char req[4096];
+    (void)recv(cfd, req, sizeof(req), 0);
+
+    const char body[] =
+        "{\"error\":{\"message\":\"You're out of credits. Add more at "
+        "https://hyper.charm.land\",\"type\":\"billing_error\",\"code\":null}}";
+    char resp[1024];
+    int n = snprintf(resp, sizeof(resp),
+                     "HTTP/1.1 402 Payment Required\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Content-Length: %zu\r\n"
+                     "x-ratelimit-limit-day: 100000\r\n"
+                     "x-ratelimit-remaining-day: 100000\r\n"
+                     "x-ratelimit-limit-hour: 10000\r\n"
+                     "x-ratelimit-remaining-hour: 10000\r\n"
+                     "\r\n"
+                     "%s",
+                     strlen(body), body);
+    send(cfd, resp, (size_t)n, 0);
+    close(cfd);
+    close(lfd);
+    return NULL;
+}
+
+static void test_agent_credit_fold_fires_on_credit_refusal(void)
+{
+    g_fold_fires = 0;
+    g_fold_last_http_status = 0;
+    memset(&g_fold_last_meta, 0, sizeof(g_fold_last_meta));
+
+    int port;
+    int lfd = server_bind(&port);
+    ASSERT_TRUE(lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, agent_402_server_thread, (void *)(intptr_t)lfd);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    const NmProvider *p = nm_provider_by_name("hyper");
+    ASSERT_NOT_NULL(p);
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "prism", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_on_credit_fold(agent, cap_credit_fold);
+
+    /* Turn fails with 402 */
+    ASSERT_EQ(nm_agent_turn(agent, "hi", NULL, 0), -1);
+    /* The fold hook fires on 402 refusal */
+    ASSERT_EQ(g_fold_fires, 1);
+    ASSERT_EQ(g_fold_last_http_status, 402);
+    ASSERT_EQ(g_fold_last_meta.req_remaining_day, 100000);
+
+    /* Round meta preserved even across failed turn */
+    NmRoundMeta got;
+    nm_agent_round_meta(agent, &got);
+    ASSERT_EQ(got.req_remaining_day, 100000);
+    ASSERT_EQ(got.req_limit_day, 100000);
+    ASSERT_EQ(got.req_remaining_hour, 10000);
+    ASSERT_EQ(got.req_limit_hour, 10000);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+}
+
 /* The text builder's remaining shapes, without a socket: a nameless
  * routing, both savings at once, and a value that is not a number (it
  * rides through verbatim — a notice never invents or zeroes a figure). */
@@ -7609,5 +7741,7 @@ int main(void)
     RUN_TEST(test_openrouter_round_carries_the_mode_composed_id);
     RUN_TEST(test_agent_round_meta_served_text_shapes);
     RUN_TEST(test_agent_served_notice_fire_rule);
+    RUN_TEST(test_agent_credit_fold_fires_per_round);
+    RUN_TEST(test_agent_credit_fold_fires_on_credit_refusal);
     TEST_SUMMARY();
 }

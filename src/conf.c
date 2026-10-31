@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 25
+#define NM_CFG_NKEYS 26
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -179,6 +179,7 @@ static const struct
     { NM_CFG_KEY_TEMPERATURE, "NEVERMORE_TEMPERATURE", NULL },
     { NM_CFG_KEY_MAX_TOKENS, "NEVERMORE_MAX_TOKENS", NULL },
     { NM_CFG_KEY_IMAGE_LIVE, "NEVERMORE_IMAGE_LIVE", "1" },
+    { NM_CFG_KEY_CREDITS_TTL, "NEVERMORE_CREDITS_TTL", "300" },
 };
 
 static void init_keys(NmConfig *c)
@@ -1040,8 +1041,9 @@ static int normalize_value(const char *key, const char *raw, char *out,
         return nm_config_color_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0) {
-        /* The duration keys: a positive decimal (ms) or `off`. */
+               strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0 ||
+               strcmp(key, NM_CFG_KEY_CREDITS_TTL) == 0) {
+        /* The duration keys: a positive decimal (ms or s) or `off`. */
         return nm_config_duration_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_POLL_TIMEOUT) == 0) {
         /* A duration shape too, but `off` is refused: a poll is bounded
@@ -1617,6 +1619,11 @@ int nm_config_resolve_image_live(const NmConfig *c)
         return 0; /* `off`: the image rides every request */
     int n = parse_int(v, 1);
     return n > 0 ? n : 1;
+}
+
+int nm_config_resolve_credits_ttl(const NmConfig *c)
+{
+    return nm_config_resolve_duration_ms(c, NM_CFG_KEY_CREDITS_TTL, 300);
 }
 
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)

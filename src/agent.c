@@ -109,6 +109,8 @@ struct NmAgent
     /* Provider response metadata, one fire per round that reported any
      * (Hyper's Prism router today — see nm_agent_on_round_meta). */
     NmAgentRoundMetaFn on_round_meta;
+    /* Credit fold hook: fired on each completed round and on credit refusal. */
+    NmAgentCreditFoldFn on_credit_fold;
     /* Reminders (reminder.h): every injected reminder is handed to
      * the UI (transparency), and the user gets a warning of its own
      * when untrusted output tried to forge one. */
@@ -429,6 +431,11 @@ static void usage_reset(NmUsage *u)
     u->total_tokens = -1;
     u->cached_tokens = -1;
     u->cache_write_tokens = -1;
+    u->cost_usd = -1.0;
+    u->cost_credits = -1.0;
+    u->remaining_credits = -1.0;
+    u->opencode_list_cost = -1.0;
+    u->opencode_allowance = -1.0;
 }
 
 NmAgent *nm_agent_new(const NmProvider *provider, const char *model,
@@ -591,6 +598,22 @@ void nm_agent_on_round_meta(NmAgent *a, NmAgentRoundMetaFn cb)
 {
     if (a)
         a->on_round_meta = cb;
+}
+
+void nm_agent_on_credit_fold(NmAgent *a, NmAgentCreditFoldFn cb)
+{
+    if (a)
+        a->on_credit_fold = cb;
+}
+
+void nm_agent_last_usage(const NmAgent *a, NmUsage *out)
+{
+    if (!out)
+        return;
+    if (a && a->has_usage)
+        *out = a->last_usage;
+    else
+        usage_reset(out);
 }
 
 void nm_agent_on_warning(NmAgent *a, NmAgentWarningFn cb)
@@ -1930,25 +1953,29 @@ static int void_round(NmAgent *a, const NmChatResult *r)
 
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
+    /* The round's provider response metadata (Hyper's Prism routing,
+     * rate windows): preserved across every finish (including failed rounds). */
+    a->round_meta = r->meta;
+
     if (r->status != NM_CHAT_OK) {
+        if (r->http_status == 402 && a->on_credit_fold) {
+            const NmUsage *u = a->round_usage_seen ? &a->round_usage : NULL;
+            a->on_credit_fold(u, &r->meta, r->http_status, r->message,
+                              a->userdata);
+        }
         char msg[NM_CHAT_MSG_MAX + 64];
         chat_failure(a, r, msg, sizeof(msg));
         set_error(a, msg);
         return -1;
     }
 
-    /* The round's provider response metadata (Hyper's Prism routing:
-     * which model actually answered, savings — §3.5.2). A failed round
-     * above never reaches here, so it leaves the meta zeroed.
-     *
-     * Hand it to the UI too, once per routed round: the human picks a
+    /* Hand it to the UI too, once per routed round: the human picks a
      * router model precisely to have someone else answer, and the fact
      * is worth a line the moment it lands rather than only under a
      * `/context` they have to think to ask for. A round that reported
      * nothing does not fire — the listener sees routed rounds only, and
      * each tool round of one turn is its own request with its own
      * routing decision. */
-    a->round_meta = r->meta;
     /* Hand it to the UI too, once per round that has something to say. A
      * Hyper routed round is always worth a line; an OpenRouter round is
      * worth one only when it carries SIGNAL (D6) — a non-`default` tier,
@@ -2000,6 +2027,12 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
      * failed round above never reaches here, so it contributes no
      * partial numbers). */
     session_account_round(a);
+
+    /* Credit fold hook: fold the round's usage and metadata into the credit store. */
+    if (a->on_credit_fold) {
+        const NmUsage *u = a->round_usage_seen ? &a->round_usage : NULL;
+        a->on_credit_fold(u, &r->meta, 200, NULL, a->userdata);
+    }
 
     /* Record what the model said, with the round's reasoning trace
      * kept alongside it. The trace is display/history material: the

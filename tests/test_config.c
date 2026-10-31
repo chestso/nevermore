@@ -864,7 +864,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_TEMPERATURE);
     ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_MAX_TOKENS);
     ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_NULL(nm_config_key_at(25));
+    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_CREDITS_TTL);
+    ASSERT_NULL(nm_config_key_at(26));
     /* The model is not a key: no plain spelling, no env name of its own
      * (the run-level override's spelling is NM_ENV_MODEL). */
     ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));
@@ -906,6 +907,8 @@ static void test_key_vocabulary(void)
                   "NEVERMORE_MAX_TOKENS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_IMAGE_LIVE),
                   "NEVERMORE_IMAGE_LIVE");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CREDITS_TTL),
+                  "NEVERMORE_CREDITS_TTL");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SERVED_NOTICE),
                   "NEVERMORE_SERVED_NOTICE");
     ASSERT_NULL(nm_config_env_name("bogus"));

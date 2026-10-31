@@ -18,6 +18,13 @@ extern const struct NmProvider nm_openrouter_provider;
 extern const struct NmProvider nm_opencode_provider;     /* :go */
 extern const struct NmProvider nm_opencode_zen_provider; /* :zen */
 
+/* Provider credits descriptors (credit.c / provider_*.c) */
+extern const struct NmProviderCredits nm_hyper_credits;
+extern const struct NmProviderCredits nm_ollama_credits;
+extern const struct NmProviderCredits nm_openrouter_credits;
+extern const struct NmProviderCredits nm_opencode_credits;
+extern const struct NmProviderCredits nm_opencode_zen_credits;
+
 /* Shared OpenCode wire surface (provider_opencode.c): the two tiers
  * differ only in base URL and shipped table, so they share one vtable
  * surface — the descriptors live there (provider_openaicompat.h) and

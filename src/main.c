@@ -464,6 +464,7 @@ static int run_interactive(const char *provider_name, const char *model,
      * fetch is the picker's own async seam, so nothing blocks here and
      * a failure just leaves the cold-cache degradation. */
     nm_chat_app_warm_catalog(app);
+    nm_chat_app_warm_credits(app);
 
     nm_history_load(nm_chat_app_textinput(app));
 

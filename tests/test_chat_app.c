@@ -50,6 +50,7 @@
 #include <boba/unicode.h>
 
 #include "chat_app.h"
+#include "credit.h"
 #include "agent.h"
 #include "conf.h"
 #include "reminder.h"
@@ -2744,6 +2745,227 @@ static void test_status_row_identity_dropped_when_short(void)
     harness_free(h);
 }
 
+/* Status row credit cluster for all six ladders */
+static void test_status_row_credit_ladders(void)
+{
+    nm_credits_reset();
+    AppHarness *h = harness_new("hyper", "prism", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* 1. Hyper: 0hc 100k·d */
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
+    cr->brackets[0].unit = NM_CREDIT_HYPER;
+    cr->brackets[0].window = NM_CREDIT_PURSE;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 0.0;
+    cr->brackets[0].limit = -1;
+
+    cr->brackets[1].unit = NM_CREDIT_REQUESTS;
+    cr->brackets[1].window = NM_CREDIT_DAY;
+    cr->brackets[1].state = NM_CREDIT_KNOWN;
+    cr->brackets[1].value = 100000;
+    cr->brackets[1].limit = 100000;
+
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    char *credit_span =
+        span_bytes(nm_color_credit(NM_COLOR_16), "0hc 100k\xc2\xb7"
+                                                 "d ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+    harness_free(h);
+
+    /* 2. Ollama Cloud: $13.23/$60 */
+    h = harness_new("ollama:cloud", "kimi-k3", NULL);
+    cr = nm_credits_get(NM_PROVIDER_OLLAMA);
+    cr->brackets[0].unit = NM_CREDIT_USD;
+    cr->brackets[0].window = NM_CREDIT_PURSE;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 13.23;
+    cr->brackets[0].limit = 60.0;
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    credit_span = span_bytes(nm_color_credit(NM_COLOR_16), "$13.23/$60 ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+    harness_free(h);
+
+    /* 3. OpenRouter: $7.71 */
+    h = harness_new("openrouter", "qwen3-coder", NULL);
+    cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
+    cr->brackets[0].unit = NM_CREDIT_USD;
+    cr->brackets[0].window = NM_CREDIT_PURSE;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 7.71;
+    cr->brackets[0].limit = -1;
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    credit_span = span_bytes(nm_color_credit(NM_COLOR_16), "$7.71 ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+    harness_free(h);
+
+    /* 4. OpenCode Go: 100%·5h 74%·w */
+    h = harness_new("opencode:go", "deepseek", NULL);
+    cr = nm_credits_get(NM_PROVIDER_OPENCODE);
+    cr->brackets[0].unit = NM_CREDIT_PERCENT;
+    cr->brackets[0].window = NM_CREDIT_ROLLING_5H;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 100.0;
+    cr->brackets[0].limit = 100.0;
+    cr->brackets[1].unit = NM_CREDIT_PERCENT;
+    cr->brackets[1].window = NM_CREDIT_WEEK;
+    cr->brackets[1].state = NM_CREDIT_KNOWN;
+    cr->brackets[1].value = 74.0;
+    cr->brackets[1].limit = 100.0;
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    credit_span = span_bytes(nm_color_credit(NM_COLOR_16),
+                             "100%\xc2\xb7"
+                             "5h 74%\xc2\xb7"
+                             "w ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+    harness_free(h);
+
+    /* 5. OpenCode Zen: cr! in red */
+    h = harness_new("opencode:zen", "deepseek", NULL);
+    cr = nm_credits_get(NM_PROVIDER_OPENCODE_ZEN);
+    cr->brackets[0].state = NM_CREDIT_EXHAUSTED;
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    credit_span = span_bytes(nm_color_gauge_warn_hot(NM_COLOR_16), "cr! ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+    harness_free(h);
+
+    /* 6. Ollama Local: unmetered, no credit cluster */
+    h = harness_new("ollama:local", "qwen3", NULL);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
+    ASSERT_TRUE(strstr(row, gauge) != NULL);
+    free(gauge);
+    free(prompt);
+    free(row);
+    harness_free(h);
+}
+
+/* Sizing and Boba shrink order: credit cluster is priority 1, min_cols 0
+ * so it drops whole when the row narrows, before identity drops completely. */
+static void test_status_row_credit_boba_shrink_order(void)
+{
+    nm_credits_reset();
+    AppHarness *h = harness_new("hyper", "vendor/some-model-identifier", NULL);
+    ASSERT_NOT_NULL(h);
+
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
+    cr->brackets[0].unit = NM_CREDIT_HYPER;
+    cr->brackets[0].window = NM_CREDIT_PURSE;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 0.0;
+    cr->brackets[0].limit = -1;
+
+    cr->brackets[1].unit = NM_CREDIT_REQUESTS;
+    cr->brackets[1].window = NM_CREDIT_DAY;
+    cr->brackets[1].state = NM_CREDIT_KNOWN;
+    cr->brackets[1].value = 100000;
+    cr->brackets[1].limit = 100000;
+
+    /* 80 columns: full row with credit cluster */
+    tui_runtime_send(h->rt, tui_msg_window_size(80, 24));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    char *credit_span =
+        span_bytes(nm_color_credit(NM_COLOR_16), "0hc 100k\xc2\xb7"
+                                                 "d ");
+    ASSERT_TRUE(strstr(row, credit_span) != NULL);
+    free(credit_span);
+    free(prompt);
+    free(row);
+
+    /* Narrow down to 6 columns:
+     * Gauge takes 4 cols ("-/- ").
+     * Rule takes 1 col.
+     * Identity drops.
+     * Credit cluster (priority 1, min_cols 0) drops whole! */
+    tui_runtime_send(h->rt, tui_msg_window_size(6, 24));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    /* Credit cluster was dropped whole */
+    ASSERT_TRUE(strstr(row, "0hc") == NULL);
+    /* Gauge is still present */
+    char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
+    ASSERT_TRUE(strstr(row, gauge) != NULL);
+    free(gauge);
+    free(prompt);
+    free(row);
+
+    harness_free(h);
+}
+
+static void test_credits_command_output(void)
+{
+    nm_credits_reset();
+    AppHarness *h = harness_new("openrouter", "qwen3-coder", NULL);
+    ASSERT_NOT_NULL(h);
+
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
+    cr->observed_at = (long)nm_monotonic_seconds() - 120;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 7.71;
+    snprintf(cr->brackets[0].label, sizeof(cr->brackets[0].label),
+             "account purse (265.00 credits - 257.29 used)");
+    snprintf(cr->brackets[0].origin_desc, sizeof(cr->brackets[0].origin_desc),
+             "GET /api/v1/credits");
+
+    harness_type(h, "/credits");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "credits: openrouter (as of 2m ago)") != NULL);
+    ASSERT_TRUE(strstr(out, "$7.71") != NULL);
+    ASSERT_TRUE(strstr(out, "account purse") != NULL);
+    ASSERT_TRUE(strstr(out, "GET /api/v1/credits") != NULL);
+
+    harness_free(h);
+}
+
 /* The composer owns the cursor's chrome offset: boba's textinput reports
  * its OWN rows (it no longer counts a status row), so the view declares
  * the input's row PLUS the chrome row it painted. The placement is
@@ -3153,6 +3375,7 @@ static void test_help_command_lists_commands(void)
     ASSERT_TRUE(strstr(out, "/provider") != NULL);
     ASSERT_TRUE(strstr(out, "/config") != NULL);
     ASSERT_TRUE(strstr(out, "/context") != NULL);
+    ASSERT_TRUE(strstr(out, "/credits") != NULL);
     ASSERT_TRUE(strstr(out, "/image") != NULL);
     ASSERT_TRUE(strstr(out, "/session") != NULL);
     ASSERT_TRUE(strstr(out, "/ps") != NULL);
@@ -10208,6 +10431,9 @@ int main(void)
     RUN_TEST(test_status_row_identity_no_model);
     RUN_TEST(test_status_row_identity_elides_on_narrow_terminal);
     RUN_TEST(test_status_row_identity_dropped_when_short);
+    RUN_TEST(test_status_row_credit_ladders);
+    RUN_TEST(test_status_row_credit_boba_shrink_order);
+    RUN_TEST(test_credits_command_output);
     RUN_TEST(test_status_row_cursor_lands_on_the_input_row);
     RUN_TEST(test_busy_input_gathers_type_ahead);
     RUN_TEST(test_quit_command_quits);

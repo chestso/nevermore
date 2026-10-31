@@ -50,6 +50,7 @@ EXTRA_DIST = \
     chat_app.h \
     colors.h \
     conf.h \
+    credit.h \
     connection_layout.h \
     context.h \
     history.h \
@@ -117,6 +118,8 @@ nevermore_SOURCES = \
     authinfo.c \
     conf.h \
     conf.c \
+    credit.h \
+    credit.c \
     args.h \
     args.c \
     provider_internal.h \

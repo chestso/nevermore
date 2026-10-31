@@ -36,6 +36,7 @@
 
 #include "identity.h" /* NM_APP_URL / NM_APP_NAME / NM_APP_CATEGORY */
 #include "openai_client.h"
+#include "provider_internal.h"
 #include "provider_openaicompat.h"
 #include "catalog_data.h" /* the generated fallback catalog (every provider) */
 
@@ -540,7 +541,8 @@ const struct NmProvider nm_openrouter_provider = {
     nm_openaicompat_models_end,
     openrouter_needs_auth,
     openrouter_env_key,
-    &openrouter_knobs,           /* routing / tier / max_price (§7) */
+    &openrouter_knobs, /* routing / tier / max_price (§7) */
+    &nm_openrouter_credits,
     openrouter_request_model_id, /* the wire id carries the mode */
     openrouter_catalog_model_id, /* the lookup resolves it back */
 };

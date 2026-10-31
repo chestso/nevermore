@@ -33,6 +33,7 @@ check_PROGRAMS = \
     test_reminder \
     test_file_ledger \
     test_sysout \
+    test_credit \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -185,7 +186,8 @@ TEST_PROVIDER_SOURCES = \
     ../src/provider_hyper.c ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openrouter.c \
-    ../src/provider_opencode.c ../src/provider_opencode_zen.c
+    ../src/provider_opencode.c ../src/provider_opencode_zen.c \
+    ../src/credit.c
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
 # vtables call into the shared openai_client, so it links too).
@@ -198,7 +200,7 @@ test_provider_SOURCES = test_provider.c ../src/clock.c ../src/conf.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_provider_LDADD = -lpthread $(TEST_TLS_LIBS)
+test_provider_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).
@@ -211,7 +213,7 @@ test_source_SOURCES = test_source.c ../src/clock.c ../src/source.c ../src/conf.c
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_source_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_source_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_source_LDADD = $(TEST_TLS_LIBS)
+test_source_LDADD = $(BOBA_LIBS) $(TEST_TLS_LIBS)
 
 # Transport wire tests (dummy threaded localhost servers, canned
 # responses; loopback only, never real APIs). POSIX threads.
@@ -243,7 +245,7 @@ test_openai_client_SOURCES = test_openai_client.c ../src/clock.c \
     $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_openai_client_LDADD = -lpthread $(TEST_TLS_LIBS)
+test_openai_client_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # TLS: negative handshake over loopback with the committed self-signed
 # cert (system trust must reject it). Live probe is manual
@@ -335,7 +337,7 @@ test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversat
     $(TEST_PROVIDER_SOURCES)
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_agent_LDADD = -lpthread $(TEST_TLS_LIBS)
+test_agent_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # Spinner: pure model — the spinner OBJECT (one phase per object, a
 # style switch resets it), the dot's size ramp + color pulse, the
@@ -408,6 +410,17 @@ test_sysout_CFLAGS = $(TEST_CFLAGS)
 # comment state, and language detection.
 test_highlight_SOURCES = test_highlight.c ../src/highlight.c
 test_highlight_CFLAGS = $(TEST_CFLAGS)
+
+# Credit ladders, formatters and out-of-band fetch driver
+test_credit_SOURCES = test_credit.c ../src/clock.c ../src/conf.c \
+    ../src/nevermore.c ../src/authinfo.c \
+    ../src/conversation_id.c ../src/xxh3.c \
+    $(TEST_PROVIDER_SOURCES) \
+    ../src/openai_client.c ../src/json.c ../src/sse.c \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
+test_credit_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_credit_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_credit_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # Chat app: the inline TUI component, driven through boba without a
 # terminal (runtime over tmpfile output, hand-fed messages) against

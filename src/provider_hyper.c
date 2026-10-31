@@ -196,6 +196,14 @@ static void hyper_read_response_meta(const NmConnection *conn,
     if ((v = nm_response_header(conn, "X-Prism-Dollar-Savings")) != NULL)
         snprintf(result->meta.usd_savings, sizeof(result->meta.usd_savings),
                  "%s", v);
+    if ((v = nm_response_header(conn, "x-ratelimit-limit-day")) != NULL)
+        result->meta.req_limit_day = strtol(v, NULL, 10);
+    if ((v = nm_response_header(conn, "x-ratelimit-remaining-day")) != NULL)
+        result->meta.req_remaining_day = strtol(v, NULL, 10);
+    if ((v = nm_response_header(conn, "x-ratelimit-limit-hour")) != NULL)
+        result->meta.req_limit_hour = strtol(v, NULL, 10);
+    if ((v = nm_response_header(conn, "x-ratelimit-remaining-hour")) != NULL)
+        result->meta.req_remaining_hour = strtol(v, NULL, 10);
 }
 
 /* The chat endpoint: base + auth + the affinity extras + the Prism
@@ -299,6 +307,7 @@ const struct NmProvider nm_hyper_provider = {
     hyper_needs_auth,
     hyper_env_key,
     NULL, /* knobs: no pricing/routing vocabulary */
+    &nm_hyper_credits,
     NULL, /* request_model: the id rides verbatim */
     NULL, /* catalog_model: exact match */
 };

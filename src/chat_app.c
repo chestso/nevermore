@@ -64,6 +64,8 @@
 #include "sysout.h"
 #include "proc.h"
 #include "spinner.h"
+#include "credit.h"
+#include "clock.h"
 #include "provider_internal.h" /* nm_live_catalog_enabled (the warm's gate) */
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
@@ -324,6 +326,9 @@ static int model_vision(const NmChatApp *app, const NmProvider *p);
 /* The model-catalog fetch (defined with the popup below): the event
  * loop's fd-ready and tick drive it. */
 static void catalog_step(NmChatApp *app);
+static void credits_step(NmChatApp *app);
+static void compose_status(NmChatApp *app);
+static const char *endpoint_key(const NmChatApp *app, const NmProvider *p);
 static void show_models_popup(NmChatApp *app, NmListSource *s,
                               const ModelQuery *q);
 
@@ -940,6 +945,17 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
         /* Close both streams, then the one blank line that separates the
          * answer from whatever follows. */
         stream_end_all(app);
+        if (app->provider) {
+            int ttl = nm_config_resolve_credits_ttl(app->cfg);
+            if (ttl > 0) {
+                NmCredits *cr = nm_credits_get(app->provider->id);
+                long now = (long)nm_monotonic_seconds();
+                if (now - cr->observed_at >= ttl) {
+                    const char *key = endpoint_key(app, app->provider);
+                    nm_credits_fetch_begin(app->provider->id, app->base_url, key);
+                }
+            }
+        }
         break;
     case NM_AGENT_ERROR:
         stream_end_all(app);
@@ -1445,6 +1461,27 @@ static void warn_missing_key(NmChatApp *app, const NmProvider *p)
  * s_app), and the tools get the agent's own NmToolCtx — no workdir
  * (relative paths resolve against the process cwd) plus the session's
  * file ledger. */
+static void nm_chat_app_on_credit_fold(const NmUsage *usage,
+                                       const NmRoundMeta *meta,
+                                       int http_status,
+                                       const char *error_msg,
+                                       void *userdata)
+{
+    (void)userdata;
+    NmChatApp *app = s_app;
+    if (!app || !app->provider)
+        return;
+
+    nm_credit_fold_round(app->provider->id, usage, meta, http_status,
+                         error_msg);
+
+    if (http_status == 402) {
+        /* Credit refusal: trigger one out-of-band refresh (5.2.3) */
+        const char *key = endpoint_key(app, app->provider);
+        nm_credits_fetch_begin(app->provider->id, app->base_url, key);
+    }
+}
+
 static int build_agent(NmChatApp *app, const NmProvider *p)
 {
     NmAgent *a = nm_agent_new(p, app->model, app->tools, NULL);
@@ -1460,6 +1497,7 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     nm_agent_on_state(a, nm_chat_app_on_state);
     nm_agent_on_notice(a, nm_chat_app_on_notice);
     nm_agent_on_round_meta(a, nm_chat_app_on_round_meta);
+    nm_agent_on_credit_fold(a, nm_chat_app_on_credit_fold);
     nm_agent_on_reminder(a, nm_chat_app_on_reminder);
     nm_agent_on_warning(a, nm_chat_app_on_warning);
     nm_agent_set_endpoint(a, app->base_url, endpoint_key(app, p));
@@ -1615,7 +1653,9 @@ void nm_chat_app_free(NmChatApp *app)
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
     tui_statusline_free(app->status);
-    nm_source_free(app->catalog_src);                  /* an in-flight fetch goes with it */
+    nm_source_free(app->catalog_src); /* an in-flight fetch goes with it */
+    if (app->provider)
+        nm_credits_fetch_end(app->provider->id);
     nm_markdown_render_state_free(&app->render_state); /* image slot */
     if (app->agent)
         nm_agent_free(app->agent); /* owns the session */
@@ -1888,6 +1928,11 @@ NmSource nm_chat_app_source(NmChatApp *app)
     NmSource cat = nm_source_fd(app->catalog_src);
     if (cat.handle >= 0 && cat.flags)
         return cat;
+    if (app->provider && nm_credits_fetch_in_flight(app->provider->id)) {
+        NmSource cr_src = nm_credits_fetch_source(app->provider->id);
+        if (cr_src.handle >= 0 && cr_src.flags)
+            return cr_src;
+    }
     return s;
 }
 
@@ -1944,6 +1989,11 @@ void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
     if (app->catalog_src &&
         handle == nm_source_fd(app->catalog_src).handle) {
         catalog_step(app);
+        return;
+    }
+    if (app->provider && nm_credits_fetch_in_flight(app->provider->id) &&
+        handle == nm_credits_fetch_source(app->provider->id).handle) {
+        credits_step(app);
         return;
     }
     if (app->agent && handle == nm_agent_source(app->agent).handle) {
@@ -2013,6 +2063,8 @@ void nm_chat_app_tick(NmChatApp *app)
      * (an accepted-but-silent peer). tick_ms keeps the loop waking. */
     if (app->catalog_src)
         catalog_step(app);
+    if (app->provider && nm_credits_fetch_in_flight(app->provider->id))
+        credits_step(app);
 
     NmSpinnerFrame frame = nm_spinner_tick(app->spinner, color_depth(app));
     app->spinner_frame = frame;
@@ -2029,7 +2081,11 @@ int nm_chat_app_tick_ms(NmChatApp *app)
         /* Idle: a catalog fetch is the one thing that wants a wakeup
          * (its own deadline; the fd alone cannot fire a silent peer).
          * The spinner is the turn's, so no cadence otherwise. */
-        return app->catalog_src ? 100 : -1;
+        if (app->catalog_src)
+            return 100;
+        if (app->provider && nm_credits_fetch_in_flight(app->provider->id))
+            return 100;
+        return -1;
     }
     /* The animation's own cadence (100 ms: the dot's breath, the stars'
      * rotation), shortened to the nearest agent deadline so a
@@ -2315,6 +2371,7 @@ static void print_help(NmChatApp *app)
                   "  /preset <intent>   cheap (:floor+flex), fast (:nitro+priority)\n"
                   "                     or balanced (neither)\n"
                   "  /context           context-window usage (provider-reported)\n"
+                  "  /credits           provider credit and balance breakdown\n"
                   "  /skills            discovered Agent Skills (and any\n"
                   "                     refusals); load_skill reads one\n"
                   "  /image <path>      attach an image to the next message\n"
@@ -2480,6 +2537,34 @@ static void print_context(NmChatApp *app)
         char sw[32];
         format_tokens_exact(write, sw, sizeof(sw));
         sys_line(app, "context: session cache write %s tokens", sw);
+    }
+}
+
+/* /credits: provider credit and balance meters breakdown. */
+static void print_credits(NmChatApp *app)
+{
+    const NmProvider *p = app->provider;
+    if (!p) {
+        sys_line(app, "credits: no provider");
+        return;
+    }
+    NmCredits *cr = nm_credits_get(p->id);
+    char buf[2048];
+    nm_credit_format_ladder(cr, p->name, buf, sizeof(buf));
+    char *saveptr = NULL;
+    char *line = strtok_r(buf, "\n", &saveptr);
+    while (line) {
+        sys_line(app, "%s", line);
+        line = strtok_r(NULL, "\n", &saveptr);
+    }
+
+    int ttl = nm_config_resolve_credits_ttl(app->cfg);
+    long now = (long)nm_monotonic_seconds();
+    int is_stale = (cr->observed_at == 0) ||
+                   (ttl > 0 && (now - cr->observed_at) >= ttl);
+    if (is_stale && p->credits && p->credits->endpoint) {
+        const char *key = endpoint_key(app, p);
+        nm_credits_fetch_begin(p->id, app->base_url, key);
     }
 }
 
@@ -3015,6 +3100,28 @@ static void catalog_step(NmChatApp *app)
     nm_source_free(s);
 }
 
+void nm_chat_app_warm_credits(NmChatApp *app)
+{
+    if (!app || !app->provider)
+        return;
+    if (!nm_live_catalog_enabled())
+        return;
+    const char *key = endpoint_key(app, app->provider);
+    nm_credits_fetch_begin(app->provider->id, app->base_url, key);
+}
+
+static void credits_step(NmChatApp *app)
+{
+    if (!app || !app->provider)
+        return;
+    NmCatalogStatus st = nm_credits_fetch_step(app->provider->id);
+    if (st == NM_CATALOG_PENDING)
+        return;
+    compose_status(app);
+    if (app->rt)
+        tui_runtime_wakeup(app->rt);
+}
+
 /* Does the entry pass the parsed filter? Capabilities, tag and context
  * bounds all AND together; an unknown context window (-1) never
  * satisfies a bound (the catalog did not claim one). */
@@ -3213,6 +3320,7 @@ static int switch_provider(NmChatApp *app, const char *name)
      * background, exactly as startup does — otherwise the gauge (and
      * the claims) read the new provider cold until a picker visit. */
     nm_chat_app_warm_catalog(app);
+    nm_chat_app_warm_credits(app);
     if (!app->model)
         no_model_notice(app);
     if (dropped)
@@ -4260,6 +4368,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         print_context(app);
         return;
     }
+    if (NAME_IS("credits")) {
+        print_credits(app);
+        return;
+    }
     if (NAME_IS("skills")) {
         print_skills(app);
         return;
@@ -4395,18 +4507,18 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
 {
     (void)word_start;
     static const char *const commands[] = {
-        "/help", "/model", "/provider", "/config", "/context",
+        "/help", "/model", "/provider", "/config", "/context", "/credits",
         "/skills", "/image", "/session", "/ps", "/kill", "/quit",
         "/routing", "/tier", "/maxprice", "/preset", NULL
     };
-    const char *matches[16];
+    const char *matches[20];
     size_t n_matches = 0;
     if (!prefix || prefix[0] != '/')
         return;
     size_t plen = strlen(prefix);
     /* commands[] is NULL-terminated: iterate the sentinel, never
      * sizeof/sizeof (that counts the NULL and strncmp's it). */
-    for (int i = 0; commands[i] && n_matches < 16; i++) {
+    for (int i = 0; commands[i] && n_matches < 20; i++) {
         if (strncmp(commands[i], prefix, plen) == 0)
             matches[n_matches++] = commands[i];
     }
@@ -4881,7 +4993,7 @@ static void compose_status(NmChatApp *app)
     char identity[256];
     nm_chat_app_identity(app, identity, sizeof(identity));
 
-    TuiSegment segs[6];
+    TuiSegment segs[7];
     size_t n = 0;
     char glyph_text[16];
     if (frame->glyph) {
@@ -4910,6 +5022,23 @@ static void compose_status(NmChatApp *app)
                                    nm_color_gauge_output(color_depth(app)));
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
+
+    /* The credit cluster: priority 1, min_cols 0
+     * so it drops whole when the row narrows, before the rule gives its
+     * reserve or identity drops completely. */
+    char credit_text[64];
+    credit_text[0] = '\0';
+    TuiColor credit_color = nm_color_credit(color_depth(app));
+    const NmProvider *p = app->provider;
+    if (p) {
+        NmCredits *cr = nm_credits_get(p->id);
+        nm_credit_format_status(cr, credit_text, sizeof(credit_text),
+                                &credit_color, color_depth(app));
+    }
+    if (credit_text[0])
+        segs[n++] = status_segment(credit_text, TUI_SEGMENT_LEFT, 1, 0, 0,
+                                   credit_color);
+
     segs[n++] =
         status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
                        nm_color_status_rule(color_depth(app)));

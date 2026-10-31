@@ -349,6 +349,18 @@ void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
 typedef void (*NmAgentRoundMetaFn)(const NmRoundMeta *meta, void *userdata);
 void nm_agent_on_round_meta(NmAgent *a, NmAgentRoundMetaFn cb);
 
+/* Credit fold hook: fired at the finish of every completed round
+ * (NM_CHAT_OK), and on a round that refused with a credit error (HTTP 402).
+ * Hands over the round's usage, response metadata and HTTP status + error. */
+typedef void (*NmAgentCreditFoldFn)(const NmUsage *usage,
+                                    const NmRoundMeta *meta, int http_status,
+                                    const char *error_msg, void *userdata);
+void nm_agent_on_credit_fold(NmAgent *a, NmAgentCreditFoldFn cb);
+
+/* The last completed round's usage report (including the credit tier).
+ * All -1 when no round ever reported usage. */
+void nm_agent_last_usage(const NmAgent *a, NmUsage *out);
+
 /* A reminder the harness injected into the conversation (see
  * reminder.h). Fired for EVERY reminder, in table order, whether it
  * was nested in a tool result (NM_REMINDER_CHANNEL_TOOL — the panel

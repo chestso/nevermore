@@ -684,6 +684,7 @@ const struct NmProvider nm_opencode_provider = {
     nm_opencode_needs_auth,
     opencode_env_key,
     NULL, /* knobs: no pricing/routing vocabulary */
+    &nm_opencode_credits,
     NULL, /* request_model: the id rides verbatim */
     NULL, /* catalog_model: exact match */
 };
