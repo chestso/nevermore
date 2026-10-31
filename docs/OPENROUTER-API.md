@@ -1,4 +1,4 @@
-# OpenRouter API Reference (live-verified 2026-09-12)
+# OpenRouter API Reference (live-verified 2026-09-12, extended 2026-10-31)
 
 > Status: verified against the live wire (unauthenticated catalog +
 > authenticated chat probes, Sep 2026; the batch surface in §6 on
@@ -1127,3 +1127,112 @@ null`, and NO usage object anywhere in the response (observed when
   rate, `cache_write_tokens` the `/context` write count, both parsed
   by the shared client today. A round that pays the miss surcharge
   shows as a write spike — exactly what the wire dump is for.
+
+---
+
+## 11. Credits and key usage (live, 2026-10-31)
+
+Two tokenless-once-authed GETs, both free, and neither on the chat path:
+
+```bash
+curl -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  https://openrouter.ai/api/v1/key
+curl -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  https://openrouter.ai/api/v1/credits
+```
+
+**`/api/v1/key`** describes the KEY (probed; ids elided, `limit` set on a
+capped key, `null` here):
+
+```json
+{
+  "data": {
+    "label": "sk-or-v1-db1…cb9",
+    "is_management_key": false,
+    "is_provisioning_key": false,
+    "limit": null,
+    "limit_reset": null,
+    "limit_remaining": null,
+    "include_byok_in_limit": false,
+    "budgets": [],
+    "effective_budget": null,
+    "usage": 247.842103014,
+    "usage_daily": 0.552686729,
+    "usage_weekly": 23.507445535,
+    "usage_monthly": 32.014127785,
+    "byok_usage": 26.3555828,
+    "byok_usage_daily": 0,
+    "byok_usage_weekly": 0,
+    "byok_usage_monthly": 0,
+    "is_free_tier": false,
+    "expires_at": null,
+    "creator_user_id": "user_…",
+    "organization_id": null,
+    "workspace_id": "021935af-…",
+    "allowed_data_regions": ["global"],
+    "free_model_daily_requests": {
+      "used": 0,
+      "limit": 1000,
+      "remaining": 1000
+    },
+    "rate_limit": {
+      "requests": -1,
+      "interval": "10s",
+      "note": "This field is deprecated and safe to ignore."
+    }
+  }
+}
+```
+
+**`/api/v1/credits`** describes the ACCOUNT:
+
+```json
+{ "data": { "total_credits": 265, "total_usage": 257.289128774 } }
+```
+
+Reading it:
+
+- **The account purse is `total_credits − total_usage`** (here $7.71). It is
+  account-wide and unrelated to any one key's own counter (`/key`'s `usage`
+  is 247.84 for this key); never treat either as the other.
+- **`limit` / `limit_remaining` are the KEY's cap, not the purse.** Both are
+  `null` here (no key limit), and `effective_budget` / `budgets[]` are empty —
+  a capped key or an org budget fills them.
+- **`usage_daily` / `usage_weekly` / `usage_monthly` are spend in a window**,
+  with no cap attached; `byok_usage*` is the BYOK share (bypassing OpenRouter
+  billing) and must not be summed into the account figures.
+- **`free_model_daily_requests` is its own allowance** — used / limit /
+  remaining per day — and it applies to `:free` ids only.
+- `is_free_tier`, `is_management_key` / `is_provisioning_key`, `expires_at`,
+  `workspace_id` / `organization_id`, `allowed_data_regions`: identity, not
+  credit.
+- The deprecated `rate_limit` field is safe to ignore; the live rate shape is
+  the 429 below.
+
+**Per round**, the top-level `usage` carries the round's own cost (§3):
+`cost` (dollars), `cost_details.upstream_inference_{cost,prompt_cost,
+completions_cost}`, `is_byok`, alongside `provider` / `service_tier` (§7.7).
+A `:free` round reports `cost: 0`.
+
+**Refusals.** A free id can be refused by its shared upstream pool:
+
+```json
+{
+  "error": {
+    "message": "… is temporarily rate-limited upstream. …",
+    "code": 429,
+    "metadata": {
+      "raw": "…",
+      "provider_name": "Liquid",
+      "is_byok": false,
+      "provider_error_code": "model_rate_limit_exceeded",
+      "limit_source": "upstream_provider_shared_pool",
+      "remedy_hint": "…",
+      "retry_after_seconds": 1
+    }
+  }
+}
+```
+
+That is a RATE fact (per upstream, not per purse), and it carries no balance
+figure — an account with credits still meets it.

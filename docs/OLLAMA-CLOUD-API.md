@@ -90,26 +90,17 @@ Source: https://ollama.com/pricing
 >    key gets 303 → `/signin`. Paginates via the htmx fragment
 >    `GET /settings/usage/requests?before_id=<id>&before_t=<iso>&scope=self&shown=<n>`.
 >
-> There is no remaining-quota, plan-name, or reset-date API field anywhere. The
-> closest thing to an account API is **`POST /api/me`** (bearer key; verified
-> Sep 8 2026 — GET returns 405): it returns the account `ID`, email, name, and
-> `"Plan": "pro"` — and nothing else (no usage, no limits, no subscription
-> dates). The undocumented account meter `GET /api/usage` (section 6.17) is
-> **badly lagged** — on Sep 8 2026 it read
-> $0.008–0.009 while the settings
-> page showed $0.50 of
-> $60 for the same account
-> (re-confirmed Sep 9 2026: $0.009 in JSON vs
-> $0.51 on the page)
-> — so treat it as a request-counter, not a billing total. A billing/usage API
-> has been requested upstream since Feb 2026 (ollama/ollama issue #12532, still
-> open — #15132 and #15663 were both closed as its duplicates; every third-party
-> monitor — the ollama-usage CLIs, CodexBar, Open WebUI extensions — currently
-> scrapes `ollama.com/settings` with a browser session cookie, exactly as
-> documented above). Note the settings page itself has moved to a monthly
-> **"Included usage"** dollar-credits layout (`$X of $Y used`,
-> per-model meter); the older session/hourly + weekly quota windows
-> are legacy (CodexBar still parses both).
+> **Remaining credit IS readable** (documented since Oct 2026):
+> `GET /api/balance` returns the included allowance still available with its
+> period, plus purchased credits (§6.20), and `GET /api/usage` returns history
+> over 24h / 7d / 30d (§6.17). The earlier "no remaining-quota field anywhere,
+> and the usage meter is badly lagged" conclusion is obsolete: the two
+> endpoints reconcile to the cent (probed 2026-10-31). Plan identity is still
+> only **`POST /api/me`** (bearer key; GET returns 405), which answers the
+> account `ID`, email, name and `"Plan": "pro"`, and nothing else. The settings
+> page (browser cookies, §6.0) shows the same figures as dollars and a
+> per-model meter; a legacy plan keeps its session and weekly percent windows
+> in `/api/balance` instead of a dollar allowance.
 
 ---
 
@@ -1391,85 +1382,102 @@ data: [DONE]
 > plan-metered (Pro allows several parallel requests; five parallel small
 > requests were observed to all succeed on Pro, Sep 2026).
 
-### 6.17. GET /api/usage (undocumented account meter)
+### 6.17. GET /api/usage (cloud usage statistics, documented Oct 2026)
 
-Account-level usage and limit readout for the current key's plan. Not in
-docs.ollama.com's API reference or its OpenAPI spec — found by probing (Sep
-2026, paid Pro key). Bearer realm only — the browser session cookie does not
-authenticate it (see section 6.0). Also see `POST /api/me` (section 3) for the
-account/plan identity companion, and section 6.18 for what the billing meter
-hides.
+Usage history for cloud inference, web search and web fetch over a fixed range,
+in hourly or daily buckets. Documented upstream at
+`docs.ollama.com/api/cloud-usage`, with `group_by=model` for the per-model
+breakdown. The undocumented shape probed in Sep 2026 (`activity` /
+`limits.monthly` / `starting_at`) no longer exists — probed 2026-10-31, neither
+member is returned, and query parameters now select the window. Bearer realm
+only (the session cookie gets `401`, §6.0), and rate limited (see the notes
+below).
+
+**Remaining credit is a different endpoint, `GET /api/balance` (§6.20).**
 
 ```bash
 curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
-  https://ollama.com/api/usage
+  'https://ollama.com/api/usage?range=24h'
 ```
 
-**Response:**
+**Response (live, 2026-10-31, buckets trimmed):**
 
 ```json
 {
-  "activity": {
-    "cost": "0.00000",
-    "period": {
-      "type": "last_4_weeks",
-      "starting_at": "2026-08-17T00:00:00Z",
-      "ending_at": "2026-09-08T15:53:03.091440608Z"
-    },
-    "models": []
+  "range": "24h",
+  "scope": "self",
+  "granularity": "hour",
+  "from": "2026-10-30T08:00:00Z",
+  "until": "2026-10-31T08:30:20.471775139Z",
+  "totals": {
+    "request_count": 636,
+    "usage_usd": 4.58518,
+    "input_tokens": 118180145,
+    "cached_input_tokens": 116741556,
+    "output_tokens": 757750
   },
-  "limits": {
-    "monthly": {
-      "usage": 0.004,
-      "models": [
-        { "name": "glm-5.3-flash", "request_count": 65 },
-        { "name": "kimi-k3", "request_count": 2 }
-      ]
+  "buckets": [
+    {
+      "from": "2026-10-30T12:00:00Z",
+      "until": "2026-10-30T13:00:00Z",
+      "request_count": 100,
+      "usage_usd": 0.44064,
+      "input_tokens": 5941484,
+      "cached_input_tokens": 5550566,
+      "output_tokens": 76507
+    },
+    {
+      "from": "2026-10-31T08:00:00Z",
+      "until": "2026-10-31T08:30:20.471775139Z",
+      "partial": true,
+      "request_count": 196,
+      "usage_usd": 1.92525,
+      "input_tokens": 34283825,
+      "cached_input_tokens": 33670784,
+      "output_tokens": 522132
     }
-  }
+  ]
 }
 ```
 
 **Fields:**
 
-| Field                                   | Type   | Description                                                                         |
-| --------------------------------------- | ------ | ----------------------------------------------------------------------------------- |
-| `activity.cost`                         | string | Metered cost this period, 5-decimal string; stayed `0.00000` while `limits` accrued |
-| `activity.period`                       | object | Fixed rolling window: `last_4_weeks` with ISO timestamps                            |
-| `activity.models`                       | array  | Empty in every probe; appears vestigial                                             |
-| `limits.monthly.usage`                  | number | **Dollars burned this period** (see note)                                           |
-| `limits.monthly.models`                 | array  | One entry per model touched this period                                             |
-| `limits.monthly.models[].name`          | string | Model name                                                                          |
-| `limits.monthly.models[].request_count` | number | Requests issued this period                                                         |
+| Field            | Type   | Description                                                                  |
+| ---------------- | ------ | ---------------------------------------------------------------------------- |
+| `range`          | string | The requested window: `24h`, `7d`, `30d` (default `7d`)                      |
+| `scope`          | string | `self`; `team` answers `403` unless the key's member is a team admin         |
+| `granularity`    | string | `hour` for `24h`, `day` for `7d` / `30d` — set by the server, not the client |
+| `group_by`       | string | Present as `model` when requested; adds `groups[]` to totals and buckets     |
+| `from` / `until` | string | The whole range, UTC; `from` inclusive, `until` exclusive                    |
+| `totals.*`       | object | The range summed: requests, dollars, input / cached / output tokens          |
+| `buckets[]`      | array  | Chronological, one per hour or day, zero-filled, last one `partial: true`    |
 
-> **Live testing notes (Sep 2026, paid Pro key):**
+**Ranges (documented):** `24h` starts 24 hours before the start of the current
+UTC hour and returns 25 hourly buckets; `7d` starts seven days ago at 00:00 UTC
+(8 daily buckets); `30d` starts thirty days ago at 00:00 UTC (31 daily buckets).
+Every range ends at the time of the request.
+
+> **Live notes (2026-10-31, paid Pro key):**
 >
-> - **Auth is enforced:** 401 `{"error":"invalid credentials"}` without a key
->   (unlike the catalog endpoints).
-> - **`limits.monthly.usage` is the meter in dollars.** It moved 0 → 0.004
->   seconds after a single kimi-k3 request (152 prompt + 6951 completion
->   tokens). Updates within seconds of a request; `request_count` likewise ticks
->   per request. There is no remaining-quota, plan-name, reset-date, or
->   token-count field anywhere in the response.
-> - **The window is a fixed rolling 4 weeks** (`starting_at` was exactly four
->   weeks before "now"). Query parameters are ignored — `?start=`,
->   `?period=daily`, `?granularity=daily`, `?days=30` all return the same body;
->   subpaths (`/api/usage/models` etc.) 404. POST returns 405.
-> - **No per-model pricing is exposed by this endpoint** (see section 3 for the
->   two machine-readable sources that carry it). The only way to estimate
->   per-model prices from this endpoint alone is a metering differential: burn a
->   known token count on one model, read the `limits.monthly.usage` delta,
->   repeat per model. Lossy (usage rounds to ~3-4 decimals) but workable as a
->   calibration exercise.
-> - The `activity` block never accrued during testing while `limits.monthly` did
->   — treat `activity` as informational and `limits.monthly` as the live meter.
-> - **This meter is badly lagged as a billing total.** On Sep 8 2026 (paid Pro
->   key) it read
->   $0.008–0.009 across a session that the account settings page
->   (section 3) showed as $0.50
->   of real spend. `limits.monthly.usage` moves, but at a small fraction of true
->   cost — reconcile against the settings page, never against this endpoint. No
->   pricing is exposed here (see section 3 for the machine-readable sources).
+> - **Auth is enforced:** `401 {"error":"invalid credentials"}` without a key.
+> - **Windows:** `?range=24h|7d|30d`; anything else answers
+>   `400 {"error":"range must be 24h, 7d, or 30d"}`. `?scope=team` without
+>   admin is `403 {"error":"only team admins can use scope=team"}`. An
+>   unsupported or repeated parameter answers `400`, with the offending name
+>   in the body. `group_by=model` is the one accepted selector.
+> - **The old "fixed rolling 4 weeks" window is gone**, and so is the
+>   "badly lagged, treat it as a request-counter" caveat: the 30d totals
+>   reconcile with §6.20's balance to the cent (see §6.20's reconciliation
+>   note).
+> - **No cap, no remaining figure, no plan name here** — this endpoint is
+>   history only. The plan's included allowance and the remaining balance are
+>   §6.20; the plan identity is `POST /api/me` (§3).
+> - **No per-model pricing** is exposed (see §3 for the two machine-readable
+>   sources). `group_by=model` gives requests and dollars per model, not unit
+>   prices.
+> - **Rate limited, 10 requests/minute per user** shared across API keys and
+>   devices; `429 {"error":"too many requests"}` carries `Retry-After` in
+>   seconds (2 s observed). Poll no more than once a minute per the docs.
 
 ### 6.18. Prefix-cache billing (measured)
 
@@ -1561,6 +1569,80 @@ text must be **byte-stable**: a different marker text is another full
 re-bill (12,287 fresh tokens), so a marker that carried a round
 number would re-bill the tail on EVERY request.
 
+### 6.20. GET /api/balance (credits remaining, documented Oct 2026)
+
+The remaining credit purse: the included allowance and the purchased credits,
+with the allowance's period. Documented upstream at
+`docs.ollama.com/api/balance`. Bearer realm only (the session cookie gets
+`401`, §6.0, and so does an absent key). **This is the authority for "how much
+is left"**; §6.17 is history and is not a substitute for it.
+
+```bash
+curl -H "Authorization: Bearer $OLLAMA_API_KEY" \
+  https://ollama.com/api/balance
+```
+
+**Response (live, 2026-10-31, paid Pro key):**
+
+```json
+{
+  "included": {
+    "balance_usd": 13.22513,
+    "allowance_usd": 60,
+    "period": {
+      "from": "2026-10-20T04:24:38Z",
+      "until": "2026-11-20T04:24:35Z"
+    }
+  },
+  "purchased": { "balance_usd": 0 }
+}
+```
+
+**Fields:**
+
+| Field                        | Type   | Description                                                      |
+| ---------------------------- | ------ | ---------------------------------------------------------------- |
+| `included.balance_usd`       | number | The included allowance still available this period               |
+| `included.allowance_usd`     | number | The plan's included allowance for the period (60 on Pro)         |
+| `included.period.from/until` | string | The allowance's period, UTC; `from` inclusive, `until` exclusive |
+| `purchased.balance_usd`      | number | Purchased credits left, unexpired ones only                      |
+
+**Legacy plans** (documented; not probed on this box, which is a credit plan)
+replace the included amounts with two percent windows:
+
+```json
+{
+  "included": {
+    "session": { "remaining_percent": 75, "resets_at": "2026-10-01T07:00:00Z" },
+    "weekly": { "remaining_percent": 40, "resets_at": "2026-10-05T00:00:00Z" }
+  },
+  "purchased": { "balance_usd": 25 }
+}
+```
+
+> **Live notes (2026-10-31):**
+>
+> - **The balance is authoritative and exact — and it reconciles with §6.17.**
+>   Summing `usage_usd` over the 30d buckets from `included.period.from`
+>   (`60 − 46.77487`) gives `13.22513`, exactly `included.balance_usd`. So the
+>   "badly lagged" caveat the earlier probe recorded no longer holds for the
+>   documented pair of endpoints; the docs' own caveat is only "new usage may
+>   take time to appear".
+> - **The period is the subscription's monthly reset, not the calendar
+>   month** (`from` is the anniversary instant), so it does not align with any
+>   §6.17 range. The balance is the pair that matters.
+> - **`allowance_usd` is plan metadata made a wire fact:** Pro is $60 of usage
+>   credits per month, Max $300, Team $1,000 shared (pricing page). Never
+>   infer a plan from the number.
+> - **`purchased.balance_usd` is a second purse.** It can pay after the
+>   included allowance runs out, so a client shows it separately, never summed
+>   into the included figure.
+> - **Teams share one included and one purchased balance** (documented).
+> - **Rate limited, 10 requests/minute per user**, shared across API keys and
+>   devices, `429` with `Retry-After`; upstream recommends polling once a
+>   minute. A client that refreshes on a 402/429 should honour the header
+>   rather than retry tightly.
+
 ---
 
 ## 7. Streaming
@@ -1574,7 +1656,7 @@ Streaming is specified in detail in the endpoint sections above:
 
 Both produce newline-delimited JSON chunks with incremental token content. The
 account-level usage meter (`GET /api/usage`, section 6.17) is unrelated to
-streaming — it reports per-period billing aggregates, not per-request tokens.
+streaming — it reports billing aggregates per range, not per-request tokens.
 
 ---
 

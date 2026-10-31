@@ -633,6 +633,26 @@ Special cases:
   from the `usage.remaining.hypercredits` field of chat response metadata and
   only falls back to `GET /v1/credits` when no cached value is available from
   the last response.
+- **A zeroed team reports a real zero** (probed 2026-10-31, this box):
+  `{"balance": 0}` — the integer shape, not `balance_usd`. A displayed `0` and
+  an absent `balance` are different facts and must stay so.
+- **The refusal is a `402 billing_error`, and it still carries the request
+  windows** (same probe):
+
+  ```json
+  {
+    "error": {
+      "message": "You're out of credits. Add more at https://hyper.charm.land",
+      "type": "billing_error",
+      "code": null
+    }
+  }
+  ```
+
+  with `x-ratelimit-limit-day: 100000`, `x-ratelimit-limit-hour: 10000` and
+  both `remaining-*` equal to their limits. So a client learns the purse is
+  empty AND reads the day/hour windows from the same failed round; the purse
+  itself is never in the refusal.
 
 ---
 

@@ -1,4 +1,4 @@
-# OpenCode Zen + Go API Reference (live-probed 2026-09-15, extended 2026-09-22)
+# OpenCode Zen + Go API Reference (live-probed 2026-09-15, extended 2026-09-22, 2026-10-31)
 
 > Status: verified against the live wire on 2026-09-15 with the
 > box's real key (`machine opencode.ai` in `~/.authinfo`). Every
@@ -333,15 +333,15 @@ real request:
 All errors are `{"type":"error","error":{"type":…,"message":…}}`
 with an HTTP status:
 
-| Case                                                                             | HTTP | `error.type`                                                                                      |
-| -------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------- |
-| Missing / invalid key                                                            | 401  | `AuthError` (`"Missing API key."` / `"Invalid API key."`)                                         |
-| No Go subscription, Go chat                                                      | 401  | `AuthError` (probed: bad key on the Go path)                                                      |
-| Unknown model (Go and Zen both)                                                  | 401  | `ModelError` (`"Model nope-1 is not supported"`) — _401, not 400_                                 |
-| Empty Zen credit balance                                                         | 401  | `CreditsError`                                                                                    |
-| Missing `x-opencode-session`                                                     | 400  | `MissingSessionID`                                                                                |
-| Free model via third-party session                                               | 400  | `MissingSessionID`                                                                                |
-| Tool-call turn replayed without `reasoning_content` (on the `deepseek` endpoint) | 400  | `invalid_request_error` (`"Upstream request failed: … must be passed back to the API."` — see §3) |
+| Case                                                                             | HTTP | `error.type`                                                                                                                   |
+| -------------------------------------------------------------------------------- | ---- | ------------------------------------------------------------------------------------------------------------------------------ |
+| Missing / invalid key                                                            | 401  | `AuthError` (`"Missing API key."` / `"Invalid API key."`)                                                                      |
+| No Go subscription, Go chat                                                      | 401  | `AuthError` (probed: bad key on the Go path)                                                                                   |
+| Unknown model (Go and Zen both)                                                  | 401  | `ModelError` (`"Model nope-1 is not supported"`) — _401, not 400_                                                              |
+| Empty Zen credit balance (probed 2026-10-31)                                     | 402  | `api_error` (`/messages`) / `server_error` (`/chat/completions`), both `"Upstream request failed: Insufficient account funds"` |
+| Missing `x-opencode-session`                                                     | 400  | `MissingSessionID`                                                                                                             |
+| Free model via third-party session                                               | 400  | `MissingSessionID`                                                                                                             |
+| Tool-call turn replayed without `reasoning_content` (on the `deepseek` endpoint) | 400  | `invalid_request_error` (`"Upstream request failed: … must be passed back to the API."` — see §3)                              |
 
 nevermore maps 401/403 → `NM_CHAT_ERR_AUTH` generically; the
 specific `error.type` is inside the body, which the existing
@@ -510,9 +510,156 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
   been sent;
 - catalog `GET {base}/models`, tokenless, mapped id-only with a
   static fallback (a canned-wire test must assert the header set
-  and the mapping, per the project's test conventions).
+  and the mapping, per the project's test conventions);
+- **`GET {origin}/zen/go/v1/usage`** with the same bearer key (plus
+  `x-opencode-org-id` for a multi-workspace key) is the Go
+  allowance: three windows, percent USED, `ok` / `rate-limited`
+  (§7.1). A `403` there means "no Go subscription", not a failure;
+- **no Zen balance** is readable at any endpoint a client can call
+  (§7.3) — a paid round's `402` is the only "exhausted" signal.
 
-## 7. Unprobed / open questions
+## 7. Credits and usage limits (probed 2026-10-31)
+
+The two tiers do not share a credit surface: the Go allowance is
+readable over the wire, the Zen purse is not readable at all.
+
+### 7.1 The Go allowance: `GET /zen/go/v1/usage`
+
+```bash
+curl -H "Authorization: Bearer $OPENCODE_API_KEY" \
+     -H "x-opencode-org-id: <workspace id>" \
+     https://opencode.ai/zen/go/v1/usage
+```
+
+Response `200` (live, 2026-10-31):
+
+```json
+{
+  "usage": {
+    "rolling": {
+      "status": "ok",
+      "percent": 0,
+      "resetsAt": "2026-10-31T13:20:00.000Z"
+    },
+    "weekly": {
+      "status": "ok",
+      "percent": 26,
+      "resetsAt": "2026-11-02T00:00:00.000Z"
+    },
+    "monthly": {
+      "status": "ok",
+      "percent": 63,
+      "resetsAt": "2026-11-13T13:33:39.000Z"
+    }
+  }
+}
+```
+
+| Field      | Meaning                                                                                                     |
+| ---------- | ----------------------------------------------------------------------------------------------------------- |
+| `percent`  | **USED**, 0–100, of that window's allowance. Not remaining.                                                 |
+| `status`   | `"ok"` or `"rate-limited"` — the whole vocabulary; a rate-limited window refuses requests until `resetsAt`. |
+| `resetsAt` | ISO-8601 UTC instant of the next reset.                                                                     |
+| `rolling`  | 5 hours from the window's FIRST use (so its reset moves with the first request, not the clock).             |
+| `weekly`   | UTC calendar week.                                                                                          |
+| `monthly`  | The paid period (the subscription anniversary, not the calendar month).                                     |
+
+The dollar cap behind each percentage is plan metadata, never a wire
+field (Console's product catalog):
+
+| Plan     | Price      | 5 h | Week | Period |
+| -------- | ---------- | --- | ---- | ------ |
+| Go       | $10/mo     | $12 | $30  | $60    |
+| Go Plus  | $40/mo     | $48 | $120 | $240   |
+| Go Teams | $20/member | $12 | $30  | $60    |
+
+Rules:
+
+- **`status` is a two-value union.** OpenCode's own schema
+  (`packages/core/src/usage-limits.ts`, `GoMeter`) is
+  `Schema.Literals(["ok", "rate-limited"])`, and its mapper is
+  `limited: value.status === "rate-limited"`. There is no warn
+  tier: a window either has room or refuses, and the reset instant
+  is what says when the refusal ends.
+- **Not per model.** The three meters are workspace-wide. The
+  per-model caps in the Console are _budget policies_
+  (`per: "set" | "model"`, `coverage: "all" | "models"`) on a
+  different surface, `/console/api/policies/current-budgets`,
+  which answers `403` to a plain inference key. "Higher usage
+  limits across the models below" (the marketing page) means the
+  allowance spans models; it is not an endpoint shape.
+- **Auth:** `401 AuthError` for a bad/missing key; **`403` = the
+  member does not subscribe to Go** (OpenCode treats it as "no
+  allowance to show", not as a failure). `x-opencode-org-id`
+  names the workspace: OpenCode always sends it, a _bogus_ value
+  answers `400` with an empty body, and a single-workspace key
+  works with it omitted.
+- Query parameters are ignored (`?group_by=model`, `?detail=1`
+  return the same body).
+- Because the plan is not on this wire, a client must show
+  **percent**, not dollars: the cap table above turns 26 % into
+  $7.80 only for a known plan, and no endpoint reports the plan.
+
+### 7.2 The per-round spend: `usage.opencode`
+
+A streamed Go round's usage object carries the gateway's own
+accounting alongside the OpenAI fields:
+
+```json
+{
+  "prompt_tokens": 31,
+  "completion_tokens": 4,
+  "total_tokens": 35,
+  "cost": 0,
+  "opencode": {
+    "billing_source": "go",
+    "list_cost": 0.00000705,
+    "allowance": 0.00000423,
+    "tokens": {
+      "input": 31,
+      "output": 4,
+      "reasoning": 4,
+      "cache_read": 0,
+      "cache_write_5m": 0,
+      "cache_write_1h": 0
+    }
+  }
+}
+```
+
+- `cost` (the standard OpenAI extension) is `0` on a subscription
+  round; `list_cost` is the round's list price and `allowance` the
+  part drawn from the plan.
+- `billing_source` was `"go"` on every Go round probed. A credited
+  Zen round could not be reached (empty balance), so the other
+  spellings are unprobed.
+- It is a per-round CHARGE, never a remaining figure: reconciling
+  it with §7.1 needs the plan's cap, so a client keeps it as a
+  session spend meter, not as a purse.
+- `tokens.cache_write_5m` / `cache_write_1h` distinguish cache
+  TTLs — a finer fact than the OpenAI `cache_write_tokens` this
+  client maps.
+
+### 7.3 The Zen purse is not over the wire
+
+- `/zen/v1/{balance,credits,usage,me,key,account,billing,
+subscription,profile,limits}` all answer `404` (the marketing
+  site's HTML). The balance exists only in the web Console, and
+  the upstream request for an endpoint is open (opencode issue
+  #10448). Treat Zen's balance as unreadable — an unknown, never
+  a zero.
+- The empty-balance refusal is the `402` in §4, on both the
+  chat-completions and the messages route. It carries **no**
+  balance figure: it proves "cannot pay", not "the purse is 0".
+- The free-model trough is its own, separate cap:
+  `429 {"type":"error","error":{"type":"FreeUsageLimitError",
+"message":"Free usage limit reached. …"}}` with a `Retry-After`
+  in seconds (55501 observed, i.e. the next daily reset). It is a
+  rate fact, not a credit fact.
+- What a client can therefore know for Zen: the per-round `cost`
+  if a round reports one, and "exhausted" once a paid round 402s.
+
+## 8. Unprobed / open questions
 
 - No Zen credit on the box, so every **paid** Zen chat path was
   verified only as far as "the gateway parsed and routed" — no
@@ -522,7 +669,18 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
 - The `/zen/v1/responses` and `/zen/v1/messages` response shapes
   were not observed (they need a credited workspace). Not needed
   for the planned chat-completions integration.
-- Rate-limit / 429 shape and headers not observed.
+- **A credited Zen round was never observed**, so
+  `usage.opencode.billing_source` has only ever read `"go"`
+  (§7.2), and whether a credited round reports a remaining figure
+  is unknown. The Zen purse itself has no endpoint (§7.3), so the
+  gap is the round's own payload, not a balance call.
+- **A `rate-limited` Go window was never observed** (§7.1): the
+  vocabulary comes from OpenCode's schema, not from a refusal on
+  this box. What a Go round answers once a window flips (a `429`?
+  a `402` with the Zen body?) is unprobed, and so is whether the
+  gateway names the window that refused.
+- Go rate-limit / 429 headers on a **paid** Go round were not
+  observed (the free tier's `429` + `Retry-After` is §7.3).
 - Whether Zen's free-model gate ever accepts a non-OpenCode
   client beyond the session header is documented as flatly "no";
   the observed message says exactly that. Treat free access as
@@ -550,7 +708,18 @@ flash`): the gateway load-balances one model id across several
 Endpoint is rate limited"}`. A cache measurement on this stack is a
   SHAPE confirmation, not a benchmark.
 
-## 8. Corrections to the pre-work notes
+## 9. Corrections to the pre-work notes
+
+- **The Go allowance IS readable** (`GET /zen/go/v1/usage`, §7.1):
+  three workspace windows, percent used, `ok`/`rate-limited`. The
+  marketing page's "limits across the models" is not an endpoint
+  shape; per-model caps are Console budget policies on a different
+  surface.
+- **The empty Zen balance is a `402`**, with
+  `"Upstream request failed: Insufficient account funds"` on both
+  routes (§4) — not the `401 CreditsError` the September probe
+  recorded. The `CreditsError` type may still exist on another
+  surface; on the two routes a client uses, 402 is the shape.
 
 - **`/zen/v1/models` is public (tokenless)**, not key-gated —
   same as OpenRouter's catalog.
