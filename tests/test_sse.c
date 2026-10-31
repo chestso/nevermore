@@ -53,23 +53,50 @@ static void test_sse_crlf_and_comments(void)
 
 static void test_sse_bare_cr_between_fields(void)
 {
-    /* Leniency: a bare CR is dropped, not a line ending, so the lines merge. */
+    /* WHATWG: a bare CR is an end-of-line delimiter, splitting the fields. */
     NmSseParser *p = nm_sse_new();
     NmSseEvent ev;
     const char *stream = "data: a\rdata: b\n\n";
     ASSERT_EQ(nm_sse_feed(p, stream, strlen(stream), &ev), 1);
-    ASSERT_STR_EQ(ev.data, "adata: b");
+    ASSERT_STR_EQ(ev.data, "a\nb");
     nm_sse_free(p);
 }
 
-static void test_sse_cr_inside_value_is_dropped(void)
+static void test_sse_cr_inside_value_ends_line(void)
 {
-    /* Leniency: a raw CR inside a value is dropped; the payload loses it. */
+    /* WHATWG: CR is excluded from field-value characters; it ends the line.
+     * The trailing y"} is treated as an unknown field name and ignored. */
     NmSseParser *p = nm_sse_new();
     NmSseEvent ev;
     const char *stream = "data: {\"a\":\"x\ry\"}\n\n";
     ASSERT_EQ(nm_sse_feed(p, stream, strlen(stream), &ev), 1);
-    ASSERT_STR_EQ(ev.data, "{\"a\":\"xy\"}");
+    ASSERT_STR_EQ(ev.data, "{\"a\":\"x");
+    nm_sse_free(p);
+}
+
+static void test_sse_split_crlf_across_feeds(void)
+{
+    /* CRLF split across feed boundaries: \r in first feed, \n in second.
+     * The \n must be consumed as part of the CRLF pair, not as a blank line. */
+    NmSseParser *p = nm_sse_new();
+    NmSseEvent ev;
+    const char *s1 = "data: test\r";
+    const char *s2 = "\n\n";
+    ASSERT_EQ(nm_sse_feed(p, s1, strlen(s1), &ev), 0);
+    ASSERT_EQ(nm_sse_feed(p, s2, strlen(s2), &ev), 1);
+    ASSERT_STR_EQ(ev.data, "test");
+    nm_sse_free(p);
+}
+
+static void test_sse_consecutive_bare_cr(void)
+{
+    /* Two consecutive bare CRs: first ends the line, second is a blank line
+     * that dispatches the accumulated event. */
+    NmSseParser *p = nm_sse_new();
+    NmSseEvent ev;
+    const char *stream = "data: hello\r\r";
+    ASSERT_EQ(nm_sse_feed(p, stream, strlen(stream), &ev), 1);
+    ASSERT_STR_EQ(ev.data, "hello");
     nm_sse_free(p);
 }
 
@@ -121,7 +148,9 @@ int main(int argc, char *argv[])
     RUN_TEST(test_sse_split_across_feeds);
     RUN_TEST(test_sse_crlf_and_comments);
     RUN_TEST(test_sse_bare_cr_between_fields);
-    RUN_TEST(test_sse_cr_inside_value_is_dropped);
+    RUN_TEST(test_sse_cr_inside_value_ends_line);
+    RUN_TEST(test_sse_split_crlf_across_feeds);
+    RUN_TEST(test_sse_consecutive_bare_cr);
     RUN_TEST(test_sse_openai_done_marker);
     RUN_TEST(test_sse_byte_by_byte);
     TEST_SUMMARY();

@@ -11,27 +11,21 @@
  * nm_sse_reset rewinds state but keeps the buffers for reuse across
  * requests on the same connection.
  *
- * SSE grammar (hand-rolled; WHATWG's event-stream shape, with ONE
- * deliberate leniency — the CR rule, spelled out below):
+ * SSE grammar (WHATWG event stream format):
  *   stream  = *(event) [partial-line]
  *   event   = 1*line blank-line
- *   line    = field-name [":" [BWS] value] LF   |  ":" ... LF
+ *   line    = field-name [":" [BWS] value] end-of-line  |  ":" ... end-of-line
+ *   end-of-line = ( CR LF / CR / LF )
+ *
  * A line's field name accumulates in `name`; its value in `val` (one
  * optional leading space stripped). "data" values append to the
  * event's data buffer ('\n'-joined); "event"/"id" values are copied
  * into their own retained buffers. Comments (leading ':') and
  * unknown fields are ignored.
  *
- * CR: a carriage return is DROPPED wherever it appears — before an LF,
- * inside a field name, inside a value — and is never a line ending
- * here. WHATWG makes a bare CR an end-of-line of its own, so a stream
- * that ends its lines with a bare CR would have them MERGED instead of
- * split: that leniency is deliberate, and it buys the other case (a
- * raw CR inside a value loses one byte, where the strict reading cuts
- * the value at the CR and leaves the JSON layer a fragment it rejects
- * — losing the whole chunk). No provider seen so far sends a bare CR,
- * so the leniency costs nothing today; tests/test_sse.c pins both
- * shapes, and changing either one is a deliberate act.
+ * End of line: CR, LF, and CRLF are all standard line endings. A bare
+ * CR ends a line immediately; if an LF follows, it is consumed as part
+ * of the CRLF pair (not as a second empty line).
  */
 
 #include <stdlib.h>
@@ -41,7 +35,7 @@
 
 enum
 {
-    SSE_NAME,       /* reading field name up to ':' or '\n' */
+    SSE_NAME,       /* reading field name up to ':' or end-of-line */
     SSE_COLON,      /* saw ':'; maybe one leading space */
     SSE_VAL,        /* reading field value */
     SSE_IGNORE_LINE /* comment / unknown field: eat to end of line */
@@ -69,6 +63,8 @@ struct NmSseParser
                        * at the start of the NEXT feed so the borrowed
                        * out->data pointer stays valid (per sse.h:
                        * valid until the next nm_sse_feed call). */
+    int pending_cr;   /* saw CR line ending; if LF immediately follows,
+                       * consume it as the second half of CRLF */
     char *hold;       /* unconsumed tail of the last feed (an event completed
                        * mid-buffer); prepended to the next feed. Grown
                        * geometrically, reused — never freed per event. */
@@ -133,6 +129,7 @@ void nm_sse_reset(NmSseParser *p)
     p->has_event = 0;
     p->has_id = 0;
     p->data_emitted = 0;
+    p->pending_cr = 0;
     p->hold_len = 0;
 }
 
@@ -143,6 +140,71 @@ static int set_retained(char **dst, size_t *cap, const char *src, size_t n)
         return -1;
     memcpy(*dst, src, n);
     (*dst)[n] = '\0';
+    return 0;
+}
+
+/* Process a complete line end (CR or LF). Returns 1 if an event was
+ * emitted (*out populated and unconsumed tail stashed in p->hold),
+ * 0 if more lines/bytes are needed, -1 on allocation error. */
+static int process_line_end(NmSseParser *p, NmSseEvent *out, const char *buf,
+                            size_t i, size_t len)
+{
+    /* Blank line: no name accumulated and we're at NAME state.
+     * (A completed field line resets name_len below.) */
+    int is_blank = (p->state == SSE_NAME && p->name_len == 0);
+    if (is_blank) {
+        /* Event boundary: emit when anything was collected. */
+        if (p->data_len || p->has_event || p->has_id) {
+            out->event = p->has_event ? p->event : NULL;
+            out->data = p->data ? p->data : "";
+            out->id = p->has_id ? p->id : NULL;
+            /* Rewind for the next event; buffers retained. */
+            p->data_len = 0;
+            p->has_event = 0;
+            p->has_id = 0;
+            p->state = SSE_NAME;
+            p->name_len = 0;
+            p->val_len = 0;
+            p->data_emitted = 1;
+            /* Stash the unconsumed tail so the caller can call
+             * again to drain it (one event per call). */
+            if (i + 1 < len) {
+                if (buf_reserve(&p->hold, &p->hold_cap, len - i - 1))
+                    return -1;
+                /* buf may BE p->hold (draining the hold), so
+                 * overlapping copy: memmove. */
+                memmove(p->hold, buf + i + 1, len - i - 1);
+                p->hold_len = len - i - 1;
+            }
+            return 1;
+        }
+        /* Blank line with no fields: ignore. */
+    } else {
+        /* Complete field line: dispatch by name. */
+        const char *nm = p->name ? p->name : "";
+        size_t nlen = p->name_len;
+        if (nlen == 4 && memcmp(nm, "data", 4) == 0) {
+            if (p->data_len &&
+                buf_put(&p->data, &p->data_len, &p->data_cap, "\n", 1))
+                return -1;
+            if (buf_put(&p->data, &p->data_len, &p->data_cap,
+                        p->val ? p->val : "", p->val_len))
+                return -1;
+        } else if (nlen == 5 && memcmp(nm, "event", 5) == 0) {
+            if (set_retained(&p->event, &p->event_cap, p->val ? p->val : "",
+                             p->val_len))
+                return -1;
+            p->has_event = 1;
+        } else if (nlen == 2 && memcmp(nm, "id", 2) == 0) {
+            if (set_retained(&p->id, &p->id_cap, p->val ? p->val : "",
+                             p->val_len))
+                return -1;
+            p->has_id = 1;
+        } /* else: unknown field — ignored */
+    }
+    p->state = SSE_NAME;
+    p->name_len = 0;
+    p->val_len = 0;
     return 0;
 }
 
@@ -178,68 +240,26 @@ int nm_sse_feed(NmSseParser *p, const char *buf, size_t len, NmSseEvent *out)
     for (size_t i = 0; i < len; i++) {
         char c = buf[i];
 
-        if (c == '\r')
-            continue; /* CR is dropped anywhere — see the file header */
-
-        if (c == '\n') {
-            /* Blank line: no name accumulated and we're at NAME state.
-             * (A completed field line resets name_len below.) */
-            int is_blank = (p->state == SSE_NAME && p->name_len == 0);
-            if (is_blank) {
-                /* Event boundary: emit when anything was collected. */
-                if (p->data_len || p->has_event || p->has_id) {
-                    out->event = p->has_event ? p->event : NULL;
-                    out->data = p->data ? p->data : "";
-                    out->id = p->has_id ? p->id : NULL;
-                    /* Rewind for the next event; buffers retained. */
-                    p->data_len = 0;
-                    p->has_event = 0;
-                    p->has_id = 0;
-                    p->state = SSE_NAME;
-                    p->name_len = 0;
-                    p->val_len = 0;
-                    p->data_emitted = 1;
-                    /* Stash the unconsumed tail so the caller can call
-                     * again to drain it (one event per call). */
-                    if (i + 1 < len) {
-                        if (buf_reserve(&p->hold, &p->hold_cap, len - i - 1))
-                            return -1;
-                        /* buf may BE p->hold (draining the hold), so
-                         * overlapping copy: memmove. */
-                        memmove(p->hold, buf + i + 1, len - i - 1);
-                        p->hold_len = len - i - 1;
-                    }
-                    return 1;
-                }
-                /* Blank line with no fields: ignore. */
-            } else {
-                /* Complete field line: dispatch by name. */
-                const char *nm = p->name ? p->name : "";
-                size_t nlen = p->name_len;
-                if (nlen == 4 && memcmp(nm, "data", 4) == 0) {
-                    if (p->data_len && buf_put(&p->data, &p->data_len,
-                                               &p->data_cap, "\n", 1))
-                        return -1;
-                    if (buf_put(&p->data, &p->data_len, &p->data_cap,
-                                p->val ? p->val : "", p->val_len))
-                        return -1;
-                } else if (nlen == 5 && memcmp(nm, "event", 5) == 0) {
-                    if (set_retained(&p->event, &p->event_cap,
-                                     p->val ? p->val : "", p->val_len))
-                        return -1;
-                    p->has_event = 1;
-                } else if (nlen == 2 && memcmp(nm, "id", 2) == 0) {
-                    if (set_retained(&p->id, &p->id_cap,
-                                     p->val ? p->val : "", p->val_len))
-                        return -1;
-                    p->has_id = 1;
-                } /* else: unknown field — ignored */
-            }
-            p->state = SSE_NAME;
-            p->name_len = 0;
-            p->val_len = 0;
+        if (c == '\r') {
+            p->pending_cr = 1;
+            int r = process_line_end(p, out, buf, i, len);
+            if (r != 0)
+                return r;
             continue;
         }
+
+        if (c == '\n') {
+            if (p->pending_cr) {
+                p->pending_cr = 0;
+                continue; /* LF immediately following CR is part of CRLF */
+            }
+            int r = process_line_end(p, out, buf, i, len);
+            if (r != 0)
+                return r;
+            continue;
+        }
+
+        p->pending_cr = 0;
 
         switch (p->state) {
         case SSE_NAME:
