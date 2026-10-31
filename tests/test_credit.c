@@ -2,6 +2,7 @@
 
 #include "credit.h"
 #include "clock.h"
+#include "fake_clock.h" /* this binary's clock is virtual (see the age test) */
 #include "provider_internal.h"
 #include "test_helpers.h"
 
@@ -315,10 +316,16 @@ static void test_credit_status_colors(void)
 static void test_credit_age_and_iso8601(void)
 {
     char age[32];
+    /* The clock is virtual (fake_clock.c): the base is a nonzero
+     * constant, so an age is "now minus this" whatever the runner's
+     * uptime is. On a fresh CI VM the real monotonic origin sat below
+     * 7200 s and the 2 h case ran past zero into "unknown". */
+    nm_test_clock_reset();
     nm_credit_format_age(0, age, sizeof(age));
     ASSERT_STR_EQ(age, "unknown");
 
     long now = (long)nm_monotonic_seconds();
+    ASSERT_TRUE(now > 7200); /* the age cases below need a past to point at */
     nm_credit_format_age(now - 10, age, sizeof(age));
     ASSERT_STR_EQ(age, "as of 10s ago");
 

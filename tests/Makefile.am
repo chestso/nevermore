@@ -411,8 +411,13 @@ test_sysout_CFLAGS = $(TEST_CFLAGS)
 test_highlight_SOURCES = test_highlight.c ../src/highlight.c
 test_highlight_CFLAGS = $(TEST_CFLAGS)
 
-# Credit ladders, formatters and out-of-band fetch driver
-test_credit_SOURCES = test_credit.c ../src/clock.c ../src/conf.c \
+# Credit ladders, formatters and out-of-band fetch driver. The clock is
+# the FAKE one (fake_clock.c INSTEAD of src/clock.c): the age formatter
+# and the Retry-After latch are pure functions of "now", and a runner's
+# uptime must not decide the verdict — a fresh CI VM reported a 2 h-old
+# observation as "unknown" because now (a small monotonic value) minus
+# 7200 ran below zero.
+test_credit_SOURCES = test_credit.c fake_clock.c ../src/conf.c \
     ../src/nevermore.c ../src/authinfo.c \
     ../src/conversation_id.c ../src/xxh3.c \
     $(TEST_PROVIDER_SOURCES) \
