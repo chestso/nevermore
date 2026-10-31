@@ -594,6 +594,15 @@ Rules:
   names the workspace: OpenCode always sends it, a _bogus_ value
   answers `400` with an empty body, and a single-workspace key
   works with it omitted.
+- **The path is absolute from the origin.** nevermore's fetch driver
+  (`nm_fetch_begin`) sends the credits `endpoint` string verbatim as
+  the request target and takes only scheme/host/port from the base
+  URL — which for Go ends in `/zen/go/v1`. The endpoint is therefore
+  `/zen/go/v1/usage`, not `/usage`: the short form asks
+  `https://opencode.ai/usage`, gets the marketing site's
+  `404 text/html`, and every window renders unknown. The canned-wire test
+  asserts the request target, because a canned body cannot tell a
+  wrong path from a right one.
 - Query parameters are ignored (`?group_by=model`, `?detail=1`
   return the same body).
 - Because the plan is not on this wire, a client must show

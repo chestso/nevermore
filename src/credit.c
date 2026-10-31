@@ -1005,7 +1005,7 @@ static void opencode_init_brackets(NmCreditBracket *b, size_t max_b,
     b[0].limit = 100.0;
     b[0].percent_used = -1;
     snprintf(b[0].label, sizeof(b[0].label), "rolling 5h allowance");
-    snprintf(b[0].origin_desc, sizeof(b[0].origin_desc), "GET /usage");
+    snprintf(b[0].origin_desc, sizeof(b[0].origin_desc), "GET /zen/go/v1/usage");
 
     b[1].unit = NM_CREDIT_PERCENT;
     b[1].window = NM_CREDIT_WEEK;
@@ -1014,7 +1014,7 @@ static void opencode_init_brackets(NmCreditBracket *b, size_t max_b,
     b[1].limit = 100.0;
     b[1].percent_used = -1;
     snprintf(b[1].label, sizeof(b[1].label), "weekly allowance");
-    snprintf(b[1].origin_desc, sizeof(b[1].origin_desc), "GET /usage");
+    snprintf(b[1].origin_desc, sizeof(b[1].origin_desc), "GET /zen/go/v1/usage");
 
     b[2].unit = NM_CREDIT_PERCENT;
     b[2].window = NM_CREDIT_PERIOD;
@@ -1023,7 +1023,7 @@ static void opencode_init_brackets(NmCreditBracket *b, size_t max_b,
     b[2].limit = 100.0;
     b[2].percent_used = -1;
     snprintf(b[2].label, sizeof(b[2].label), "monthly allowance");
-    snprintf(b[2].origin_desc, sizeof(b[2].origin_desc), "GET /usage");
+    snprintf(b[2].origin_desc, sizeof(b[2].origin_desc), "GET /zen/go/v1/usage");
 
     *n_out = 3;
 }
@@ -1063,7 +1063,7 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         snprintf(brackets[0].label, sizeof(brackets[0].label),
                  "rolling 5h allowance (%.0f%% used)", pused);
         snprintf(brackets[0].origin_desc, sizeof(brackets[0].origin_desc),
-                 "GET /usage");
+                 "GET /zen/go/v1/usage");
     }
 
     /* weekly */
@@ -1087,7 +1087,7 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         snprintf(brackets[1].label, sizeof(brackets[1].label),
                  "weekly allowance (%.0f%% used)", pused);
         snprintf(brackets[1].origin_desc, sizeof(brackets[1].origin_desc),
-                 "GET /usage");
+                 "GET /zen/go/v1/usage");
     }
 
     /* monthly */
@@ -1111,14 +1111,19 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         snprintf(brackets[2].label, sizeof(brackets[2].label),
                  "monthly allowance (%.0f%% used)", pused);
         snprintf(brackets[2].origin_desc, sizeof(brackets[2].origin_desc),
-                 "GET /usage");
+                 "GET /zen/go/v1/usage");
     }
 
     return 1;
 }
 
 const NmProviderCredits nm_opencode_credits = {
-    "/usage",
+    /* ABSOLUTE from the origin: the fetch driver sends `endpoint` as the
+     * request target and takes only scheme/host/port from base_url, which
+     * here ends in "/zen/go/v1" (docs/OPENCODE-API.md §7.1). "/usage"
+     * asked opencode.ai/usage — the marketing site's 404 — and every Go
+     * bracket stayed unknown. */
+    "/zen/go/v1/usage",
     "Bearer %s",
     0,
     1,

@@ -372,7 +372,27 @@ typedef struct
 {
     int fd;
     const char *resp;
+    char path[256]; /* the request line's target, recorded for the test */
 } SimpleServer;
+
+/* Copy the request line's target out of a raw request head ("GET <path>
+ * HTTP/1.1"). The path is an ASSERTION, not decoration: the fetch driver
+ * sends the endpoint string verbatim as the target and takes only
+ * scheme/host/port from the base URL, so a path that does not sit where
+ * the wire puts it is a real failure, not a canned-server detail. */
+static void record_request_path(const char *req, char *out, size_t cap)
+{
+    out[0] = '\0';
+    const char *sp = strchr(req, ' ');
+    if (!sp)
+        return;
+    sp++;
+    size_t n = strcspn(sp, " \r\n");
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, sp, n);
+    out[n] = '\0';
+}
 
 static void *simple_server_thread(void *arg)
 {
@@ -385,7 +405,11 @@ static void *simple_server_thread(void *arg)
         return NULL;
     }
     char req[4096];
-    (void)recv(cfd, req, sizeof(req), 0);
+    ssize_t rn = recv(cfd, req, sizeof(req) - 1, 0);
+    if (rn < 0)
+        rn = 0;
+    req[rn] = '\0';
+    record_request_path(req, s->path, sizeof(s->path));
     send(cfd, s->resp, strlen(s->resp), 0);
     close(cfd);
     close(s->fd);
@@ -404,7 +428,7 @@ static void test_credit_fetch_hyper(void)
         "Content-Length: 14\r\n"
         "\r\n"
         "{\"balance\": 0}";
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
@@ -445,7 +469,7 @@ static void test_credit_fetch_ollama_standard(void)
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
@@ -495,7 +519,7 @@ static void test_credit_fetch_ollama_legacy(void)
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
@@ -617,7 +641,7 @@ static void test_credit_fetch_opencode_go(void)
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
@@ -648,6 +672,11 @@ static void test_credit_fetch_opencode_go(void)
                           "w ");
 
     pthread_join(th, NULL);
+    /* The request TARGET is the endpoint string verbatim (base_url supplies
+     * scheme/host/port only), so the Go meter lives at the tier's full path
+     * — "/usage" is the marketing site's 404, and it used to read as three
+     * unknown brackets. */
+    ASSERT_STR_EQ(s.path, "/zen/go/v1/usage");
 }
 
 static void test_credit_fetch_opencode_go_403(void)
@@ -662,7 +691,7 @@ static void test_credit_fetch_opencode_go_403(void)
         "Content-Length: 26\r\n"
         "\r\n"
         "{\"error\":\"no subscription\"}";
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
@@ -693,7 +722,7 @@ static void test_credit_fetch_429_retry_after_latch(void)
         "Retry-After: 4\r\n"
         "Content-Length: 0\r\n"
         "\r\n";
-    SimpleServer s = { lfd, resp };
+    SimpleServer s = { .fd = lfd, .resp = resp };
     pthread_t th;
     pthread_create(&th, NULL, simple_server_thread, &s);
 
