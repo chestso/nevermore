@@ -1327,16 +1327,22 @@ data: [DONE]
 > response headers (non-streaming responses have the same three fields; the only
 > cost readout is the account-level `GET /api/usage` meter below). Response
 > headers of interest: `x-request-id` (echoable in support requests) and
-> `x-build-commit`/`x-build-time`.
+> `x-build-commit`/`x-build-time`. _(The "three fields" half held only until
+> Ollama shipped the cache breakdown — see the correction below.)_
 >
-> **Correction (nevermore wire captures, Sep 2026).** The "no cached-token
-> breakdown" line below/above is not what the wire shows: both `ollama:cloud`
-> and `ollama:local` capture sessions in `~/.local/state/nevermore/wire/`
-> carry `prompt_tokens_details.cached_tokens` on their usage objects (and a
-> `cost` member), exactly the OpenAI-compatible shape — the doc's
-> "three fields" note was written from a bare streamed chunk, not a full
-> capture. nevermore reads the canonical key wherever it appears; no
-> provider-specific fallback is needed.
+> **Correction (nevermore wire captures + ollama source, Oct 2026).** The
+> "three fields" note above predates Ollama's own change (#8008, closed Sep
+> 2026): the usage object now also carries
+> `prompt_tokens_details.cached_tokens`, the OpenAI-compatible shape. An
+> `ollama:cloud` session against `deepseek-v4.1-flash:1017` reported
+> `"prompt_tokens":102550` with `"prompt_tokens_details":{"cached_tokens":99200}`.
+> The local daemon gets the same field from the native
+> `prompt_eval_cached_count` (`openai/openai.go`, `ToUsage`), emitted only when
+> the runner measured it — daemons through v0.33.2 sent the three counts alone.
+> A cache **write** count is never reported (Ollama has no such field), and
+> neither is a per-request `cost`: the only cost readout stays the
+> account-level `GET /api/usage` meter below. nevermore reads the canonical key
+> wherever it appears; no provider-specific fallback is needed.
 
 #### Parameter handling (cloud, Sep 2026 live tests)
 

@@ -339,8 +339,9 @@ what the next request will actually send.
 ### Prompt cache and usage
 
 Hyper, OpenRouter and the OpenCode tiers report cache reads; the OpenCode
-upstreams also report cache writes; Ollama reports token counts only. Where a
-fact is not reported the display degrades instead of inventing it.
+upstreams also report cache writes; Ollama reports cache reads, but never cache
+writes and never a per-request cost. Where a fact is not reported the display
+degrades instead of inventing it.
 
 ## Skills
 
