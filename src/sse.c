@@ -11,15 +11,27 @@
  * nm_sse_reset rewinds state but keeps the buffers for reuse across
  * requests on the same connection.
  *
- * SSE grammar (WHATWG, hand-rolled):
+ * SSE grammar (hand-rolled; WHATWG's event-stream shape, with ONE
+ * deliberate leniency — the CR rule, spelled out below):
  *   stream  = *(event) [partial-line]
  *   event   = 1*line blank-line
- *   line    = field-name [":" [BWS] value] (*CR) LF   |  ":" ... LF
+ *   line    = field-name [":" [BWS] value] LF   |  ":" ... LF
  * A line's field name accumulates in `name`; its value in `val` (one
  * optional leading space stripped). "data" values append to the
  * event's data buffer ('\n'-joined); "event"/"id" values are copied
  * into their own retained buffers. Comments (leading ':') and
- * unknown fields are ignored. CR never enters any buffer.
+ * unknown fields are ignored.
+ *
+ * CR: a carriage return is DROPPED wherever it appears — before an LF,
+ * inside a field name, inside a value — and is never a line ending
+ * here. WHATWG makes a bare CR an end-of-line of its own, so a stream
+ * that ends its lines with a bare CR would have them MERGED instead of
+ * split: that leniency is deliberate, and it buys the other case (a
+ * raw CR inside a value loses one byte, where the strict reading cuts
+ * the value at the CR and leaves the JSON layer a fragment it rejects
+ * — losing the whole chunk). No provider seen so far sends a bare CR,
+ * so the leniency costs nothing today; tests/test_sse.c pins both
+ * shapes, and changing either one is a deliberate act.
  */
 
 #include <stdlib.h>
@@ -167,7 +179,7 @@ int nm_sse_feed(NmSseParser *p, const char *buf, size_t len, NmSseEvent *out)
         char c = buf[i];
 
         if (c == '\r')
-            continue; /* CR never enters any buffer */
+            continue; /* CR is dropped anywhere — see the file header */
 
         if (c == '\n') {
             /* Blank line: no name accumulated and we're at NAME state.

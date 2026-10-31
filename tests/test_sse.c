@@ -51,6 +51,28 @@ static void test_sse_crlf_and_comments(void)
     nm_sse_free(p);
 }
 
+static void test_sse_bare_cr_between_fields(void)
+{
+    /* Leniency: a bare CR is dropped, not a line ending, so the lines merge. */
+    NmSseParser *p = nm_sse_new();
+    NmSseEvent ev;
+    const char *stream = "data: a\rdata: b\n\n";
+    ASSERT_EQ(nm_sse_feed(p, stream, strlen(stream), &ev), 1);
+    ASSERT_STR_EQ(ev.data, "adata: b");
+    nm_sse_free(p);
+}
+
+static void test_sse_cr_inside_value_is_dropped(void)
+{
+    /* Leniency: a raw CR inside a value is dropped; the payload loses it. */
+    NmSseParser *p = nm_sse_new();
+    NmSseEvent ev;
+    const char *stream = "data: {\"a\":\"x\ry\"}\n\n";
+    ASSERT_EQ(nm_sse_feed(p, stream, strlen(stream), &ev), 1);
+    ASSERT_STR_EQ(ev.data, "{\"a\":\"xy\"}");
+    nm_sse_free(p);
+}
+
 static void test_sse_openai_done_marker(void)
 {
     /* The exact tail of an OpenAI-compatible stream. */
@@ -98,6 +120,8 @@ int main(int argc, char *argv[])
     RUN_TEST(test_sse_named_event_multiline_data);
     RUN_TEST(test_sse_split_across_feeds);
     RUN_TEST(test_sse_crlf_and_comments);
+    RUN_TEST(test_sse_bare_cr_between_fields);
+    RUN_TEST(test_sse_cr_inside_value_is_dropped);
     RUN_TEST(test_sse_openai_done_marker);
     RUN_TEST(test_sse_byte_by_byte);
     TEST_SUMMARY();
