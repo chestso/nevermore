@@ -5,6 +5,7 @@
 #include "fake_clock.h" /* this binary's clock is virtual (see the age test) */
 #include "provider_internal.h"
 #include "test_helpers.h"
+#include "test_net_helpers.h" /* WSAStartup on Windows: raw sockets below */
 
 #include <math.h>
 #include <pthread.h>
@@ -14,9 +15,9 @@
 #include <string.h>
 
 #ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#define close(fd) closesocket(fd)
+/* winsock2.h / ws2tcpip.h and the close() shim come from
+ * test_net_helpers.h; the loopback servers still need WSA initialized
+ * (test_wsa_init in main). */
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -756,6 +757,12 @@ int main(int argc, char *argv[])
 #ifndef _WIN32
     signal(SIGPIPE, SIG_IGN);
 #endif
+    /* The fetch tests bind raw loopback listeners; Winsock is not up
+     * until it is asked (on POSIX this is a no-op returning 0). */
+    if (test_wsa_init() != 0) {
+        fprintf(stderr, "  FAIL: WSAStartup\n");
+        return 1;
+    }
     printf("test_credit:\n");
     RUN_TEST(test_credit_format_grammar);
     RUN_TEST(test_credit_unknown_is_not_zero);
