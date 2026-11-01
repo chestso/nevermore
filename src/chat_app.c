@@ -303,6 +303,18 @@ struct NmChatApp
     NmListSource *catalog_src;
     ModelQuery catalog_query;
     int catalog_popup;
+
+    /* The idle balance refresh's own backoff: the monotonic instant
+     * its next background attempt may be made (0 = none armed). The
+     * purse's TTL deadline and the store's rate latch live in the
+     * credits store; this one is the app's because a FAILED attempt
+     * arms no store state of its own — and without it a provider that
+     * declares no rate floor (openrouter, hyper) would leave the
+     * refresh due every tick, a 0 ms cadence the loop spins on. One
+     * attempt per TTL window, started or refused. Reset on a /provider
+     * switch: the new provider's store owes nothing to the old one's
+     * failed attempt. */
+    double credits_retry_at;
 };
 
 /* The singleton (see file header). */
@@ -2049,6 +2061,64 @@ void nm_chat_app_step(NmChatApp *app)
     }
 }
 
+/* The idle balance refresh: when may its next background attempt be
+ * made? The LATEST of three gates wins — the purse's own TTL deadline
+ * (fetched_at + credits_ttl, and never-fetched means NOW, so a session
+ * whose startup warm never landed self-heals), the store's rate latch
+ * (Retry-After, a provider's refresh floor), and the app's own
+ * failed-attempt backoff (credits_retry_at). Returns 0 when no attempt
+ * can ever be made: no provider, no balance endpoint, the TTL `off` —
+ * or the no-unbidden-traffic knob set, the same gate the startup warm
+ * uses. That last one is deliberate: this refresh fires with NO user
+ * action at all, which is exactly the traffic the knob suppresses. The
+ * post-turn gate is NOT so gated — it fires only after the user has
+ * been talking to that provider — and /credits is bidden outright. */
+static int credits_idle_due(const NmChatApp *app, double *due)
+{
+    if (!app || !app->provider)
+        return 0;
+    if (!nm_live_catalog_enabled())
+        return 0;
+    const NmProvider *p = app->provider;
+    if (!p->credits || !p->credits->endpoint)
+        return 0;
+    int ttl = nm_config_resolve_credits_ttl(app->cfg);
+    if (ttl <= 0)
+        return 0;
+    NmCredits *cr = nm_credits_get(p->id);
+    double at = app->credits_retry_at;
+    if (at < cr->next_fetch_allowed_at)
+        at = cr->next_fetch_allowed_at;
+    if (cr->fetched_at > 0) {
+        double fresh_until = (double)cr->fetched_at + (double)ttl;
+        if (at < fresh_until)
+            at = fresh_until;
+    }
+    *due = at;
+    return 1;
+}
+
+/* One idle refresh attempt, if its deadline has come. The backoff is
+ * armed FIRST, whatever nm_credits_fetch_begin then says: a refused
+ * begin (the rate latch, an allocation failure) must not come back as
+ * a 0 ms cadence on the next tick, or the loop spins. A started fetch
+ * is stepped by the tick like any other, and its landing advances
+ * fetched_at — so the next deadline falls a full TTL out either way:
+ * one attempt per window, success or not. */
+static void credits_idle_attempt(NmChatApp *app)
+{
+    double due;
+    if (!credits_idle_due(app, &due))
+        return;
+    if (nm_monotonic_seconds() < due)
+        return;
+    app->credits_retry_at =
+        nm_monotonic_seconds() +
+        (double)nm_config_resolve_credits_ttl(app->cfg);
+    const char *key = endpoint_key(app, app->provider);
+    nm_credits_fetch_begin(app->provider->id, app->base_url, key);
+}
+
 void nm_chat_app_tick(NmChatApp *app)
 {
     if (!app)
@@ -2067,8 +2137,21 @@ void nm_chat_app_tick(NmChatApp *app)
      * (an accepted-but-silent peer). tick_ms keeps the loop waking. */
     if (app->catalog_src)
         catalog_step(app);
-    if (app->provider && nm_credits_fetch_in_flight(app->provider->id))
-        credits_step(app);
+    /* The balance fetch: stepped while in flight (that is
+     * phase-independent), and STARTED when its own idle deadline has
+     * come. The start is idle-only — a running turn keeps the loop at
+     * its busy cadence and ends at the post-turn gate, which makes the
+     * same freshness call without waiting for a tick. */
+    if (app->provider) {
+        if (nm_credits_fetch_in_flight(app->provider->id)) {
+            credits_step(app);
+        } else {
+            NmAgentState st = app->agent ? nm_agent_state(app->agent)
+                                         : NM_AGENT_IDLE;
+            if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
+                credits_idle_attempt(app);
+        }
+    }
 
     NmSpinnerFrame frame = nm_spinner_tick(app->spinner, color_depth(app));
     app->spinner_frame = frame;
@@ -2089,6 +2172,15 @@ int nm_chat_app_tick_ms(NmChatApp *app)
             return 100;
         if (app->provider && nm_credits_fetch_in_flight(app->provider->id))
             return 100;
+        /* The idle balance refresh's deadline is the one cadence an
+         * idle session has of its own, so the purse follows the wire
+         * even while nobody types. 0 means due now: the tick attempts,
+         * and the attempt arms the next window, so this never spins. */
+        double due;
+        if (credits_idle_due(app, &due)) {
+            int ms = (int)((due - nm_monotonic_seconds()) * 1000.0);
+            return ms > 0 ? ms : 0;
+        }
         return -1;
     }
     /* The animation's own cadence (100 ms: the dot's breath, the stars'
@@ -3322,6 +3414,10 @@ static int switch_provider(NmChatApp *app, const char *name)
     build_agent(app, p);
     sys_line(app, "— provider: %s (fresh session) —", p->name);
     warn_missing_key(app, p);
+    /* The new provider's balance store is a different one: the old
+     * provider's failed-attempt backoff must not delay its idle
+     * refresh. */
+    app->credits_retry_at = 0;
     /* The new provider's catalog is a different cache: warm it in the
      * background, exactly as startup does — otherwise the gauge (and
      * the claims) read the new provider cold until a picker visit. */

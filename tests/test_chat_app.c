@@ -3025,6 +3025,9 @@ typedef struct
      * total_usage is always 0). The test MOVES it between turns, so a
      * second fetch is only observable if it actually happened. */
     double purse;
+    /* Answer the balance GET with 404: the fixture's "the endpoint is
+     * not there today", for the refresh's failure paths. */
+    int fail_credits;
     int n_credits; /* GET /api/v1/credits served */
     int n_key;     /* GET /api/v1/key served */
     int n_chat;    /* chat completions served */
@@ -3085,11 +3088,18 @@ static void *credit_route_server_thread(void *arg)
         req[got] = '\0';
         if (strstr(req, "GET /api/v1/credits")) {
             s->n_credits++;
-            char body[128];
-            snprintf(body, sizeof(body),
-                     "{\"data\":{\"total_credits\":%.2f,\"total_usage\":0}}",
-                     s->purse);
-            route_send_json(cfd, body);
+            if (s->fail_credits) {
+                static const char nf[] = "HTTP/1.1 404 Not Found\r\n"
+                                         "Content-Length: 0\r\n\r\n";
+                send(cfd, nf, sizeof(nf) - 1, 0);
+            } else {
+                char body[128];
+                snprintf(body, sizeof(body),
+                         "{\"data\":{\"total_credits\":%.2f,"
+                         "\"total_usage\":0}}",
+                         s->purse);
+                route_send_json(cfd, body);
+            }
         } else if (strstr(req, "GET /api/v1/key")) {
             s->n_key++;
             route_send_json(cfd, "{\"data\":{}}");
@@ -3185,6 +3195,124 @@ static void test_credits_status_refreshes_after_ttl(void)
     ASSERT_TRUE(strstr(row, "$7.71 ") == NULL);
     free(row);
     free(prompt);
+
+    s.stop = 1;
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(s.lfd);
+}
+
+/* The idle half of the refresh: the TTL is not only a turn-end gate but
+ * the app's own idle cadence, so the purse follows the wire while
+ * nobody types. (Both idle tests lift the suite's NM_NO_LIVE_CATALOG
+ * pin — the idle refresh is unbidden live traffic, gated exactly like
+ * the startup warm — and are registered LAST so no later test can read
+ * the lifted value.) */
+static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
+{
+    test_unsetenv("NM_NO_LIVE_CATALOG");
+
+    CreditRouteServer s;
+    memset(&s, 0, sizeof(s));
+    s.purse = 7.71; /* what a launch fetch would have landed */
+    s.lfd = server_bind(&s.port);
+    ASSERT_TRUE(s.lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, credit_route_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    AppHarness *h = harness_new("openrouter", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    /* The harness stamped the store "fetched at launch", so the refresh
+     * is a full TTL away — and that deadline is the app's whole idle
+     * cadence. The frozen clock makes it exact. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 300000);
+
+    /* Nobody types. Ten minutes pass, and the wire's purse moves. */
+    nm_test_clock_advance_ms(600 * 1000);
+    s.purse = 5.00;
+
+    /* The deadline is due NOW: the loop wakes on it, and the tick
+     * starts the fetch with no turn anywhere in sight. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 0);
+    nm_chat_app_tick(h->app);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    /* Idle, the credits socket is the app's primary source: the loop
+     * pumps what the app declares. */
+    ASSERT_EQ((int)nm_chat_app_source(h->app).handle,
+              (int)nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle);
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+
+    /* The bar followed the wire — without one chat round. */
+    ASSERT_EQ(s.n_credits, 1);
+    ASSERT_EQ(s.n_key, 1);
+    ASSERT_EQ(s.n_chat, 0);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "$5 ") != NULL);
+    free(row);
+    free(prompt);
+    /* The landed fetch re-arms the next window a full TTL out: a due
+     * deadline never survives its own tick, so the loop cannot spin. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 300000);
+
+    s.stop = 1;
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(s.lfd);
+}
+
+/* A failed idle attempt must not come back as a due-now deadline:
+ * openrouter declares no rate floor, so a 404 leaves the credits store
+ * exactly as it was — without the app's own backoff the idle tick would
+ * return 0 ms forever and the loop would spin between the tick and the
+ * refused fetch. One attempt per TTL window, started, landed or
+ * failed. */
+static void test_credits_idle_refresh_backs_off_a_failed_fetch(void)
+{
+    test_unsetenv("NM_NO_LIVE_CATALOG"); /* idempotent: lifted above */
+
+    CreditRouteServer s;
+    memset(&s, 0, sizeof(s));
+    s.fail_credits = 1; /* the balance endpoint is not there today */
+    s.lfd = server_bind(&s.port);
+    ASSERT_TRUE(s.lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, credit_route_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    AppHarness *h = harness_new("openrouter", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    /* The session whose startup warm never landed: never fetched means
+     * due at once, so the idle refresh self-heals. */
+    nm_credits_reset();
+
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 0);
+    nm_chat_app_tick(h->app);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+    ASSERT_EQ(s.n_credits, 1);
+    ASSERT_EQ(s.n_key, 0); /* the chain died at the failed first step */
+    ASSERT_EQ(s.n_chat, 0);
+
+    /* The fetch failed and nothing in the store moved: the backoff is
+     * the app's, armed by the attempt itself. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 300000);
+
+    /* One window later it tries again — once. */
+    nm_test_clock_advance_ms(300 * 1000);
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 0);
+    nm_chat_app_tick(h->app);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+    ASSERT_EQ(s.n_credits, 2);
+    ASSERT_EQ(s.n_chat, 0);
 
     s.stop = 1;
     harness_free(h);
@@ -10801,5 +10929,13 @@ int main(void)
     RUN_TEST(test_knob_commands_refuse_a_provider_without_knobs);
     RUN_TEST(test_served_notice_prints_and_the_key_gates_it);
     RUN_TEST(test_context_states_the_active_knobs);
+    /* LAST on purpose, and AFTER the catalog-warm test's own "last":
+     * these lift the suite's NM_NO_LIVE_CATALOG pin (the idle balance
+     * refresh is unbidden live traffic, gated like the startup warm),
+     * and the pin is process state — nothing after them may read the
+     * lifted value. The pin's own tripwire ran first, so the lift is
+     * loud, not silent. */
+    RUN_TEST(test_credits_idle_refresh_updates_the_bar_while_idle);
+    RUN_TEST(test_credits_idle_refresh_backs_off_a_failed_fetch);
     TEST_SUMMARY();
 }
