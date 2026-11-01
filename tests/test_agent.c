@@ -7017,8 +7017,23 @@ static void *agent_402_server_thread(void *arg)
         close(lfd);
         return NULL;
     }
-    char req[4096];
-    (void)recv(cfd, req, sizeof(req), 0);
+    /* Drain the WHOLE request before the reply (the one-shot 401
+     * responder's own rule): the old single recv could return with the
+     * POST's body still in flight, and a close over an unread request
+     * sends an RST that can discard the 402 the client has not read
+     * yet — the turn then dies as a transport error, the fold hook
+     * never fires, and the test fails. Wine's segmentation hit that
+     * race every run; loopback Linux never did. */
+    char req[REQ_CAP];
+    size_t got = 0;
+    while (got < sizeof(req) - 1) {
+        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
+            break;
+    }
 
     const char body[] =
         "{\"error\":{\"message\":\"You're out of credits. Add more at "
