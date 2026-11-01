@@ -306,6 +306,10 @@ bounded to those conversations, and none has been seen.
 - 400 (bad model id): `{"error":{"message":"no-such/model is not a
 valid model ID","code":400},"user_id":"..."}`.
 - Errors arrive as a plain JSON body (HTTP status set), not SSE.
+- A refusal that comes from the UPSTREAM rather than the router adds a
+  `metadata` object — `raw` (the upstream's own body, as an escaped
+  STRING), `provider_name`, `is_byok`, `provider_error_code`. Two are
+  measured, both in §11: the 429 rate refusal and the 400 geography one.
 
 ## 5. Vision content parts (live test)
 
@@ -1236,3 +1240,57 @@ A `:free` round reports `cost: 0`.
 
 That is a RATE fact (per upstream, not per purse), and it carries no balance
 figure — an account with credits still meets it.
+
+**A refusal can also be a GEOGRAPHY fact.** Same envelope, same
+`metadata` shape, but here the router did its job and the last hop refused
+(captured 2026-11-01, a `google/gemini-*` round):
+
+```json
+{
+  "error": {
+    "message": "Provider returned error",
+    "code": 400,
+    "metadata": {
+      "raw": "{\n  \"error\": {\n    \"code\": 400,\n    \"message\": \"User location is not supported for the API use.\",\n    \"status\": \"FAILED_PRECONDITION\"\n  }\n}\n",
+      "provider_name": "Google AI Studio",
+      "is_byok": false,
+      "provider_error_code": "400"
+    }
+  },
+  "user_id": "user_…"
+}
+```
+
+Reading it:
+
+- **`metadata.raw` is a STRING holding the upstream's own JSON**, escapes
+  and all — the double encoding is the wire's, not a transcription
+  artifact. Anything that wants the upstream's `message` or `status` must
+  unescape and parse it a second time; the rest of `metadata` is the
+  router's summary of that body.
+- **`provider_name` is the upstream's DISPLAY name** (`Google AI Studio`),
+  not the slug vocabulary `provider.only` takes (§7.1's 404 names slugs —
+  `azure`, `openai`). This body does not say which slug to pin.
+- **`is_byok: false`** — the key was the router's, so the round
+  authenticated, the account had credit and the model id resolved. No key,
+  top-up or model-id correction touches this.
+- **`provider_error_code` is the upstream's HTTP status as a STRING**
+  (`"400"`), where the 429 above carries a symbolic word
+  (`model_rate_limit_exceeded`). A client reading the field must accept
+  both spellings.
+- **The cause is the region the request reaches Google from.** The
+  Generative Language API serves a country list, and `FAILED_PRECONDITION`
+  is how it says "not from here", not "wrong parameters". It is
+  deterministic: the same egress meets it on every retry. §7.1's three
+  levers re-sort hosts, pin a tier and steer upstreams — none moves
+  geography, and they help only a model that has a non-Google host to land
+  on (`google/gemini-*` ids are served by Google alone). Leaving the region
+  or leaving the model is the fix.
+- **On nevermore's side nothing is parsed and nothing is added:**
+  `chat_failure` prepends `chat failed: ` to the provider's message, behind
+  it the client's own `HTTP %d: ` and the captured body, capped at
+  `NM_CHAT_MSG_MAX` (512) bytes. So the user reads
+  `chat failed: HTTP 400: {…}` with the one sentence that matters buried in
+  an escaped string three layers down. A geography refusal is a small open
+  gap of §10.5's kind: named nowhere, so the UI cannot say "blocked in your
+  region".
