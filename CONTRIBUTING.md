@@ -86,6 +86,14 @@ or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
   analyzer. Nothing passes `-Werror`. Optimizer-only warnings show up in the
   local `-O3` release build. [AGENTS.md](AGENTS.md) has the rules for automated
   agents.
+- **A column is DISPLAY columns, never bytes.** A row that aligns fields pads
+  through `columns.h` (`nm_columns_needed` / `nm_columns_pad`), which measures
+  with boba's `tui_utf8_display_width`: a printf field width counts bytes, so
+  `%-16s` on a cell carrying `·` (two bytes, one column) shifts every row that
+  has a tag, and a wide or combining glyph shifts the rest. Text that must be
+  clipped is clipped with boba's `tui_text_fit` — the same walk — and padded by
+  the columns it actually emitted, so a wide glyph is never split and the
+  leftover column becomes padding, never a short row.
 - **Tests first.** Tests exist before or with the code.
 - **Delete dead code,** including code referenced only by tests: a test hook is
   not a consumer. If a test needs a seam, test the public behavior that uses it,

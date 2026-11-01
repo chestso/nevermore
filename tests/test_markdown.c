@@ -1037,6 +1037,56 @@ static void test_render_block_emits_content_not_framing(void)
     h_free(h);
 }
 
+/* Display width of every row of the LAST committed box, from its top
+ * corner to the bottom border, into `w` (at most `cap`). Returns the
+ * row count (0 when there is no box).
+ *
+ * Border rows use 3-byte glyphs where content rows use spaces, so byte
+ * length is not the measure; SGR is zero-width. The capture also holds
+ * live-path re-renders, so the finalized table is the LAST top-corner
+ * onward, and it ends at the bottom border (the block's own blank row
+ * follows it). SGR is stripped before measuring so attr bytes do not
+ * count as glyphs (the width math itself is attr-free by design: attrs
+ * are emitted around, never inside, the cell fields). */
+static int last_box_row_widths(H *h, int *w, int cap)
+{
+    const char *out = h_read(h);
+    const char *top = NULL;
+    for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
+        top = q; /* last top-left corner */
+    if (!top)
+        return 0;
+    int nrows = 0;
+    for (const char *p = top; *p && nrows < cap;) {
+        const char *e = strstr(p, "\r\n");
+        if (!e)
+            break;
+        char row[4096];
+        size_t rl = (size_t)(e - p);
+        if (rl >= sizeof(row))
+            rl = sizeof(row) - 1;
+        size_t o = 0;
+        for (size_t k = 0; k < rl; k++) {
+            if (p[k] == '\x1b') {
+                k++;
+                if (k < rl && p[k] == '[') {
+                    while (k < rl && p[k] != 'm')
+                        k++;
+                }
+                continue;
+            }
+            row[o++] = p[k];
+        }
+        row[o] = '\0';
+        w[nrows++] = (int)tui_utf8_display_width_ansi(row, strlen(row));
+        p = e + 2;
+        /* the bottom border (U+2514) is the box's last row */
+        if (strncmp(row, "\xe2\x94\x94", 3) == 0)
+            break;
+    }
+    return nrows;
+}
+
 static void test_table_width_grows_then_final_box_aligned(void)
 {
     H *h = h_new_render();
@@ -1065,49 +1115,9 @@ static void test_table_width_grows_then_final_box_aligned(void)
     h_flush(h);
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
 
-    /* Every committed box row has the same DISPLAY width. Border rows
-     * use 3-byte glyphs where content rows use spaces, so byte length
-     * is not the measure; SGR is zero-width. The capture also holds
-     * live-path re-renders; the finalized table is the LAST top-corner
-     * onward, and it ends at the bottom border (the block's own blank
-     * row follows it). Strip SGR before measuring so the attr bytes do
-     * not count as glyphs (the width math itself is attr-free by
-     * design: attrs are emitted around, never inside, the cell
-     * fields). */
-    const char *out = h_read(h);
-    const char *top = NULL;
-    for (const char *q = out; (q = strstr(q, "\xe2\x94\x8c")) != NULL; q++)
-        top = q; /* last top-left corner */
-    ASSERT_NOT_NULL(top);
+    /* Every committed box row has the same DISPLAY width. */
     int widths[32];
-    int nrows = 0;
-    for (const char *p = top; *p && nrows < 32;) {
-        const char *e = strstr(p, "\r\n");
-        if (!e)
-            break;
-        char row[512];
-        size_t rl = (size_t)(e - p);
-        if (rl >= sizeof(row))
-            rl = sizeof(row) - 1;
-        size_t o = 0;
-        for (size_t k = 0; k < rl; k++) {
-            if (p[k] == '\x1b') {
-                k++;
-                if (k < rl && p[k] == '[') {
-                    while (k < rl && p[k] != 'm')
-                        k++;
-                }
-                continue;
-            }
-            row[o++] = p[k];
-        }
-        row[o] = '\0';
-        widths[nrows++] = (int)tui_utf8_display_width_ansi(row, strlen(row));
-        p = e + 2;
-        /* the bottom border (U+2514) is the box's last row */
-        if (strncmp(row, "\xe2\x94\x94", 3) == 0)
-            break;
-    }
+    int nrows = last_box_row_widths(h, widths, 32);
     ASSERT_TRUE(nrows >= 5); /* top, header, sep, body, bottom */
     for (int r = 1; r < nrows; r++)
         ASSERT_EQ(widths[r], widths[0]);
@@ -1127,7 +1137,7 @@ static int last_box_row_width(H *h)
     const char *e = strstr(top, "\r\n");
     if (!e)
         return -1;
-    char row[512];
+    char row[4096];
     size_t rl = (size_t)(e - top);
     if (rl >= sizeof(row))
         rl = sizeof(row) - 1;
@@ -1190,6 +1200,46 @@ static void test_table_cell_width_is_cluster_based(void)
     int cluster_ascii = one_col_box_width("yyx", "y");
     ASSERT_TRUE(cluster_sym > 0);
     ASSERT_EQ(cluster_sym, cluster_ascii);
+}
+
+/* A column too narrow for its widest cell clips on a GRAPHEME-CLUSTER
+ * boundary and still pads to the column: boba's tui_text_fit stops
+ * before a wide glyph that would not fit, so the content row keeps the
+ * border's width instead of carrying half a glyph (whose width the
+ * terminal answers for a byte sequence that is not there). */
+static void test_table_wide_cell_clips_on_a_cluster(void)
+{
+    /* 40 U+3042 (あ): 80 columns, wider than the harness's 40-column
+     * window, so the column is shrunk to fit and the cell is clipped —
+     * at an ODD budget (31), the case a wide glyph cannot fill exactly. */
+    char wide[4 * 40];
+    size_t o = 0;
+    for (int i = 0; i < 40; i++) {
+        memcpy(wide + o, "\xe3\x81\x82", 3);
+        o += 3;
+    }
+    wide[o] = '\0';
+
+    char table[512];
+    snprintf(table, sizeof(table), "| %s | yy |\n| - | - |\n| %s | yy |\n\n",
+             wide, wide);
+
+    H *h = h_new_render();
+    ASSERT_NOT_NULL(h);
+    h_send(h, tui_msg_stream_delta(0, table, strlen(table)));
+    h_flush(h);
+    h_send(h, tui_msg_stream_end(0));
+    h_flush(h);
+    ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
+
+    int widths[32];
+    int nrows = last_box_row_widths(h, widths, 32);
+    ASSERT_TRUE(nrows >= 5);  /* top, header, sep, body, bottom */
+    ASSERT_EQ(widths[0], 40); /* the box fits the window */
+    for (int r = 1; r < nrows; r++)
+        ASSERT_EQ(widths[r], widths[0]);
+
+    h_free(h);
 }
 
 /* A harness with an explicit stream count and a caller-supplied
@@ -1723,6 +1773,7 @@ int main(void)
     RUN_TEST(test_image_then_text_keeps_the_line);
     RUN_TEST(test_table_width_grows_then_final_box_aligned);
     RUN_TEST(test_table_cell_width_is_cluster_based);
+    RUN_TEST(test_table_wide_cell_clips_on_a_cluster);
     RUN_TEST(test_reasoning_stream_is_dim);
     RUN_TEST(test_dim_heading_keeps_both_attrs);
     RUN_TEST(test_inline_code_span);

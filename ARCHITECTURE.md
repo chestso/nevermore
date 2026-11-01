@@ -96,6 +96,9 @@ docs/               wire specs and platform notes
 - `tools*.c`, `proc*.c`: tools and the process-job registry
 - `chat_app.c`, `markdown*.c`, `colors.c`, `spinner.c`, `image*.c`, `sysout.c`,
   `banner.c`: the TUI
+- `columns.c`, `size.c`: the two formatters a row shares — a field filled to a
+  count of terminal COLUMNS (boba's display width, never a byte field width),
+  and a human byte size
 
 ## Providers and catalogs
 

@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <boba/text.h>
 #include <boba/unicode.h>
 
 #include "colors.h"
@@ -169,40 +170,6 @@ static int line_is_blank_line(const char *s, size_t len)
             return 0;
     }
     return 1;
-}
-
-/* Display width of a byte range, counting whole grapheme clusters. */
-static int display_width(const char *s, size_t len)
-{
-    int w = 0;
-    size_t i = 0;
-    while (i < len) {
-        size_t cl = 0;
-        int cw = tui_next_cluster(s + i, len - i, &cl);
-        if (cl == 0)
-            break;
-        w += cw;
-        i += cl;
-    }
-    return w;
-}
-
-/* Byte length of the longest prefix whose display width <= maxw. */
-static size_t clip_bytes(const char *s, size_t len, int maxw)
-{
-    int w = 0;
-    size_t i = 0;
-    while (i < len) {
-        size_t cl = 0;
-        int cw = tui_next_cluster(s + i, len - i, &cl);
-        if (cl == 0)
-            break;
-        if (w + cw > maxw)
-            break;
-        w += cw;
-        i += cl;
-    }
-    return i;
 }
 
 /* ---------------------------------------------------------------- */
@@ -824,7 +791,13 @@ static int table_parse(const char *text, size_t len, Table *t)
     return t->nrows > 0 && t->ncols > 0;
 }
 
-/* Natural column widths, then shrink the widest columns until the
+/* A cell's width and the prefix that fits its column are boba's walks
+ * (unicode.h's tui_utf8_display_width_n, text.h's tui_text_fit), so the
+ * table's columns are the columns the rest of the app measures. Cells
+ * are bytes, never styled spans (D5), so a cell carries no escape
+ * sequence for the fit walk to step over.
+ *
+ * Natural column widths, then shrink the widest columns until the
  * bordered table fits `width` (never below MIN_COL_WIDTH). */
 static void table_widths(const Table *t, int *w, int width)
 {
@@ -832,7 +805,8 @@ static void table_widths(const Table *t, int *w, int width)
         w[c] = MIN_COL_WIDTH;
     for (int r = 0; r < t->nrows; r++) {
         for (int c = 0; c < t->rows[r].ncols; c++) {
-            int cw = display_width(t->rows[r].cells[c], t->rows[r].clens[c]);
+            int cw = tui_utf8_display_width_n(t->rows[r].cells[c],
+                                              t->rows[r].clens[c]);
             if (cw > w[c])
                 w[c] = cw;
         }
@@ -886,8 +860,8 @@ static void emit_border(TuiRowSink *sink, const Table *t, const int *w,
 
 /* A content row: `│` + (space + aligned field + space) per column,
  * with `│` between columns. Borders Comment; header cells bold; body
- * cells plain (no spans inside cells — D5: the width math counts SGR
- * bytes as glyphs). */
+ * cells plain (no spans inside cells — D5: tui_utf8_display_width_n does
+ * not skip escape sequences, so SGR bytes would count as glyphs). */
 static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,
                            const TableRow *r, int is_header, TuiAttr base,
                            NmColorDepth depth)
@@ -898,18 +872,24 @@ static void emit_table_row(TuiRowSink *sink, const Table *t, const int *w,
     for (int c = 0; c < t->ncols; c++) {
         emit_styled(sink, "\xe2\x94\x82", 3, border, base);
         emit_styled(sink, " ", 1, cell, base);
-        int cw = c < r->ncols ? display_width(r->cells[c], r->clens[c]) : 0;
-        if (cw > w[c])
-            cw = w[c];
+        /* The fit IS the field: the bytes to emit and the columns they
+         * occupy come from one walk (tui_text_fit), so a cell clipped to
+         * an odd budget — the next glyph is wide and a wide glyph is
+         * never split — leaves the leftover column as PADDING instead of
+         * ending the row one column short of its own border. */
+        size_t keep = 0;
+        int cw = 0;
+        if (c < r->ncols) {
+            TuiTextFit fit = tui_text_fit(r->cells[c], r->clens[c], w[c], 0);
+            keep = fit.bytes;
+            cw = fit.cols;
+        }
         int pad = w[c] - cw;
         int lp = t->align[c] == 2 ? pad : t->align[c] == 1 ? pad / 2
                                                            : 0;
         emit_spaces(sink, lp, cell, base);
-        if (c < r->ncols) {
-            size_t keep = clip_bytes(r->cells[c], r->clens[c], w[c]);
-            if (keep)
-                emit_styled(sink, r->cells[c], keep, cell, base);
-        }
+        if (keep)
+            emit_styled(sink, r->cells[c], keep, cell, base);
         emit_spaces(sink, pad - lp, cell, base);
         emit_styled(sink, " ", 1, cell, base);
     }

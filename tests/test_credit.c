@@ -2,6 +2,7 @@
 
 #include "credit.h"
 #include "clock.h"
+#include "columns.h"
 #include "fake_clock.h" /* this binary's clock is virtual (see the age test) */
 #include "provider_internal.h"
 #include "test_helpers.h"
@@ -14,6 +15,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#include <boba/unicode.h>
 
 #ifdef _WIN32
 /* winsock2.h / ws2tcpip.h and the close() shim come from
@@ -674,6 +677,37 @@ static void test_credit_ladder_columns_align(void)
     ASSERT_TRUE(strstr(buf, "1k/1000") == NULL);
 }
 
+/* The ladder's column arithmetic is columns.h's, natively and for the
+ * system rows too: a field is filled to a DISPLAY-column budget, so a
+ * multi-byte glyph (or a combining mark) neither widens nor narrows it,
+ * and an over-wide field is passed through whole rather than cut. */
+static void test_columns_field_is_measured_in_columns(void)
+{
+    char out[64];
+
+    /* `·` (U+00B7) is two bytes and ONE column. */
+    nm_columns_pad(out, sizeof(out), "a\xc2\xb7", 4);
+    ASSERT_EQ(tui_utf8_display_width(out), 4);
+
+    /* `日` (U+65E5) is three bytes and TWO columns. */
+    nm_columns_pad(out, sizeof(out), "\xe6\x97\xa5", 4);
+    ASSERT_EQ(tui_utf8_display_width(out), 4);
+
+    /* A combining acute adds a byte and no column. */
+    nm_columns_pad(out, sizeof(out), "e\xcc\x81", 3);
+    ASSERT_EQ(tui_utf8_display_width(out), 3);
+
+    /* Overlong text is written whole: the field pushes its neighbours
+     * right instead of gluing to them with a cut glyph. */
+    nm_columns_pad(out, sizeof(out), "longer", 4);
+    ASSERT_EQ(strcmp(out, "longer"), 0);
+    ASSERT_EQ(nm_columns_needed("longer", 4), 0);
+
+    /* An empty (or absent) field is all padding. */
+    ASSERT_EQ(nm_columns_needed("", 3), 3);
+    ASSERT_EQ(nm_columns_needed(NULL, 3), 3);
+}
+
 /* ------------------------------------------------------------------ */
 /* Canned loopback servers for out-of-band fetch driver                */
 /* ------------------------------------------------------------------ */
@@ -1122,6 +1156,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_credit_format_until);
     RUN_TEST(test_credit_ladder_counts_down);
     RUN_TEST(test_credit_ladder_columns_align);
+    RUN_TEST(test_columns_field_is_measured_in_columns);
     RUN_TEST(test_credit_age_and_iso8601);
     RUN_TEST(test_credit_fetch_hyper);
     RUN_TEST(test_credit_fetch_ollama_standard);

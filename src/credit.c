@@ -5,6 +5,7 @@
 
 #include "credit.h"
 #include "clock.h"
+#include "columns.h"
 #include "openai_client.h"
 #include "provider_internal.h"
 #include "transport.h"
@@ -13,8 +14,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#include <boba/unicode.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -492,28 +491,6 @@ size_t nm_credit_status_cells(const NmCredits *cr, NmCreditCell *cells,
     return written;
 }
 
-/* Terminal columns a string occupies. boba owns the Unicode rules (wide
- * CJK, combining marks); a printf field width counts BYTES, which is why
- * `%-16s` on a cell carrying the separator (U+00B7 is two bytes but one
- * column) put every tagged row one column left of the rows with no tag. */
-static size_t display_width(const char *s)
-{
-    int w = tui_utf8_display_width(s);
-    return w > 0 ? (size_t)w : 0;
-}
-
-/* Left-justify `s` in a `cols`-wide COLUMN. Overlong text is passed
- * through whole: the caller keeps a space between fields, so an
- * over-wide cell pushes its neighbours right instead of gluing to them. */
-static void pad_to_column(const char *s, size_t cols, char *out, size_t cap)
-{
-    size_t w = display_width(s);
-    if (w >= cols)
-        snprintf(out, cap, "%s", s);
-    else
-        snprintf(out, cap, "%s%*s", s, (int)(cols - w), "");
-}
-
 int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
                             char *out, size_t cap)
 {
@@ -595,13 +572,14 @@ int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
         const char *orig = b->origin_desc[0] ? b->origin_desc : "";
 
         /* Columns are padded by DISPLAY WIDTH, never by byte count: the
-         * cell is the only field that carries the `·` separator, so a
-         * byte-measured field would shift exactly the rows that have a
-         * window tag. */
+         * cell is the only field that carries the `·` separator (two
+         * bytes, one column), so a byte-measured field would shift
+         * exactly the rows that have a window tag. nm_columns_pad is
+         * the ONE place that arithmetic lives. */
         char cell_col[96];
         char desc_col[256];
-        pad_to_column(cell_buf, 16, cell_col, sizeof(cell_col));
-        pad_to_column(desc, 46, desc_col, sizeof(desc_col));
+        nm_columns_pad(cell_col, sizeof(cell_col), cell_buf, 16);
+        nm_columns_pad(desc_col, sizeof(desc_col), desc, 46);
 
         if (*orig) {
             off += (size_t)snprintf(out + off, cap > off ? cap - off : 0,

@@ -56,6 +56,7 @@
 #include "conf.h"
 #include "reminder.h"
 #include "colors.h"
+#include "columns.h"
 #include "markdown.h"
 #include "markdown_render.h"
 #include "image.h"
@@ -3535,11 +3536,17 @@ static const char *app_config_resolve(const NmChatApp *app, const char *key,
  * print: the key, the value, and the layer that dictates it. The layer
  * is the view's own; a surface that knows better than the store (a
  * frozen echo, an inert latch, the terminal's own answer) passes its
- * own words. */
+ * own words.
+ *
+ * Columns are padded by DISPLAY WIDTH (columns.h), never by printf's
+ * byte field width: a value carrying a wide or combining character
+ * would otherwise push the layer column right on exactly the rows that
+ * have one. */
 static void config_row(NmChatApp *app, const char *key, NmCfgView view,
                        const char *layer)
 {
-    sys_line(app, "  %-20s %-14s (%s)", key, view.value,
+    sys_line(app, "  %s%*s %s%*s (%s)", key, nm_columns_needed(key, 20), "",
+             view.value, nm_columns_needed(view.value, 14), "",
              layer ? layer : view.layer);
 }
 
@@ -4227,14 +4234,17 @@ static void session_list(NmChatApp *app)
         nm_size_text(m->content ? strlen(m->content) : 0, size, sizeof(size));
         char notes[64];
         session_notes(m, notes, sizeof(notes));
+        /* The tool name is the model's own text, so the column it fills
+         * is measured in DISPLAY columns (columns.h), not bytes. */
+        const char *tool = m->tool_name ? m->tool_name : "-";
+        int tool_pad = nm_columns_needed(tool, 14);
         if (notes[0])
-            sys_line(app, "  #%-3zu %-9s %-14s %9s  %s", i,
-                     session_role_tag(m->role),
-                     m->tool_name ? m->tool_name : "-", size, notes);
+            sys_line(app, "  #%-3zu %-9s %s%*s %9s  %s", i,
+                     session_role_tag(m->role), tool, tool_pad, "", size,
+                     notes);
         else
-            sys_line(app, "  #%-3zu %-9s %-14s %9s", i,
-                     session_role_tag(m->role),
-                     m->tool_name ? m->tool_name : "-", size);
+            sys_line(app, "  #%-3zu %-9s %s%*s %9s", i,
+                     session_role_tag(m->role), tool, tool_pad, "", size);
     }
 }
 
