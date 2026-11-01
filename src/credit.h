@@ -107,12 +107,18 @@ long nm_credit_parse_iso8601(const char *iso);
  * "as of 1h ago", or "unknown" if observed_at == 0). */
 void nm_credit_format_age(long observed_at, char *out, size_t cap);
 
+/* Format the reset countdown for an epoch instant: "in 4h 51m",
+ * "in 12d 3h", "now" (at or past). Writes "" and returns 0 when `at` is
+ * 0 (no reset reported). PURE in (now, at) — the wall-clock epoch is the
+ * caller's, so a test owns it and the ladder supplies time(NULL). */
+int nm_credit_format_until(long now, long at, char *out, size_t cap);
+
 /* Format a single credit bracket cell according to the prose grammar:
  *   cell       ::= ["-"] <amount> [ "·" <window-tag> ] | <exhausted>
  *   amount     ::= "$" <money> [ "/" "$" <money> ]
  *                | <number> [ "/" <number> ] <unit-tag>
  *                | <count> [ "/" <count> ]
- *   exhausted  ::= <unit-tag> "!"
+ *   exhausted  ::= ( <window-tag> | <unit-tag> ) "!"
  * When `compress` is nonzero and `value == limit`, compresses to one number
  * (e.g. "100k·d" instead of "100k/100k·d").
  * If `state == NM_CREDIT_UNKNOWN`, writes "-" if not compressed, or empty if
@@ -120,11 +126,43 @@ void nm_credit_format_age(long observed_at, char *out, size_t cap);
 int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
                           int compress);
 
-/* Format the status row credit cluster (at most 2 cells, separated by space,
- * with a trailing space if non-empty). Returns length written, or 0 if
- * nothing is to be shown. Sets `*color` to the appropriate role. */
-int nm_credit_format_status(const NmCredits *cr, char *out, size_t cap,
-                            TuiColor *color, NmColorDepth depth);
+/* One cell of the status row: the formatted text (with its trailing
+ * space, so a dropped cell leaves no gap), the colour its OWN pressure
+ * earns, and the ADMISSION RANK the row admits it by (1 first = dropped
+ * last; higher ranks are dropped first when the row has no columns for
+ * them). The rank is not boba's shrink priority: a cell is all-or-
+ * nothing there, never half-elided. */
+typedef struct
+{
+    char text[24];
+    TuiColor color;
+    int rank;
+} NmCreditCell;
+
+#define NM_CREDIT_CELLS_MAX 3
+
+/* Rank the store's brackets for the status row.
+ *
+ * Selection is SEMANTIC, never positional (position used to be the only
+ * rule, so opencode:go's monthly window — declared third — could never
+ * win a slot):
+ *   - the BUDGET is picked first: the durable number a plan decision
+ *     hangs on, i.e. the longest window (a purse, a paid period) — a
+ *     busy month must never demote it to "the third thing left".
+ *   - the GATE is the short window that can refuse a request soonest:
+ *     an EXHAUSTED one, else the LEFT bracket with the smallest
+ *     remaining fraction; ties break toward the earlier bracket, which
+ *     is the shorter window in every provider's ladder.
+ *   - the MIDDLE cell is whatever known bracket remains.
+ * Cells are WRITTEN in declaration order (the provider's own ladder),
+ * so the row's positions are learnable and never reorder — an exhausted
+ * window keeps its slot and turns red instead of jumping to cell 1.
+ * `rank` is what makes the row narrow gracefully: the budget is rank 1
+ * and the middle window the highest, so the longest window is the last
+ * datum to leave the row.
+ * Returns the number of cells written (0 = nothing to show). */
+size_t nm_credit_status_cells(const NmCredits *cr, NmCreditCell *cells,
+                              size_t max_cells, NmColorDepth depth);
 
 /* Format the full `/credits` breakdown text for `provider_name` into `out`.
  * Returns length written. */

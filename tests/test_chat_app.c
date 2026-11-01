@@ -986,6 +986,26 @@ static char *span_bytes(TuiColor color, const char *text)
     return tui_style_render(&s, text);
 }
 
+/* The credit cluster is one span PER CELL now (each cell owns its colour
+ * and its own drop priority), so a row assertion is a sequence of spans
+ * that must also appear in row order. */
+static int row_has_cells(const char *row, const TuiColor *colors,
+                         const char *const *texts, size_t n)
+{
+    const char *at = row;
+    for (size_t i = 0; i < n; i++) {
+        char *span = span_bytes(colors[i], texts[i]);
+        if (!span)
+            return 0;
+        const char *hit = strstr(at, span);
+        free(span);
+        if (!hit)
+            return 0;
+        at = hit + 1;
+    }
+    return 1;
+}
+
 /* The status row's right-hand half, exactly as boba's layout paints it:
  * the rule filling the slack (nm_color_status_rule — the spec's Current
  * Line token, the color the spec gives a subtle separator; FOREGROUND
@@ -2811,11 +2831,13 @@ static void test_status_row_credit_ladders(void)
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    char *credit_span =
-        span_bytes(nm_color_credit(NM_COLOR_16), "0hc 100k\xc2\xb7"
-                                                 "d ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    /* Two cells, two spans: the purse is the budget (declared first, so
+     * it keeps the left slot) and the day window is the gate. */
+    TuiColor base = nm_color_credit(NM_COLOR_16);
+    const TuiColor two_base[2] = { base, base };
+    const char *hyper_texts[2] = { "0hc ", "100k\xc2\xb7"
+                                           "d " };
+    ASSERT_TRUE(row_has_cells(row, two_base, hyper_texts, 2));
     free(prompt);
     free(row);
     harness_free(h);
@@ -2833,9 +2855,8 @@ static void test_status_row_credit_ladders(void)
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    credit_span = span_bytes(nm_color_credit(NM_COLOR_16), "$13.23/$60 ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    const char *ollama_texts[1] = { "$13.23/$60 " };
+    ASSERT_TRUE(row_has_cells(row, &base, ollama_texts, 1));
     free(prompt);
     free(row);
     harness_free(h);
@@ -2853,9 +2874,8 @@ static void test_status_row_credit_ladders(void)
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    credit_span = span_bytes(nm_color_credit(NM_COLOR_16), "$7.71 ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    const char *or_texts[1] = { "$7.71 " };
+    ASSERT_TRUE(row_has_cells(row, &base, or_texts, 1));
     free(prompt);
     free(row);
     harness_free(h);
@@ -2878,12 +2898,11 @@ static void test_status_row_credit_ladders(void)
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    credit_span = span_bytes(nm_color_credit(NM_COLOR_16),
-                             "100%\xc2\xb7"
-                             "5h 74%\xc2\xb7"
-                             "w ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    const char *go_texts[2] = { "100%\xc2\xb7"
+                                "5h ",
+                                "74%\xc2\xb7"
+                                "w " };
+    ASSERT_TRUE(row_has_cells(row, two_base, go_texts, 2));
     free(prompt);
     free(row);
     harness_free(h);
@@ -2897,9 +2916,9 @@ static void test_status_row_credit_ladders(void)
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    credit_span = span_bytes(nm_color_gauge_warn_hot(NM_COLOR_16), "cr! ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    const TuiColor hot[1] = { nm_color_gauge_warn_hot(NM_COLOR_16) };
+    const char *zen_texts[1] = { "cr! " };
+    ASSERT_TRUE(row_has_cells(row, hot, zen_texts, 1));
     free(prompt);
     free(row);
     harness_free(h);
@@ -2916,6 +2935,73 @@ static void test_status_row_credit_ladders(void)
     free(gauge);
     free(prompt);
     free(row);
+    harness_free(h);
+}
+
+/* The row narrows CELL BY CELL, in the rank's order: the middle window
+ * goes first and the budget (the paid period) is the last datum to leave
+ * — which is the whole reason the rank exists. A cell is all-or-nothing:
+ * it is never half-elided into "74%·…". */
+static void test_status_row_credit_cells_shrink_in_rank_order(void)
+{
+    nm_credits_reset();
+    AppHarness *h = harness_new("opencode:go", "vendor/some-model-identifier",
+                                NULL);
+    ASSERT_NOT_NULL(h);
+
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENCODE);
+    const NmCreditWindow win[3] = { NM_CREDIT_ROLLING_5H, NM_CREDIT_WEEK,
+                                    NM_CREDIT_PERIOD };
+    const double left[3] = { 100.0, 74.0, 37.0 };
+    for (int i = 0; i < 3; i++) {
+        cr->brackets[i].unit = NM_CREDIT_PERCENT;
+        cr->brackets[i].window = win[i];
+        cr->brackets[i].kind = NM_CREDIT_LEFT;
+        cr->brackets[i].state = NM_CREDIT_KNOWN;
+        cr->brackets[i].value = left[i];
+        cr->brackets[i].limit = 100.0;
+    }
+
+    static const int widths[] = { 80, 60, 40, 20, 14, 10 };
+    for (size_t w = 0; w < sizeof(widths) / sizeof(widths[0]); w++) {
+        tui_runtime_send(h->rt, tui_msg_window_size(widths[w], 24));
+        tui_runtime_drain(h->rt);
+        tui_runtime_flush(h->rt);
+        const char *frame = tui_runtime_render(h->rt);
+        char *prompt =
+            span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+        char *row = frame_status_row(frame, prompt);
+        ASSERT_NOT_NULL(row);
+
+        int has_5h = strstr(row, "5h") != NULL;
+        int has_w = strstr(row, "74%\xc2\xb7"
+                                "w") != NULL;
+        int has_mo = strstr(row, "37%\xc2\xb7"
+                                 "mo") != NULL;
+        switch (widths[w]) {
+        case 80:
+        case 60:
+        case 40:
+            /* Roomy: the identity elides, never a cell. */
+            ASSERT_TRUE(has_5h && has_w && has_mo);
+            break;
+        case 20:
+            /* The MIDDLE window is what goes first. */
+            ASSERT_TRUE(!has_5h && has_w && has_mo);
+            break;
+        case 14:
+            /* Then the gate; the budget is the last datum standing. */
+            ASSERT_TRUE(!has_5h && !has_w && has_mo);
+            break;
+        default:
+            /* Nothing fits: the cluster is absent, not a stub. */
+            ASSERT_TRUE(!has_5h && !has_w && !has_mo);
+            break;
+        }
+        free(row);
+        free(prompt);
+    }
+
     harness_free(h);
 }
 
@@ -2948,11 +3034,11 @@ static void test_status_row_credit_boba_shrink_order(void)
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    char *credit_span =
-        span_bytes(nm_color_credit(NM_COLOR_16), "0hc 100k\xc2\xb7"
-                                                 "d ");
-    ASSERT_TRUE(strstr(row, credit_span) != NULL);
-    free(credit_span);
+    TuiColor base = nm_color_credit(NM_COLOR_16);
+    const TuiColor two_base[2] = { base, base };
+    const char *hyper_texts[2] = { "0hc ", "100k\xc2\xb7"
+                                           "d " };
+    ASSERT_TRUE(row_has_cells(row, two_base, hyper_texts, 2));
     free(prompt);
     free(row);
 
@@ -10799,6 +10885,7 @@ int main(void)
     RUN_TEST(test_status_row_identity_elides_on_narrow_terminal);
     RUN_TEST(test_status_row_identity_dropped_when_short);
     RUN_TEST(test_status_row_credit_ladders);
+    RUN_TEST(test_status_row_credit_cells_shrink_in_rank_order);
     RUN_TEST(test_status_row_credit_boba_shrink_order);
     RUN_TEST(test_credits_command_output);
     RUN_TEST(test_credits_status_refreshes_after_ttl);

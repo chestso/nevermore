@@ -13,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 /* winsock2.h / ws2tcpip.h and the close() shim come from
@@ -167,6 +168,23 @@ static void test_credit_exhausted_is_not_zero(void)
     b.unit = NM_CREDIT_REQUESTS;
     nm_credit_format_cell(&b, buf, sizeof(buf), 1);
     ASSERT_STR_EQ(buf, "!");
+
+    /* With a WINDOW the tag names which allowance refuses: "%!" said
+     * only that something did. A purse keeps the unit sigil (it has no
+     * window tag). */
+    b.unit = NM_CREDIT_PERCENT;
+    b.window = NM_CREDIT_ROLLING_5H;
+    nm_credit_format_cell(&b, buf, sizeof(buf), 1);
+    ASSERT_STR_EQ(buf, "5h!");
+
+    b.window = NM_CREDIT_PERIOD;
+    nm_credit_format_cell(&b, buf, sizeof(buf), 1);
+    ASSERT_STR_EQ(buf, "mo!");
+
+    b.unit = NM_CREDIT_REQUESTS;
+    b.window = NM_CREDIT_HOUR;
+    nm_credit_format_cell(&b, buf, sizeof(buf), 1);
+    ASSERT_STR_EQ(buf, "h!");
 }
 
 static void test_credit_percent_never_becomes_money(void)
@@ -219,99 +237,255 @@ static void test_credit_full_bracket_compression(void)
                        "d");
 }
 
-static void test_credit_two_cell_rule_and_ladder_order(void)
+/* Join the cells' texts, which is what the row reads left to right. */
+static void cells_text(const NmCreditCell *cells, size_t n, char *out,
+                       size_t cap)
+{
+    out[0] = '\0';
+    size_t off = 0;
+    for (size_t i = 0; i < n && off + 1 < cap; i++)
+        off += (size_t)snprintf(out + off, cap - off, "%s", cells[i].text);
+}
+
+static void hyper_three_windows(NmCredits *cr)
+{
+    memset(cr, 0, sizeof(*cr));
+    cr->n_brackets = 3;
+
+    cr->brackets[0].unit = NM_CREDIT_HYPER;
+    cr->brackets[0].window = NM_CREDIT_PURSE;
+    cr->brackets[0].kind = NM_CREDIT_LEFT;
+    cr->brackets[0].state = NM_CREDIT_KNOWN;
+    cr->brackets[0].value = 0.0;
+    cr->brackets[0].limit = -1;
+
+    cr->brackets[1].unit = NM_CREDIT_REQUESTS;
+    cr->brackets[1].window = NM_CREDIT_DAY;
+    cr->brackets[1].kind = NM_CREDIT_LEFT;
+    cr->brackets[1].state = NM_CREDIT_KNOWN;
+    cr->brackets[1].value = 100000;
+    cr->brackets[1].limit = 100000;
+
+    cr->brackets[2].unit = NM_CREDIT_REQUESTS;
+    cr->brackets[2].window = NM_CREDIT_HOUR;
+    cr->brackets[2].kind = NM_CREDIT_LEFT;
+    cr->brackets[2].state = NM_CREDIT_KNOWN;
+    cr->brackets[2].value = 10000;
+    cr->brackets[2].limit = 10000;
+}
+
+/* The cells are RANKED, not positional: the budget (the durable purse)
+ * keeps a slot however busy the short windows are, and the row never
+ * reorders — an exhausted window keeps its place and turns red. */
+static void test_credit_status_cells_rank(void)
 {
     NmCredits cr;
-    memset(&cr, 0, sizeof(cr));
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
     char buf[128];
-    TuiColor color;
 
-    /* 0 known brackets => empty */
+    memset(&cr, 0, sizeof(cr));
     cr.n_brackets = 3;
     for (int i = 0; i < 3; i++)
         cr.brackets[i].state = NM_CREDIT_UNKNOWN;
-    ASSERT_EQ(nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16), 0);
-    ASSERT_STR_EQ(buf, "");
+    /* 0 known brackets => no cells at all (never a zero) */
+    ASSERT_EQ(nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
+                                     NM_COLOR_16),
+              0);
 
-    /* Hyper example: 0hc and 100k·d */
-    cr.brackets[0].unit = NM_CREDIT_HYPER;
+    /* Hyper: purse + day + hour, all declared and all known */
+    hyper_three_windows(&cr);
+    size_t n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
+                                      NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    cells_text(cells, n, buf, sizeof(buf));
+    /* DECLARATION order — the provider's own ladder — never a rank order */
+    ASSERT_STR_EQ(buf, "0hc 100k\xc2\xb7"
+                       "d 10k\xc2\xb7"
+                       "h ");
+    /* purse = budget (rank 1: admitted first, dropped last), day = gate,
+     * the hour window = middle (the first to go when columns run out) */
+    ASSERT_EQ(cells[0].rank, 1);
+    ASSERT_EQ(cells[1].rank, 2);
+    ASSERT_EQ(cells[2].rank, 3);
+
+    /* An exhausted window keeps its slot: cell 3 says "h!", in red, and
+     * the other cells keep their own colours. */
+    cr.brackets[2].state = NM_CREDIT_EXHAUSTED;
+    n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    cells_text(cells, n, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "0hc 100k\xc2\xb7"
+                       "d h! ");
+    TuiColor hot = nm_color_gauge_warn_hot(NM_COLOR_16);
+    ASSERT_EQ(cells[2].color.v.ansi, hot.v.ansi);
+    TuiColor base = nm_color_credit(NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, base.v.ansi);
+    ASSERT_EQ(cells[1].color.v.ansi, base.v.ansi);
+
+    /* A tight day window makes the GATE the day (the hour is the middle),
+     * and the purse still holds its budget slot: the rank is pressure,
+     * the layout is the ladder. */
+    hyper_three_windows(&cr);
+    cr.brackets[1].value = 4000; /* 4 % left */
+    n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    ASSERT_EQ(cells[0].rank, 1); /* purse: budget */
+    ASSERT_EQ(cells[1].rank, 2); /* day: gate */
+    ASSERT_EQ(cells[2].rank, 3); /* hour: middle */
+    TuiColor red = nm_color_gauge_warn_hot(NM_COLOR_16);
+    ASSERT_EQ(cells[1].color.v.ansi, red.v.ansi);
+    ASSERT_EQ(cells[2].color.v.ansi, base.v.ansi);
+}
+
+/* opencode:go's three windows — the case the rank exists for: the paid
+ * period (declared third) must reach the row, and it must be the cell
+ * that survives narrowing. */
+static void test_credit_status_cells_opencode_go(void)
+{
+    NmCredits cr;
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    char buf[128];
+
+    /* The wire's 0 / 26 / 63 % USED => 100 / 74 / 37 % LEFT. */
+    memset(&cr, 0, sizeof(cr));
+    cr.n_brackets = 3;
+    const double left[3] = { 100.0, 74.0, 37.0 };
+    const NmCreditWindow win[3] = { NM_CREDIT_ROLLING_5H, NM_CREDIT_WEEK,
+                                    NM_CREDIT_PERIOD };
+    for (int i = 0; i < 3; i++) {
+        cr.brackets[i].unit = NM_CREDIT_PERCENT;
+        cr.brackets[i].window = win[i];
+        cr.brackets[i].kind = NM_CREDIT_LEFT;
+        cr.brackets[i].state = NM_CREDIT_KNOWN;
+        cr.brackets[i].value = left[i];
+        cr.brackets[i].limit = 100.0;
+        cr.brackets[i].percent_used = 100.0 - left[i];
+    }
+
+    size_t n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
+                                      NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    cells_text(cells, n, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "100%\xc2\xb7"
+                       "5h 74%\xc2\xb7"
+                       "w 37%\xc2\xb7"
+                       "mo ");
+    /* 5h = middle (first out), weekly = gate, monthly = budget (last
+     * out): the row narrows to "37%·mo", never to "100%·5h". */
+    ASSERT_EQ(cells[0].rank, 3);
+    ASSERT_EQ(cells[1].rank, 2);
+    ASSERT_EQ(cells[2].rank, 1);
+
+    /* 12 % left of the month: orange, and the healthy 5h stays base. */
+    cr.brackets[2].value = 12.0;
+    n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    TuiColor warn = nm_color_gauge_warn(NM_COLOR_16);
+    TuiColor base = nm_color_credit(NM_COLOR_16);
+    ASSERT_EQ(cells[2].color.v.ansi, warn.v.ansi);
+    ASSERT_EQ(cells[0].color.v.ansi, base.v.ansi);
+
+    /* A refused rolling window: "5h!" in red, monthly still its own
+     * colour — one cell's alarm never paints another. */
+    cr.brackets[0].state = NM_CREDIT_EXHAUSTED;
+    n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(n, 3);
+    cells_text(cells, n, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "5h! 74%\xc2\xb7"
+                       "w 12%\xc2\xb7"
+                       "mo ");
+    TuiColor hot = nm_color_gauge_warn_hot(NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, hot.v.ansi);
+    ASSERT_EQ(cells[2].color.v.ansi, warn.v.ansi);
+}
+
+/* A SPENT spend meter is a diary entry, not a constraint: it never takes
+ * a row slot while a remaining figure is available. */
+static void test_credit_status_cells_skip_spent(void)
+{
+    NmCredits cr;
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    char buf[128];
+
+    memset(&cr, 0, sizeof(cr));
+    cr.n_brackets = 3;
+
+    cr.brackets[0].unit = NM_CREDIT_USD;
     cr.brackets[0].window = NM_CREDIT_PURSE;
+    cr.brackets[0].kind = NM_CREDIT_LEFT;
     cr.brackets[0].state = NM_CREDIT_KNOWN;
-    cr.brackets[0].value = 0.0;
+    cr.brackets[0].value = 7.71;
     cr.brackets[0].limit = -1;
 
     cr.brackets[1].unit = NM_CREDIT_REQUESTS;
     cr.brackets[1].window = NM_CREDIT_DAY;
+    cr.brackets[1].kind = NM_CREDIT_LEFT;
     cr.brackets[1].state = NM_CREDIT_KNOWN;
-    cr.brackets[1].value = 100000;
-    cr.brackets[1].limit = 100000;
+    cr.brackets[1].value = 1000;
+    cr.brackets[1].limit = 1000;
 
-    cr.brackets[2].unit = NM_CREDIT_REQUESTS;
-    cr.brackets[2].window = NM_CREDIT_HOUR;
+    cr.brackets[2].unit = NM_CREDIT_USD;
+    cr.brackets[2].window = NM_CREDIT_DAY;
+    cr.brackets[2].kind = NM_CREDIT_SPENT;
     cr.brackets[2].state = NM_CREDIT_KNOWN;
-    cr.brackets[2].value = 10000;
-    cr.brackets[2].limit = 10000;
+    cr.brackets[2].value = 0.55;
+    cr.brackets[2].limit = -1;
 
-    /* Two-cell rule: shows bracket 0 and bracket 1, bracket 2 omitted */
-    ASSERT_TRUE(nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16) > 0);
-    ASSERT_STR_EQ(buf, "0hc 100k\xc2\xb7"
+    size_t n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
+                                      NM_COLOR_16);
+    ASSERT_EQ(n, 2);
+    cells_text(cells, n, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "$7.71 1k\xc2\xb7"
                        "d ");
-
-    /* Exhausted bracket takes cell 1 even if later in ladder */
-    cr.brackets[2].state = NM_CREDIT_EXHAUSTED;
-    ASSERT_TRUE(nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16) > 0);
-    /* Cell 1 is exhausted bracket 2 (!), Cell 2 is bracket 0 (0hc) */
-    ASSERT_STR_EQ(buf, "! 0hc ");
 }
 
-static void test_credit_status_colors(void)
+static void test_credit_status_cell_colors(void)
 {
     NmCredits cr;
-    memset(&cr, 0, sizeof(cr));
-    char buf[128];
-    TuiColor color;
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
 
-    cr.n_brackets = 2;
+    memset(&cr, 0, sizeof(cr));
+    cr.n_brackets = 1;
     cr.brackets[0].unit = NM_CREDIT_USD;
-    cr.brackets[0].window = NM_CREDIT_PURSE;
+    cr.brackets[0].window = NM_CREDIT_DAY;
+    cr.brackets[0].kind = NM_CREDIT_LEFT;
     cr.brackets[0].state = NM_CREDIT_KNOWN;
     cr.brackets[0].value = 100.0;
     cr.brackets[0].limit = 100.0;
 
-    /* Full balance: base color */
-    nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16);
     TuiColor base = nm_color_credit(NM_COLOR_16);
-    ASSERT_EQ(color.type, base.type);
-    ASSERT_EQ(color.v.ansi, base.v.ansi);
+    TuiColor warn = nm_color_gauge_warn(NM_COLOR_16);
+    TuiColor red = nm_color_gauge_warn_hot(NM_COLOR_16);
+    TuiColor comment = nm_color_gauge(NM_COLOR_16);
+
+    /* Full balance: base color */
+    ASSERT_EQ(nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
+                                     NM_COLOR_16),
+              1);
+    ASSERT_EQ(cells[0].color.type, base.type);
+    ASSERT_EQ(cells[0].color.v.ansi, base.v.ansi);
 
     /* Remaining < 15%: warn (orange) */
     cr.brackets[0].value = 14.0;
-    nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16);
-    TuiColor warn = nm_color_gauge_warn(NM_COLOR_16);
-    ASSERT_EQ(color.type, warn.type);
-    ASSERT_EQ(color.v.ansi, warn.v.ansi);
+    nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, warn.v.ansi);
 
     /* Remaining < 5%: warn_hot (red) */
     cr.brackets[0].value = 4.0;
-    nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16);
-    TuiColor red = nm_color_gauge_warn_hot(NM_COLOR_16);
-    ASSERT_EQ(color.type, red.type);
-    ASSERT_EQ(color.v.ansi, red.v.ansi);
+    nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, red.v.ansi);
 
     /* Exhausted: red */
     cr.brackets[0].state = NM_CREDIT_EXHAUSTED;
-    nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16);
-    ASSERT_EQ(color.type, red.type);
-    ASSERT_EQ(color.v.ansi, red.v.ansi);
+    nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, red.v.ansi);
 
-    /* SPENT-only cells: Comment */
+    /* SPENT: Comment */
     cr.brackets[0].state = NM_CREDIT_KNOWN;
     cr.brackets[0].kind = NM_CREDIT_SPENT;
     cr.brackets[0].limit = -1;
-    nm_credit_format_status(&cr, buf, sizeof(buf), &color, NM_COLOR_16);
-    TuiColor comment = nm_color_gauge(NM_COLOR_16);
-    ASSERT_EQ(color.type, comment.type);
-    ASSERT_EQ(color.v.ansi, comment.v.ansi);
+    nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
+    ASSERT_EQ(cells[0].color.v.ansi, comment.v.ansi);
 }
 
 static void test_credit_age_and_iso8601(void)
@@ -341,6 +515,73 @@ static void test_credit_age_and_iso8601(void)
     ASSERT_EQ(nm_credit_parse_iso8601("1970-01-01T00:01:00Z"), 60L);
     long t = nm_credit_parse_iso8601("2026-10-31T13:20:00.000Z");
     ASSERT_TRUE(t > 1700000000L);
+}
+
+/* A percentage decides nothing without its reset instant, so the
+ * countdown is part of the display and is pure in (now, at). */
+static void test_credit_format_until(void)
+{
+    char buf[32];
+
+    /* No reset reported: nothing to say (never "in 0s") */
+    ASSERT_EQ(nm_credit_format_until(1000, 0, buf, sizeof(buf)), 0);
+    ASSERT_STR_EQ(buf, "");
+
+    /* At or past the instant: "now", not a negative countdown */
+    ASSERT_EQ(nm_credit_format_until(1000, 1000, buf, sizeof(buf)), 3);
+    ASSERT_STR_EQ(buf, "now");
+    nm_credit_format_until(1000, 900, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "now");
+
+    nm_credit_format_until(1000, 1006, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "in 6s");
+
+    nm_credit_format_until(0, 45, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "in 45s");
+    nm_credit_format_until(0, 120, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "in 2m");
+    nm_credit_format_until(0, 3600 + 120, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "in 1h 2m");
+    nm_credit_format_until(0, 12 * 86400 + 3 * 3600, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "in 12d 3h");
+}
+
+/* /credits names the polarity once, counts down to the reset, and says
+ * a refusal in prose — a lone "!" cannot tell the user when it ends. */
+static void test_credit_ladder_counts_down(void)
+{
+    NmCredits cr;
+    memset(&cr, 0, sizeof(cr));
+    char buf[512];
+
+    cr.n_brackets = 1;
+    cr.brackets[0].unit = NM_CREDIT_PERCENT;
+    cr.brackets[0].window = NM_CREDIT_PERIOD;
+    cr.brackets[0].kind = NM_CREDIT_LEFT;
+    cr.brackets[0].state = NM_CREDIT_KNOWN;
+    cr.brackets[0].value = 37.0;
+    cr.brackets[0].limit = 100.0;
+    cr.brackets[0].percent_used = 63.0;
+    cr.brackets[0].resets_at = (long)time(NULL) + 12 * 86400 + 3 * 3600;
+    snprintf(cr.brackets[0].label, sizeof(cr.brackets[0].label),
+             "monthly allowance");
+
+    nm_credit_format_ladder(&cr, "opencode:go", buf, sizeof(buf));
+    /* The wire's percent is USED and the cells are LEFT: the ladder says
+     * which one it is printing, once, instead of flipping mid-line. */
+    ASSERT_TRUE(strstr(buf, "% = remaining") != NULL);
+    ASSERT_TRUE(strstr(buf, "37%\xc2\xb7"
+                            "mo") != NULL);
+    ASSERT_TRUE(strstr(buf, "monthly allowance (resets in 12d") != NULL);
+    ASSERT_TRUE(strstr(buf, "63% used") == NULL);
+
+    /* A refused window: the cell names the window, the prose names the
+     * state. */
+    cr.brackets[0].state = NM_CREDIT_EXHAUSTED;
+    cr.brackets[0].resets_at = 0;
+    nm_credit_format_ladder(&cr, "opencode:go", buf, sizeof(buf));
+    ASSERT_TRUE(strstr(buf, "mo!") != NULL);
+    ASSERT_TRUE(strstr(buf, "monthly allowance (rate-limited)") != NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -452,8 +693,10 @@ static void test_credit_fetch_hyper(void)
     ASSERT_EQ((long)cr->brackets[0].value, 0);
 
     char status[64];
-    TuiColor color;
-    nm_credit_format_status(cr, status, sizeof(status), &color, NM_COLOR_16);
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
+                                            NM_COLOR_16);
+    cells_text(cells, n_cells, status, sizeof(status));
     ASSERT_STR_EQ(status, "0hc ");
 
     pthread_join(th, NULL);
@@ -497,8 +740,10 @@ static void test_credit_fetch_ollama_standard(void)
     ASSERT_EQ(cr->brackets[1].state, NM_CREDIT_UNKNOWN);
 
     char status[64];
-    TuiColor color;
-    nm_credit_format_status(cr, status, sizeof(status), &color, NM_COLOR_16);
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
+                                            NM_COLOR_16);
+    cells_text(cells, n_cells, status, sizeof(status));
     ASSERT_STR_EQ(status, "$13.23/$60 ");
 
     /* 60s minimum interval latch is active */
@@ -548,11 +793,15 @@ static void test_credit_fetch_ollama_legacy(void)
     ASSERT_EQ((long)cr->brackets[2].value, 25);
 
     char status[64];
-    TuiColor color;
-    nm_credit_format_status(cr, status, sizeof(status), &color, NM_COLOR_16);
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
+                                            NM_COLOR_16);
+    cells_text(cells, n_cells, status, sizeof(status));
+    /* The purchased purse is the BUDGET: the durable number takes the
+     * third slot rather than being crowded out by the two percentages. */
     ASSERT_STR_EQ(status, "75%\xc2\xb7"
                           "h 40%\xc2\xb7"
-                          "w ");
+                          "w $25 ");
 
     pthread_join(th, NULL);
 }
@@ -623,8 +872,10 @@ static void test_credit_fetch_openrouter_chain(void)
 
     /* Status row shows account purse and free-model requests */
     char status[64];
-    TuiColor color;
-    nm_credit_format_status(cr, status, sizeof(status), &color, NM_COLOR_16);
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
+                                            NM_COLOR_16);
+    cells_text(cells, n_cells, status, sizeof(status));
     ASSERT_STR_EQ(status, "$7.71 1k\xc2\xb7"
                           "d ");
 
@@ -673,11 +924,16 @@ static void test_credit_fetch_opencode_go(void)
     ASSERT_EQ((long)cr->brackets[2].value, 37);
 
     char status[64];
-    TuiColor color;
-    nm_credit_format_status(cr, status, sizeof(status), &color, NM_COLOR_16);
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
+                                            NM_COLOR_16);
+    cells_text(cells, n_cells, status, sizeof(status));
+    /* All three windows reach the row — the monthly included, which is
+     * the whole point of the rank. */
     ASSERT_STR_EQ(status, "100%\xc2\xb7"
                           "5h 74%\xc2\xb7"
-                          "w ");
+                          "w 37%\xc2\xb7"
+                          "mo ");
 
     pthread_join(th, NULL);
     /* The request TARGET is the endpoint string verbatim (base_url supplies
@@ -769,8 +1025,12 @@ int main(int argc, char *argv[])
     RUN_TEST(test_credit_exhausted_is_not_zero);
     RUN_TEST(test_credit_percent_never_becomes_money);
     RUN_TEST(test_credit_full_bracket_compression);
-    RUN_TEST(test_credit_two_cell_rule_and_ladder_order);
-    RUN_TEST(test_credit_status_colors);
+    RUN_TEST(test_credit_status_cells_rank);
+    RUN_TEST(test_credit_status_cells_opencode_go);
+    RUN_TEST(test_credit_status_cells_skip_spent);
+    RUN_TEST(test_credit_status_cell_colors);
+    RUN_TEST(test_credit_format_until);
+    RUN_TEST(test_credit_ladder_counts_down);
     RUN_TEST(test_credit_age_and_iso8601);
     RUN_TEST(test_credit_fetch_hyper);
     RUN_TEST(test_credit_fetch_ollama_standard);

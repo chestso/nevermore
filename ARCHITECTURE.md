@@ -935,22 +935,39 @@ Two halves, one sniffer.
   render modes.
 - **Status row** (`compose_status`). A boba `TuiStatusLine` the app declares and
   boba lays out (it was once a field of the text input, which could not measure
-  it). At most six segments: the spinner glyph (left, fixed; its color rides the
+  it). At most nine segments: the spinner glyph (left, fixed; its color rides the
   frame the spinner hands over), then the gauge fields (counts, output count,
   cache rate; one segment each so each carries its own color:
   `nm_color_gauge_output` for the output, the tier's color for counts and rate),
-  all left and fixed chrome that is never cut; then a `─` fill (priority 1) and
-  the right-aligned identity (priority 2). The ladder is a declaration, not app
-  arithmetic: the identity elides before the rule gives, the rule before the
-  chrome, and a row with a fill is always exactly the terminal width. **boba
-  owns the columns; the app owns the content** (`compose_gauge`,
-  `nm_chat_app_identity`). A field with nothing to report is a segment the row
-  does not declare, and each field is written whole into a buffer sized for the
-  worst its type can print. The identity is `<provider> · <label>`
-  (`nm_chat_app_model_label` is the one `(no model)` spelling). The composer
-  owns the frame: it paints the row between transcript and input, adds the
-  chrome row to the cursor row the view declares, and `app->submitting` means
-  "declare no row".
+  all left and fixed chrome that is never cut; then up to three **credit cells**
+  (see below); then a `─` fill (priority 1) and the right-aligned identity
+  (priority 2). The ladder is a declaration, not app arithmetic: the identity
+  elides before the rule gives, the rule before the chrome, and a row with a
+  fill is always exactly the terminal width. **boba owns the columns; the app
+  owns the content** (`compose_gauge`, `nm_chat_app_identity`). A field with
+  nothing to report is a segment the row does not declare, and each field is
+  written whole into a buffer sized for the worst its type can print. The
+  identity is `<provider> · <label>` (`nm_chat_app_model_label` is the one
+  `(no model)` spelling). The composer owns the frame: it paints the row between
+  transcript and input, adds the chrome row to the cursor row the view declares,
+  and `app->submitting` means "declare no row".
+- **Credit cells** (`nm_credit_status_cells`, `credit.{h,c}`). One segment per
+  cell, so each carries the color its OWN pressure earns — a spent 5h window
+  never reddens a healthy monthly number. The cells are chosen SEMANTICALLY,
+  never by position: the **budget** is the longest window (a purse or a paid
+  period), the **gate** is the short window closest to refusing, the third is
+  whatever is left; `SPENT` meters are fillers only. They are written in the
+  provider's declared ladder order, so the row's positions are learnable and
+  an exhausted window keeps its slot and turns red instead of jumping to the
+  front. Each cell carries an ADMISSION RANK (budget last to leave) and
+  `compose_status` admits the cells against the columns that are left before
+  declaring them FIXED: boba elides what it must shrink, and half a cell
+  (`74%·…`) says nothing, so the cluster decides what fits and the identity —
+  whose floor is one column — is what gives way. `/credits` reads the same
+  numbers from the other end: percent cells are REMAINING (the wire's `percent`
+  is used; the mapper inverts once), a refused window prints `5h!`, and every
+  bracket with a `resets_at` counts down to it, because a percentage without
+  its reset instant cannot be acted on.
 - **Foreground only, no surface.** The row (and the prompt below it) paints no
   background: the canvas stays the terminal's, which in chest.so's projects is
   pitch-black or transparent, and a painted band shows as a rectangle under the

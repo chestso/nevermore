@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -90,6 +91,33 @@ void nm_credit_format_age(long observed_at, char *out, size_t cap)
 /* ------------------------------------------------------------------ */
 /* Formatting helpers                                                 */
 /* ------------------------------------------------------------------ */
+
+int nm_credit_format_until(long now, long at, char *out, size_t cap)
+{
+    if (!out || cap == 0)
+        return 0;
+    out[0] = '\0';
+    if (at <= 0)
+        return 0;
+
+    long secs = at - now;
+    if (secs <= 0) {
+        snprintf(out, cap, "now");
+        return (int)strlen(out);
+    }
+    long days = secs / 86400;
+    long hours = (secs % 86400) / 3600;
+    long mins = (secs % 3600) / 60;
+    if (days > 0)
+        snprintf(out, cap, "in %ldd %ldh", days, hours);
+    else if (hours > 0)
+        snprintf(out, cap, "in %ldh %ldm", hours, mins);
+    else if (mins > 0)
+        snprintf(out, cap, "in %ldm", mins);
+    else
+        snprintf(out, cap, "in %lds", secs);
+    return (int)strlen(out);
+}
 
 /* Compact token count (mirrors chat_app.c's format_tokens). */
 static void format_compact_count(long n, char *dst, size_t cap)
@@ -174,6 +202,15 @@ int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
     }
 
     if (b->state == NM_CREDIT_EXHAUSTED) {
+        /* The window is the fact when there is one: "5h!", "w!", "mo!"
+         * says WHICH window refuses, where a bare "%!" said only that
+         * something did. A purse has no window tag, so it keeps the
+         * unit sigil ("$!", "hc!", "cr!"). */
+        const char *wtag = window_tag(b->window);
+        if (*wtag) {
+            snprintf(out, cap, "%s!", wtag);
+            return (int)strlen(out);
+        }
         switch (b->unit) {
         case NM_CREDIT_USD:
             snprintf(out, cap, "$!");
@@ -277,104 +314,178 @@ int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
     return (int)strlen(out);
 }
 
-int nm_credit_format_status(const NmCredits *cr, char *out, size_t cap,
-                            TuiColor *color, NmColorDepth depth)
+/* How durable a bracket is: the budget cell is the LONGEST window,
+ * because that is the number a plan decision hangs on (a paid period or
+ * the purse, never the rolling window that resets this afternoon). */
+static int window_span_rank(NmCreditWindow w)
 {
-    if (!cr || !out || cap == 0)
+    switch (w) {
+    case NM_CREDIT_PURSE:
+        return 4;
+    case NM_CREDIT_PERIOD:
+        return 3;
+    case NM_CREDIT_WEEK:
+        return 2;
+    case NM_CREDIT_DAY:
+        return 1;
+    case NM_CREDIT_HOUR:
+    case NM_CREDIT_ROLLING_5H:
+    default:
         return 0;
-
-    out[0] = '\0';
-
-    /* Find up to 2 cells according to the 2-cell rule:
-     * First cell: exhausted bracket if any, else first non-unknown bracket.
-     * Second cell: first non-unknown bracket after cell 1. */
-    const NmCreditBracket *b1 = NULL;
-    const NmCreditBracket *b2 = NULL;
-    size_t b1_idx = 0;
-
-    /* Check for exhausted bracket first */
-    for (size_t i = 0; i < cr->n_brackets; i++) {
-        if (cr->brackets[i].state == NM_CREDIT_EXHAUSTED) {
-            b1 = &cr->brackets[i];
-            b1_idx = i;
-            break;
-        }
     }
+}
 
-    if (!b1) {
-        for (size_t i = 0; i < cr->n_brackets; i++) {
-            if (cr->brackets[i].state != NM_CREDIT_UNKNOWN) {
-                b1 = &cr->brackets[i];
-                b1_idx = i;
-                break;
-            }
-        }
+/* How close a bracket is to refusing a request: 2 = exhausted, else the
+ * used fraction of a capped window, else 0 (an uncapped purse is a
+ * store, never a gate). SPENT brackets are spend meters with no "left"
+ * to run out of: -1, so they are fillers only. */
+static double credit_pressure(const NmCreditBracket *b)
+{
+    if (b->state == NM_CREDIT_EXHAUSTED)
+        return 2.0;
+    if (b->state != NM_CREDIT_KNOWN || b->kind == NM_CREDIT_SPENT)
+        return -1.0;
+    if (b->limit > 0) {
+        double used = 1.0 - b->value / b->limit;
+        if (used < 0.0)
+            used = 0.0;
+        if (used > 1.0)
+            used = 1.0;
+        return used;
     }
+    return 0.0;
+}
 
-    if (!b1)
-        return 0;
+/* The pressure a cell's own number earns. One colour per cell: a spent
+ * 5h window must not paint a healthy monthly number red. */
+static TuiColor credit_cell_color(const NmCreditBracket *b, NmColorDepth depth)
+{
+    if (b->state == NM_CREDIT_EXHAUSTED)
+        return nm_color_gauge_warn_hot(depth);
+    if (b->limit > 0) {
+        double frac = b->value / b->limit;
+        if (frac < 0.05)
+            return nm_color_gauge_warn_hot(depth);
+        if (frac < 0.15)
+            return nm_color_gauge_warn(depth);
+    }
+    if (b->kind == NM_CREDIT_SPENT)
+        return nm_color_gauge(depth);
+    return nm_color_credit(depth);
+}
 
-    /* Find second non-unknown bracket */
-    for (size_t i = 0; i < cr->n_brackets; i++) {
-        if (i == b1_idx)
+/* The gate: max pressure, ties toward the earlier bracket (which is the
+ * shorter window in every provider's declared ladder). */
+static int pick_gate(const NmCreditBracket *b, size_t n, int skip1, int skip2)
+{
+    int best = -1;
+    double best_p = -1.0;
+    for (size_t i = 0; i < n; i++) {
+        if ((int)i == skip1 || (int)i == skip2)
             continue;
-        if (cr->brackets[i].state != NM_CREDIT_UNKNOWN) {
-            b2 = &cr->brackets[i];
-            break;
+        double p = credit_pressure(&b[i]);
+        if (p > best_p) {
+            best_p = p;
+            best = (int)i;
         }
     }
+    return best;
+}
 
-    char c1[64], c2[64];
-    nm_credit_format_cell(b1, c1, sizeof(c1), 1);
-    c2[0] = '\0';
-    if (b2)
-        nm_credit_format_cell(b2, c2, sizeof(c2), 1);
+/* The longest window among what is left, of `kind` only; ties toward the
+ * later bracket (a provider declares short windows first). -1 = none. */
+static int pick_longest(const NmCreditBracket *b, size_t n, int skip1,
+                        int skip2, NmCreditKind kind)
+{
+    int best = -1, best_rank = -1;
+    for (size_t i = 0; i < n; i++) {
+        if ((int)i == skip1 || (int)i == skip2)
+            continue;
+        if (b[i].state == NM_CREDIT_UNKNOWN || b[i].kind != kind)
+            continue;
+        int r = window_span_rank(b[i].window);
+        if (r >= best_rank) {
+            best_rank = r;
+            best = (int)i;
+        }
+    }
+    return best;
+}
 
-    if (c2[0])
-        snprintf(out, cap, "%s %s ", c1, c2);
-    else if (c1[0])
-        snprintf(out, cap, "%s ", c1);
-    else
+size_t nm_credit_status_cells(const NmCredits *cr, NmCreditCell *cells,
+                              size_t max_cells, NmColorDepth depth)
+{
+    if (!cr || !cells || max_cells == 0)
         return 0;
 
-    /* Determine color role:
-     * - Any cell EXHAUSTED -> red (nm_color_gauge_warn_hot)
-     * - Any cell with limit > 0 and (value/limit) < 0.05 -> red
-     * - Any cell with limit > 0 and (value/limit) < 0.15 -> orange
-     * - All shown cells SPENT -> Comment (nm_color_gauge)
-     * - Otherwise -> base role (nm_color_credit) */
-    if (color) {
-        int is_exhausted = (b1->state == NM_CREDIT_EXHAUSTED) ||
-                           (b2 && b2->state == NM_CREDIT_EXHAUSTED);
-        int is_red = is_exhausted;
-        int is_orange = 0;
+    size_t n = cr->n_brackets;
+    if (n > NM_CREDIT_BRACKETS_MAX)
+        n = NM_CREDIT_BRACKETS_MAX;
 
-        if (!is_red) {
-            if (b1->limit > 0 && (b1->value / b1->limit) < 0.05)
-                is_red = 1;
-            else if (b2 && b2->limit > 0 && (b2->value / b2->limit) < 0.05)
-                is_red = 1;
-        }
-        if (!is_red) {
-            if (b1->limit > 0 && (b1->value / b1->limit) < 0.15)
-                is_orange = 1;
-            else if (b2 && b2->limit > 0 && (b2->value / b2->limit) < 0.15)
-                is_orange = 1;
-        }
+    enum
+    {
+        GATE,
+        BUDGET,
+        MIDDLE,
+        ROLES
+    };
+    int slot[ROLES] = { -1, -1, -1 };
 
-        if (is_red) {
-            *color = nm_color_gauge_warn_hot(depth);
-        } else if (is_orange) {
-            *color = nm_color_gauge_warn(depth);
-        } else if (b1->kind == NM_CREDIT_SPENT &&
-                   (!b2 || b2->kind == NM_CREDIT_SPENT)) {
-            *color = nm_color_gauge(depth);
-        } else {
-            *color = nm_color_credit(depth);
+    /* 1. The durable number FIRST: the longest window (a paid period or
+     * the purse) is the one a plan decision hangs on, so a busy month
+     * must never demote it to "the third thing left". */
+    slot[BUDGET] = pick_longest(cr->brackets, n, -1, -1, NM_CREDIT_LEFT);
+    if (slot[BUDGET] < 0)
+        slot[BUDGET] = pick_longest(cr->brackets, n, -1, -1, NM_CREDIT_SPENT);
+
+    /* 2. What can refuse a request soonest, among SHORT windows. */
+    slot[GATE] = pick_gate(cr->brackets, n, slot[BUDGET], -1);
+
+    /* 3. Whatever third bracket is left. LEFT only: a SPENT spend meter
+     * has no decision hanging on it ("used today" is a diary entry, not
+     * a constraint), so it never takes a row slot while anything with a
+     * remaining figure is left. */
+    slot[MIDDLE] = pick_gate(cr->brackets, n, slot[BUDGET], slot[GATE]);
+    if (slot[MIDDLE] < 0)
+        slot[MIDDLE] = pick_longest(cr->brackets, n, slot[BUDGET], slot[GATE],
+                                    NM_CREDIT_LEFT);
+
+    /* Emitted in DECLARATION order — the provider's own ladder — so the
+     * row never reorders: an exhausted window keeps its slot and turns
+     * red instead of jumping to the front. The role decides only the
+     * admission RANK (budget first, middle last). */
+    size_t written = 0;
+    for (size_t i = 0; i < n && written < max_cells; i++) {
+        int role = -1;
+        for (int r = 0; r < ROLES; r++) {
+            if (slot[r] == (int)i)
+                role = r;
         }
+        if (role < 0)
+            continue;
+
+        const NmCreditBracket *b = &cr->brackets[i];
+        char cell[16];
+        if (nm_credit_format_cell(b, cell, sizeof(cell), 1) <= 0)
+            continue;
+
+        /* The trailing space belongs to the cell: a dropped cell takes
+         * its gap with it, so the cluster never shows a double space. */
+        snprintf(cells[written].text, sizeof(cells[written].text), "%s ", cell);
+        cells[written].color = credit_cell_color(b, depth);
+        /* The budget is not a pressure fact at all, so it is admitted
+         * FIRST and leaves last; the gate is what can refuse you; the
+         * middle window is the bonus. */
+        if (role == BUDGET)
+            cells[written].rank = 1;
+        else if (role == GATE)
+            cells[written].rank = 2;
+        else
+            cells[written].rank = 3;
+        written++;
     }
 
-    return (int)strlen(out);
+    return written;
 }
 
 int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
@@ -409,18 +520,52 @@ int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
     char age[32];
     nm_credit_format_age(cr ? cr->observed_at : 0, age, sizeof(age));
 
+    /* One polarity, stated once: the wire's `percent` is USED, the cells
+     * are remaining (the mapper inverts), and a ladder that mixed the
+     * two silently is the trap this display exists to avoid. */
+    int any_percent = 0;
+    if (cr) {
+        for (size_t i = 0; i < cr->n_brackets; i++) {
+            if (cr->brackets[i].state != NM_CREDIT_UNKNOWN &&
+                cr->brackets[i].unit == NM_CREDIT_PERCENT)
+                any_percent = 1;
+        }
+    }
+
     off += (size_t)snprintf(out + off, cap > off ? cap - off : 0,
-                            "credits: %s (%s)\n", provider_name, age);
+                            "credits: %s (%s%s)\n", provider_name, age,
+                            any_percent ? "; % = remaining" : "");
 
     if (!cr || cr->n_brackets == 0)
         return (int)off;
 
+    long now = (long)time(NULL);
     for (size_t i = 0; i < cr->n_brackets; i++) {
         const NmCreditBracket *b = &cr->brackets[i];
         char cell_buf[32];
         nm_credit_format_cell(b, cell_buf, sizeof(cell_buf), 0);
 
-        const char *desc = b->label[0] ? b->label : "";
+        /* The countdown is what makes a percentage actionable ("37% of
+         * the month left" decides nothing; "... and it resets in 12d"
+         * does), so it rides in the description column rather than
+         * growing a fourth one. A refused window says so in prose: a
+         * `!` alone cannot tell the user when the refusal ends. */
+        char note[64];
+        size_t noff = 0;
+        note[0] = '\0';
+        char until[32];
+        if (b->state == NM_CREDIT_EXHAUSTED)
+            noff += (size_t)snprintf(note + noff, sizeof(note) - noff,
+                                     "rate-limited");
+        if (nm_credit_format_until(now, b->resets_at, until, sizeof(until)) > 0) {
+            noff += (size_t)snprintf(note + noff, sizeof(note) - noff,
+                                     "%sresets %s", noff ? ", " : "", until);
+        }
+
+        char desc[128];
+        snprintf(desc, sizeof(desc), "%s%s%s%s", b->label[0] ? b->label : "",
+                 note[0] ? " (" : "", note, note[0] ? ")" : "");
+
         const char *orig = b->origin_desc[0] ? b->origin_desc : "";
 
         if (*orig) {
@@ -1074,7 +1219,7 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         brackets[0].origin = NM_CREDIT_FROM_ENDPOINT;
         brackets[0].observed_at = now;
         snprintf(brackets[0].label, sizeof(brackets[0].label),
-                 "rolling 5h allowance (%.0f%% used)", pused);
+                 "rolling 5h allowance");
         snprintf(brackets[0].origin_desc, sizeof(brackets[0].origin_desc),
                  "GET /zen/go/v1/usage");
     }
@@ -1098,7 +1243,7 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         brackets[1].origin = NM_CREDIT_FROM_ENDPOINT;
         brackets[1].observed_at = now;
         snprintf(brackets[1].label, sizeof(brackets[1].label),
-                 "weekly allowance (%.0f%% used)", pused);
+                 "weekly allowance");
         snprintf(brackets[1].origin_desc, sizeof(brackets[1].origin_desc),
                  "GET /zen/go/v1/usage");
     }
@@ -1122,7 +1267,7 @@ static int opencode_map_endpoint(const NmJson *doc, int step,
         brackets[2].origin = NM_CREDIT_FROM_ENDPOINT;
         brackets[2].observed_at = now;
         snprintf(brackets[2].label, sizeof(brackets[2].label),
-                 "monthly allowance (%.0f%% used)", pused);
+                 "monthly allowance");
         snprintf(brackets[2].origin_desc, sizeof(brackets[2].origin_desc),
                  "GET /zen/go/v1/usage");
     }

@@ -608,6 +608,18 @@ Rules:
 - Because the plan is not on this wire, a client must show
   **percent**, not dollars: the cap table above turns 26 % into
   $7.80 only for a known plan, and no endpoint reports the plan.
+- **How nevermore renders the three windows.** The wire's `percent` is
+  USED; the mapper inverts it once, so a cell reads REMAINING
+  (`100 - used`), and `/credits` states that polarity in its header
+  rather than flipping mid-line. All three windows reach the status
+  row — the monthly included, which is the one a plan decision hangs
+  on — as `100%·5h 74%·w 37%·mo`, with the paid period admitted last
+  and dropped last when the row narrows. A `rate-limited` window
+  prints `5h!` in its own slot (the surface has no warn tier: it has
+  room or it refuses), and every bracket prints its `resetsAt` as a
+  countdown, since the percentage alone does not say when the window
+  comes back. Rules and the exact cell grammar live in
+  `ARCHITECTURE.md` ("Credit cells").
 
 ### 7.2 The per-round spend: `usage.opencode`
 

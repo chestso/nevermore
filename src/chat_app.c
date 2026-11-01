@@ -5103,7 +5103,14 @@ static void compose_status(NmChatApp *app)
     char identity[256];
     nm_chat_app_identity(app, identity, sizeof(identity));
 
-    TuiSegment segs[7];
+    /* The cells' storage outlives the block that fills them: boba's
+     * segment setter copies the text only when it is CALLED, and a
+     * segment holds a POINTER, so a cell array scoped to the `if` below
+     * would dangle by the time the row is declared. */
+    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
+
+    /* glyph + 3 gauge fields + 3 credit cells + rule + identity */
+    TuiSegment segs[10];
     size_t n = 0;
     char glyph_text[16];
     if (frame->glyph) {
@@ -5133,21 +5140,63 @@ static void compose_status(NmChatApp *app)
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
 
-    /* The credit cluster: priority 1, min_cols 0
-     * so it drops whole when the row narrows, before the rule gives its
-     * reserve or identity drops completely. */
-    char credit_text[64];
-    credit_text[0] = '\0';
-    TuiColor credit_color = nm_color_credit(color_depth(app));
+    /* The credit cluster is ONE SEGMENT PER CELL, so each cell carries
+     * its own pressure colour. The cells are ADMITTED here, by rank,
+     * against the columns that are left, and declared FIXED (priority 0):
+     * boba elides what it must shrink, and half a cell ("74%·…") says
+     * nothing, so the cluster decides for itself what fits and the
+     * identity — its floor is one column — is what gives way. The rank
+     * is semantic (see credit.h): the budget is admitted first, so the
+     * paid period is the last datum to leave the row. */
     const NmProvider *p = app->provider;
     if (p) {
         NmCredits *cr = nm_credits_get(p->id);
-        nm_credit_format_status(cr, credit_text, sizeof(credit_text),
-                                &credit_color, color_depth(app));
+        size_t n_cells = nm_credit_status_cells(cr, cells,
+                                                NM_CREDIT_CELLS_MAX,
+                                                color_depth(app));
+
+        /* identity pad_left + identity's one-column floor + the rule's
+         * one-column reserve: the row fits however far boba has to
+         * elide the identity, which is the only thing left to shrink. */
+        int fixed = 3;
+        if (frame->glyph)
+            fixed += tui_utf8_display_width(glyph_text);
+        fixed += tui_utf8_display_width(g.counts);
+        if (g.out[0])
+            fixed += tui_utf8_display_width(g.out);
+        if (g.rate[0])
+            fixed += tui_utf8_display_width(g.rate);
+        int avail = (app->term_w > 0 ? app->term_w : 80) - fixed;
+
+        /* Admission runs in RANK order and STOPS at the first cell that
+         * does not fit: if the budget has no room, no smaller cell takes
+         * its place — the cluster shows its most important number or
+         * nothing, and the leftmost cell never changes identity. */
+        int order[NM_CREDIT_CELLS_MAX] = { -1, -1, -1 };
+        for (size_t i = 0; i < n_cells; i++) {
+            if (cells[i].rank >= 1 && cells[i].rank <= NM_CREDIT_CELLS_MAX)
+                order[cells[i].rank - 1] = (int)i;
+        }
+
+        int admitted[NM_CREDIT_CELLS_MAX] = { 0 };
+        int used = 0;
+        for (size_t k = 0; k < NM_CREDIT_CELLS_MAX; k++) {
+            int i = order[k];
+            if (i < 0)
+                continue;
+            int cols = tui_utf8_display_width(cells[i].text);
+            if (used + cols > avail)
+                break;
+            admitted[i] = 1;
+            used += cols;
+        }
+        for (size_t i = 0; i < n_cells; i++) {
+            if (!admitted[i])
+                continue;
+            segs[n++] = status_segment(cells[i].text, TUI_SEGMENT_LEFT, 0, 0,
+                                       0, cells[i].color);
+        }
     }
-    if (credit_text[0])
-        segs[n++] = status_segment(credit_text, TUI_SEGMENT_LEFT, 1, 0, 0,
-                                   credit_color);
 
     segs[n++] =
         status_segment("\xe2\x94\x80", TUI_SEGMENT_FILL, 1, 1, 0, /* ─ */
