@@ -73,20 +73,30 @@ int nm_ollama_needs_auth(const NmProvider *p, const char *base_url);
 #define NM_CONVERSATION_ID_LEN 40
 void nm_conversation_id_new(char out[NM_CONVERSATION_ID_LEN]);
 
-/* Live-catalog fetch gate (shared by all providers): 0 when
- * NM_NO_LIVE_CATALOG is set in the environment. `make check` runs
- * with it set (TESTS_ENVIRONMENT) so default-base catalog probes are
- * no-ops (static fallback) — a default-base probe is a real network
- * call (local-daemon 127.0.0.1:11434, hyper.charm.land, ...) whose
- * latency or refusal is CI-environment-dependent (a blackholed
- * loopback connect stalled Windows CI past the 10s watchdog).
- * Providers apply the gate ONLY when the caller passed no explicit
- * base_url: scripted-server tests (explicit base) keep exercising
- * the live fetch path. The app's background catalog warm
- * (nm_chat_app_warm_catalog) applies it unconditionally — that fetch
- * is live-catalog traffic nobody asked for, so the knob suppresses it
- * even with an explicit base (the wire-replay tool sets the knob
- * because its server holds only chat completions). */
-int nm_live_catalog_enabled(void);
+/* The unbidden-fetch gate (shared by all providers): 0 when
+ * NM_NO_UNBIDDEN_FETCH is set in the environment. "Unbidden" is the
+ * rule, not a mood: a fetch nobody at the terminal asked for, or one
+ * to a host nobody named. It covers
+ *   - the app's own warms and refreshes — the model catalog
+ *     (nm_chat_app_warm_catalog) and the credit balance
+ *     (nm_chat_app_warm_credits, the idle tick's refresh) — which run
+ *     with no user action at all;
+ *   - a CATALOG fetch at a provider's DEFAULT base (no explicit
+ *     base_url), where the app would have to pick the host itself.
+ * It does NOT cover what the user bade: chat turns, /credits, and any
+ * fetch to an explicitly given base.
+ *
+ * `make check` runs with it set (TESTS_ENVIRONMENT) so default-base
+ * catalog probes are no-ops (static fallback) — a default-base probe
+ * is a real network call (local-daemon 127.0.0.1:11434,
+ * hyper.charm.land, ...) whose latency or refusal is
+ * CI-environment-dependent (a blackholed loopback connect stalled
+ * Windows CI past the 10s watchdog). Providers apply the gate ONLY
+ * when the caller passed no explicit base_url: scripted-server tests
+ * (explicit base) keep exercising the live fetch path. The app's own
+ * warms apply it unconditionally, explicit base or not — that is
+ * exactly the traffic nobody asked for (the wire-replay tool sets the
+ * knob because its server holds only chat completions). */
+int nm_unbidden_fetch_enabled(void);
 
 #endif // NM_PROVIDER_INTERNAL_H

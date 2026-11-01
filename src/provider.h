@@ -593,7 +593,7 @@ struct NmProvider
      *   ok = models_begin(p, base_url, api_key)
      *     -> 1: a fetch is in flight (step + fd drive it)
      *     -> 0: nothing to fetch — already cached, gated off
-     *           (!base_url && !nm_live_catalog_enabled()), or ALREADY
+     *           (!base_url && !nm_unbidden_fetch_enabled()), or ALREADY
      *           in flight, which is what makes models() safe to call
      *           mid-fetch (it must never start a second, blocking one)
      *   models_source(p)   -> what to wait on (fd + interest), or -1

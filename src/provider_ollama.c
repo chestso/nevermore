@@ -22,7 +22,7 @@
 #include <string.h>
 
 #include "openai_client.h"
-#include "provider_internal.h" /* nm_live_catalog_enabled */
+#include "provider_internal.h" /* nm_unbidden_fetch_enabled */
 #include "provider_openaicompat.h"
 #include "catalog_data.h" /* the generated fallback catalog (every provider) */
 #include "json.h"
@@ -398,7 +398,7 @@ int nm_ollama_models_begin(const NmProvider *p, const char *base_url,
     OllamaFetch *o = &ollama_fetches[slot];
     if (ollama_catalogs[slot].models || o->stage != OC_IDLE)
         return 0; /* cached, or a fetch is in flight */
-    if (!base_url && !nm_live_catalog_enabled())
+    if (!base_url && !nm_unbidden_fetch_enabled())
         return 0;
 
     memset(o, 0, sizeof(*o));

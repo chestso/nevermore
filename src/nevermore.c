@@ -18,12 +18,12 @@
 /* Registry                                                          */
 /* ---------------------------------------------------------------- */
 
-int nm_live_catalog_enabled(void)
+int nm_unbidden_fetch_enabled(void)
 {
     /* Checked per call (not cached): tests flip it inside one
      * process run if they ever need to. getenv is cheap and this is
      * a fetch-gate, not a per-token path. */
-    return getenv("NM_NO_LIVE_CATALOG") == NULL;
+    return getenv("NM_NO_UNBIDDEN_FETCH") == NULL;
 }
 
 static const struct NmProvider *const g_providers[] = {

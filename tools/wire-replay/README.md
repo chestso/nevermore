@@ -153,7 +153,7 @@ tools/wire-replay/wire-replay ~/.local/state/nevermore/wire/DUMP.ndjson \
 # 3. replay it through the real client: no base override (the tier's
 #    default IS localhost:11434/v1) and the live catalog switched off,
 #    since the replay server holds only what was recorded.
-NM_NO_LIVE_CATALOG=1 nevermore -p ollama:local -m deepseek-v4.1-flash
+NM_NO_UNBIDDEN_FETCH=1 nevermore -p ollama:local -m deepseek-v4.1-flash
 ```
 
 The model id is not looked up: `-m` goes to the wire as typed, which is
@@ -166,15 +166,15 @@ target is matched on:
 
 ```sh
 NEVERMORE_BASE_URL=http://localhost:11434/zen/go/v1 \
-NM_NO_LIVE_CATALOG=1 \
+NM_NO_UNBIDDEN_FETCH=1 \
     nevermore -p ollama:local -m deepseek-v4.1-flash
 ```
 
 Two things change with that override, both from the same rule: **an
-explicit base wins the live-catalog gate**, and `ollama:local` is a
+explicit base wins the unbidden-fetch gate**, and `ollama:local` is a
 wire-catalog provider. So
 
-- `NM_NO_LIVE_CATALOG=1` stops nothing here. It gates the probe only
+- `NM_NO_UNBIDDEN_FETCH=1` stops nothing here. It gates the probe only
   while no base is named; with one, the run warms the catalog (ask
   mode) or the `/model` popup fetches, and a **`GET /api/tags`** goes
   to the replay server (followed by one `POST /api/show` per tag it

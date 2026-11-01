@@ -3204,13 +3204,13 @@ static void test_credits_status_refreshes_after_ttl(void)
 
 /* The idle half of the refresh: the TTL is not only a turn-end gate but
  * the app's own idle cadence, so the purse follows the wire while
- * nobody types. (Both idle tests lift the suite's NM_NO_LIVE_CATALOG
- * pin — the idle refresh is unbidden live traffic, gated exactly like
- * the startup warm — and are registered LAST so no later test can read
- * the lifted value.) */
+ * nobody types. (Both idle tests lift the suite's NM_NO_UNBIDDEN_FETCH
+ * pin — the idle refresh is exactly the unbidden traffic that knob
+ * refuses, gated like the startup warm — and are registered LAST so no
+ * later test can read the lifted value.) */
 static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
 {
-    test_unsetenv("NM_NO_LIVE_CATALOG");
+    test_unsetenv("NM_NO_UNBIDDEN_FETCH");
 
     CreditRouteServer s;
     memset(&s, 0, sizeof(s));
@@ -3275,7 +3275,7 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
  * failed. */
 static void test_credits_idle_refresh_backs_off_a_failed_fetch(void)
 {
-    test_unsetenv("NM_NO_LIVE_CATALOG"); /* idempotent: lifted above */
+    test_unsetenv("NM_NO_UNBIDDEN_FETCH"); /* idempotent: lifted above */
 
     CreditRouteServer s;
     memset(&s, 0, sizeof(s));
@@ -6843,12 +6843,12 @@ static void *warm_catalog_server_thread(void *arg)
  * it would replace the static fallback those tests pin. */
 static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 {
-    /* The warm is gated on the live-catalog knob (it is live-catalog
-     * traffic the user did not ask for), so lift the suite's pin for
-     * this one test — the production default. LAST test, so nothing
+    /* The warm is gated on the unbidden-fetch knob (it is traffic the
+     * user did not ask for), so lift the suite's pin for this one test
+     * — the production default. LAST test, so nothing
      * after it can read the unpinned state, and the pin's own tripwire
      * (test_offline_catalog_is_pinned) already ran first. */
-    test_unsetenv("NM_NO_LIVE_CATALOG");
+    test_unsetenv("NM_NO_UNBIDDEN_FETCH");
 
     int port;
     int lfd = server_bind(&port);
@@ -7059,11 +7059,11 @@ static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
     ASSERT_NOT_NULL(h);
 
     /* main.c's warm, verbatim: the fetch is in flight while the turn
-     * runs. The warm is gated on the live-catalog knob, so lift the
+     * runs. The warm is gated on the unbidden-fetch knob, so lift the
      * suite's pin for it — and put the pin back BEFORE the first
      * assertion, so a failed assert cannot leave it off for the tests
      * after this one (they would then dial the real provider). */
-    test_unsetenv("NM_NO_LIVE_CATALOG");
+    test_unsetenv("NM_NO_UNBIDDEN_FETCH");
     nm_chat_app_warm_catalog(h->app);
     /* The fetch is in flight: the app's primary slot is the catalog's
      * socket (the agent is idle). */
@@ -10943,9 +10943,9 @@ int main(void)
     RUN_TEST(test_served_notice_prints_and_the_key_gates_it);
     RUN_TEST(test_context_states_the_active_knobs);
     /* LAST on purpose, and AFTER the catalog-warm test's own "last":
-     * these lift the suite's NM_NO_LIVE_CATALOG pin (the idle balance
-     * refresh is unbidden live traffic, gated like the startup warm),
-     * and the pin is process state — nothing after them may read the
+     * these lift the suite's NM_NO_UNBIDDEN_FETCH pin (the idle balance
+     * refresh is unbidden traffic, gated like the startup warm), and
+     * the pin is process state — nothing after them may read the
      * lifted value. The pin's own tripwire ran first, so the lift is
      * loud, not silent. */
     RUN_TEST(test_credits_idle_refresh_updates_the_bar_while_idle);

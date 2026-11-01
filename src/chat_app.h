@@ -95,7 +95,8 @@ void nm_chat_app_set_endpoint(NmChatApp *app, const char *base_url,
 void nm_chat_app_warm_catalog(NmChatApp *app);
 
 /* Background warm for the provider's credit balance. Gated on the
- * live-catalog knob (nm_live_catalog_enabled), and rate-limited. */
+ * unbidden-fetch knob (nm_unbidden_fetch_enabled) — it runs with no
+ * user action at all — and rate-limited. */
 void nm_chat_app_warm_credits(NmChatApp *app);
 
 /* Tool-call round cap, reasoning echo mode and stream-inactivity

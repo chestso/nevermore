@@ -788,7 +788,7 @@ static void test_agent_sampling_knobs_ride_the_request(void)
  * motivated the field) gets a request carrying neither "tools" nor
  * "tool_choice", while a model the catalog says nothing about keeps
  * both. The provider is openrouter against its static fallback
- * (NM_NO_LIVE_CATALOG is pinned in main), so the claim under test is
+ * (NM_NO_UNBIDDEN_FETCH is pinned in main), so the claim under test is
  * the shipped table's own. */
 static void test_agent_omits_tools_when_the_catalog_says_so(void)
 {

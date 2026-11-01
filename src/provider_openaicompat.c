@@ -25,7 +25,7 @@
 #include <string.h>
 
 #include "provider_openaicompat.h"
-#include "provider_internal.h" /* nm_live_catalog_enabled */
+#include "provider_internal.h" /* nm_unbidden_fetch_enabled */
 
 /* One provider's catalog state: the committed live rows and the fetch
  * in flight (at most one at a time — the async seam's state). */
@@ -192,8 +192,8 @@ int nm_openaicompat_models_begin(const NmProvider *p, const char *base_url,
         return 0; /* no live catalog for this provider */
     if (s->live || s->fetch.f)
         return 0; /* cached, or a fetch is already in flight */
-    if (!base_url && !nm_live_catalog_enabled())
-        return 0; /* the shared live-catalog gate (provider_internal.h) */
+    if (!base_url && !nm_unbidden_fetch_enabled())
+        return 0; /* the shared unbidden-fetch gate (provider_internal.h) */
     NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX];
     NmOpenaiEndpoint ep;
     openaicompat_preset(p, base_url, &ep);

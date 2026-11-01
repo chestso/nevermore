@@ -192,15 +192,15 @@ static const char *oc_document_url(void)
 
 /* May the document be fetched? An OVERRIDE is an explicit request —
  * the canned-wire test's own server — and is never gated. The default
- * URL is live-catalog traffic like any other, so the live-catalog
- * knob governs it (the suite pins that knob, so the suite never
- * reaches the network). */
+ * URL is unbidden traffic like any other, so the unbidden-fetch knob
+ * governs it (the suite pins that knob, so the suite never reaches
+ * the network). */
 static int oc_document_allowed(void)
 {
     const char *u = getenv("NEVERMORE_OPENCODE_CATALOG_URL");
     if (u && *u)
         return 1;
-    return nm_live_catalog_enabled();
+    return nm_unbidden_fetch_enabled();
 }
 
 /* The tier's slot: 0 = Go, 1 = Zen. The two tiers keep their own
@@ -522,8 +522,8 @@ int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
     OcFetch *o = &g_oc_fetches[slot];
     if (g_oc_catalogs[slot].models || o->stage != OC_IDLE)
         return 0; /* cached, or a fetch is in flight */
-    if (!base_url && !nm_live_catalog_enabled())
-        return 0; /* the shared live-catalog gate (provider_internal.h) */
+    if (!base_url && !nm_unbidden_fetch_enabled())
+        return 0; /* the shared unbidden-fetch gate (provider_internal.h) */
     const char *base = (base_url && *base_url) ? base_url
                                                : p->default_base_url;
     memset(o, 0, sizeof(*o));

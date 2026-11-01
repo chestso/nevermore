@@ -156,20 +156,22 @@ static const char *test_scratch_dir(void)
  *
  * Why: a catalog lookup with NO endpoint override resolves the
  * provider's DEFAULT base (api.ollama.com, opencode.ai, ...) and,
- * since the live gate is on unless NM_NO_LIVE_CATALOG is set, goes
- * straight to the real service. That breaks the make-check rule
- * (canned loopback servers only), and it is not a benign extra
+ * since unbidden fetches are allowed unless NM_NO_UNBIDDEN_FETCH is
+ * set, goes straight to the real service. That breaks the make-check
+ * rule (canned loopback servers only), and it is not a benign extra
  * round-trip: the fetched list REPLACES the static catalog the tests
  * assert against (the 2026-09-17 flake — model ids differed per run
  * in test_chat_app, and a slow fetch blew the per-test watchdog),
  * the probe blocks, and a networked CI runner takes the same path
  * because no workflow exports the gate.
  *
- * NM_NO_LIVE_CATALOG is the production knob nm_live_catalog_enabled()
- * reads; setting it here rather than asking every caller to export it
- * keeps "tests never probe a default base" true by construction. The
- * canned-base fetches the wire tests DO want are unaffected — an
- * explicit base_url is honored whatever the gate says.
+ * NM_NO_UNBIDDEN_FETCH is the production knob nm_unbidden_fetch_enabled()
+ * reads — it refuses fetches nobody asked for and default-base probes,
+ * which includes both app warms and the idle balance refresh; setting
+ * it here rather than asking every caller to export it keeps "tests
+ * never probe a default base" true by construction. The canned-base
+ * fetches the wire tests DO want are unaffected — an explicit base_url
+ * is honored whatever the gate says.
  *
  * Returns 0 on success. Call from main() before any app, agent or
  * provider call, and pair it with TEST_OFFLINE_CATALOG_PIN_CHECK. */
@@ -177,9 +179,9 @@ static int test_pin_offline_catalog(void) TEST_NET_HELPERS_UNUSED;
 static int test_pin_offline_catalog(void)
 {
 #ifdef _WIN32
-    return _putenv_s("NM_NO_LIVE_CATALOG", "1") == 0 ? 0 : -1;
+    return _putenv_s("NM_NO_UNBIDDEN_FETCH", "1") == 0 ? 0 : -1;
 #else
-    return setenv("NM_NO_LIVE_CATALOG", "1", 1) == 0 ? 0 : -1;
+    return setenv("NM_NO_UNBIDDEN_FETCH", "1", 1) == 0 ? 0 : -1;
 #endif
 }
 
@@ -187,7 +189,7 @@ static int test_pin_offline_catalog(void)
 static int test_offline_catalog_pinned(void) TEST_NET_HELPERS_UNUSED;
 static int test_offline_catalog_pinned(void)
 {
-    return getenv("NM_NO_LIVE_CATALOG") != NULL ? 1 : 0;
+    return getenv("NM_NO_UNBIDDEN_FETCH") != NULL ? 1 : 0;
 }
 
 /* Tripwire for the pin above: expand ONCE at file scope, then

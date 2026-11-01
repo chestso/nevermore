@@ -1806,7 +1806,7 @@ static void *opencode_document_server_thread(void *arg)
  * shipped table has never heard of, and the catalog document resolves
  * it. The document is a SECOND fetch on ANOTHER host, so the seam is
  * the env override — and an override is an explicit request, so the
- * live-catalog knob does not suppress it. */
+ * unbidden-fetch knob does not suppress it. */
 static void test_opencode_models_fetch_resolves_the_drift(void)
 {
     const NmProvider *p = nm_provider_by_name("opencode:go");
@@ -1877,8 +1877,8 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
  * DIFFERENT id set than Go's, so the two slots cannot be confused.
  *
  * The list carries an id no source covers ("uncovered-zen-id"): the
- * drift that would ask for the catalog document. The live-catalog knob
- * is pinned in this binary, so the document is NOT fetched — the
+ * drift that would ask for the catalog document. The unbidden-fetch
+ * knob is pinned in this binary, so the document is NOT fetched — the
  * suite never reaches the network — and the uncovered id is dropped by
  * the coverage rule. */
 static void *opencode_zen_models_server_thread(void *arg)

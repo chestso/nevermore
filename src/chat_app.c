@@ -66,7 +66,7 @@
 #include "spinner.h"
 #include "credit.h"
 #include "clock.h"
-#include "provider_internal.h" /* nm_live_catalog_enabled (the warm's gate) */
+#include "provider_internal.h" /* nm_unbidden_fetch_enabled (the warm's gate) */
 
 #define NM_CHAT_APP_TYPE_ID (TUI_COMPONENT_TYPE_BASE + 21)
 
@@ -2087,7 +2087,7 @@ static int credits_idle_due(const NmChatApp *app, double *due)
 {
     if (!app || !app->provider)
         return 0;
-    if (!nm_live_catalog_enabled())
+    if (!nm_unbidden_fetch_enabled())
         return 0;
     const NmProvider *p = app->provider;
     if (!p->credits || !p->credits->endpoint)
@@ -3144,17 +3144,17 @@ static void open_models_popup(NmChatApp *app, const ModelQuery *q)
  * agent), so a warm that lands later moves the gauge and the claims
  * that are read at their point of use, never the prefix.
  *
- * Gated on the live-catalog knob (nm_live_catalog_enabled): a warm is
- * live-catalog traffic the user did NOT ask for, which is exactly what
- * `NM_NO_LIVE_CATALOG` suppresses — the picker's fetch is bidden, this
- * one is not. That keeps `make check` and the wire-replay tool (both
- * of which set the knob, the latter because its server holds only chat
- * completions) free of surprise /models GETs. */
+ * Gated on the unbidden-fetch knob (nm_unbidden_fetch_enabled): a warm
+ * is traffic the user did NOT ask for, which is exactly what
+ * `NM_NO_UNBIDDEN_FETCH` suppresses — the picker's fetch is bidden,
+ * this one is not. That keeps `make check` and the wire-replay tool
+ * (both of which set the knob, the latter because its server holds
+ * only chat completions) free of surprise /models GETs. */
 void nm_chat_app_warm_catalog(NmChatApp *app)
 {
     if (!app || app->catalog_src)
         return; /* a fetch is already in flight (a warm, or the picker) */
-    if (!nm_live_catalog_enabled())
+    if (!nm_unbidden_fetch_enabled())
         return;
     NmListSource *s = NULL;
     if (catalog_fetch_begin(app, &s) != NM_CAT_FETCHING) {
@@ -3210,7 +3210,7 @@ void nm_chat_app_warm_credits(NmChatApp *app)
 {
     if (!app || !app->provider)
         return;
-    if (!nm_live_catalog_enabled())
+    if (!nm_unbidden_fetch_enabled())
         return;
     const char *key = endpoint_key(app, app->provider);
     nm_credits_fetch_begin(app->provider->id, app->base_url, key);

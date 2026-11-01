@@ -251,8 +251,8 @@ Sources:
   then the shipped table; the tier's own window always wins. The document is 5.9
   MB, so `nm_json_parse_kept` keeps only the two wanted members instead of
   building a 50 MB tree. `NEVERMORE_OPENCODE_CATALOG_URL` overrides it
-  explicitly and is never gated; the default URL is live-catalog traffic and
-  `NM_NO_LIVE_CATALOG` governs it. See `docs/OPENCODE-API.md` §5.1.
+  explicitly and is never gated; the default URL is unbidden traffic and
+  `NM_NO_UNBIDDEN_FETCH` governs it. See `docs/OPENCODE-API.md` §5.1.
 
 ### Model flags
 

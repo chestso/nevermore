@@ -513,7 +513,7 @@ compile-check:
 # provider's default endpoint (local daemon 127.0.0.1:11434,
 # hyper.charm.land, ...) when no base URL is given — on CI that probe's
 # refusal latency is environment-dependent (a blackholed loopback
-# connect stalled Windows CI past the 10s watchdog). NM_NO_LIVE_CATALOG
+# connect stalled Windows CI past the 10s watchdog). NM_NO_UNBIDDEN_FETCH
 # makes default-base probes no-ops (static fallback); explicit-base
 # fetches are unaffected.
 #
@@ -525,7 +525,7 @@ compile-check:
 # Nothing is exported here on purpose: the pin is per-test state, not
 # an environment variable, so a test cannot forget to export it and a
 # suite cannot silently inherit one.
-TESTS_ENVIRONMENT = NM_NO_LIVE_CATALOG=1 \
+TESTS_ENVIRONMENT = NM_NO_UNBIDDEN_FETCH=1 \
     NM_E2E_NEVERMORE='$(abs_top_builddir)/src/nevermore$(EXEEXT)' \
     NM_E2E_TOOLS='$(abs_top_srcdir)/tools'
 

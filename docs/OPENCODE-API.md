@@ -439,7 +439,7 @@ table has never heard of).
   `NEVERMORE_BASE_URL` precedent: the document lives on another host
   than the inference API, so the base-URL override cannot carry it.
   An OVERRIDE is an explicit request and is never gated; the default
-  URL is live-catalog traffic like any other, so `NM_NO_LIVE_CATALOG`
+  URL is unbidden traffic like any other, so `NM_NO_UNBIDDEN_FETCH`
   governs it (the suite pins that knob and never reaches the
   network).
 - **The join**: the tier's own entry first, the SIBLING tier's entry
