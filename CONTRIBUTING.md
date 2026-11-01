@@ -309,6 +309,16 @@ minutes, so catch failures locally.
   `make dist-portable DIST_TARGET=windows`, then the extracted `.exe` under wine
   with the MinGW bin dir off `PATH`). Wine is not MSYS2 UCRT64: pre-flight, not
   guarantee (it still catches ~90% in seconds).
+- **Wine's Schannel does real cryptography**, so `test_tls.exe` under wine is
+  the Windows success-path proof, not a rehearsal: with a live peer the file's
+  `NM_LIVE_TLS=1` probe completes a full handshake (measured 2026-10-17: the
+  certificate/policy tail, the record buffers, the token handoff), and the
+  loop-owned socket
+  cases — the `WSAEventSelect` association, the refused mode flip, a held
+  reply, the silent-peer budget — run in the same binary. What wine cannot
+  cover is an async connect behind a live association, an SSPI token
+  outstanding under a cancel, and a real chain's revocation and policy
+  checks; those need hardware.
 - **Run the scripts from the repo root** (0 results from a build dir). **Read
   the logs once**: evidence lands in
   `build-w32/{boba-*,configure,build,check}.log`, `build-w32/tests/*.log` and
