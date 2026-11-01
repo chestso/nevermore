@@ -444,6 +444,24 @@ static AppHarness *harness_new_full(const char *provider, const char *model,
     if (base_url)
         nm_chat_app_set_endpoint(h->app, base_url, NULL);
 
+    /* The startup credit warm main.c performs, pinned the harness's
+     * way: the store reads "fetched at launch", so the post-turn
+     * refresh TTL (credits_ttl, 300 s) is shut — and under this
+     * harness's FROZEN clock it can never open. That is the point:
+     * the refresh would fire a background balance GET at the first
+     * turn's end, and the scripted servers here serve one chat round
+     * per connection on a single thread, so a fetch the harness never
+     * pumps (its request never even reaches the wire) deadlocks the
+     * fixture: the server accepts the fetch's connection and blocks
+     * reading a request that is never sent, never serving the next
+     * scripted round. A test that exercises the refresh opts out by
+     * resetting the store (nm_credits_reset) once the harness exists. */
+    const NmProvider *p = nm_provider_by_name(provider);
+    if (p && p->credits) {
+        NmCredits *cr = nm_credits_get(p->id);
+        cr->observed_at = cr->fetched_at = (long)nm_monotonic_seconds();
+    }
+
     /* The event loop's first flush (run() does this before reading). */
     tui_runtime_flush(h->rt);
 
@@ -817,6 +835,28 @@ static int app_wait_ready(const NmSource *sp, int timeout_ms)
                ? 1
                : 0;
 #endif
+}
+
+/* Pump an in-flight credits fetch the way boba's loop does: wait on the
+ * app's declared source, dispatch the ready branch, tick on timeout.
+ * Bounded by WALL CLOCK (a ready fd costs microseconds). */
+static int harness_pump_credits(AppHarness *h, int budget_ms, NmProviderId id)
+{
+    long long t0 = wall_ms();
+    while (nm_credits_fetch_in_flight(id)) {
+        if (wall_ms() - t0 > (long long)budget_ms)
+            return -1;
+        NmSource cs = nm_credits_fetch_source(id);
+        int wait_ms = nm_chat_app_tick_ms(h->app);
+        if (wait_ms < 0)
+            wait_ms = 50;
+        if (cs.handle >= 0 && cs.flags && app_wait_ready(&cs, wait_ms))
+            nm_chat_app_external_ready(h->app, cs.handle, cs.flags);
+        else
+            nm_chat_app_tick(h->app); /* the timeout branch: tick steps it */
+        tui_runtime_flush(h->rt);
+    }
+    return 0;
 }
 
 /* Drive a turn the way boba's EVENT LOOP does: wait on the app's wait
@@ -2947,7 +2987,12 @@ static void test_credits_command_output(void)
     ASSERT_NOT_NULL(h);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
-    cr->observed_at = (long)nm_monotonic_seconds() - 120;
+    /* An endpoint fetch landed 2m ago: the age line and the freshness
+     * gate (`fetched_at`) are BOTH about that landing, so the command
+     * prints the figure and does not go to the wire. */
+    long landed = (long)nm_monotonic_seconds() - 120;
+    cr->observed_at = landed;
+    cr->fetched_at = landed;
     cr->brackets[0].state = NM_CREDIT_KNOWN;
     cr->brackets[0].value = 7.71;
     snprintf(cr->brackets[0].label, sizeof(cr->brackets[0].label),
@@ -2964,6 +3009,187 @@ static void test_credits_command_output(void)
     ASSERT_TRUE(strstr(out, "GET /api/v1/credits") != NULL);
 
     harness_free(h);
+}
+
+/* ---------------------------------------------------------------- */
+/* Routing loopback server: one connection per request, answered by  */
+/* path — so a test can script a provider's credit endpoints and its */
+/* chat stream on the SAME fixture.                                  */
+/* ---------------------------------------------------------------- */
+
+typedef struct
+{
+    int port;
+    int lfd;
+    /* The purse the NEXT `GET /api/v1/credits` reports (total_credits;
+     * total_usage is always 0). The test MOVES it between turns, so a
+     * second fetch is only observable if it actually happened. */
+    double purse;
+    int n_credits; /* GET /api/v1/credits served */
+    int n_key;     /* GET /api/v1/key served */
+    int n_chat;    /* chat completions served */
+    int stop;
+} CreditRouteServer;
+
+static void route_send_json(int cfd, const char *body)
+{
+    char head[160];
+    int hl = snprintf(head, sizeof(head),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/json\r\n"
+                      "Content-Length: %zu\r\n\r\n",
+                      strlen(body));
+    send(cfd, head, (size_t)hl, 0);
+    send(cfd, body, strlen(body), 0);
+}
+
+static void *credit_route_server_thread(void *arg)
+{
+    CreditRouteServer *s = arg;
+    for (;;) {
+        fd_set r;
+        struct timeval tv = { 0, 50 * 1000 };
+        FD_ZERO(&r);
+        FD_SET(s->lfd, &r);
+        if (select(s->lfd + 1, &r, NULL, NULL, &tv) <= 0) {
+            if (s->stop)
+                return NULL;
+            continue;
+        }
+        int cfd = accept(s->lfd, NULL, NULL);
+        if (cfd < 0)
+            return NULL;
+        /* Drain the request before any reply: a server that closes
+         * with a POST's body still unread sends an RST, which can
+         * discard the reply the client has not read yet (the canned
+         * server's own house rule). A GET has no body, so the header
+         * terminator ends it; a POST ends at its JSON body's '}'. The
+         * buffer is the canned server's REQ_CAP: a chat POST carries
+         * the whole session (system prompt, skills menu, history) and
+         * runs to several KB — a short buffer truncates the drain and
+         * the close then races the client's unread reply. */
+        char req[REQ_CAP];
+        size_t got = 0;
+        int is_get = 0;
+        while (got < sizeof(req) - 1) {
+            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
+            if (n <= 0)
+                break;
+            got += (size_t)n;
+            req[got] = '\0';
+            is_get = strncmp(req, "GET ", 4) == 0;
+            if (strstr(req, "\r\n\r\n") &&
+                (is_get || (got > 4 && req[got - 1] == '}')))
+                break;
+        }
+        req[got] = '\0';
+        if (strstr(req, "GET /api/v1/credits")) {
+            s->n_credits++;
+            char body[128];
+            snprintf(body, sizeof(body),
+                     "{\"data\":{\"total_credits\":%.2f,\"total_usage\":0}}",
+                     s->purse);
+            route_send_json(cfd, body);
+        } else if (strstr(req, "GET /api/v1/key")) {
+            s->n_key++;
+            route_send_json(cfd, "{\"data\":{}}");
+        } else {
+            s->n_chat++;
+            sse_send_chunked(cfd,
+                             "data: {\"choices\":[{\"delta\":{\"content\":"
+                             "\"ok\"}}]}\n\n"
+                             "data: [DONE]\n\n",
+                             NULL);
+            send(cfd, "0\r\n\r\n", 5, 0);
+        }
+        close(cfd);
+    }
+}
+
+/* Regression (the purse froze at the startup fetch): the background
+ * refresh TTL used to gate on the credits store's `observed_at`, which
+ * EVERY 200 round restamped — the round's in-band fold stamped it
+ * unconditionally, whether or not the round had reported a balance. A
+ * provider whose round body carries no balance (openrouter,
+ * ollama:cloud, opencode:go) therefore looked freshly observed after
+ * every turn: the gate stayed shut for the whole session and the status
+ * row kept the launch figure. The fold now stamps only when it folded
+ * something, and the gate reads `fetched_at` (the last out-of-band
+ * fetch's landing) — so a turn after the TTL really refetches and the
+ * bar follows the wire. */
+static void test_credits_status_refreshes_after_ttl(void)
+{
+    CreditRouteServer s;
+    memset(&s, 0, sizeof(s));
+    s.purse = 7.71; /* the purse the launch fetch lands */
+    s.lfd = server_bind(&s.port);
+    ASSERT_TRUE(s.lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, credit_route_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    AppHarness *h = harness_new("openrouter", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    /* Opt out of the harness's startup stamp: this test is ABOUT the
+     * refresh, so the store starts "never fetched" and the first turn's
+     * end must fetch on its own. */
+    nm_credits_reset();
+
+    /* Turn 1: the store has never been fetched (fetched_at == 0), so
+     * the turn's end starts the fetch — the "initial setup" figure. */
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive_events(h, 5000), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    /* The loop can only pump what the app DECLARES: the credits socket
+     * is the primary source now that the agent is idle. */
+    ASSERT_EQ((int)nm_chat_app_source(h->app).handle,
+              (int)nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle);
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+    ASSERT_EQ(s.n_credits, 1);
+    ASSERT_EQ(s.n_key, 1); /* openrouter's two-step chain ran */
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "$7.71 ") != NULL);
+    free(row);
+    free(prompt);
+
+    /* Ten minutes later — well past the 300 s default — a second turn
+     * completes. Its round folds nothing but still carries a 200, and
+     * the wire's purse has moved. */
+    nm_test_clock_advance_ms(600 * 1000);
+    s.purse = 5.00;
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive_events(h, 5000), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+
+    /* A SECOND fetch landed, and the status row is the new figure. */
+    ASSERT_EQ(s.n_credits, 2);
+    ASSERT_EQ(s.n_key, 2);
+    ASSERT_EQ(s.n_chat, 2); /* one POST per turn, nothing else routed */
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    row = frame_status_row(frame, prompt);
+    ASSERT_NOT_NULL(row);
+    ASSERT_TRUE(strstr(row, "$5 ") != NULL);
+    ASSERT_TRUE(strstr(row, "$7.71 ") == NULL);
+    free(row);
+    free(prompt);
+
+    s.stop = 1;
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(s.lfd);
 }
 
 /* The composer owns the cursor's chrome offset: boba's textinput reports
@@ -10434,6 +10660,7 @@ int main(void)
     RUN_TEST(test_status_row_credit_ladders);
     RUN_TEST(test_status_row_credit_boba_shrink_order);
     RUN_TEST(test_credits_command_output);
+    RUN_TEST(test_credits_status_refreshes_after_ttl);
     RUN_TEST(test_status_row_cursor_lands_on_the_input_row);
     RUN_TEST(test_busy_input_gathers_type_ahead);
     RUN_TEST(test_quit_command_quits);

@@ -950,7 +950,11 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
             if (ttl > 0) {
                 NmCredits *cr = nm_credits_get(app->provider->id);
                 long now = (long)nm_monotonic_seconds();
-                if (now - cr->observed_at >= ttl) {
+                /* fetched_at, never observed_at: the round's own fold
+                 * restamps observed_at (the store's newest fact), and
+                 * for a provider whose rounds carry no balance that
+                 * would keep this gate shut for the whole session. */
+                if (cr->fetched_at == 0 || now - cr->fetched_at >= ttl) {
                     const char *key = endpoint_key(app, app->provider);
                     nm_credits_fetch_begin(app->provider->id, app->base_url, key);
                 }
@@ -2560,8 +2564,10 @@ static void print_credits(NmChatApp *app)
 
     int ttl = nm_config_resolve_credits_ttl(app->cfg);
     long now = (long)nm_monotonic_seconds();
-    int is_stale = (cr->observed_at == 0) ||
-                   (ttl > 0 && (now - cr->observed_at) >= ttl);
+    /* fetched_at: a /credits whose purse came from a startup fetch is
+     * stale, however recently a round restamped observed_at. */
+    int is_stale = (cr->fetched_at == 0) ||
+                   (ttl > 0 && (now - cr->fetched_at) >= ttl);
     if (is_stale && p->credits && p->credits->endpoint) {
         const char *key = endpoint_key(app, p);
         nm_credits_fetch_begin(p->id, app->base_url, key);

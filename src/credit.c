@@ -508,7 +508,14 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
     if (http_status != 200)
         return;
 
-    cr->observed_at = now;
+    /* A fold makes the store fresher ONLY when it stamps a bracket.
+     * Hyper's round body carries the purse and its headers the rate
+     * windows; the other providers' rounds report neither, so a bare
+     * 200 there says nothing about the balance and must leave
+     * observed_at alone — /credits prints it as the age, and a round
+     * that told us nothing is not an observation. (The background
+     * refresh TTL never reads this field; see NmCredits::fetched_at.) */
+    int folded = 0;
 
     if (id == NM_PROVIDER_HYPER && cr->n_brackets >= 3) {
         if (usage && usage->remaining_credits >= 0) {
@@ -517,6 +524,7 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
             cr->brackets[0].limit = -1;
             cr->brackets[0].origin = NM_CREDIT_FROM_ROUND_BODY;
             cr->brackets[0].observed_at = now;
+            folded = 1;
         }
         if (meta) {
             if (meta->req_remaining_day >= 0) {
@@ -525,6 +533,7 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
                 cr->brackets[1].limit = (double)meta->req_limit_day;
                 cr->brackets[1].origin = NM_CREDIT_FROM_ROUND_HEADER;
                 cr->brackets[1].observed_at = now;
+                folded = 1;
             }
             if (meta->req_remaining_hour >= 0) {
                 cr->brackets[2].state = NM_CREDIT_KNOWN;
@@ -532,9 +541,13 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
                 cr->brackets[2].limit = (double)meta->req_limit_hour;
                 cr->brackets[2].origin = NM_CREDIT_FROM_ROUND_HEADER;
                 cr->brackets[2].observed_at = now;
+                folded = 1;
             }
         }
     }
+
+    if (folded)
+        cr->observed_at = now;
 }
 
 void nm_credit_fold_refusal(NmProviderId id, const char *msg)
@@ -1257,8 +1270,12 @@ NmCatalogStatus nm_credits_fetch_step(NmProviderId id)
                 return NM_CATALOG_PENDING;
         }
 
-        /* Success termination */
+        /* Success termination: the purse now carries an out-of-band
+         * figure, so BOTH clocks advance — observed_at (the age
+         * `/credits` prints) and fetched_at (the background refresh
+         * TTL's only reference; see NmCredits). */
         cr->observed_at = (long)nm_monotonic_seconds();
+        cr->fetched_at = cr->observed_at;
         cr->fetch_in_flight = 0;
         if (p && p->credits && p->credits->min_interval_sec > 0)
             cr->next_fetch_allowed_at =

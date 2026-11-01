@@ -80,7 +80,17 @@ typedef struct
 {
     NmCreditBracket brackets[NM_CREDIT_BRACKETS_MAX];
     size_t n_brackets;
+    /* TWO clocks, never one. observed_at is the NEWEST fact of any
+     * origin (an in-band round fold counts: hyper's round body carries
+     * the purse), and it is what `/credits` reports as the age.
+     * fetched_at is the last OUT-OF-BAND endpoint fetch's landing
+     * (0 = never), and it is the ONLY field the background refresh TTL
+     * may gate on: a provider whose rounds fold nothing (openrouter,
+     * ollama:cloud, opencode:go) would otherwise keep the bar frozen at
+     * the startup warm forever, because every 200 round restamps
+     * observed_at while folding no bracket. */
     long observed_at;             /* monotonic seconds of latest update */
+    long fetched_at;              /* monotonic seconds of latest GET; 0 none */
     double next_fetch_allowed_at; /* monotonic deadline; Retry-After / floor */
     int fetch_in_flight;
 } NmCredits;
