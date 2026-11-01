@@ -198,9 +198,9 @@ prerequisite (skip).
 - Suffix-less test binaries go through automake's `LOG_COMPILER`, **not**
   `TEST_LOG_COMPILER` (which is for `.test` scripts and does nothing here).
 - **The E2E harness drives the binary:** `tests/e2e_portty/` (see its README)
-  runs `src/nevermore` through coffer's `cfr-debug` with `tools/fake-ollama`. It
-  is part of `make check` and skips (77) when python3, `cfr-debug` or the binary
-  is absent, so a tests-only build skips it. Two traps:
+  runs `src/nevermore` through coffer's `coffer` PTY inspector CLI with
+  `tools/fake-ollama`. It is part of `make check` and skips (77) when python3,
+  `coffer` or the binary is absent, so a tests-only build skips it. Two traps:
   - **A backgrounded helper must not inherit the harness's stdin:** a job
     reading it can be stopped by SIGTTIN, silently (`kill -0` still says alive).
     Give it `</dev/null`.

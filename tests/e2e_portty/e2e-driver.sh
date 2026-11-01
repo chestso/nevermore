@@ -3,11 +3,11 @@
 #
 # Usage: e2e-driver.sh SCENARIO [FAKE-OLLAMA-SCENARIO]
 #
-# Spawns the built nevermore through coffer's cfr-debug PTY inspector,
-# points it at tools/fake-ollama on an ephemeral port, and replays
-# tests/e2e_portty/<SCENARIO>.script against it. Exit 0 = the scenario
-# passed, 1 = it failed, 77 = this box cannot run it (the automake skip
-# convention; see README.md).
+# Spawns the built nevermore through coffer's PTY inspector (the
+# `coffer` CLI), points it at tools/fake-ollama on an ephemeral port,
+# and replays tests/e2e_portty/<SCENARIO>.script against it. Exit 0 =
+# the scenario passed, 1 = it failed, 77 = this box cannot run it (the
+# automake skip convention; see README.md).
 #
 # TIMING DISCIPLINE: every wait in a scenario is a `wait-for` with an
 # explicit budget, bounded by the real clock. The budgets are the only
@@ -39,9 +39,9 @@ fail() {
 command -v python3 >/dev/null 2>&1 ||
 	skip "python3 not found (fake-ollama is the canned provider)"
 
-CFR_DEBUG=${CFR_DEBUG:-cfr-debug}
-command -v "$CFR_DEBUG" >/dev/null 2>&1 ||
-	skip "cfr-debug not installed (coffer's contrib PTY inspector)"
+COFFER_BIN=${COFFER_BIN:-coffer}
+command -v "$COFFER_BIN" >/dev/null 2>&1 ||
+	skip "coffer not installed (coffer's PTY inspector CLI)"
 
 # The binary under test comes from the BUILD TREE (NM_E2E_NEVERMORE,
 # exported by tests/Makefile.am) — never from PATH, so a stale installed
@@ -53,14 +53,14 @@ NEVERMORE_BIN=${NM_E2E_NEVERMORE:-$dir/../../src/nevermore}
 script=$dir/$scenario.script
 [ -f "$script" ] || fail "no such scenario: $script"
 
-# Feature detection: the installed cfr-debug must know the commands the
+# Feature detection: the installed coffer must know the commands the
 # scenario uses, else 77 naming the reason instead of a mystery failure.
-spec=$("$CFR_DEBUG" --help-spec 2>/dev/null) ||
-	skip "cfr-debug --help-spec failed"
+spec=$("$COFFER_BIN" --help-spec 2>/dev/null) ||
+	skip "coffer --help-spec failed"
 for c in wait-for await-exit assert-exit; do
 	case "$spec" in
 	*"$(printf 'CMD\t%s' "$c")"*) ;;
-	*) skip "cfr-debug has no '$c' command (rebuild coffer)" ;;
+	*) skip "coffer has no '$c' command (rebuild coffer)" ;;
 	esac
 done
 
@@ -148,7 +148,7 @@ export NEVERMORE_BASE_URL
 
 # --- run the scenario ------------------------------------------------
 raw=$tmp/raw
-"$CFR_DEBUG" -r 28 -c 90 -w 0 -f "$script" -o "$raw" \
+"$COFFER_BIN" -r 28 -c 90 -w 0 -f "$script" -o "$raw" \
 	-- "$NEVERMORE_BIN" -p ollama:local -m fake:1b
 rc=$?
 if [ "$rc" -ne 0 ]; then
@@ -160,7 +160,7 @@ if [ "$rc" -ne 0 ]; then
 	echo "--- raw PTY capture (tail, escapes visible) ---" >&2
 	tail -c 4000 "$raw" 2>/dev/null | cat -v >&2
 	echo >&2
-	fail "$scenario: cfr-debug exited $rc"
+	fail "$scenario: coffer exited $rc"
 fi
 
 # One wire-level pin: the focused prompt's pink (colors.h's app accent)

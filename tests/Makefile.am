@@ -450,9 +450,9 @@ test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 TESTS = $(check_PROGRAMS)
 
 # End-to-end PTY scenarios (Phase 7): the BUILT binary driven through
-# coffer's cfr-debug PTY inspector with tools/fake-ollama as the canned
-# provider. They exit 77 (the automake skip) when python3, cfr-debug or
-# the built binary is absent — CI without a coffer checkout reports
+# coffer's `coffer` PTY inspector CLI with tools/fake-ollama as the
+# canned provider. They exit 77 (the automake skip) when python3, coffer
+# or the built binary is absent — CI without a coffer checkout reports
 # SKIP, never red. The driver resolves the scenario files through its
 # own $0, so the srcdir/builddir duality is its business, not
 # automake's; the binary comes from NM_E2E_NEVERMORE (the build tree,
@@ -460,7 +460,7 @@ TESTS = $(check_PROGRAMS)
 #
 # NOT in a Windows CROSS tree: the driver runs the binary through a host
 # PTY inspector, and nevermore.exe only exists as something wine can
-# run — cfr-debug would be handed a PE it cannot drive. MSYS2 CI skips
+# run — coffer would be handed a PE it cannot drive. MSYS2 CI skips
 # it too (no coffer there); a cross tree drops it from the roster
 # outright instead of reporting a mystery failure.
 if !CROSS_WINDOWS

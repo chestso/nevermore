@@ -4,7 +4,7 @@
 # 60 s: 10 + 5 + 5 + 15 + 1 + 8 + slack.
 
 # Startup: the banner's identity halves, then the prompt glyph itself
-# (the UTF-8 needle path in cfr-debug, dogfooded).
+# (the UTF-8 needle path in coffer, dogfooded).
 wait-for "ollama:local" 10
 wait-for "fake:1b" 5
 wait-for "❯" 5

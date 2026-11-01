@@ -26,10 +26,10 @@ Both were user calls, and the tracked tree no longer promises either:
 ## E2E testing
 
 `tests/e2e_portty/` (Phase 7) drives the built binary through coffer's
-`cfr-debug` PTY inspector with scripted `wait-for`/`assert-contains`
+`coffer` PTY inspector CLI with scripted `wait-for`/`assert-contains`
 assertions, against `tools/fake-ollama` on an ephemeral port — the
 binary's startup, a turn end to end, the transcript's bytes, and its
-exit status, all through a real terminal. Skipped with exit 77 when
-`cfr-debug` (a coffer tool), `python3` or the built binary is absent
+exit status, all through a real terminal. Skipped with exit 77 when the
+`coffer` CLI (a coffer tool), `python3` or the built binary is absent
 (the automake skip convention). See that directory's README for the
 skip matrix and the scenario rules.

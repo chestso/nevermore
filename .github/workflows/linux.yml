@@ -158,29 +158,31 @@ jobs:
           ../configure --prefix="$HOME/.local" --enable-release
           make -j"$(nproc)" && make install
 
-      - name: Checkout coffer (cfr-debug, the E2E PTY inspector)
+      - name: Checkout coffer (the `coffer` E2E PTY inspector)
         uses: actions/checkout@v5
         with:
           repository: chestso/coffer
           # Pinned: tests/e2e_portty drives the BUILT binary through
-          # coffer's cfr-debug, so a coffer change to the script
+          # coffer's `coffer` CLI, so a coffer change to the script
           # vocabulary or the grid/scrollback queries can break this
-          # repo's e2e. The vocabulary the harness needs (wait-for,
-          # await-exit/assert-exit, the unified-buffer search) landed in
-          # this commit. The same SHA lives in macos.yml; Windows does
+          # repo's e2e. This commit is the one that built the inspector
+          # as the `coffer` binary (it was `contrib/cfr-debug` before),
+          # so it carries both that name and the vocabulary the harness
+          # needs (wait-for, await-exit/assert-exit, the unified-buffer
+          # search). The same SHA lives in macos.yml; Windows does
           # not build coffer yet (its e2e reports SKIP). The coffer
           # commit must be PUSHED before nevermore, or CI cannot fetch
           # it.
-          ref: 31dfa4904fa49780feda7e340a32e64340157ff2
+          ref: 970053e4dcff200cf2757ef4055f2bfb711ee46c
           path: coffer
           fetch-depth: 0
 
-      - name: Build and install coffer (cfr-debug)
+      - name: Build and install coffer (the `coffer` CLI)
         run: |
           cd coffer
           ./autogen.sh
           mkdir build && cd build
-          # --enable-release: cfr-debug is the harness, not the subject
+          # --enable-release: coffer is the harness, not the subject
           # under test; coffer's default ASan+UBSan build would only add
           # startup cost and sanitizer noise to the e2e.
           ../configure --prefix="$HOME/.local" --enable-release
@@ -199,7 +201,7 @@ jobs:
         # the whole step so no hang can burn the job budget.
         timeout-minutes: 20
         run: |
-          # cfr-debug, installed above, is what tests/e2e_portty
+          # coffer, installed above, is what tests/e2e_portty
           # drives; without it on PATH that test SKIPs (77).
           export PATH="$HOME/.local/bin:$PATH"
           make -C build check
