@@ -120,7 +120,9 @@ int nm_credit_format_until(long now, long at, char *out, size_t cap);
  *                | <count> [ "/" <count> ]
  *   exhausted  ::= ( <window-tag> | <unit-tag> ) "!"
  * When `compress` is nonzero and `value == limit`, compresses to one number
- * (e.g. "100k·d" instead of "100k/100k·d").
+ * (e.g. "100k·d" instead of "100k/100k·d"). Both halves of a pair take the
+ * SAME formatter — `compress` collapses a full pair, it never abbreviates
+ * one number and not the other ("1k/1000" read as two units in one cell).
  * If `state == NM_CREDIT_UNKNOWN`, writes "-" if not compressed, or empty if
  * compressed. Returns string length written. */
 int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,

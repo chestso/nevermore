@@ -225,15 +225,25 @@ static void test_credit_full_bracket_compression(void)
     ASSERT_STR_EQ(buf, "100k\xc2\xb7"
                        "d");
 
-    /* Uncompressed: print value/limit */
+    /* Uncompressed: print value/limit — in the SAME form. A compacted
+     * numerator over a raw denominator ("1k/1000·d") read as two
+     * different units inside one cell. */
     nm_credit_format_cell(&b, buf, sizeof(buf), 0);
-    ASSERT_STR_EQ(buf, "100k/100000\xc2\xb7"
+    ASSERT_STR_EQ(buf, "100k/100k\xc2\xb7"
                        "d");
 
     /* Not full: prints value/limit */
     b.value = 50000;
     nm_credit_format_cell(&b, buf, sizeof(buf), 1);
     ASSERT_STR_EQ(buf, "50k/100k\xc2\xb7"
+                       "d");
+
+    /* The free-model counter, the case that showed the bug: 1000/1000
+     * prints "1k/1k", never "1k/1000". */
+    b.value = 1000;
+    b.limit = 1000;
+    nm_credit_format_cell(&b, buf, sizeof(buf), 0);
+    ASSERT_STR_EQ(buf, "1k/1k\xc2\xb7"
                        "d");
 }
 
@@ -582,6 +592,86 @@ static void test_credit_ladder_counts_down(void)
     nm_credit_format_ladder(&cr, "opencode:go", buf, sizeof(buf));
     ASSERT_TRUE(strstr(buf, "mo!") != NULL);
     ASSERT_TRUE(strstr(buf, "monthly allowance (rate-limited)") != NULL);
+}
+
+/* Terminal columns of `s` (continuation bytes excluded). */
+static size_t test_columns(const char *s, size_t n)
+{
+    size_t w = 0;
+    for (size_t i = 0; i < n; i++)
+        if ((((unsigned char)s[i]) & 0xC0) != 0x80)
+            w++;
+    return w;
+}
+
+/* The description column starts in the SAME terminal column on every
+ * row. The cell is the one field that can carry the `·` separator (two
+ * bytes, one column), so a byte-counted "%-16s" shifted exactly the rows
+ * that had a window tag and left "column 2" ragged. */
+static void test_credit_ladder_columns_align(void)
+{
+    NmCredits cr;
+    memset(&cr, 0, sizeof(cr));
+    char buf[512];
+
+    cr.n_brackets = 3;
+    /* A purse: no window tag, so no `·`. */
+    cr.brackets[0].unit = NM_CREDIT_USD;
+    cr.brackets[0].window = NM_CREDIT_PURSE;
+    cr.brackets[0].kind = NM_CREDIT_LEFT;
+    cr.brackets[0].state = NM_CREDIT_KNOWN;
+    cr.brackets[0].value = 20.54;
+    cr.brackets[0].limit = -1;
+    snprintf(cr.brackets[0].label, sizeof(cr.brackets[0].label),
+             "account purse");
+    snprintf(cr.brackets[0].origin_desc, sizeof(cr.brackets[0].origin_desc),
+             "GET /api/v1/credits");
+
+    /* A spend meter: carries `·d`. */
+    cr.brackets[1].unit = NM_CREDIT_USD;
+    cr.brackets[1].window = NM_CREDIT_DAY;
+    cr.brackets[1].kind = NM_CREDIT_SPENT;
+    cr.brackets[1].state = NM_CREDIT_KNOWN;
+    cr.brackets[1].value = 0.93;
+    cr.brackets[1].limit = -1;
+    snprintf(cr.brackets[1].label, sizeof(cr.brackets[1].label),
+             "used today (no cap)");
+    snprintf(cr.brackets[1].origin_desc, sizeof(cr.brackets[1].origin_desc),
+             "GET /api/v1/key");
+
+    /* A request meter: `·d` plus a compacted pair. */
+    cr.brackets[2].unit = NM_CREDIT_REQUESTS;
+    cr.brackets[2].window = NM_CREDIT_DAY;
+    cr.brackets[2].kind = NM_CREDIT_LEFT;
+    cr.brackets[2].state = NM_CREDIT_KNOWN;
+    cr.brackets[2].value = 1000;
+    cr.brackets[2].limit = 1000;
+    snprintf(cr.brackets[2].label, sizeof(cr.brackets[2].label),
+             "free-model requests");
+    snprintf(cr.brackets[2].origin_desc, sizeof(cr.brackets[2].origin_desc),
+             "GET /api/v1/key");
+
+    nm_credit_format_ladder(&cr, "openrouter", buf, sizeof(buf));
+
+    /* "  " + a 16-column cell + one space = the description starts at
+     * terminal column 19 (0-based) on each row, tagged or not. */
+    static const char *labels[] = { "account purse", "used today (no cap)",
+                                    "free-model requests" };
+    for (size_t i = 0; i < sizeof(labels) / sizeof(labels[0]); i++) {
+        const char *p = strstr(buf, labels[i]);
+        ASSERT_TRUE(p != NULL);
+        if (!p)
+            continue;
+        const char *line = p;
+        while (line > buf && line[-1] != '\n')
+            line--;
+        ASSERT_TRUE(test_columns(line, (size_t)(p - line)) == 19);
+    }
+
+    /* The pair a reader sees together: one formatter on both halves. */
+    ASSERT_TRUE(strstr(buf, "1k/1k\xc2\xb7"
+                            "d") != NULL);
+    ASSERT_TRUE(strstr(buf, "1k/1000") == NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1031,6 +1121,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_credit_status_cell_colors);
     RUN_TEST(test_credit_format_until);
     RUN_TEST(test_credit_ladder_counts_down);
+    RUN_TEST(test_credit_ladder_columns_align);
     RUN_TEST(test_credit_age_and_iso8601);
     RUN_TEST(test_credit_fetch_hyper);
     RUN_TEST(test_credit_fetch_ollama_standard);

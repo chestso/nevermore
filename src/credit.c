@@ -14,6 +14,8 @@
 #include <string.h>
 #include <time.h>
 
+#include <boba/unicode.h>
+
 #ifdef _WIN32
 #include <winsock2.h>
 #define nm_usleep(us) Sleep((DWORD)((us) / 1000))
@@ -280,14 +282,16 @@ int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
     }
     case NM_CREDIT_REQUESTS:
     {
+        /* BOTH halves of the pair take the same formatter. Printing the
+         * value compacted and the limit raw ("1k/1000·d") read as two
+         * different units in one cell; `compress` is about collapsing a
+         * full bracket into one number, never about which numbers are
+         * abbreviated. */
         char val_buf[32];
         format_compact_count((long)b->value, val_buf, sizeof(val_buf));
         if (b->limit > 0 && (!compress || !is_full)) {
             char lim_buf[32];
-            if (compress)
-                format_compact_count((long)b->limit, lim_buf, sizeof(lim_buf));
-            else
-                snprintf(lim_buf, sizeof(lim_buf), "%ld", (long)b->limit);
+            format_compact_count((long)b->limit, lim_buf, sizeof(lim_buf));
             snprintf(amount, sizeof(amount), "%s/%s", val_buf, lim_buf);
         } else {
             snprintf(amount, sizeof(amount), "%s", val_buf);
@@ -488,6 +492,28 @@ size_t nm_credit_status_cells(const NmCredits *cr, NmCreditCell *cells,
     return written;
 }
 
+/* Terminal columns a string occupies. boba owns the Unicode rules (wide
+ * CJK, combining marks); a printf field width counts BYTES, which is why
+ * `%-16s` on a cell carrying the separator (U+00B7 is two bytes but one
+ * column) put every tagged row one column left of the rows with no tag. */
+static size_t display_width(const char *s)
+{
+    int w = tui_utf8_display_width(s);
+    return w > 0 ? (size_t)w : 0;
+}
+
+/* Left-justify `s` in a `cols`-wide COLUMN. Overlong text is passed
+ * through whole: the caller keeps a space between fields, so an
+ * over-wide cell pushes its neighbours right instead of gluing to them. */
+static void pad_to_column(const char *s, size_t cols, char *out, size_t cap)
+{
+    size_t w = display_width(s);
+    if (w >= cols)
+        snprintf(out, cap, "%s", s);
+    else
+        snprintf(out, cap, "%s%*s", s, (int)(cols - w), "");
+}
+
 int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
                             char *out, size_t cap)
 {
@@ -568,12 +594,21 @@ int nm_credit_format_ladder(const NmCredits *cr, const char *provider_name,
 
         const char *orig = b->origin_desc[0] ? b->origin_desc : "";
 
+        /* Columns are padded by DISPLAY WIDTH, never by byte count: the
+         * cell is the only field that carries the `·` separator, so a
+         * byte-measured field would shift exactly the rows that have a
+         * window tag. */
+        char cell_col[96];
+        char desc_col[256];
+        pad_to_column(cell_buf, 16, cell_col, sizeof(cell_col));
+        pad_to_column(desc, 46, desc_col, sizeof(desc_col));
+
         if (*orig) {
             off += (size_t)snprintf(out + off, cap > off ? cap - off : 0,
-                                    "  %-16s %-46s %s\n", cell_buf, desc, orig);
+                                    "  %s %s %s\n", cell_col, desc_col, orig);
         } else {
             off += (size_t)snprintf(out + off, cap > off ? cap - off : 0,
-                                    "  %-16s %s\n", cell_buf, desc);
+                                    "  %s %s\n", cell_col, desc_col);
         }
     }
 
@@ -964,7 +999,7 @@ static void openrouter_init_brackets(NmCreditBracket *b, size_t max_b,
     b[1].state = NM_CREDIT_UNKNOWN;
     b[1].limit = -1;
     b[1].percent_used = -1;
-    snprintf(b[1].label, sizeof(b[1].label), "key purse: no key limit (limit_remaining null)");
+    snprintf(b[1].label, sizeof(b[1].label), "key purse: no limit set");
     snprintf(b[1].origin_desc, sizeof(b[1].origin_desc), "GET /api/v1/key");
 
     b[2].unit = NM_CREDIT_REQUESTS;
@@ -1056,7 +1091,7 @@ static int openrouter_map_endpoint(const NmJson *doc, int step,
             brackets[1].value = -1;
             brackets[1].limit = -1;
             snprintf(brackets[1].label, sizeof(brackets[1].label),
-                     "key purse: no key limit (limit_remaining null)");
+                     "key purse: no limit set");
         }
         brackets[1].origin = NM_CREDIT_FROM_ENDPOINT;
         brackets[1].observed_at = now;

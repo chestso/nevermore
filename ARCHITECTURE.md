@@ -967,7 +967,10 @@ Two halves, one sniffer.
   numbers from the other end: percent cells are REMAINING (the wire's `percent`
   is used; the mapper inverts once), a refused window prints `5h!`, and every
   bracket with a `resets_at` counts down to it, because a percentage without
-  its reset instant cannot be acted on.
+  its reset instant cannot be acted on. The ladder pads its columns by DISPLAY
+  WIDTH, never by byte count: the cell is the only field that can carry `·`
+  (two bytes, one column), so a byte-measured `%-16s` ragged exactly the rows
+  that had a window tag.
 - **Foreground only, no surface.** The row (and the prompt below it) paints no
   background: the canvas stays the terminal's, which in chest.so's projects is
   pitch-black or transparent, and a painted band shows as a rectangle under the
