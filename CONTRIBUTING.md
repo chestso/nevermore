@@ -71,6 +71,13 @@ or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
   `proc_w32.c`), and our Windows token is `w32`, never `win` (see
   ARCHITECTURE.md, Naming). Guards: `ls src/nm_*` prints nothing, and a new
   header is checked against `ls src/*.h` and the platform's include dir.
+- **Time values are milliseconds, everywhere.** Every time-valued config key
+  (`timeout`, `connect_timeout`, `handshake_timeout`, `searxng_timeout`,
+  `run_command_timeout`, `poll_timeout`, `credits_ttl`) is a positive decimal
+  in ms, and its env spelling ends in `_MS` (`off`, where a key takes it,
+  disables). A key documented in any other unit is a bug: `credits_ttl` was
+  documented in seconds while being resolved through the ms family's helper,
+  and a value written under one story silently meant the other.
 - **Warnings: fix the smell, accept the noise.** A warning that names a real
   hole is fixed at its root (a buffer sized for the worst its type can produce,
   never for the values seen). A genuine false positive, or an OS-native

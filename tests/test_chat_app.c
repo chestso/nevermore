@@ -446,7 +446,7 @@ static AppHarness *harness_new_full(const char *provider, const char *model,
 
     /* The startup credit warm main.c performs, pinned the harness's
      * way: the store reads "fetched at launch", so the post-turn
-     * refresh TTL (credits_ttl, 300 s) is shut — and under this
+     * refresh TTL (credits_ttl, 300000 ms) is shut — and under this
      * harness's FROZEN clock it can never open. That is the point:
      * the refresh would fire a background balance GET at the first
      * turn's end, and the scripted servers here serve one chat round
@@ -3170,9 +3170,9 @@ static void test_credits_status_refreshes_after_ttl(void)
     free(row);
     free(prompt);
 
-    /* Ten minutes later — well past the 300 s default — a second turn
-     * completes. Its round folds nothing but still carries a 200, and
-     * the wire's purse has moved. */
+    /* Ten minutes later — well past the 300000 ms default — a second
+     * turn completes. Its round folds nothing but still carries a 200,
+     * and the wire's purse has moved. */
     nm_test_clock_advance_ms(600 * 1000);
     s.purse = 5.00;
     harness_type(h, "two");
@@ -4104,7 +4104,7 @@ static void test_connect_walk_notice_is_printed(void)
  * The endpoint is a bracketed IPv6 literal, the exact shape the
  * family-skip feature exists for: one address, unroutable here, so the
  * walk exhausts its single attempt and the turn reports within the
- * budget instead of hanging for the 300 s inactivity default. */
+ * budget instead of hanging for the 300000 ms inactivity default. */
 static void test_black_hole_connect_is_bounded_by_the_tick(void)
 {
     scratch_store_begin();
@@ -4120,9 +4120,9 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
 
     /* The seam under test: while connecting, the agent must report the
-     * budget as its next deadline. Without the fix this is the 300 s
-     * inactivity value (or -1), and the tick below never fires the
-     * walk's advance. */
+     * budget as its next deadline. Without the fix this is the
+     * 300000 ms inactivity value (or -1), and the tick below never
+     * fires the walk's advance. */
     int to = nm_agent_next_timeout_ms(nm_chat_app_agent(h->app));
     ASSERT_TRUE(to >= 0 && to <= 250);
 
@@ -6307,9 +6307,22 @@ static void test_config_runtime_change_writes_shadow(void)
      * reported (and persisted) canonically. */
     ASSERT_TRUE(strstr(harness_read(h), "config: reasoning_echo = all") != NULL);
 
+    /* credits_ttl is a duration in ms like every time-valued key: a
+     * real window round-trips, a sub-second one is refused (it is a
+     * balance-fetch cadence — the app's failed-attempt backoff is the
+     * window itself). */
+    harness_type(h, "/config set credits_ttl 2000");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "config: credits_ttl = 2000") != NULL);
+    harness_type(h, "/config set credits_ttl 300");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "config: credits_ttl: invalid value '300'") != NULL);
+
     /* The shadow holds the normalized value (one canonical spelling per
      * key: `on` -> `all` here, `TRUE` -> `on` for a bool key). */
-    ASSERT_STR_EQ(cfg_read_shadow(), "rounds = 7\nreasoning_echo = all\n");
+    ASSERT_STR_EQ(cfg_read_shadow(),
+                  "rounds = 7\nreasoning_echo = all\ncredits_ttl = 2000\n");
     /* The user file is byte-identical: the app wrote exactly one file. */
     ASSERT_TRUE(cfg_file_present(g_cfg_user));
     ASSERT_STR_EQ(cfg_user_bytes(), "model.ollama:local = from-user\n");

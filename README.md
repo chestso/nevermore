@@ -224,6 +224,9 @@ provider, nevermore asks you to choose one with `/model` instead of guessing an
 id from another provider's catalog. `-m ID` / `$NEVERMORE_MODEL` set the model
 for this run only, for the provider the run resolved.
 
+Every time-valued setting below is milliseconds, and the matching environment
+variable says so with an `_MS` suffix.
+
 - `provider` (default `ollama:local`): active provider
 - `model.<provider>` (default none): model id, remembered per provider
 - `rounds` (default 25): max tool rounds in one turn; past it the turn stops
@@ -270,6 +273,10 @@ for this run only, for the provider the run resolved.
 - `skills` (default on): skill discovery, read when a chat starts
 - `image_live` (default 1): how many requests an image rides before it becomes a
   text marker; `off` keeps it on every request
+- `credits_ttl` (default 300000 ms): how stale the credit balance may get before
+  a background refresh fires — at a turn's end and on the idle tick alike;
+  `off` disables both (`/credits` still fetches on demand); sub-second values
+  are refused
 
 Environment-only knobs: `NEVERMORE_CONFIG` and `NEVERMORE_SHADOW_CONFIG`
 relocate the two files, `NEVERMORE_BASE_URL` overrides the endpoint for one run,

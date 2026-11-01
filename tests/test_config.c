@@ -908,7 +908,7 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_IMAGE_LIVE),
                   "NEVERMORE_IMAGE_LIVE");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_CREDITS_TTL),
-                  "NEVERMORE_CREDITS_TTL");
+                  "NEVERMORE_CREDITS_TTL_MS");
     ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SERVED_NOTICE),
                   "NEVERMORE_SERVED_NOTICE");
     ASSERT_NULL(nm_config_env_name("bogus"));
@@ -1102,6 +1102,68 @@ static void test_duration_keys(void)
     test_unsetenv("NEVERMORE_TIMEOUT_MS");
 
     nm_config_free(c);
+}
+
+/* `credits_ttl` is a duration in MILLISECONDS, like every time-valued
+ * key — it was the one that was not (documented seconds, resolved
+ * through the ms family), and the unification redefines its decimal.
+ * Two guards come with that: a FLOOR (the TTL is a balance-fetch
+ * cadence, and the app's failed-attempt backoff is the window itself,
+ * so a sub-second value would hammer the balance endpoint), and the
+ * load-time tripwire (a file or shadow line written under the OLD
+ * seconds story — 300, 60, ... — is refused loudly instead of silently
+ * becoming a 300 ms window). */
+static void test_credits_ttl_key(void)
+{
+    pin_paths("credits-ttl");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+
+    /* Unset: the five-minute window the key has always meant, with no
+     * layer claiming it (the get-NULL rule of the default layer). */
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c), 300000);
+    ASSERT_NULL(nm_config_get(c, NM_CFG_KEY_CREDITS_TTL));
+
+    /* A ms decimal round-trips, and `off` disables (0, distinct from
+     * the default). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_CREDITS_TTL, "45000"), 0);
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c), 45000);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_CREDITS_TTL, "off"), 0);
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_CREDITS_TTL, "1000"), 0);
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c), 1000);
+
+    /* The floor: sub-second windows are refused, in the shadow
+     * write-back and the file layer alike (a refused write leaves the
+     * previous value standing). */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_CREDITS_TTL, "999"), -1);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_CREDITS_TTL, "0"), -1);
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c), 1000);
+    nm_config_free(c);
+
+    /* The migration tripwire: a line written when the key meant
+     * SECONDS is refused at load with the invalid-value notice, so the
+     * default stands — never a silent 300 ms window. A valid line
+     * after it still lands (the parse loop reads on). */
+    pin_paths("credits-ttl-old");
+    write_file_at(g_user, "credits_ttl = 300\ntimeout = 60000\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_NULL(nm_config_get(c2, NM_CFG_KEY_CREDITS_TTL));
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c2), 300000);
+    ASSERT_EQ(nm_config_resolve_duration_ms(c2, NM_CFG_KEY_TIMEOUT, -1),
+              60000);
+
+    /* The env spelling carries the family's unit suffix; the old
+     * seconds-era name is simply not a variable any more (a value
+     * there is never read, so it cannot pin a sub-second window). */
+    test_setenv("NEVERMORE_CREDITS_TTL", "300");
+    test_setenv("NEVERMORE_CREDITS_TTL_MS", "45000");
+    nm_config_set_env(c2);
+    ASSERT_EQ(nm_config_resolve_credits_ttl_ms(c2), 45000);
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_CREDITS_TTL_MS");
+    test_unsetenv("NEVERMORE_CREDITS_TTL");
 }
 
 /* The `image_live` key: how many REQUESTS an image rides before its
@@ -1967,6 +2029,7 @@ int main(void)
     RUN_TEST(test_view_separates_unset_from_a_default);
     RUN_TEST(test_connect_knobs);
     RUN_TEST(test_duration_keys);
+    RUN_TEST(test_credits_ttl_key);
     RUN_TEST(test_image_live_key);
     RUN_TEST(test_defaults_and_resolve);
     RUN_TEST(test_runtime_layer);

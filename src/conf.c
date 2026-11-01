@@ -179,7 +179,7 @@ static const struct
     { NM_CFG_KEY_TEMPERATURE, "NEVERMORE_TEMPERATURE", NULL },
     { NM_CFG_KEY_MAX_TOKENS, "NEVERMORE_MAX_TOKENS", NULL },
     { NM_CFG_KEY_IMAGE_LIVE, "NEVERMORE_IMAGE_LIVE", "1" },
-    { NM_CFG_KEY_CREDITS_TTL, "NEVERMORE_CREDITS_TTL", "300" },
+    { NM_CFG_KEY_CREDITS_TTL, "NEVERMORE_CREDITS_TTL_MS", "300000" },
 };
 
 static void init_keys(NmConfig *c)
@@ -1041,10 +1041,25 @@ static int normalize_value(const char *key, const char *raw, char *out,
         return nm_config_color_canon(raw, out, cap);
     } else if (strcmp(key, NM_CFG_KEY_TIMEOUT) == 0 ||
                strcmp(key, NM_CFG_KEY_RUN_COMMAND_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0 ||
-               strcmp(key, NM_CFG_KEY_CREDITS_TTL) == 0) {
-        /* The duration keys: a positive decimal (ms or s) or `off`. */
+               strcmp(key, NM_CFG_KEY_HANDSHAKE_TIMEOUT) == 0) {
+        /* The duration keys: a positive decimal (ms) or `off`. Every
+         * time-valued key in this table is milliseconds — the env
+         * spellings say so with their _MS suffix, and a key that means
+         * anything else is a bug. */
         return nm_config_duration_canon(raw, out, cap);
+    } else if (strcmp(key, NM_CFG_KEY_CREDITS_TTL) == 0) {
+        /* A duration in ms like the others, with a FLOOR: the TTL is a
+         * balance-fetch cadence, and the app's failed-attempt backoff
+         * is the window itself, so a sub-second value would hammer the
+         * provider's balance endpoint three times a second. The floor
+         * is also the unit migration's tripwire: this key used to be
+         * documented in seconds, and a shadow or file line written
+         * under that story (300, 60, ...) is refused HERE — loudly, at
+         * load, with the invalid-value notice — instead of silently
+         * becoming a 300 ms window. */
+        if (!nm_config_duration_canon(raw, out, cap))
+            return 0;
+        return strcmp(out, "off") == 0 || duration_parse(out) >= 1000;
     } else if (strcmp(key, NM_CFG_KEY_POLL_TIMEOUT) == 0) {
         /* A duration shape too, but `off` is refused: a poll is bounded
          * by its ceiling or by the job's exit, never left unbounded
@@ -1621,9 +1636,12 @@ int nm_config_resolve_image_live(const NmConfig *c)
     return n > 0 ? n : 1;
 }
 
-int nm_config_resolve_credits_ttl(const NmConfig *c)
+int nm_config_resolve_credits_ttl_ms(const NmConfig *c)
 {
-    return nm_config_resolve_duration_ms(c, NM_CFG_KEY_CREDITS_TTL, 300);
+    /* 300000 ms is the five-minute window the key has always meant —
+     * the decimal was redefined from seconds to ms (the one time-valued
+     * key that was not), so the default keeps the behavior. */
+    return nm_config_resolve_duration_ms(c, NM_CFG_KEY_CREDITS_TTL, 300000);
 }
 
 int nm_config_resolve_bool(const NmConfig *c, const char *key, int fallback)

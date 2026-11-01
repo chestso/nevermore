@@ -934,6 +934,16 @@ static void spinner_follow_state(NmChatApp *app, NmAgentState state)
     }
 }
 
+/* credits_ttl in SECONDS. The key itself is milliseconds like every
+ * time-valued config key, while the credits store's clock
+ * (observed_at / fetched_at / credits_retry_at) is monotonic seconds —
+ * this is the one place the two clocks meet, so no caller has to know
+ * either unit. 0 = `off`: no background refresh. */
+static double credits_ttl_sec(const NmChatApp *app)
+{
+    return (double)nm_config_resolve_credits_ttl_ms(app->cfg) / 1000.0;
+}
+
 void nm_chat_app_on_state(NmAgentState state, void *userdata)
 {
     (void)userdata;
@@ -958,7 +968,7 @@ void nm_chat_app_on_state(NmAgentState state, void *userdata)
          * answer from whatever follows. */
         stream_end_all(app);
         if (app->provider) {
-            int ttl = nm_config_resolve_credits_ttl(app->cfg);
+            double ttl = credits_ttl_sec(app);
             if (ttl > 0) {
                 NmCredits *cr = nm_credits_get(app->provider->id);
                 long now = (long)nm_monotonic_seconds();
@@ -2082,7 +2092,7 @@ static int credits_idle_due(const NmChatApp *app, double *due)
     const NmProvider *p = app->provider;
     if (!p->credits || !p->credits->endpoint)
         return 0;
-    int ttl = nm_config_resolve_credits_ttl(app->cfg);
+    double ttl = credits_ttl_sec(app);
     if (ttl <= 0)
         return 0;
     NmCredits *cr = nm_credits_get(p->id);
@@ -2090,7 +2100,7 @@ static int credits_idle_due(const NmChatApp *app, double *due)
     if (at < cr->next_fetch_allowed_at)
         at = cr->next_fetch_allowed_at;
     if (cr->fetched_at > 0) {
-        double fresh_until = (double)cr->fetched_at + (double)ttl;
+        double fresh_until = (double)cr->fetched_at + ttl;
         if (at < fresh_until)
             at = fresh_until;
     }
@@ -2112,9 +2122,7 @@ static void credits_idle_attempt(NmChatApp *app)
         return;
     if (nm_monotonic_seconds() < due)
         return;
-    app->credits_retry_at =
-        nm_monotonic_seconds() +
-        (double)nm_config_resolve_credits_ttl(app->cfg);
+    app->credits_retry_at = nm_monotonic_seconds() + credits_ttl_sec(app);
     const char *key = endpoint_key(app, app->provider);
     nm_credits_fetch_begin(app->provider->id, app->base_url, key);
 }
@@ -2654,7 +2662,7 @@ static void print_credits(NmChatApp *app)
         line = strtok_r(NULL, "\n", &saveptr);
     }
 
-    int ttl = nm_config_resolve_credits_ttl(app->cfg);
+    double ttl = credits_ttl_sec(app);
     long now = (long)nm_monotonic_seconds();
     /* fetched_at: a /credits whose purse came from a startup fetch is
      * stale, however recently a round restamped observed_at. */

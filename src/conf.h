@@ -406,11 +406,14 @@ extern "C" {
  * mid-chat change is harmless: it only changes how OLD images are
  * presented. Env spelling: NEVERMORE_IMAGE_LIVE. */
 #define NM_CFG_KEY_IMAGE_LIVE "image_live"
-/* Background credit balance refresh TTL in seconds.
- * A positive decimal or `off` (disables the background refresh — the
+/* Background credit balance refresh TTL — milliseconds, like every
+ * time-valued key (the env spelling carries the _MS suffix the family
+ * uses). A positive decimal of at least 1000 (a sub-second window would
+ * hammer the balance endpoint — the app's failed-attempt backoff is the
+ * window itself) or `off` (disables the background refresh — the
  * post-turn one and the idle tick's one alike; /credits still fetches
- * on demand). Built-in default 300 seconds.
- * Env spelling: NEVERMORE_CREDITS_TTL. */
+ * on demand). Built-in default 300000 ms, the five-minute window.
+ * Env spelling: NEVERMORE_CREDITS_TTL_MS. */
 #define NM_CFG_KEY_CREDITS_TTL "credits_ttl"
 
 /* The three PRICING/ROUTING keys, all provider-scoped (the `model`
@@ -765,11 +768,12 @@ int nm_config_image_live_canon(const char *value, char *out, size_t cap);
  * the agent reads at the point of use. */
 int nm_config_resolve_image_live(const NmConfig *c);
 /* The `credits_ttl` key resolved and parsed: the background balance
- * refresh TTL in seconds — the post-turn gate's staleness bound and the
- * idle tick's refresh cadence — or 0 for `off` (both disabled; /credits
- * still fetches on demand). Unset resolves to the built-in default
- * (300). */
-int nm_config_resolve_credits_ttl(const NmConfig *c);
+ * refresh TTL in MILLISECONDS — the post-turn gate's staleness bound
+ * and the idle tick's refresh cadence — or 0 for `off` (both disabled;
+ * /credits still fetches on demand). Unset resolves to the built-in
+ * default (300000 ms, five minutes). The app converts to seconds at its
+ * own seam: the credits store's clock is monotonic seconds. */
+int nm_config_resolve_credits_ttl_ms(const NmConfig *c);
 /* Is `value` a `temperature` spelling — a decimal in `0`–`2` (digits,
  * optionally '.' + digits; no sign, no exponent, no bare `.5`, no
  * trailing dot)? The range is the OpenAI-compatible one the gateways
@@ -787,7 +791,9 @@ int nm_config_temperature_canon(const char *value, char *out, size_t cap);
 int nm_config_valid_bool(const char *value);
 /* Is `value` a duration spelling — a positive decimal (ms, up to
  * INT_MAX) or `off` (case-insensitive)? The shape `timeout`,
- * `run_command_timeout` and `handshake_timeout` share; read back by
+ * `run_command_timeout`, `handshake_timeout` and `credits_ttl` share
+ * (`credits_ttl` additionally refuses sub-second values — a refresh
+ * window is a fetch cadence); read back by
  * nm_config_resolve_duration_ms. The decimal range is wider than
  * nm_config_valid_positive_int's (which caps at ~1e6): a
  * stream-inactivity budget is legitimately hours. */
