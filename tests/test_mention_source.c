@@ -11,6 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
+
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
@@ -24,10 +26,11 @@
 static int make_dir(const char *path)
 {
 #ifdef _WIN32
-    return _mkdir(path) == 0 ? 0 : -1;
+    int rc = _mkdir(path);
 #else
-    return mkdir(path, 0755) == 0 ? 0 : -1;
+    int rc = mkdir(path, 0755);
 #endif
+    return rc == 0 || errno == EEXIST ? 0 : -1;
 }
 
 /* Write one file (content is irrelevant — only its size is read). */
@@ -53,8 +56,10 @@ static int fixture_begin(const char *name)
 #else
     snprintf(cmd, sizeof(cmd), "rm -rf '%s' 2>/dev/null", g_root);
 #endif
-    if (system(cmd) != 0)
-        return -1; /* nothing to remove on a first run */
+    /* Best effort: a first run has nothing to remove, and cmd.exe's
+     * `rmdir /s /q` exits nonzero for that where `rm -rf` exits zero,
+     * so the wipe's status decides nothing — the mkdir below does. */
+    (void)system(cmd);
     return make_dir(g_root);
 }
 
