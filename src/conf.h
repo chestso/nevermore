@@ -304,6 +304,15 @@ extern "C" {
  * NEVERMORE_SPINNER_RAMP. */
 #define NM_CFG_KEY_SPINNER_RAMP "spinner_ramp"
 
+/* Whether the prompt offers `@path` file mentions: a bool, default on.
+ * On, typing `@` at a token boundary opens the file picker, Tab
+ * re-enters on a token that is already complete, and a mention that
+ * resolves is underlined (mention.h / mention_ui.h). Off, `@` is plain
+ * text again and submitting annotates nothing — the whole feature is one
+ * switch, because a picker that cannot be trusted to stay shut is worse
+ * than no picker. Env spelling: NEVERMORE_MENTIONS. */
+#define NM_CFG_KEY_MENTIONS "mentions"
+
 /* Whether a round Hyper's Prism model router answered prints a
  * terminal-only notice (`prism: routed to qwen3.8-flash (Qwen3.8-Flash)`,
  * plus the savings figure when the gateway reports one). A bool,

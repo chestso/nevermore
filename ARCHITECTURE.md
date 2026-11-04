@@ -272,10 +272,12 @@ Sources:
   row, since its wire has no per-model field), and Ollama (`0`). See
   `docs/OPENROUTER-API.md` §2.
 - The `/model` argument is a small query grammar (`ModelQuery`,
-  `model_query_parse`): free text (id substring) plus `@vision`, `@image`,
-  `@tools`, `tag:NAME` and `ctx:<op>N` (`>N`, `>=N`, `<N`, `<=N`, `=N`, bare N =
-  at least, `k`/`M` suffix). Tokens AND together, and a malformed token is a
-  named refusal, never a silent id query.
+  `model_query_parse`): free text (id substring) plus `cap:vision`,
+  `cap:image`, `cap:tools`, `tag:NAME` and `ctx:<op>N` (`>N`, `>=N`, `<N`,
+  `<=N`, `=N`, bare N = at least, `k`/`M` suffix). Tokens AND together, and a
+  malformed token is a named refusal, never a silent id query. The capability
+  claim was spelled `@vision` until the prompt's file mentions took `@`; the
+  old spelling is refused with the replacement, not reinterpreted.
 - The picker's right-aligned meta column (`ctx 👀 🖼 🔧`) is display-only. The
   row's item stays the bare id, so compose never sees the meta, and the item
   truncates first.
@@ -990,6 +992,48 @@ Two halves, one sniffer.
   with the dark phase declared as spaces so the row never shifts. The tier is
   passed into the tick, since the model knows nothing of boba, and the frame
   comes back by value, so no consumer can lean on pointer identity.
+
+### `@` file mentions
+
+`mention.{h,c}` (pure), `mention_source.{h,c}` + `mention_source_posix.c` /
+`mention_source_w32.c` (I/O), `mention_ui.{h,c}` (boba glue). The feature is a
+prompt-side file picker: typing `@` at a token boundary browses the working
+directory, and a completed mention is plain text the user can backspace into.
+
+- **The mode is derived, never stored.** "In mention mode" means the cursor sits
+  inside a token of the buffer; `nm_mention_ui_sync` re-answers that from
+  `(text, cursor)` after every input event, and `tui_textinput_revision` is what
+  tells an edit from a cursor move. There is no completed-path object to drift
+  from the bytes, so typing, paste, undo, history recall and re-editing an old
+  mention are one code path. The only memory is one bit (the token Esc
+  dismissed) and the list on screen.
+- **Typing opens; moving never does.** Arrowing through a line must not make
+  popups flash. `Tab` re-enters on demand — and the app routes Tab **before**
+  boba, because boba only asks for completion when the byte before the cursor is
+  a word character, which `@a.` and `@"x"` are not.
+- **The grammar** is `@bare` (to whitespace) or `@"quoted"`, bounded at buffer
+  start or after whitespace or `( [ { , ;`. An open quote is a valid in-progress
+  state and runs only to the end of the line. Paths are stored with `/`; a typed
+  `\` is normalised, so one prompt means one path on every platform.
+- **Listing** is one bounded directory read (2000 entries) — no index, no
+  recursion — ranked prefix-first then subsequence, directories first, deduped by
+  case-folded name. `pinned_browse` (re-entry) lists the whole directory and
+  preselects the token's own leaf.
+- **Styling** is boba style spans (`tui_textinput_set_spans`), declared by
+  `sync` only: absolute byte ranges, so a token split by soft-wrap or half
+  scrolled out of view is underlined where its bytes are. Only mentions that
+  RESOLVE are declared (a fresh stat per token), so the prompt never claims a
+  path that is not there.
+- **Submit** sends the line verbatim and, for the mentions that resolve, queues
+  one note (`nm_agent_note_mentions`) that `nm_agent_start` appends as a
+  synthetic user message right after the user's own — framed by
+  `nm_reminder_frame`, reported through `on_reminder` as `mentions`, bounded by
+  the number of refs rather than the rule table's cap. Bytes are never inlined:
+  the model reads with `read_file`, and the file ledger keeps de-duplicating.
+- **`/`-lines are never scanned** (a command keeps its own grammar), and the
+  `mentions` key turns the whole feature off. `/model`'s capability claim moved
+  from `@vision` to `cap:vision` when `@` became the prompt's sigil; the old
+  spelling is refused with the replacement rather than reinterpreted.
 
 ### Color tier
 

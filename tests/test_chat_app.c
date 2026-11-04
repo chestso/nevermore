@@ -9383,7 +9383,7 @@ static void test_model_picker_shows_capability_metadata(void)
     harness_free(h);
 }
 
-/* "/model @image" opens the picker filtered to image generators. The
+/* "/model cap:image" opens the picker filtered to image generators. The
  * active vision model does NOT carry the capability, so it is not
  * prepended — the answer is only the models that claim it. */
 static void test_model_picker_capability_query_image(void)
@@ -9391,7 +9391,7 @@ static void test_model_picker_capability_query_image(void)
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @image");
+    harness_type(h, "/model cap:image");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
@@ -9411,7 +9411,7 @@ static void test_model_picker_capability_query_image(void)
     harness_free(h);
 }
 
-/* "/model @tools" opens the picker filtered to the models whose catalog
+/* "/model cap:tools" opens the picker filtered to the models whose catalog
  * CLAIMS tool use (tools == 1) — the same claim the 🔧 badge shows. The
  * vision model (tools == 0, "the catalog says nothing") and the image
  * generator (tools == -1, "listed without tools") both drop out, and
@@ -9424,7 +9424,7 @@ static void test_model_picker_capability_query_tools(void)
     AppHarness *h = harness_new("openrouter", "aion-labs/aion-rp-llama-3.1-8b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @tools aion-labs");
+    harness_type(h, "/model cap:tools aion-labs");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
@@ -9446,7 +9446,7 @@ static void test_model_picker_capability_query_tools(void)
     harness_free(h);
 }
 
-/* A catalog with no tool claim at all answers the `@tools` filter with
+/* A catalog with no tool claim at all answers the `cap:tools` filter with
  * the empty-catalog note, never a silent empty modal. */
 static void test_model_picker_capability_query_tools_empty(void)
 {
@@ -9455,7 +9455,7 @@ static void test_model_picker_capability_query_tools_empty(void)
     AppHarness *h = harness_new("ollama:cloud", "gemma4:31b", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @tools");
+    harness_type(h, "/model cap:tools");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "no tool-capable models") != NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "gemma4:31b");
@@ -9488,14 +9488,14 @@ static void test_model_picker_tool_badge_for_hyper_and_opencode(void)
     harness_free(h);
 }
 
-/* "/model @vision" opens the picker filtered to vision models: the
+/* "/model cap:vision" opens the picker filtered to vision models: the
  * image generator is filtered out, the active vision model remains. */
 static void test_model_picker_capability_query_vision(void)
 {
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @vision");
+    harness_type(h, "/model cap:vision");
     harness_enter(h);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "~openai/gpt-astra-latest") != NULL);
@@ -9511,7 +9511,7 @@ static void test_model_picker_capability_query_unknown(void)
     AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "/model @bogus");
+    harness_type(h, "/model cap:bogus");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "unknown capability") != NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
@@ -9519,8 +9519,32 @@ static void test_model_picker_capability_query_unknown(void)
     harness_free(h);
 }
 
+/* The old spelling is refused with the fix, not quietly reinterpreted:
+ * `@` is the prompt's file-mention sigil now, so `/model @vision` must
+ * say where the token went instead of filtering on something else. */
+static void test_model_picker_old_capability_spelling_is_refused(void)
+{
+    AppHarness *h = harness_new("openrouter", "~openai/gpt-astra-latest", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "/model @vision");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "model: '@vision' is now cap:vision") !=
+                NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
+
+    /* An unknown @word gets the vocabulary, never a silent id query. */
+    harness_type(h, "/model @bogus");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h), "cap:vision, cap:image, cap:tools") !=
+                NULL);
+    ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
+
+    harness_free(h);
+}
+
 /* Grammar v2: `tag:NAME` filters by the entry's tags (NmEntry.tags),
- * the same vocabulary `@vision` reads. The openrouter static catalog
+ * the same vocabulary `cap:vision` reads. The openrouter static catalog
  * tags only the vision model. */
 static void test_model_picker_grammar_tag(void)
 {
@@ -9584,7 +9608,7 @@ static void test_model_picker_grammar_ctx_range(void)
 
 /* Grammar v2: tokens combine — a capability, a tag and a ctx bound
  * AND together, and free text rides along. `tag:vision ctx:>128k`
- * leaves the one model that claims both; adding `@image` (which that
+ * leaves the one model that claims both; adding `cap:image` (which that
  * model does not claim) empties the view with the generic note. */
 static void test_model_picker_grammar_combines(void)
 {
@@ -9599,7 +9623,7 @@ static void test_model_picker_grammar_combines(void)
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
     /* Three filters, no match: the image generators are all small. */
-    harness_type(h, "/model tag:vision @image ctx:>2000000");
+    harness_type(h, "/model tag:vision cap:image ctx:>2000000");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "no models match the filter") != NULL);
     ASSERT_STR_EQ(nm_chat_app_model(h->app), "~openai/gpt-astra-latest");
@@ -9718,13 +9742,13 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     AppHarness *h = harness_new("openrouter", "filler-000", base);
     ASSERT_NOT_NULL(h);
 
-    /* /model @image: the deep generator is the ONLY match — past the
+    /* /model cap:image: the deep generator is the ONLY match — past the
      * cap it was invisible and the answer was "none in the catalog".
      * The active filler carries no image_gen, so nothing prepends.
      * The catalog is a WIRE catalog here (an explicit base): /model
      * starts the fetch and returns, so pump the event loop until the
      * popup lands. */
-    harness_type(h, "/model @image");
+    harness_type(h, "/model cap:image");
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "loading the openrouter") != NULL);
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
@@ -10794,6 +10818,385 @@ static void test_context_states_the_active_knobs(void)
     harness_free(h);
 }
 
+/* ---- `@path` file mentions (mention.h / mention_ui.h) ------------- */
+
+/* The mention fixture: one directory with a small, known tree — a file
+ * with a known size, a second name to filter against, and a directory
+ * whose own name needs the quoted form. Rebuilt per test (the scratch
+ * dir is PID-keyed, so a stale tree must not decide an assert). */
+static char g_mfx[600];
+
+static const char *mfx_build(void)
+{
+    snprintf(g_mfx, sizeof(g_mfx), "%s/mfx", test_scratch_dir());
+    char cmd[768];
+#ifdef _WIN32
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\" 2>NUL", g_mfx);
+#else
+    snprintf(cmd, sizeof(cmd), "rm -rf '%s' 2>/dev/null", g_mfx);
+#endif
+    if (system(cmd) != 0) {
+        /* nothing to remove on the first run */
+    }
+    chat_mkdir(g_mfx);
+
+    char p[700];
+    snprintf(p, sizeof(p), "%s/alpha.c", g_mfx);
+    write_file_at(p, "abcdef\n"); /* 7 bytes: the note's size column */
+    snprintf(p, sizeof(p), "%s/beta.txt", g_mfx);
+    write_file_at(p, "xyz\n");
+    snprintf(p, sizeof(p), "%s/my dir", g_mfx);
+    chat_mkdir(p);
+    snprintf(p, sizeof(p), "%s/my dir/a b.txt", g_mfx);
+    write_file_at(p, "hi\n");
+    return g_mfx;
+}
+
+/* Type a mention prompt and return the frame it produced. */
+static const char *mention_frame(AppHarness *h, const char *text)
+{
+    harness_type(h, text);
+    return tui_runtime_render(h->rt);
+}
+
+/* Typing `@` at a token boundary opens the picker on the workdir, and
+ * every further byte narrows it: this is the whole "browse" mode. */
+static void test_mention_popup_opens_and_filters(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/al", dir);
+    const char *frame = mention_frame(h, text);
+    ASSERT_TRUE(strstr(frame, "alpha.c") != NULL);
+    ASSERT_TRUE(strstr(frame, "beta.txt") == NULL);
+    /* The popup says how to drive it (the one-line key hint). */
+    ASSERT_TRUE(strstr(frame, "pick") != NULL);
+    ASSERT_TRUE(strstr(frame, "esc keep as typed") != NULL);
+    ASSERT_TRUE(strstr(frame, "no matches") == NULL);
+
+    harness_free(h);
+}
+
+/* Enter on a file ACCEPTS it — it never submits. The token becomes the
+ * path (quoted if it needs to be), one space follows, the picker
+ * closes, and the line is still the user's to finish. */
+static void test_mention_enter_accepts_and_does_not_submit(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "read @%s/al", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "alpha.c") != NULL);
+
+    harness_enter(h);
+    char want[760];
+    snprintf(want, sizeof(want), "read @%s/alpha.c ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    /* Not submitted: the turn never started and the popup is gone. */
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_IDLE);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_free(h);
+}
+
+/* A directory is a drill-down, not an exit: the token keeps growing
+ * inside the same (quoted) mention and the popup stays open on the
+ * directory's contents. */
+static void test_mention_directory_drills_down(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "look @\"%s/my dir", dir);
+    const char *frame = mention_frame(h, text);
+    /* The row carries the shell's directory mark. */
+    ASSERT_TRUE(strstr(frame, "my dir/") != NULL);
+
+    harness_enter(h);
+    char want[760];
+    snprintf(want, sizeof(want), "look @\"%s/my dir/", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "a b.txt") != NULL); /* still open, inside */
+    ASSERT_TRUE(strstr(frame, "pick") != NULL);
+
+    /* And a pick inside the quote closes it. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ENTER, 0, 0));
+    tui_runtime_flush(h->rt);
+    snprintf(want, sizeof(want), "look @\"%s/my dir/a b.txt\" ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_free(h);
+}
+
+/* Esc means "I will type it myself": the text is untouched, the popup
+ * closes, and MOVEMENT does not reopen it (arrowing through a line must
+ * never make popups flash). Tab is the explicit way back in, and it
+ * opens on the token's own value — so Enter with no other key changes
+ * nothing. */
+static void test_mention_esc_and_reentry(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/al", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+    /* The typed text survived the dismissal. */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+
+    /* Out of the token and back in by MOVEMENT only: still shut. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_HOME, 0, 0));
+    tui_runtime_flush(h->rt);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_END, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    /* Tab re-enters on demand, on the whole directory. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+
+    harness_free(h);
+}
+
+/* The picker shares the app's ONE popup with the command, model and
+ * provider lists, so the mention footer must not survive into them: a
+ * hint that names keys another picker does not honour is a lie. */
+static void test_mention_footer_does_not_leak_into_other_popups(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/al", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "esc keep as typed") != NULL);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    tui_runtime_flush(h->rt);
+
+    /* Now the command picker over the same popup object. */
+    tui_runtime_send(h->rt, tui_msg_interrupt()); /* clear the buffer */
+    tui_runtime_flush(h->rt);
+    harness_type(h, "/");
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "commands") != NULL);
+    ASSERT_TRUE(strstr(frame, "esc keep as typed") == NULL);
+    ASSERT_TRUE(strstr(frame, "no matches") == NULL);
+
+    harness_free(h);
+}
+
+/* Re-entry on a COMPLETE mention (the "swap it for its neighbour"
+ * gesture): Tab on `@dir/alpha.c` opens the directory with alpha.c
+ * itself selected, so Enter re-confirms it — the same text, one space
+ * added — and the popup closes. */
+static void test_mention_reentry_reconfirms_the_token(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/alpha.c", dir);
+    harness_type(h, text);
+    /* Nothing left to complete: the picker is already shut. */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_TAB, 0, 0));
+    tui_runtime_flush(h->rt);
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "pick") != NULL);
+    /* The neighbour is listed too: the listing is the directory. */
+    ASSERT_TRUE(strstr(frame, "beta.txt") != NULL);
+
+    harness_enter(h);
+    char want[760];
+    snprintf(want, sizeof(want), "see @%s/alpha.c ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_free(h);
+}
+
+/* An EDIT revives a dismissed token (typing is the user asking again);
+ * merely looking at it does not. */
+static void test_mention_edit_reopens_the_picker(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/a", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_type(h, "l"); /* the token is now ".../al" */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "alpha.c") != NULL);
+
+    harness_free(h);
+}
+
+/* A resolved mention is underlined in the prompt; one that does not
+ * resolve is not, and the picker says so instead of vanishing. */
+static void test_mention_underline_marks_only_resolved_tokens(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/alpha.c", dir);
+    const char *frame = mention_frame(h, text);
+    /* \x1b[4m is the underline SGR boba paints a style span with. */
+    ASSERT_TRUE(strstr(frame, "\x1b[4m@") != NULL);
+    /* The exact, single match leaves nothing to complete: Enter would
+     * submit, so the popup is already shut. */
+    ASSERT_TRUE(strstr(frame, "pick") == NULL);
+    /* The user's line is intact — no space was appended behind their
+     * back. */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+
+    char miss[700];
+    snprintf(miss, sizeof(miss), "see @%s/nothing.c", dir);
+    /* Clear the buffer the way the user would: an interrupt at the
+     * prompt (idle with text = abort the edit). */
+    tui_runtime_send(h->rt, tui_msg_interrupt());
+    tui_runtime_flush(h->rt);
+    frame = mention_frame(h, miss);
+    ASSERT_TRUE(strstr(frame, "\x1b[4m@") == NULL);
+    ASSERT_TRUE(strstr(frame, "no matches") != NULL);
+
+    harness_free(h);
+}
+
+/* A `/`-line is a command, never a prompt: no mentions on it at all. */
+static void test_mention_slash_line_never_opens(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[700];
+    snprintf(text, sizeof(text), "/model @%s/al", dir);
+    const char *frame = mention_frame(h, text);
+    ASSERT_TRUE(strstr(frame, "pick") == NULL);
+    ASSERT_TRUE(strstr(frame, "no matches") == NULL);
+    ASSERT_TRUE(strstr(frame, "\x1b[4m@") == NULL);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+
+    harness_free(h);
+}
+
+/* The `mentions` key turns the whole feature off: `@` is plain text. */
+static void test_mention_key_disables_the_feature(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_MENTIONS, "off"), 0);
+
+    char text[700];
+    snprintf(text, sizeof(text), "see @%s/alpha.c", dir);
+    const char *frame = mention_frame(h, text);
+    ASSERT_TRUE(strstr(frame, "pick") == NULL);
+    ASSERT_TRUE(strstr(frame, "\x1b[4m@") == NULL);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+    ASSERT_EQ(nm_config_resolve_bool(cfg, NM_CFG_KEY_MENTIONS, 1), 0);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* Submit: the user's line goes out verbatim and the mentions that
+ * resolve ride a framed note right after it — the human sees what the
+ * model was told (transparency), and the bytes come from a stat made at
+ * submit, not from the picker's listing. */
+static void test_mention_submit_sends_a_note(void)
+{
+    const char *dir = mfx_build();
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    char text[800];
+    snprintf(text, sizeof(text), "compare @%s/alpha.c with @\"%s/my dir\"",
+             dir, dir);
+    harness_type(h, text);
+    /* The picker is open on the last token; a send retires it. */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+    /* A user finishing a path dismisses the picker before sending. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    tui_runtime_flush(h->rt);
+    harness_enter(h);
+
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+
+    /* The user's own line rode the wire verbatim. */
+    ASSERT_TRUE(strstr(g_request, "compare @") != NULL);
+    /* The note names both: a file with its size, a directory as one. */
+    char want[800];
+    snprintf(want, sizeof(want), "%s/alpha.c (file, 7 B)", dir);
+    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    snprintf(want, sizeof(want), "%s/my dir (directory)", dir);
+    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    /* It is harness speech, framed and reported (not silent). */
+    ASSERT_TRUE(strstr(g_request, "The user referenced: ") != NULL);
+    ASSERT_TRUE(strstr(g_request, "<system-reminder>") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "reminder (mentions)") != NULL);
+    /* A send retires the picker. */
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    /* History recall needs no mention state: the recalled line is text,
+     * so its mentions resolve (underlined) and the picker re-opens on
+     * the token the cursor lands in. */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_UP, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "\x1b[4m@") != NULL);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -10987,6 +11390,7 @@ int main(void)
     RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
+    RUN_TEST(test_model_picker_old_capability_spelling_is_refused);
     RUN_TEST(test_model_picker_grammar_tag);
     RUN_TEST(test_model_picker_grammar_ctx);
     RUN_TEST(test_model_picker_grammar_ctx_range);
@@ -11005,6 +11409,17 @@ int main(void)
     RUN_TEST(test_skills_reports_none_found);
     RUN_TEST(test_skills_lists_found_skills);
     RUN_TEST(test_load_skill_round_shows_the_body);
+    RUN_TEST(test_mention_popup_opens_and_filters);
+    RUN_TEST(test_mention_enter_accepts_and_does_not_submit);
+    RUN_TEST(test_mention_directory_drills_down);
+    RUN_TEST(test_mention_esc_and_reentry);
+    RUN_TEST(test_mention_footer_does_not_leak_into_other_popups);
+    RUN_TEST(test_mention_reentry_reconfirms_the_token);
+    RUN_TEST(test_mention_edit_reopens_the_picker);
+    RUN_TEST(test_mention_underline_marks_only_resolved_tokens);
+    RUN_TEST(test_mention_slash_line_never_opens);
+    RUN_TEST(test_mention_key_disables_the_feature);
+    RUN_TEST(test_mention_submit_sends_a_note);
 #ifdef _WIN32
     RUN_TEST(test_windows_job_source_kind);
 #else

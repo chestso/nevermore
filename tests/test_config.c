@@ -865,7 +865,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_MAX_TOKENS);
     ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_IMAGE_LIVE);
     ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_CREDITS_TTL);
-    ASSERT_NULL(nm_config_key_at(26));
+    ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_MENTIONS);
+    ASSERT_NULL(nm_config_key_at(27));
     /* The model is not a key: no plain spelling, no env name of its own
      * (the run-level override's spelling is NM_ENV_MODEL). */
     ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));
@@ -1509,6 +1510,40 @@ static void test_spinner_ramp_key(void)
     nm_config_free(c);
 }
 
+/* The `@` mention switch (`mentions`): a bool, ON by default. Off, the
+ * prompt's picker never opens and submitting annotates nothing — the
+ * whole feature is one key (mention_ui.h). */
+static void test_mentions_key(void)
+{
+    pin_paths("mentions");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_MENTIONS, 1));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_MENTIONS), "on");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_MENTIONS),
+                  "NEVERMORE_MENTIONS");
+
+    write_file_at(g_user, "mentions = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_MENTIONS, 1));
+    nm_config_free(c2);
+
+    test_setenv("NEVERMORE_MENTIONS", "true");
+    nm_config_set_env(c2 = nm_config_load());
+    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_MENTIONS, 0));
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_MENTIONS");
+
+    /* A shadow write round-trips; a garbage value is refused. */
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MENTIONS, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "mentions = off\n");
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_MENTIONS, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MENTIONS), 0);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_MENTIONS, 1));
+    nm_config_free(c);
+}
+
 /* The Prism notice gate (`prism_notice`): a bool, ON by default — a
  * round Hyper's model router answered says so on the terminal, and the
  * key is the user's volume knob for that line, nothing more. The CAPTURE
@@ -2039,6 +2074,7 @@ int main(void)
     RUN_TEST(test_reminders_key);
     RUN_TEST(test_login_shell_key);
     RUN_TEST(test_spinner_ramp_key);
+    RUN_TEST(test_mentions_key);
     RUN_TEST(test_prism_notice_key);
     RUN_TEST(test_sampling_knobs);
     RUN_TEST(test_scoped_model_resolution);

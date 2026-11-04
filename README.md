@@ -135,6 +135,23 @@ switching to a provider with no key says so up front, before the first turn.
 - The app paints **foreground colors only**; the terminal keeps its own
   background.
 
+#### `@` file mentions
+
+Typing `@` at the start of a word opens a picker over the working directory:
+`@src/` browses, `@src/cha` filters, Up/Down (or Tab/Shift-Tab) moves, Enter
+picks and never submits, and Esc keeps the text exactly as typed. A directory
+picks with a trailing `/` and stays open inside it; a path with spaces is
+inserted as `@"my dir/a b.txt"`, and an open quote is a valid half-typed state.
+`Tab` on an already-complete mention re-opens it on its own directory with the
+current file selected — the "swap it for its neighbour" gesture. Any edit
+inside a mention re-opens the picker filtered up to the cursor.
+
+A mention that resolves is underlined; one that does not (`@property`, a path
+that is not there) is just text. The line you send is verbatim — the model also
+gets one short note naming the files and directories you pointed at, and reads
+them with `read_file` if they matter. `mentions off` turns the whole feature
+off.
+
 #### Slash commands
 
 - `/model`, `/provider`: switch model or provider (the model picker filters, see
@@ -154,9 +171,11 @@ switching to a provider with no key says so up front, before the first turn.
 - `/ps`, `/kill <id>`: list or stop background jobs
 - `/skills`: list discovered skills and any validation findings
 
-The `/model` picker takes free text (id substring) plus `@vision`, `@image`,
-`@tools`, `tag:NAME` and `ctx:>200k`-style tokens, all ANDed. Its badges are
-`ctx 👀 🖼 🔧` (window, vision, image output, tools).
+The `/model` picker takes free text (id substring) plus `cap:vision`,
+`cap:image`, `cap:tools`, `tag:NAME` and `ctx:>200k`-style tokens, all ANDed
+(the old `@vision` spelling is refused with the fix, since `@` is the prompt's
+file-mention sigil). Its badges are `ctx 👀 🖼 🔧` (window, vision, image
+output, tools).
 
 ### What the model sees
 
@@ -257,6 +276,8 @@ variable says so with an `_MS` suffix.
   your profile; a call's own `login: false` always wins
 - `reminders` (default on): the harness's nudges; the escaping of forged tags is
   never switchable
+- `mentions` (default on): the prompt's `@path` picker, the underline on a
+  mention that resolves, and the note a submitted mention adds
 - `kbd` (default `auto`): kitty keyboard protocol: `auto` (after the terminal
   proves it), `on`, `off`
 - `color` (default `auto`): `auto`, `16` (ANSI palette) or `rgb` (24-bit);

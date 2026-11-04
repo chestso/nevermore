@@ -112,12 +112,18 @@ jobs:
           # from boba, since the app owns the tier DECISION and boba
           # owns emitting it.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. NOTE: this tag must exist on the boba remote
-          # BEFORE nevermore, or CI cannot fetch it. It also names the
-          # version the packaged binaries print (git describe reads
-          # v0.5.4; nevermore reports boba 0.5.4). Bump it in all three
-          # platform workflows at once.
-          ref: v0.5.4
+          # mid-work. NOTE: this commit must exist on the boba remote
+          # BEFORE nevermore, or CI cannot fetch it. It is a SHA rather
+          # than a tag because the prompt's `@` mention picker needs an
+          # API no tag carries yet (style spans, the edit revision, the
+          # whole-token replace, the popup's empty/footer/preselected
+          # rows) and configure PROBES for it: without the bump every
+          # job fails there, with the fix named. `git describe` still
+          # reads v0.5.4-N-g<sha> off it, which is the version the
+          # packaged binaries print and the mac/windows asserts compare
+          # against. Swap in the tag once boba publishes one, in all
+          # three platform workflows at once.
+          ref: df3d8b4
           path: boba
           fetch-depth: 0
 

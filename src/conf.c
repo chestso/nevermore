@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 26
+#define NM_CFG_NKEYS 27
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -180,6 +180,9 @@ static const struct
     { NM_CFG_KEY_MAX_TOKENS, "NEVERMORE_MAX_TOKENS", NULL },
     { NM_CFG_KEY_IMAGE_LIVE, "NEVERMORE_IMAGE_LIVE", "1" },
     { NM_CFG_KEY_CREDITS_TTL, "NEVERMORE_CREDITS_TTL_MS", "300000" },
+    /* Appended, never inserted: the vocabulary is a stable list
+     * (test_config pins every index), so a new key joins the end. */
+    { NM_CFG_KEY_MENTIONS, "NEVERMORE_MENTIONS", "on" },
 };
 
 static void init_keys(NmConfig *c)
@@ -1070,6 +1073,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_SPINNER_RAMP) == 0 ||
+               strcmp(key, NM_CFG_KEY_MENTIONS) == 0 ||
                strcmp(key, NM_CFG_KEY_PRISM_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SERVED_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SKILLS) == 0 ||

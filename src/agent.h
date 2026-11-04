@@ -12,6 +12,7 @@
 #define NM_AGENT_H
 
 #include "conf.h"
+#include "mention.h"
 #include "provider.h"
 #include "session.h"
 #include "skills.h"
@@ -432,6 +433,22 @@ int nm_agent_turn(NmAgent *a, const char *user_input,
 int nm_agent_start(NmAgent *a, const char *user_input,
                    const size_t *image_ids, size_t n_images);
 int nm_agent_step(NmAgent *a);
+
+/* Queue a note for the NEXT nm_agent_start, consumed by it: the files
+ * and directories the user pointed at with `@` in this message. It is
+ * NOT a byte paste and NOT a reminder-table rule — the transcript the
+ * model reads is untouched, so a mention costs a few tokens and the
+ * model fetches what it needs with read_file (where the file ledger
+ * keeps de-duplicating and staleness-checking).
+ *
+ * The note is appended as ONE synthetic user message right after the
+ * user's own, framed by nm_reminder_frame (so it cannot be forged) and
+ * reported through on_reminder as `mentions` (channel USER), which is
+ * how the human sees exactly what the model was told. The note is
+ * bounded by the number of refs, not by the rule table's text cap.
+ *
+ * Passing n == 0 clears any queued note. 0 on success, -1 on OOM. */
+int nm_agent_note_mentions(NmAgent *a, const NmMentionRef *refs, size_t n);
 
 /* Attach a file to the conversation: the bytes are read ONCE here and
  * frozen into the session's image store — later rounds

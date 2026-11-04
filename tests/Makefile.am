@@ -32,6 +32,8 @@ check_PROGRAMS = \
     test_image_codec \
     test_reminder \
     test_file_ledger \
+    test_mention \
+    test_mention_source \
     test_sysout \
     test_credit \
     test_chat_app
@@ -395,6 +397,22 @@ test_reminder_CFLAGS = $(TEST_CFLAGS)
 test_file_ledger_SOURCES = test_file_ledger.c ../src/file_ledger.c
 test_file_ledger_CFLAGS = $(TEST_CFLAGS)
 
+# The `@path` token grammar: pure C (no filesystem, no boba, no
+# terminal) — the scanner, the quoting and the boundary rule.
+test_mention_SOURCES = test_mention.c ../src/mention.c
+test_mention_CFLAGS = $(TEST_CFLAGS)
+
+# The mention listing: the portable half (resolve, rank, sort) plus ONE
+# OS seam for the directory read, split like proc's.
+if HOST_WINDOWS
+MENTION_SOURCE_OS = ../src/mention_source_w32.c
+else
+MENTION_SOURCE_OS = ../src/mention_source_posix.c
+endif
+test_mention_source_SOURCES = test_mention_source.c ../src/mention.c \
+    ../src/mention_source.c $(MENTION_SOURCE_OS)
+test_mention_source_CFLAGS = $(TEST_CFLAGS)
+
 # System line: the carrier seam both entry paths share (the TUI's
 # transcript post and ask mode's stderr). Pure C — the sink IS the
 # injection point, so the test's sink is a memory buffer and no boba, no
@@ -441,6 +459,8 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
     ../src/sysout.c \
+    ../src/mention.c ../src/mention_source.c $(MENTION_SOURCE_OS) \
+    ../src/mention_ui.c \
     $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)

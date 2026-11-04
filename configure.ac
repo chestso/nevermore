@@ -133,6 +133,42 @@ AC_DEFINE([HAVE_BOBA], [1], [boba TUI library is available])
 BOBA_VERSION_STRING=$($PKG_CONFIG --modversion boba)
 AC_DEFINE_UNQUOTED([BOBA_VERSION], ["$BOBA_VERSION_STRING"], [boba library version])
 
+dnl The app calls the newest part of boba's API: styled byte ranges on the
+dnl text input, an edit revision, a whole-token replace, and the list
+dnl popup's empty-state/footer/preselection rows. An install older than
+dnl those fails far from its cause — a stale header is an implicit
+dnl declaration, a stale archive an undefined symbol among hundreds of
+dnl objects. Probe the DECLARATIONS here, so the failure names the fix.
+dnl
+dnl Compile, not link: a cross tree (the macOS pre-flight) has no
+dnl macOS boba to link against — its dependency is this box's install,
+dnl by the script's own design — and a probe that cannot pass there
+dnl would gate the whole check on a link the box cannot perform. A
+dnl header that declares these and a library that lacks them is the
+dnl other failure, and it is a loud one: an undefined symbol at link.
+AC_MSG_CHECKING([for the boba API this tree needs])
+ac_save_CFLAGS="$CFLAGS"
+CFLAGS="$CFLAGS $BOBA_CFLAGS"
+AC_COMPILE_IFELSE(
+  [AC_LANG_PROGRAM([[#include <boba/components/textinput.h>
+                     #include <boba/components/list_popup.h>]],
+                   [[TuiTextSpan span;
+                     (void)tui_textinput_set_spans(0, &span, 0);
+                     (void)tui_textinput_revision(0);
+                     tui_textinput_replace_range(0, 0, 0, "x");
+                     tui_list_popup_set_empty_text(0, "x");
+                     tui_list_popup_set_footer(0, "x");
+                     (void)tui_list_popup_set_selected(0, 0);]])],
+  [AC_MSG_RESULT([yes])],
+  [AC_MSG_RESULT([no])
+   AC_MSG_ERROR([the installed boba is too old: this tree needs
+  tui_textinput_set_spans, tui_textinput_revision,
+  tui_textinput_replace_range, tui_list_popup_set_empty_text,
+  tui_list_popup_set_footer and tui_list_popup_set_selected.
+  Rebuild and install the boba checkout (`make install` in its build
+  dir), then re-run configure here.])])
+CFLAGS="$ac_save_CFLAGS"
+
 dnl ------------------------------------------------------------------
 dnl TLS backend selection (no libcurl, ever).
 dnl

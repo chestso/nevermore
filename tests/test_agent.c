@@ -6595,7 +6595,7 @@ static void test_agent_reminder_image_not_seen(void)
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
     ASSERT_TRUE(strstr(g_requests[1], "cannot accept images") != NULL);
-    ASSERT_TRUE(strstr(g_requests[1], "/model @vision") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "/model cap:vision") != NULL);
     /* The panel and the wire are the same bytes (transparency). */
     ASSERT_TRUE(g_body_has_tag);
     ASSERT_EQ(g_reminder_calls, 1);

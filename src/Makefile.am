@@ -65,6 +65,10 @@ EXTRA_DIST = \
     image_codec.h \
     markdown.h \
     markdown_render.h \
+    mention.h \
+    mention_source.h \
+    mention_source_internal.h \
+    mention_ui.h \
     proc.h \
     proc_internal.h \
     size.h \
@@ -88,9 +92,11 @@ EXTRA_DIST = \
 if HOST_WINDOWS
 TOOLS_SPAWN_SOURCE = tools_spawn_w32.c os_compat_w32.c
 PROCESS_SOURCE = proc_w32.c
+MENTION_SOURCE_OS = mention_source_w32.c
 else
 TOOLS_SPAWN_SOURCE = tools_spawn_posix.c
 PROCESS_SOURCE = proc_posix.c
+MENTION_SOURCE_OS = mention_source_posix.c
 endif
 
 # TLS: exactly one backend, selected by configure. Each backend .c
@@ -187,6 +193,14 @@ nevermore_SOURCES = \
     image_codec.h \
     image_codec.c \
     image.c \
+    mention.h \
+    mention.c \
+    mention_source.h \
+    mention_source_internal.h \
+    mention_source.c \
+    $(MENTION_SOURCE_OS) \
+    mention_ui.h \
+    mention_ui.c \
     highlight.h \
     highlight.c \
     chat_app.h \

@@ -49,6 +49,7 @@
 
 #include "file_ledger.h"
 #include "reminder.h"
+#include "size.h"
 
 #include "provider_internal.h"
 
@@ -122,6 +123,11 @@ struct NmAgent
      * needs no latch at all. */
     unsigned turn;
     int reminder_latch[NM_REMINDER_MAX_RULES];
+    /* The `@` mentions the user pointed at in THIS message, as the text
+     * the harness will append right after the user's own (see
+     * nm_agent_note_mentions). Consumed by nm_agent_start: one turn's
+     * worth of memory, never a session fact. */
+    char *mentions_note;
     /* This session's file ledger (file_ledger.h): what the
      * conversation has already read, so a re-read of an unchanged file
      * is a pointer instead of a duplicate copy, and a file that changed
@@ -537,6 +543,7 @@ void nm_agent_free(NmAgent *a)
     nm_session_free(a->session);
     nm_file_ledger_free(a->file_ledger);
     free(a->round_images);
+    free(a->mentions_note);
     free(a);
 }
 
@@ -714,6 +721,94 @@ static int append_user_reminders(NmAgent *a, NmReminderPoint point)
     }
     nm_reminder_out_free(&out);
     return appended;
+}
+
+/* ---- the `@` mention note (mention.h, chat_app.c) ---------------- */
+
+/* One mention as the note spells it: the path, its kind, and a file's
+ * size. "src/chat_app.c (file, 212 KB)" / "src/ (directory)". */
+static int mention_phrase(NmReminderBuf *b, const NmMentionRef *r)
+{
+    char size[32];
+    size[0] = '\0';
+    if (!r->is_dir && r->size >= 0)
+        nm_size_text((size_t)r->size, size, sizeof(size));
+    char line[512];
+    int n;
+    if (r->is_dir)
+        n = snprintf(line, sizeof(line), "%s (directory)", r->path);
+    else if (size[0])
+        n = snprintf(line, sizeof(line), "%s (file, %s)", r->path, size);
+    else
+        n = snprintf(line, sizeof(line), "%s (file)", r->path);
+    if (n < 0)
+        return -1;
+    size_t len = (size_t)n < sizeof(line) ? (size_t)n : sizeof(line) - 1;
+    return nm_reminder_buf_append(b, line, len);
+}
+
+int nm_agent_note_mentions(NmAgent *a, const NmMentionRef *refs, size_t n)
+{
+    if (!a)
+        return -1;
+    free(a->mentions_note);
+    a->mentions_note = NULL;
+    if (!refs || n == 0)
+        return 0;
+
+    NmReminderBuf b;
+    if (nm_reminder_buf_init(&b) != 0)
+        return -1;
+    if (nm_reminder_buf_append(&b, "The user referenced: ", 21) != 0)
+        goto oom;
+    for (size_t i = 0; i < n; i++) {
+        if (i > 0 && nm_reminder_buf_append(&b, ", ", 2) != 0)
+            goto oom;
+        if (mention_phrase(&b, &refs[i]) != 0)
+            goto oom;
+    }
+    if (nm_reminder_buf_append(&b,
+                               ". Use read_file (or the list tools) to read "
+                               "what you need.",
+                               sizeof(". Use read_file (or the list tools) to "
+                                      "read what you need.") -
+                                   1) != 0)
+        goto oom;
+    a->mentions_note = b.data; /* ownership moves; b is not freed */
+    return 0;
+
+oom:
+    nm_reminder_buf_free(&b);
+    return -1;
+}
+
+/* Append the queued mention note as ONE synthetic user message, right
+ * after the user's own and before the turn's state reminders: the
+ * prefix before it is untouched, so the provider's cached prefix
+ * survives, and the human sees the bytes the model saw (on_reminder).
+ * Unlike the rule table this is not edge-latched and not gated by the
+ * `reminders` key — a mention is the user's own explicit act on this
+ * message, and it is bounded by the number of mentions instead. */
+static void append_mention_note(NmAgent *a)
+{
+    if (!a->mentions_note || !*a->mentions_note || !a->session)
+        return;
+    NmReminderBuf framed;
+    if (nm_reminder_buf_init(&framed) != 0) {
+        free(a->mentions_note);
+        a->mentions_note = NULL;
+        return;
+    }
+    nm_reminder_frame(&framed, a->mentions_note);
+    if (framed.data && *framed.data) {
+        nm_session_append(a->session, NM_ROLE_USER, framed.data);
+        if (a->on_reminder)
+            a->on_reminder("mentions", a->mentions_note,
+                           NM_REMINDER_CHANNEL_USER, a->userdata);
+    }
+    nm_reminder_buf_free(&framed);
+    free(a->mentions_note);
+    a->mentions_note = NULL;
 }
 
 void nm_agent_set_endpoint(NmAgent *a, const char *base_url, const char *api_key)
@@ -2451,6 +2546,9 @@ int nm_agent_start(NmAgent *a, const char *user_input,
      * ride their own user message right after the user's own, before the
      * first round is built — the prefix before this point is untouched,
      * so the provider's cached prefix survives. */
+    /* The user's own `@` mentions come first: they are part of the
+     * message they were typed into. */
+    append_mention_note(a);
     a->turn++;
     append_user_reminders(a, NM_REMINDER_POINT_TURN);
     /* The <env> git stage: the system prompt is not final until it

@@ -60,6 +60,7 @@
 #include "markdown.h"
 #include "markdown_render.h"
 #include "image.h"
+#include "mention_ui.h"
 #include "size.h"
 #include "source.h"
 #include "sysout.h"
@@ -114,12 +115,13 @@ typedef enum
     POPUP_NONE,
     POPUP_MODELS,    /* /model: Enter composes the command */
     POPUP_PROVIDERS, /* /provider: Enter composes the command */
-    POPUP_COMMANDS   /* Tab on a "/..." word: insert the completion */
+    POPUP_COMMANDS,  /* Tab on a "/..." word: insert the completion */
+    POPUP_MENTION    /* the prompt's `@path` picker (mention_ui.h) */
 } PopupKind;
 
-/* Capability query bits for the model picker (`/model @vision`,
- * `/model @image`, `/model @tools`): a catalog-side filter, distinct from
- * the popup's text filter over ids. */
+/* Capability query bits for the model picker (`/model cap:vision`,
+ * `/model cap:image`, `/model cap:tools`): a catalog-side filter, distinct
+ * from the popup's text filter over ids. */
 #define NM_CAP_VISION 1u
 #define NM_CAP_IMAGE  2u
 #define NM_CAP_TOOLS  4u
@@ -129,14 +131,16 @@ typedef enum
  * ("/model gpt tag:vision ctx:>128k"):
  *
  *   <text>      id substring (the popup's own text filter)
- *   @cap        a capability CLAIM: @vision / @image / @tools
+ *   cap:NAME    a capability CLAIM: cap:vision / cap:image / cap:tools
  *   tag:NAME    the entry carries the tag (NmEntry.tags)
  *   ctx:<op>N   context window: >N >=N <N <=N =N (k/M suffix ok)
  *
  * `model_query_parse` is the one scanner; a malformed token is a
  * refusal (a named error), never a silent id query. A v1 argument
- * (bare text, or a lone @cap) parses to the same filter it always
- * did. */
+ * (bare text) parses to the same filter it always did. The capability
+ * claim used to be spelled `@vision`; `@` is the prompt's file-mention
+ * sigil now, so the claim moved into the same `key:value` family as
+ * `tag:` and `ctx:` — and the old spelling is refused with the fix. */
 typedef struct
 {
     char text[128]; /* id substring, "" = none */
@@ -152,6 +156,12 @@ struct NmChatApp
     TuiTextInput *input;
     TuiListPopup *popup;
     PopupKind popup_kind;
+
+    /* The prompt's `@path` picker (mention_ui.h): derived state, the
+     * popup it borrows, one bit of Esc memory. It knows boba and the
+     * filesystem; this file gives it the workdir seam, the config
+     * switch and the popup-kind latch, and nothing else. */
+    NmMentionUi *mention;
 
     /* The status row (spinner glyph + context gauge + separator rule +
      * the right-aligned identity block): boba's statusline component,
@@ -1541,6 +1551,46 @@ static int build_agent(NmChatApp *app, const NmProvider *p)
     return 0;
 }
 
+/* ---- the prompt's `@path` picker (mention_ui.h) ------------------ */
+
+/* The base a relative mention resolves against: the process working
+ * directory. The tools' own NmToolCtx.workdir is NULL for the same
+ * reason (agent.c), so a mention and a read_file of the same relative
+ * path name the same file. */
+static const char *mention_workdir(void *ud)
+{
+    (void)ud;
+    return NULL;
+}
+
+/* Is the feature on? The store's `mentions` key, resolved at the point
+ * of use — so /config takes effect on the next keystroke. */
+static int mention_enabled(void *ud)
+{
+    NmChatApp *app = ud;
+    if (!app || !app->cfg)
+        return 1;
+    return nm_config_resolve_bool(app->cfg, NM_CFG_KEY_MENTIONS, 1);
+}
+
+/* A resolved mention is UNDERLINED and nothing else: the meaning must
+ * survive a 16-colour terminal and a colour-blind reader, and the
+ * prompt is the user's own text, not a status row to colour. */
+static TuiStyle mention_style(void *ud)
+{
+    (void)ud;
+    return tui_style_underline(tui_style_new(), 1);
+}
+
+/* The popup-kind latch: exactly the bit that routes keys here. */
+static void mention_notify(void *ud, int open)
+{
+    NmChatApp *app = ud;
+    if (!app)
+        return;
+    app->popup_kind = open ? POPUP_MENTION : POPUP_NONE;
+}
+
 NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
 {
     const NmProvider *provider = nm_provider_by_name(provider_name);
@@ -1640,6 +1690,19 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     if (!app->popup)
         goto oom;
     tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
+
+    /* The prompt's `@path` picker, over the same input and popup the
+     * other completions use (one widget, one key vocabulary). */
+    NmMentionHost mention_host = {
+        .workdir = mention_workdir,
+        .enabled = mention_enabled,
+        .style = mention_style,
+        .notify = mention_notify,
+        .ud = app,
+    };
+    app->mention = nm_mention_ui_new(app->input, app->popup, &mention_host);
+    if (!app->mention)
+        goto oom;
     /* The tier-dependent colors: applied here for the first paint and
      * RE-applied by apply_chrome_colors once the probe answers. The
      * runtime does not exist yet at construction, so color_depth() reads
@@ -1677,6 +1740,8 @@ void nm_chat_app_free(NmChatApp *app)
      * by the caller (main.c / the test). */
     if (app->cfg && nm_config_store() == app->cfg)
         nm_config_set_store(NULL);
+    /* The mention UI goes first: it borrows the input and the popup. */
+    nm_mention_ui_free(app->mention);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
     tui_statusline_free(app->status);
@@ -2461,9 +2526,9 @@ static void print_help(NmChatApp *app)
                   "  /help              this list\n"
                   "  /model [id|query]  show, set, or pick a model (! id = exact;\n"
                   "                     remembered per provider)\n"
-                  "  /model @vision     pick among vision models (@image = image-gen,\n"
-                  "                     @tools = tool use; combine with text,\n"
-                  "                     tag:NAME and ctx:>128k, e.g.\n"
+                  "  /model cap:vision  pick among vision models (cap:image =\n"
+                  "                     image-gen, cap:tools = tool use; combine\n"
+                  "                     with text, tag:NAME and ctx:>128k, e.g.\n"
                   "                     /model gpt tag:vision ctx:>128k)\n"
                   "  /provider [name|q] show, switch, or pick a provider\n"
                   "                     (fresh session)\n"
@@ -2921,9 +2986,9 @@ static int apply_ctx_token(ModelQuery *q, const char *spec, char *err,
 }
 
 /* Parse a `/model` argument into `q` (which the caller zeroes). One
- * scanner for the whole grammar: `@cap`, `tag:NAME`, `ctx:<op>N`, and
- * free text (accumulated space-joined into q->text). 0 on success, -1
- * with a refusal in `err` on a malformed token — never a silent
+ * scanner for the whole grammar: `cap:NAME`, `tag:NAME`, `ctx:<op>N`,
+ * and free text (accumulated space-joined into q->text). 0 on success,
+ * -1 with a refusal in `err` on a malformed token — never a silent
  * fallthrough to an id query. */
 static int model_query_parse(const char *arg, ModelQuery *q, char *err,
                              size_t errcap)
@@ -2940,13 +3005,28 @@ static int model_query_parse(const char *arg, ModelQuery *q, char *err,
         size_t len = (size_t)(p - tok);
 
         if (tok[0] == '@') {
+            /* One release of the old spelling, refused with the fix:
+             * `@` is the prompt's file-mention sigil now, and a user
+             * who types the old token would otherwise get a filter
+             * that silently means something else. */
             char cap[32];
             snprintf(cap, sizeof(cap), "%.*s", (int)(len - 1), tok + 1);
+            if (capability_token(cap))
+                snprintf(err, errcap, "model: '@%s' is now cap:%s", cap, cap);
+            else
+                snprintf(err, errcap,
+                         "model: '@%s' is not a filter — capability tokens "
+                         "are cap:vision, cap:image, cap:tools",
+                         cap);
+            return -1;
+        } else if (len >= 4 && strncmp(tok, "cap:", 4) == 0) {
+            char cap[32];
+            snprintf(cap, sizeof(cap), "%.*s", (int)(len - 4), tok + 4);
             unsigned bit = capability_token(cap);
             if (!bit) {
                 snprintf(err, errcap,
-                         "model: unknown capability '%s' — one of @vision, "
-                         "@image, @tools",
+                         "model: unknown capability '%s' — one of cap:vision, "
+                         "cap:image, cap:tools",
                          cap);
                 return -1;
             }
@@ -4350,7 +4430,7 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
             return;
         }
         /* Grammar v2 (ModelQuery): free text plus typed tokens —
-         * "@vision" / "tag:vision" / "ctx:>128k" — combine into one
+         * "cap:vision" / "tag:vision" / "ctx:>128k" — combine into one
          * catalog filter. A malformed token is a refusal, never a
          * silent id query. */
         ModelQuery q = { 0 };
@@ -4532,6 +4612,10 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     if (!*text && app->n_pending == 0)
         return;
 
+    /* A send retires the picker: the popup must not outlive the line it
+     * was completing. */
+    nm_mention_ui_close(app->mention);
+
     /* A send with no model is refused BEFORE anything is echoed: the
      * line would otherwise look delivered. The input is left intact so
      * the user can /model and re-submit. Slash commands still run —
@@ -4607,9 +4691,18 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
         echo_pending_images(app);
         size_t n_images = app->n_pending;
         const size_t *ids = app->pending_images;
+        /* The user's `@` mentions: sent as a note, never as bytes —
+         * collected against the filesystem NOW (a path that vanished
+         * since it was typed is simply not annotated). The input is
+         * already cleared, so the text to scan is the one saved above. */
+        NmMentionRef refs[NM_MENTION_MAX_REFS];
+        size_t n_refs = nm_mention_ui_collect(app->mention, saved, refs,
+                                              NM_MENTION_MAX_REFS);
+        nm_agent_note_mentions(app->agent, refs, n_refs);
         /* Failure prints via on_state(ERROR); the session keeps the
          * user message for the retry. */
         nm_agent_start(app->agent, saved, ids, n_images);
+        nm_mention_refs_free(refs, n_refs);
         pending_clear(app);
     }
     free(saved);
@@ -4706,6 +4799,14 @@ static void popup_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
     int key_code = key->key;
     int mods = key->mods;
 
+    /* The mention picker owns its keys outright: typing must REFILTER
+     * it, not dismiss it (which is what the generic tail below does for
+     * every other popup). */
+    if (app->popup_kind == POPUP_MENTION) {
+        nm_mention_ui_key(app->mention, key, cmd_out);
+        return;
+    }
+
     if (key_code == TUI_KEY_TAB && !(mods & TUI_MOD_SHIFT)) {
         tui_list_popup_move_down(app->popup);
         return;
@@ -4779,6 +4880,7 @@ static TuiCmd *chat_interrupt(NmChatApp *app)
         return NULL;
     }
     if (tui_list_popup_is_visible(app->popup)) {
+        nm_mention_ui_close(app->mention);
         tui_list_popup_hide(app->popup);
         app->popup_kind = POPUP_NONE;
         return NULL;
@@ -4822,6 +4924,16 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
             return;
         submit(app, cmd_out);
         return;
+    }
+
+    /* Tab is the APP's before boba's: boba only emits a completion
+     * request when the byte before the cursor is a word character, which
+     * `@a.` and `@"x"` are not — exactly the tokens a re-entry is for.
+     * A mention token wins (a '/'-line never has one, so command and
+     * model completion are untouched). */
+    if (key->key == TUI_KEY_TAB && !(key->mods & TUI_MOD_SHIFT)) {
+        if (nm_mention_ui_reenter(app->mention))
+            return;
     }
 
     TuiUpdateResult r = tui_textinput_update(app->input, input_key_msg(key));
@@ -4917,6 +5029,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
         NmAgentState st = nm_agent_state(app->agent);
         int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
         if (tui_list_popup_is_visible(app->popup)) {
+            nm_mention_ui_close(app->mention);
             tui_list_popup_hide(app->popup);
             app->popup_kind = POPUP_NONE;
         } else if (!busy && tui_textinput_len(app->input) == 0) {
@@ -4939,6 +5052,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
 
     /* Flush so the batch staged by this update commits now (the commit
      * pass runs at the top of flush; coalesces into one write). */
+    nm_mention_ui_sync(app->mention);
     tui_runtime_flush(app->rt);
     return cmd ? tui_update_result(cmd) : tui_update_result_none();
 }

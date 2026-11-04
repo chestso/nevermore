@@ -340,7 +340,7 @@ static int text_image_not_seen(const NmReminderFacts *f, char *out, size_t cap)
                     "strips it, so you cannot see it. Do not describe or "
                     "reason about its contents. If the picture matters, say "
                     "so — the user can switch to a vision model "
-                    "(/model @vision).");
+                    "(/model cap:vision).");
 }
 
 /* --- the result came from outside the machine -------------------- */
