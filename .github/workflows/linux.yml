@@ -242,7 +242,7 @@ jobs:
           # boba.pc is a hard error, so a tarball job cannot skip the
           # dependency it does not compile. The tag is the one the
           # linux build job's note explains.
-          ref: df3d8b4
+          ref: v0.6.0
           path: boba
           fetch-depth: 0
 
