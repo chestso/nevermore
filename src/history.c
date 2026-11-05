@@ -2,11 +2,15 @@
  *
  * One escaped entry per line; multiline prompts ride \n escapes.
  * The ring buffer, duplicate squashing, and Up/Down navigation live
- * in boba's textinput — this module is only the durable copy.
+ * in boba's textinput. boba 0.8 made the model opaque, so its ring is
+ * write-only from here: nevermore keeps the list it persists, with the
+ * same shape as the ring (newest first, duplicates squashed, capped) and
+ * feeds both from nm_history_record().
  *
- * Memory model: escape/unescape buffers are per-call by nature
- * (translating between the textinput's string and the file's line)
- * and freed immediately; nothing accumulates.
+ * Memory model: the durable copy is one strdup per entry, freed when an
+ * entry is squashed, evicted or the process exits; escape/unescape
+ * buffers are per-call by nature (translating between the recorded string
+ * and the file's line) and freed immediately.
  *
  * This is the file path-seam + home-dir pattern authinfo.c copies
  * (nm_authinfo_path / nm_authinfo_set_path): override, then env var
@@ -145,6 +149,71 @@ void nm_history_set_path(const char *path)
 }
 
 /* ---------------------------------------------------------------- */
+/* Durable copy                                                      */
+/* ---------------------------------------------------------------- */
+
+/* Newest first, exactly like the ring: entry 0 is the last prompt sent.
+ * A fixed array of NM_HISTORY_MAX pointers is all the cap allows, and it
+ * makes the cap self-enforcing — there is no capacity to track. */
+static char *g_entries[NM_HISTORY_MAX];
+static int g_count;
+
+void nm_history_record(TuiTextInput *input, const char *line)
+{
+    if (!line || !line[0])
+        return;
+
+    /* Navigation first: boba's ring does its own squashing/eviction, and
+     * the copy below mirrors it so the two never disagree. */
+    if (input)
+        tui_textinput_history_add(input, line);
+
+    /* Squash an earlier identical entry and move this one to the front —
+     * the ring's rule (a repeat is the newest use, never a second row). */
+    for (int i = 0; i < g_count; i++) {
+        if (strcmp(g_entries[i], line) == 0) {
+            free(g_entries[i]);
+            memmove(&g_entries[i], &g_entries[i + 1],
+                    (size_t)(g_count - i - 1) * sizeof(g_entries[0]));
+            g_count--;
+            break;
+        }
+    }
+
+    if (g_count == NM_HISTORY_MAX) {
+        free(g_entries[g_count - 1]);
+        g_count--;
+    }
+
+    char *copy = strdup(line);
+    if (!copy)
+        return; /* out of memory: the ring keeps the entry, the copy skips it */
+    memmove(&g_entries[1], &g_entries[0],
+            (size_t)g_count * sizeof(g_entries[0]));
+    g_entries[0] = copy;
+    g_count++;
+}
+
+int nm_history_count(void)
+{
+    return g_count;
+}
+
+const char *nm_history_get(int i)
+{
+    if (i < 0 || i >= g_count)
+        return NULL;
+    return g_entries[i];
+}
+
+void nm_history_clear(void)
+{
+    for (int i = 0; i < g_count; i++)
+        free(g_entries[i]);
+    g_count = 0;
+}
+
+/* ---------------------------------------------------------------- */
 /* Save / load                                                       */
 /* ---------------------------------------------------------------- */
 
@@ -184,9 +253,6 @@ static int mkdir_p(const char *dir)
 
 int nm_history_load(TuiTextInput *input)
 {
-    if (!input)
-        return 0;
-
     const char *path = nm_history_path();
     FILE *f = fopen(path, "r");
     if (!f)
@@ -206,7 +272,7 @@ int nm_history_load(TuiTextInput *input)
 
         char *unescaped = nm_history_unescape(line);
         if (unescaped) {
-            tui_textinput_history_add(input, unescaped);
+            nm_history_record(input, unescaped);
             free(unescaped);
             count++;
         }
@@ -215,9 +281,9 @@ int nm_history_load(TuiTextInput *input)
     return count;
 }
 
-void nm_history_save(TuiTextInput *input)
+void nm_history_save(void)
 {
-    if (!input || input->history_count == 0)
+    if (g_count == 0)
         return;
 
     const char *path = nm_history_path();
@@ -239,11 +305,11 @@ void nm_history_save(TuiTextInput *input)
     if (!f)
         return;
 
-    /* Write oldest-first (the array is newest-first: add() prepends)
-     * so a load's re-add reconstructs the same order — history
+    /* Write oldest-first (the copy is newest-first: record() prepends)
+     * so a load's re-record reconstructs the same order — history
      * survives a save/load round-trip unchanged. */
-    for (int i = input->history_count - 1; i >= 0; i--) {
-        char *escaped = nm_history_escape(input->history[i]);
+    for (int i = g_count - 1; i >= 0; i--) {
+        char *escaped = nm_history_escape(g_entries[i]);
         if (escaped) {
             fprintf(f, "%s\n", escaped);
             free(escaped);

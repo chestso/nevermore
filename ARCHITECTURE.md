@@ -915,6 +915,22 @@ Two halves, one sniffer.
 - **chat_app** (`chat_app.c`) is the boba Elm component: textinput, popups,
   spinner, and a boba `TuiTranscript` driven by nevermore's markdown grammar
   (`markdown.c`, `markdown_render.c`).
+- **The prompt area is one geometry.** `apply_input_geometry` gives boba's
+  textinput the whole answer in one struct: `NATURAL` sizing soft-wrapped at the
+  terminal width, `INLINE` placement (the composer paints the frame, so the input
+  carries no screen row of its own), and a row cap of `term_h - 2` — the status
+  row plus the slack the transcript budget keeps. boba requires an inline
+  component's rows to fit the screen; capped, a paste taller than the terminal
+  scrolls inside the prompt with the cursor on a row it actually painted, instead
+  of stranding the frame's top rows in the scrollback. The transcript budget
+  reads `tui_textinput_visible_rows` — the number the component will paint,
+  wrapped rows and cap included — so the two row counts cannot drift.
+- **Prompt history has one owner per side.** boba's ring is navigation (Up/Down
+  with prefix matching) and, since boba 0.8, an opaque model: nevermore keeps the
+  durable copy it writes (`history.c` — newest first, duplicates squashed, capped
+  at `NM_HISTORY_MAX`, the same cap the ring is given), feeds both through
+  `nm_history_record`, and writes that copy oldest-first at exit, so a save/load
+  round trip leaves the order as it was.
 - **Interrupt keys.** **Ctrl+C** is a ladder: a busy agent cancels the round, an
   idle prompt holding text aborts the edit, an idle empty prompt quits. **Esc**
   cancels the round and **nothing else**: input keeps its text, the app does not

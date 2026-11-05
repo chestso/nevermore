@@ -54,6 +54,7 @@
 
 #include "chat_app.h"
 #include "conf.h"
+#include "history.h"
 #include "reminder.h"
 #include "colors.h"
 #include "columns.h"
@@ -1591,6 +1592,34 @@ static void mention_notify(void *ud, int open)
     app->popup_kind = open ? POPUP_MENTION : POPUP_NONE;
 }
 
+/* The input's geometry: soft-wrapped at the terminal width, INLINE
+ * placement (nevermore composes the frame, so the input carries no screen
+ * row of its own), and capped to the rows an INLINE frame may paint.
+ * boba requires H <= the screen for an inline component — it counts the
+ * frame's newlines — so without the cap a paste taller than the terminal
+ * would strand rows above the frame; capped, it scrolls inside the prompt
+ * and the cursor is always one of the rows painted.
+ *
+ * The cap mirrors the transcript budget in chat_app_view (term_h minus
+ * the input's rows, the status row and one slack row): the largest prompt
+ * the budget leaves room for is term_h - 2, which is still a frame that
+ * fits exactly when the transcript falls back to its one-row floor.
+ *
+ * The struct is read back and edited, never rebuilt from zero: create()
+ * seeds scrolloff, and set_geometry() copies literally, so a fresh struct
+ * would drop the cursor's context row. */
+static void apply_input_geometry(NmChatApp *app)
+{
+    TuiTextInputGeometry g = tui_textinput_geometry(app->input);
+    g.sizing = TUI_TEXTINPUT_NATURAL;
+    g.place = TUI_TEXTINPUT_INLINE;
+    g.width = app->term_w > 0 ? app->term_w : 80;
+    g.rows = app->term_h - 2;
+    if (g.rows < 1)
+        g.rows = 1;
+    tui_textinput_set_geometry(app->input, &g);
+}
+
 NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
 {
     const NmProvider *provider = nm_provider_by_name(provider_name);
@@ -1672,16 +1701,23 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
         goto oom;
 
     /* Textinput: multiline (Shift+Enter inserts), soft wrap, history
-     * navigation, slash-command word chars. */
-    TuiTextInputConfig ti_cfg = { .multiline = 1 };
+     * navigation, slash-command word chars. The sizing (wrap width,
+     * inline placement, row cap) is one geometry struct, applied by
+     * apply_input_geometry() once term_w/term_h are in force. */
+    TuiTextInputConfig ti_cfg = {
+        .multiline = 1,
+        .wrap = TUI_TEXTINPUT_WRAP,
+    };
     app->input = tui_textinput_create(&ti_cfg);
     if (!app->input)
         goto oom;
     tui_textinput_set_prompt(app->input, PROMPT);
     tui_textinput_set_continuation_prompt(app->input, CONTINUATION_PROMPT);
-    tui_textinput_set_terminal_width(app->input, app->term_w);
-    tui_textinput_set_soft_wrap(app->input, 1);
-    tui_textinput_set_history_size(app->input, 500);
+    apply_input_geometry(app);
+    /* The ring's cap and the durable copy's cap are the same number on
+     * purpose: Up/Down must walk exactly the entries nm_history_save()
+     * writes, or a reload would reorder what the user just navigated. */
+    tui_textinput_set_history_size(app->input, NM_HISTORY_MAX);
     tui_textinput_set_word_chars(
         app->input,
         "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-/:");
@@ -4629,7 +4665,7 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     if (!saved)
         return;
     if (*saved)
-        tui_textinput_history_add(app->input, saved);
+        nm_history_record(app->input, saved);
 
     /* The echo contract (D10): submit FINALIZES every LIVE block across
      * all streams and does not echo; a flush commits those blocks above
@@ -4968,7 +5004,7 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
     case TUI_MSG_WINDOW_SIZE:
         app->term_w = msg.data.size.width;
         app->term_h = msg.data.size.height;
-        tui_textinput_set_terminal_width(app->input, app->term_w);
+        apply_input_geometry(app);
         tui_list_popup_set_terminal_size(app->popup, app->term_w, app->term_h);
         tui_statusline_set_terminal_width(app->status, app->term_w);
         app->render_state.width = app->term_w;      /* image display math */
@@ -5335,20 +5371,14 @@ static void compose_status(NmChatApp *app)
 /* View (live region only — never the transcript)                   */
 /* ---------------------------------------------------------------- */
 
-/* Input rendered row count: boba counts frame rows by newlines, so
- * 1 + logical newlines. Shared by the view and the transcript budget
- * so the two cannot drift. */
+/* Input rendered row count: boba's visible rows for the input — wrapped
+ * rows and the inline row cap included, so it is exactly what the
+ * component will paint this frame. Shared by the view and the transcript
+ * budget so the two cannot drift. */
 static int nm_chat_app_input_rows(const NmChatApp *app)
 {
-    const char *text = tui_textinput_text(app->input);
-    if (!text)
-        return 1;
-    int rows = 1;
-    for (const char *p = text; *p; p++) {
-        if (*p == '\n')
-            rows++;
-    }
-    return rows;
+    int rows = tui_textinput_visible_rows(app->input);
+    return rows > 0 ? rows : 1;
 }
 
 static TuiView chat_app_view(const TuiModel *model, DynamicBuffer *out)

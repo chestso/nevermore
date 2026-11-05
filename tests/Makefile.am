@@ -351,8 +351,9 @@ test_spinner_SOURCES = test_spinner.c ../src/spinner.c
 test_spinner_CFLAGS = $(TEST_CFLAGS)
 
 # History: escape/unescape + real save/load against a temp file via
-# the path-override seam. Links boba's textinput (the history ring +
-# Up/Down navigation are boba's; nevermore only persists them).
+# the path-override seam, plus the durable copy's squash/cap rules.
+# Links boba's textinput (Up/Down navigation and its ring are boba's;
+# nevermore keeps the copy it writes, since that ring is opaque).
 test_history_SOURCES = test_history.c ../src/history.c
 test_history_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
 test_history_LDADD = $(BOBA_LIBS)
@@ -458,7 +459,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     $(TEST_TLS_SOURCE) ../src/nevermore.c ../src/authinfo.c ../src/source.c \
-    ../src/sysout.c \
+    ../src/sysout.c ../src/history.c \
     ../src/mention.c ../src/mention_source.c $(MENTION_SOURCE_OS) \
     ../src/mention_ui.c \
     $(TEST_PROVIDER_SOURCES)

@@ -157,17 +157,26 @@ static void drop_test_dir(void)
 static void test_history_save_then_load(void)
 {
     ASSERT_TRUE(make_test_dir() == 0);
+    nm_history_clear();
 
     TuiTextInput *in = tui_textinput_create(NULL);
     ASSERT_NOT_NULL(in);
-    tui_textinput_set_history_size(in, 100);
+    tui_textinput_set_history_size(in, NM_HISTORY_MAX);
 
-    tui_textinput_history_add(in, "first prompt");
-    tui_textinput_history_add(in, "multi\nline\nprompt");
-    tui_textinput_history_add(in, "what about \\n literal?");
+    nm_history_record(in, "first prompt");
+    nm_history_record(in, "multi\nline\nprompt");
+    nm_history_record(in, "what about \\n literal?");
+
+    /* The durable copy is newest-first, like the ring it mirrors. */
+    ASSERT_EQ(nm_history_count(), 3);
+    ASSERT_STR_EQ(nm_history_get(0), "what about \\n literal?");
+    ASSERT_STR_EQ(nm_history_get(1), "multi\nline\nprompt");
+    ASSERT_STR_EQ(nm_history_get(2), "first prompt");
+    ASSERT_NULL(nm_history_get(3));
+    ASSERT_NULL(nm_history_get(-1));
 
     /* Save the REAL way. */
-    nm_history_save(in);
+    nm_history_save();
     tui_textinput_free(in);
 
     /* The file exists and holds three escaped lines, oldest first
@@ -185,16 +194,28 @@ static void test_history_save_then_load(void)
     /* Order in the file: oldest entry first. */
     ASSERT_TRUE(strstr(buf, "first prompt") < strstr(buf, "what about \\\\n literal?"));
 
-    /* Load the REAL way into a fresh input; multiline survives. */
+    /* Load the REAL way into a fresh input. The round trip leaves the
+     * copy in the same order and at the same count: a reloaded line is
+     * re-recorded, so each one is squashed into its own earlier entry
+     * exactly as a repeat submit would be. */
     TuiTextInput *in2 = tui_textinput_create(NULL);
     ASSERT_NOT_NULL(in2);
-    tui_textinput_set_history_size(in2, 100);
+    tui_textinput_set_history_size(in2, NM_HISTORY_MAX);
+    tui_textinput_update(in2, tui_msg_focus());
     int count = nm_history_load(in2);
     ASSERT_EQ(count, 3);
-    ASSERT_EQ(in2->history_count, 3);
-    ASSERT_STR_EQ(in2->history[2], "first prompt");
-    ASSERT_STR_EQ(in2->history[1], "multi\nline\nprompt");
-    ASSERT_STR_EQ(in2->history[0], "what about \\n literal?");
+    ASSERT_EQ(nm_history_count(), 3);
+    ASSERT_STR_EQ(nm_history_get(0), "what about \\n literal?");
+    ASSERT_STR_EQ(nm_history_get(1), "multi\nline\nprompt");
+    ASSERT_STR_EQ(nm_history_get(2), "first prompt");
+
+    /* ... and the ring was fed in the same order, so Up recalls the
+     * newest line first: the copy is not a parallel history the user
+     * cannot reach. */
+    tui_textinput_update(in2, tui_msg_key(TUI_KEY_UP, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(in2), "what about \\n literal?");
+    tui_textinput_update(in2, tui_msg_key(TUI_KEY_UP, 0, 0));
+    ASSERT_STR_EQ(tui_textinput_text(in2), "multi\nline\nprompt");
     tui_textinput_free(in2);
 
     drop_test_dir();
@@ -204,12 +225,13 @@ static void test_history_load_missing_file_is_noop(void)
 {
     ASSERT_TRUE(make_test_dir() == 0);
     nm_unlink(g_file); /* guarantee absent */
+    nm_history_clear();
 
     TuiTextInput *in = tui_textinput_create(NULL);
     ASSERT_NOT_NULL(in);
-    tui_textinput_set_history_size(in, 100);
+    tui_textinput_set_history_size(in, NM_HISTORY_MAX);
     ASSERT_EQ(nm_history_load(in), 0);
-    ASSERT_EQ(in->history_count, 0);
+    ASSERT_EQ(nm_history_count(), 0);
     tui_textinput_free(in);
 
     drop_test_dir();
@@ -219,14 +241,15 @@ static void test_history_save_creates_missing_dir(void)
 {
     /* One level deeper than the temp dir: save must mkdir -p. */
     ASSERT_TRUE(make_test_dir() == 0);
+    nm_history_clear();
     snprintf(g_file, sizeof(g_file), "%s/deeper/still/history", g_dir);
     nm_history_set_path(g_file);
 
     TuiTextInput *in = tui_textinput_create(NULL);
     ASSERT_NOT_NULL(in);
-    tui_textinput_set_history_size(in, 100);
-    tui_textinput_history_add(in, "in a fresh dir");
-    nm_history_save(in);
+    tui_textinput_set_history_size(in, NM_HISTORY_MAX);
+    nm_history_record(in, "in a fresh dir");
+    nm_history_save();
     tui_textinput_free(in);
 
     FILE *f = fopen(g_file, "rb");
@@ -242,6 +265,57 @@ static void test_history_save_creates_missing_dir(void)
     nm_history_set_path(NULL);
 }
 
+static void test_history_record_squashes_repeats(void)
+{
+    nm_history_clear();
+
+    TuiTextInput *in = tui_textinput_create(NULL);
+    ASSERT_NOT_NULL(in);
+    tui_textinput_set_history_size(in, NM_HISTORY_MAX);
+
+    nm_history_record(in, "alpha");
+    nm_history_record(in, "beta");
+    nm_history_record(in, "alpha"); /* a repeat is the newest use */
+
+    ASSERT_EQ(nm_history_count(), 2);
+    ASSERT_STR_EQ(nm_history_get(0), "alpha");
+    ASSERT_STR_EQ(nm_history_get(1), "beta");
+
+    /* An empty line is not an entry: a bare Enter is not a prompt. */
+    nm_history_record(in, "");
+    nm_history_record(in, NULL);
+    ASSERT_EQ(nm_history_count(), 2);
+
+    tui_textinput_free(in);
+    nm_history_clear();
+}
+
+static void test_history_record_caps_the_copy(void)
+{
+    nm_history_clear();
+
+    TuiTextInput *in = tui_textinput_create(NULL);
+    ASSERT_NOT_NULL(in);
+    tui_textinput_set_history_size(in, NM_HISTORY_MAX);
+
+    char line[32];
+    for (int i = 0; i < NM_HISTORY_MAX + 10; i++) {
+        snprintf(line, sizeof(line), "prompt %d", i);
+        nm_history_record(in, line);
+    }
+
+    /* The copy is capped at the ring's own size: the ten oldest entries
+     * were evicted, the newest one is at the front. */
+    ASSERT_EQ(nm_history_count(), NM_HISTORY_MAX);
+    snprintf(line, sizeof(line), "prompt %d", NM_HISTORY_MAX + 9);
+    ASSERT_STR_EQ(nm_history_get(0), line);
+    snprintf(line, sizeof(line), "prompt 10");
+    ASSERT_STR_EQ(nm_history_get(NM_HISTORY_MAX - 1), line);
+
+    tui_textinput_free(in);
+    nm_history_clear();
+}
+
 int main(void)
 {
     printf("test_history:\n");
@@ -249,6 +323,8 @@ int main(void)
     RUN_TEST(test_history_unescape);
     RUN_TEST(test_history_roundtrip);
     RUN_TEST(test_history_path_default);
+    RUN_TEST(test_history_record_squashes_repeats);
+    RUN_TEST(test_history_record_caps_the_copy);
     RUN_TEST(test_history_save_then_load);
     RUN_TEST(test_history_load_missing_file_is_noop);
     RUN_TEST(test_history_save_creates_missing_dir);

@@ -1845,12 +1845,90 @@ static void test_multiline_input_continuation_aligns_under_prompt(void)
     harness_free(h);
 }
 
-/* The keyboard protocol tier is the terminal's answer, resolved at the
- * point of use: `auto` declares the protocol's flag 1 only once the
- * probe says the terminal speaks it, and the declaration is what makes
- * the runtime push it. Before the answer there is nothing to declare —
- * which changes nothing, since a terminal sends the legacy encodings
- * until we push. */
+/* One long prompt row soft-wraps at the terminal width instead of being
+ * clipped: the tail of the line is on a second row, indented under the
+ * prompt's text column, and the input reports two visible rows (the
+ * composer's transcript budget reads the same number). */
+static void test_long_prompt_soft_wraps_at_the_terminal_width(void)
+{
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    /* 80 columns, prompt 2 columns: 78 bytes fill the first row. */
+    char line[128];
+    memset(line, 'x', 78);
+    memcpy(line + 78, "MARK", 4);
+    line[82] = '\0';
+    harness_type(h, line);
+
+    ASSERT_EQ(tui_textinput_visible_rows(nm_chat_app_textinput(h->app)), 2);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *cont = span_bytes(nm_color_prompt(NM_COLOR_16), "  ");
+    ASSERT_NOT_NULL(prompt);
+    ASSERT_NOT_NULL(cont);
+
+    /* The head of the line is on the prompt's own row ... */
+    char row1[256];
+    snprintf(row1, sizeof(row1), "%sxxxxxxxx", prompt);
+    ASSERT_TRUE(strstr(frame, row1) != NULL);
+    /* ... and the wrap point is NOT clipped: it opens a continuation
+     * row, aligned under the prompt's text column. */
+    char row2[256];
+    snprintf(row2, sizeof(row2), "%sMARK", cont);
+    ASSERT_TRUE(strstr(frame, row2) != NULL);
+
+    free(prompt);
+    free(cont);
+    harness_free(h);
+}
+
+/* A paste taller than the terminal is capped to the rows an inline frame
+ * may paint (the screen minus the status row and the budget's slack), so
+ * the input scrolls inside the prompt rather than pushing the frame off
+ * the screen: the rows painted fit, and the painted text is the tail —
+ * where the cursor is. */
+static void test_tall_paste_is_capped_to_the_screen(void)
+{
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    tui_runtime_send(h->rt, tui_msg_window_size(40, 10));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    char text[512];
+    size_t n = 0;
+    for (int i = 0; i < 20; i++)
+        n += (size_t)snprintf(text + n, sizeof(text) - n, "line %02d\n", i);
+    tui_runtime_send(h->rt, tui_msg_paste(text, n));
+    tui_runtime_drain(h->rt);
+    tui_runtime_flush(h->rt);
+
+    /* The cap is term_h - 2 (status row + slack), well under the 21 rows
+     * the pasted text needs. */
+    int rows = tui_textinput_visible_rows(nm_chat_app_textinput(h->app));
+    ASSERT_EQ(rows, 8);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    /* The frame itself fits the screen: one row per row separator, and
+     * the app paints no more than term_h of them. */
+    int painted = 1;
+    for (const char *p = frame; (p = strstr(p, "\r\n")) != NULL; p += 2)
+        painted++;
+    ASSERT_TRUE(painted <= 10);
+
+    /* Scrolled to the cursor: the newest lines are painted, the first is
+     * not. */
+    ASSERT_TRUE(strstr(frame, "line 19") != NULL);
+    ASSERT_TRUE(strstr(frame, "line 00") == NULL);
+
+    harness_free(h);
+}
+
 static void test_kbd_tier_follows_the_terminal(void)
 {
     AppHarness *h = harness_new("ollama:local", "test-model", NULL);
@@ -11268,6 +11346,8 @@ int main(void)
     RUN_TEST(test_output_marker_is_one_cell_under_every_model);
     RUN_TEST(test_context_gauge_unknown_reads_as_dash);
     RUN_TEST(test_multiline_input_continuation_aligns_under_prompt);
+    RUN_TEST(test_long_prompt_soft_wraps_at_the_terminal_width);
+    RUN_TEST(test_tall_paste_is_capped_to_the_screen);
     RUN_TEST(test_kbd_tier_follows_the_terminal);
     RUN_TEST(test_kbd_full_tier_gives_shift_enter);
     RUN_TEST(test_kbd_wire_shift_press_types_nothing);

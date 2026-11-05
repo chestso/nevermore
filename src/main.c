@@ -483,7 +483,7 @@ static int run_interactive(const char *provider_name, const char *model,
     int rc = tui_runtime_run(rt);
 
     tui_runtime_finish_inline(rt); /* prompt lands in the scrollback */
-    nm_history_save(nm_chat_app_textinput(app));
+    nm_history_save();
     tui_runtime_free(rt); /* frees the app (component->free) */
     return rc == 0 ? 0 : 1;
 }
