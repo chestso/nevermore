@@ -4115,6 +4115,21 @@ static const char *effort_row_token(const char *level)
     return level;
 }
 
+/* The effective effort the status row carries: the level set by
+ * /effort when one is set, else the catalog default the request
+ * will run at, else NULL. `*is_set` (when given) says which —
+ * provenance is part of the display, so the bar can tell a
+ * user-chosen level from an inherited default. */
+static const char *effort_effective(const NmAgent *agent, int *is_set)
+{
+    const char *set = nm_agent_effort(agent);
+    if (is_set)
+        *is_set = set && *set;
+    if (set && *set)
+        return set;
+    return nm_agent_effort_default(agent);
+}
+
 /* ---------------------------------------------------------------- */
 /* Reasoning effort: /effort (the dedicated surface)                   */
 /* ---------------------------------------------------------------- */
@@ -4180,15 +4195,19 @@ static void effort_command(NmChatApp *app, const char *arg)
             if (def)
                 sys_line(app, "  (default: %s)", def);
         }
-        /* The row spelling the status bar carries: the effective
-         * effort (set, else the catalog default, else `-`). */
-        const char *effective = eff ? eff : nm_agent_effort_default(app->agent);
+        /* The row spelling the status bar carries, with its
+         * provenance spelled out: ◆ when /effort set it, ◇ when it
+         * is the model's default (or `-` when neither names one). */
+        int is_set;
+        const char *effective = effort_effective(app->agent, &is_set);
         {
             char row_text[32];
-            snprintf(row_text, sizeof(row_text), "\xe2\x97\x86%s ",
+            snprintf(row_text, sizeof(row_text), "%s%s ",
+                     is_set ? "\xe2\x97\x86" : "\xe2\x97\x87",
                      (effective && *effective) ? effort_row_token(effective)
                                                : "-");
-            sys_line(app, "  row: %s", row_text);
+            sys_line(app, "  row: %s(%s)", row_text,
+                     is_set ? "set" : (effective ? "default" : "unset"));
         }
         return;
     }
@@ -5449,21 +5468,27 @@ static void compose_status(NmChatApp *app)
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
 
-    /* The reasoning effort, always: ◆ + the clipped token (U+25C6
-     * BLACK DIAMOND, one column under every width model — no VS15,
-     * the ↓ precedent). The token is the effective effort — the set
-     * level, else the catalog default the request will run at, else
-     * `-` when neither names one — so an unset effort still shows
-     * what it will do. Priority 0 like the rest of the chrome, in
-     * the identity's Foreground — a hard current-state fact, never
-     * a window-pressure color. */
-    const char *effort = nm_agent_effort(app->agent);
-    if (!effort || !*effort)
-        effort = nm_agent_effort_default(app->agent);
-    snprintf(effort_text, sizeof(effort_text), "\xe2\x97\x86%s ",
+    /* The reasoning effort, always: a diamond + the clipped token.
+     * The token is the effective effort — the set level, else the
+     * catalog default the request will run at, else `-` when neither
+     * names one — so an unset effort still shows what it will do.
+     * Provenance rides the mark AND its color, because the token
+     * alone cannot say it: a level set by /effort is the filled
+     * ◆ (U+25C6) in the identity's Foreground (a hard user fact),
+     * an unset one — the model's default, or `-` — is the hollow
+     * ◇ (U+25C7) in the gauge's Comment (muted chrome, not a
+     * choice). Both diamonds are one column under every width
+     * model — no VS15, the ↓ precedent. Priority 0 like the rest
+     * of the chrome, never a window-pressure color. */
+    int effort_set;
+    const char *effort = effort_effective(app->agent, &effort_set);
+    snprintf(effort_text, sizeof(effort_text), "%s%s ",
+             effort_set ? "\xe2\x97\x86" : "\xe2\x97\x87",
              (effort && *effort) ? effort_row_token(effort) : "-");
-    segs[n++] = status_segment(effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
-                               nm_color_status_identity(color_depth(app)));
+    segs[n++] = status_segment(
+        effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
+        effort_set ? nm_color_status_identity(color_depth(app))
+                   : nm_color_gauge(color_depth(app)));
 
     /* The credit cluster is ONE SEGMENT PER CELL, so each cell carries
      * its own pressure colour. The cells are ADMITTED here, by rank,

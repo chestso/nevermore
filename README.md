@@ -165,7 +165,8 @@ off.
 - `/effort [level]`: how hard the model thinks (bare lists the current
   model's levels; `off` clears). The levels are per model, and changing the
   model resets the effort to the provider default; the status row shows the
-  current level as `◆hi`-style shorthand
+  current level as `◆hi`-style shorthand, filled `◆` when `/effort` set
+  it and hollow `◇` when it is the model's default
 - `/context`: the exact token breakdown (last round, session totals, cache read
   rate)
 - `/session`, `/session list`, `/session save [path]`: inspect or save the

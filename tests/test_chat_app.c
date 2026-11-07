@@ -1343,7 +1343,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *rule = status_row_bytes("\xc2\xb7 -/- \xe2\x97\x86- ",
+    char *rule = status_row_bytes("\xc2\xb7 -/- \xe2\x97\x87- ",
                                   IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
@@ -1567,7 +1567,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_NOT_NULL(frame);
     char *dark = span_bytes(tui_color_ansi(10), "  ");
     char *dark_row =
-        status_row_bytes("  -/- \xe2\x97\x86- ", IDENT("ollama:local", "test-model"));
+        status_row_bytes("  -/- \xe2\x97\x87- ", IDENT("ollama:local", "test-model"));
     char *lit_glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(dark);
     ASSERT_NOT_NULL(dark_row);
@@ -1640,11 +1640,11 @@ static void test_spinner_clears_when_round_completes(void)
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
-    char *rule = status_row_bytes("-/- \xe2\x97\x86- ",
+    char *rule = status_row_bytes("-/- \xe2\x97\x87- ",
                                   IDENT("ollama:local", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     char *effort =
-        span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
+        span_bytes(nm_color_gauge(NM_COLOR_16), "\xe2\x97\x87- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(rule);
     ASSERT_NOT_NULL(dead);
@@ -1786,10 +1786,10 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *rule = status_row_bytes("-/- \xe2\x97\x86- ",
+    char *rule = status_row_bytes("-/- \xe2\x97\x87- ",
                                   IDENT("ollama:local", "test-model"));
     char *effort =
-        span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
+        span_bytes(nm_color_gauge(NM_COLOR_16), "\xe2\x97\x87- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
@@ -2141,10 +2141,12 @@ static void test_config_reports_the_kbd_tier(void)
     harness_free(h);
 }
 
-/* The status row always carries the reasoning effort: the set level
- * when set, else the catalog default the request will run at, else
- * `-` when neither names one. OpenRouter's static catalog gives
- * openai/gpt-oss-120b its effort vocab
+/* The status row always carries the reasoning effort, and its
+ * provenance: a level set by /effort is the filled ◆ in the
+ * identity's Foreground, an unset one — the catalog default the
+ * request will run at, or `-` when neither names one — is the
+ * hollow ◇ in the gauge's Comment. OpenRouter's static catalog
+ * gives openai/gpt-oss-120b its effort vocab
  * (none|minimal|low|medium|high|xhigh|max) and its default (medium). */
 static void test_status_row_carries_the_effort(void)
 {
@@ -2153,10 +2155,11 @@ static void test_status_row_carries_the_effort(void)
     NmAgent *agent = nm_chat_app_agent(h->app);
     ASSERT_NOT_NULL(agent);
 
-    /* Unset: the segment is present, carrying the default. */
+    /* Unset: the segment is present, carrying the default, hollow
+     * and muted — not the filled Foreground span a set level gets. */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86med ");
+    char *span = span_bytes(nm_color_gauge(NM_COLOR_16), "\xe2\x97\x87med ");
     ASSERT_NOT_NULL(span);
     ASSERT_TRUE(strstr(frame, span) != NULL);
     free(span);
@@ -2179,7 +2182,7 @@ static void test_status_row_carries_the_effort(void)
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86med ");
+    span = span_bytes(nm_color_gauge(NM_COLOR_16), "\xe2\x97\x87med ");
     ASSERT_NOT_NULL(span);
     ASSERT_TRUE(strstr(frame, span) != NULL);
     free(span);
@@ -2187,12 +2190,12 @@ static void test_status_row_carries_the_effort(void)
     harness_free(h);
 
     /* A model with no levels and no default still carries the
-     * segment, as `◆-`. */
+     * segment, as `◇-`, hollow and muted like any unset effort. */
     h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
+    span = span_bytes(nm_color_gauge(NM_COLOR_16), "\xe2\x97\x87- ");
     ASSERT_NOT_NULL(span);
     ASSERT_TRUE(strstr(frame, span) != NULL);
     free(span);
@@ -2220,7 +2223,8 @@ static void test_effort_command_sets_and_lists(void)
     harness_enter(h);
     out = harness_read(h);
     ASSERT_TRUE(strstr(out + seen, "accepted: none|minimal|low|medium|high|xhigh|max") != NULL);
-    ASSERT_TRUE(strstr(out + seen, "row: ") != NULL);
+    /* The set level's row spelling, marked set. */
+    ASSERT_TRUE(strstr(out + seen, "row: \xe2\x97\x86hi (set)") != NULL);
     /* The catalog's default for this row (reasoning.default_effort):
      * shown when nothing is sent, so the bare command names what
      * the request will do by default. */
@@ -2241,6 +2245,14 @@ static void test_effort_command_sets_and_lists(void)
     ASSERT_TRUE(nm_agent_effort(agent) == NULL);
     out = harness_read(h);
     ASSERT_TRUE(strstr(out + seen, "reasoning_effort = -") != NULL);
+    seen = strlen(out);
+
+    /* Bare after clearing: the same default, hollow and marked
+     * default — visibly not the set spelling above. */
+    harness_type(h, "/effort");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "row: \xe2\x97\x87med (default)") != NULL);
 
     harness_free(h);
 }
@@ -2713,7 +2725,7 @@ static void test_status_row_paints_no_background(void)
     ASSERT_EQ(has_background_sgr(row), 0);
     /* And the row is still PAINTED: the chrome, the rule and the
      * identity are each foreground spans over the canvas. */
-    char *expected = status_row_bytes("-/- \xe2\x97\x86- ",
+    char *expected = status_row_bytes("-/- \xe2\x97\x87- ",
                                       IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(expected);
     ASSERT_TRUE(strstr(row, expected) != NULL);
@@ -3041,9 +3053,7 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 7u);
     ASSERT_TRUE(strstr(row, "openrouter") == NULL);
     ASSERT_TRUE(strstr(row, "vendor/") == NULL);
-    /* No identity text at all — not even the elided head or the pad.
-     * (The effort segment shares the identity's color, so its SGR
-     * is present; the identity's words are not.) */
+    /* No identity text at all — not even the elided head or the pad. */
     /* The chrome is whole: the gauge and the effort. */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
