@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 #include "conf.h"
 #include "transport.h"
@@ -333,6 +334,8 @@ static void test_wire_refused(void)
     close(fd);
     NmConnectInfo ci = { 0 };
     NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &ci);
+    fprintf(stderr, "  DIAG: test_wire_refused: c=%p status=%d detail='%s' port=%d\n",
+            (void *)c, ci.status, ci.detail, port);
     ASSERT_NULL(c);
     ASSERT_EQ(ci.status, NM_TRANSPORT_ERR_SOCKET);
     /* Always-set contract: the failure names the target. */
@@ -1563,6 +1566,67 @@ static void test_source_wait_any_mixed_set(void)
 }
 #endif
 
+/* --- DIAG (temporary): what does this box's loopback do? --- */
+static void diag_raw_connect(const char *host, int port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = htons((unsigned short)port);
+    int rc = connect(fd, (struct sockaddr *)&a, sizeof(a));
+    fprintf(stderr, "  DIAG: connect %s:%d -> rc=%d errno=%d (%s)\n", host,
+            port, rc, rc == 0 ? 0 : errno,
+            rc == 0 ? "CONNECTED" : strerror(errno));
+    if (rc == 0) {
+        ssize_t w = write(fd, "x", 1);
+        fprintf(stderr, "  DIAG:   write to it -> %zd errno=%d (%s)\n", w,
+                w < 0 ? errno : 0, w < 0 ? strerror(errno) : "-");
+    }
+    close(fd);
+}
+
+static void diag_macos_env(void)
+{
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    const char *hosts[2] = { "localhost", "127.0.0.1" };
+    for (int h = 0; h < 2; h++) {
+        int rc = getaddrinfo(hosts[h], "0", &hints, &res);
+        fprintf(stderr, "  DIAG: getaddrinfo(%s) rc=%d\n", hosts[h], rc);
+        for (struct addrinfo *ai = res; ai; ai = ai->ai_next) {
+            char buf[80] = "?";
+            int port = -1;
+            if (ai->ai_family == AF_INET) {
+                struct sockaddr_in *s = (struct sockaddr_in *)ai->ai_addr;
+                inet_ntop(AF_INET, &s->sin_addr, buf, sizeof(buf));
+                port = ntohs(s->sin_port);
+            } else if (ai->ai_family == AF_INET6) {
+                struct sockaddr_in6 *s = (struct sockaddr_in6 *)ai->ai_addr;
+                inet_ntop(AF_INET6, &s->sin6_addr, buf, sizeof(buf));
+                port = ntohs(s->sin6_port);
+            }
+            fprintf(stderr, "  DIAG:   family=%d addr=%s port=%d\n",
+                    ai->ai_family, buf, port);
+        }
+        if (res) {
+            freeaddrinfo(res);
+            res = NULL;
+        }
+    }
+    /* A port nobody ever bound. */
+    diag_raw_connect("127.0.0.1", 1);
+    /* A port we bound and closed. */
+    int port = 0;
+    int fd = server_bind(&port);
+    close(fd);
+    diag_raw_connect("127.0.0.1", port);
+}
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1570,6 +1634,7 @@ int main(int argc, char *argv[])
 #ifndef _WIN32
     signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
 #endif
+    diag_macos_env();
     if (test_wsa_init() != 0) {
         fprintf(stderr, "  FAIL: WSAStartup\n");
         return 1;

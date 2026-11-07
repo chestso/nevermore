@@ -2145,6 +2145,8 @@ static void test_chat_connect_refused_names_target(void)
     };
 
     NmChatResult r = nm_openai_chat(&ep, &req);
+    fprintf(stderr, "  DIAG: refused chat: status=%d message='%s'\n", r.status,
+            r.message);
     ASSERT_EQ(r.status, NM_CHAT_ERR_TRANSPORT);
     ASSERT_TRUE(r.message[0] != '\0');
     /* The loopback RST can beat begin's return or land in the first

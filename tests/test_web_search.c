@@ -461,6 +461,8 @@ static void test_web_search_http_error_does_not_latch(void)
     close(s.fd);
     NmToolResult r2 = nm_toolset_execute(ts, "web_search", "{\"query\":\"x\"}",
                                          NULL);
+    fprintf(stderr, "  DIAG: web_search: r.output='%s' r2.status=%d r2.output='%s'\n",
+            r.output, r2.status, r2.output);
     ASSERT_EQ(r2.status, NM_TOOL_ERR);
     ASSERT_NOT_NULL(strstr(r2.output, "unreachable"));
     ASSERT_TRUE(strstr(r2.output, "cached") == NULL);
@@ -680,8 +682,19 @@ static void test_web_search_async_step_seam(void)
     nm_toolset_free(ts);
 }
 
+#ifndef _WIN32
+static void diag_sigpipe(int sig)
+{
+    (void)sig;
+    fprintf(stderr, "  DIAG: SIGPIPE caught\n");
+}
+#endif
+
 int main(void)
 {
+#ifndef _WIN32
+    signal(SIGPIPE, diag_sigpipe);
+#endif
     if (test_wsa_init() != 0) {
         fprintf(stderr, "  SKIP: WSAStartup failed\n");
         return 77;

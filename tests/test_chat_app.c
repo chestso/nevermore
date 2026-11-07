@@ -4371,6 +4371,8 @@ static void test_connect_walk_notice_is_printed(void)
     tui_runtime_flush(h->rt);
 
     const char *out = harness_read(h);
+    fprintf(stderr, "  DIAG: chat walk: state=%d out_len=%zu port=%d\n",
+            (int)nm_chat_app_state(h->app), strlen(out), port);
     if (!strstr(out, "did not answer")) {
         size_t n = strlen(out);
         fprintf(stderr, "  note: no walk notice (state=%d): %s\n",

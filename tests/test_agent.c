@@ -950,6 +950,8 @@ static void test_agent_connect_notice_names_the_family(void)
     nm_agent_on_notice(agent, cap_notice);
 
     int rc = nm_agent_turn(agent, "say something", NULL, 0);
+    fprintf(stderr, "  DIAG: agent walk: rc=%d notices=%d text='%s' port=%d\n", rc,
+            g_notice_calls, g_notice_text, sc.port);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(g_text, "walked");
 
