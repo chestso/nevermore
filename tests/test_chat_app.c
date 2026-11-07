@@ -103,11 +103,29 @@ static void test_unsetenv(const char *name)
 #define chat_mkdir(d) mkdir((d), 0755)
 #endif
 
-/* The app's agent source handle as an int (always the stream's
- * socket/fd: these tests drive a stream, never a process job). */
+/* The AGENT's own wait source (the stream's socket, or a tool job's
+ * handle) — what these tests drive by hand. Fetches have their own
+ * entries in the app's interest set. */
+static NmSource app_source(NmChatApp *app)
+{
+    return nm_agent_source(nm_chat_app_agent(app));
+}
+
+/* The agent's source handle as an int. */
 static int app_fd(NmChatApp *app)
 {
-    return (int)nm_chat_app_source(app).handle;
+    return (int)app_source(app).handle;
+}
+
+/* Whether `handle` is in the app's declared wait set. */
+static int interest_has(NmChatApp *app, intptr_t handle)
+{
+    NmSource set[TUI_IO_SOURCE_MAX];
+    size_t n = nm_chat_app_interest(app, set, TUI_IO_SOURCE_MAX);
+    for (size_t i = 0; i < n; i++)
+        if (set[i].handle == handle && set[i].flags)
+            return 1;
+    return 0;
 }
 
 static char g_request[REQ_CAP];
@@ -724,7 +742,7 @@ static void app_wait_src(const NmSource *sp, int timeout_ms)
 /* Wait up to `timeout_ms` for the app's agent source. */
 static void app_wait(AppHarness *h, int timeout_ms)
 {
-    NmSource s = nm_chat_app_source(h->app);
+    NmSource s = app_source(h->app);
     if (s.handle < 0 || !s.flags)
         return;
     app_wait_src(&s, timeout_ms);
@@ -739,18 +757,26 @@ static void harness_step_ack(AppHarness *h)
         server_ack(h->pacer);
 }
 
+static void harness_event_once(AppHarness *h, int wait_ms);
+
+/* Whether the app declares anything to wait on (the agent, a fetch, a
+ * job). */
+static int app_waiting(NmChatApp *app)
+{
+    NmSource set[TUI_IO_SOURCE_MAX];
+    return nm_chat_app_interest(app, set, TUI_IO_SOURCE_MAX) > 0;
+}
+
 /* Drive an in-flight catalog fetch the way the event loop does: wait on
- * the app's source, then hand it to external_ready (the popup opens on
- * the terminal step). Bounded; 0 when no fetch is in flight. */
+ * the app's declared set, dispatch what is ready (the popup opens on
+ * the terminal step), tick on a timeout. Bounded; 0 when nothing is
+ * left to wait on. */
 static int harness_pump_catalog(AppHarness *h, int max_spins)
 {
     for (int i = 0; i < max_spins; i++) {
-        NmSource s = nm_chat_app_source(h->app);
-        if (s.handle < 0 || !s.flags)
+        if (!app_waiting(h->app))
             return 0;
-        app_wait_src(&s, 10);
-        nm_chat_app_external_ready(h->app, s.handle, s.flags);
-        tui_runtime_flush(h->rt);
+        harness_event_once(h, 10);
     }
     return -1;
 }
@@ -766,7 +792,7 @@ static int harness_drive(AppHarness *h, int max_spins)
         if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR ||
             st == NM_AGENT_IDLE)
             return 0;
-        NmSource s = nm_chat_app_source(h->app);
+        NmSource s = app_source(h->app);
         if (s.handle >= 0 && s.flags) {
             app_wait(h, 10);
             harness_step_ack(h);
@@ -837,6 +863,32 @@ static int app_wait_ready(const NmSource *sp, int timeout_ms)
 #endif
 }
 
+/* One turn of boba's event loop over the app's WHOLE declared wait set
+ * (nm_chat_app_interest: the agent, an in-flight catalog fetch, an
+ * in-flight balance fetch, the jobs): wait for any of them up to
+ * wait_ms, dispatch every ready one, and tick when nothing was ready
+ * (the timeout branch). Nothing is polled — a source the app declares
+ * is the only thing that wakes it. */
+static void harness_event_once(AppHarness *h, int wait_ms)
+{
+    NmSource set[TUI_IO_SOURCE_MAX];
+    size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
+    int ready = 0;
+    if (n > 0 && nm_source_wait_any(set, n, wait_ms) == 0) {
+        for (size_t i = 0; i < n; i++) {
+            if (set[i].handle >= 0 && set[i].flags &&
+                app_wait_ready(&set[i], 0)) {
+                nm_chat_app_external_ready(h->app, set[i].handle,
+                                           set[i].flags);
+                ready = 1;
+            }
+        }
+    }
+    if (!ready)
+        nm_chat_app_tick(h->app);
+    tui_runtime_flush(h->rt);
+}
+
 /* Pump an in-flight credits fetch the way boba's loop does: wait on the
  * app's declared source, dispatch the ready branch, tick on timeout.
  * Bounded by WALL CLOCK (a ready fd costs microseconds). */
@@ -846,15 +898,8 @@ static int harness_pump_credits(AppHarness *h, int budget_ms, NmProviderId id)
     while (nm_credits_fetch_in_flight(id)) {
         if (wall_ms() - t0 > (long long)budget_ms)
             return -1;
-        NmSource cs = nm_credits_fetch_source(id);
         int wait_ms = nm_chat_app_tick_ms(h->app);
-        if (wait_ms < 0)
-            wait_ms = 50;
-        if (cs.handle >= 0 && cs.flags && app_wait_ready(&cs, wait_ms))
-            nm_chat_app_external_ready(h->app, cs.handle, cs.flags);
-        else
-            nm_chat_app_tick(h->app); /* the timeout branch: tick steps it */
-        tui_runtime_flush(h->rt);
+        harness_event_once(h, wait_ms < 0 ? 50 : wait_ms);
     }
     return 0;
 }
@@ -882,18 +927,8 @@ static int harness_drive_events(AppHarness *h, int budget_ms)
             return 0;
         if (wall_ms() - t0 > (long long)budget_ms)
             return -1;
-        NmSource s = nm_chat_app_source(h->app);
         int wait_ms = nm_chat_app_tick_ms(h->app);
-        if (wait_ms < 0)
-            wait_ms = 50; /* no cadence: a short poll */
-        int ready = 0;
-        if (s.handle >= 0 && s.flags)
-            ready = app_wait_ready(&s, wait_ms);
-        if (ready)
-            nm_chat_app_external_ready(h->app, s.handle, s.flags);
-        else
-            nm_chat_app_tick(h->app);
-        tui_runtime_flush(h->rt);
+        harness_event_once(h, wait_ms < 0 ? 50 : wait_ms);
     }
 }
 
@@ -949,7 +984,7 @@ static void harness_single_step(AppHarness *h)
 static void harness_step_once(AppHarness *h)
 {
     for (int i = 0; i < 100; i++) {
-        if (nm_chat_app_source(h->app).handle < 0)
+        if (app_source(h->app).handle < 0)
             break;
         app_wait(h, 50);
         harness_step_ack(h);
@@ -3192,6 +3227,9 @@ typedef struct
     /* Answer the balance GET with 404: the fixture's "the endpoint is
      * not there today", for the refresh's failure paths. */
     int fail_credits;
+    /* Answer the FIRST chat POST with a run_command tool call (a slow
+     * child), so a turn spans a RUNNING_TOOL window the test can tick in. */
+    int tool_first;
     int n_credits; /* GET /api/v1/credits served */
     int n_key;     /* GET /api/v1/key served */
     int n_chat;    /* chat completions served */
@@ -3268,12 +3306,19 @@ static void *credit_route_server_thread(void *arg)
             s->n_key++;
             route_send_json(cfd, "{\"data\":{}}");
         } else {
-            s->n_chat++;
-            sse_send_chunked(cfd,
-                             "data: {\"choices\":[{\"delta\":{\"content\":"
-                             "\"ok\"}}]}\n\n"
-                             "data: [DONE]\n\n",
-                             NULL);
+            int first = s->n_chat++ == 0;
+            sse_send_chunked(
+                cfd,
+                (first && s->tool_first)
+                    ? "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
+                      "\"index\":0,\"id\":\"call_c\",\"type\":\"function\","
+                      "\"function\":{\"name\":\"run_command\",\"arguments\":"
+                      "\"{\\\"cmd\\\":\\\"sleep 0.5\\\"}\"}}]}}]}\n\n"
+                      "data: [DONE]\n\n"
+                    : "data: {\"choices\":[{\"delta\":{\"content\":"
+                      "\"ok\"}}]}\n\n"
+                      "data: [DONE]\n\n",
+                NULL);
             send(cfd, "0\r\n\r\n", 5, 0);
         }
         close(cfd);
@@ -3318,9 +3363,9 @@ static void test_credits_status_refreshes_after_ttl(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
     /* The loop can only pump what the app DECLARES: the credits socket
-     * is the primary source now that the agent is idle. */
-    ASSERT_EQ((int)nm_chat_app_source(h->app).handle,
-              (int)nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle);
+     * is in the wait set. */
+    ASSERT_TRUE(interest_has(
+        h->app, nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle));
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
     ASSERT_EQ(s.n_credits, 1);
     ASSERT_EQ(s.n_key, 1); /* openrouter's two-step chain ran */
@@ -3366,6 +3411,90 @@ static void test_credits_status_refreshes_after_ttl(void)
     close(s.lfd);
 }
 
+#ifndef _WIN32
+/* The mid-turn half of the refresh (the purse froze across a long agent
+ * turn): the tick used to START a balance fetch only while idle, and
+ * the post-turn gate only fired once the whole turn ended — so a turn
+ * of many tool rounds showed its first round's purse throughout. A
+ * deadline that falls inside a RUNNING_TOOL window now starts the
+ * fetch there, and the figure lands while the turn is still running. */
+static void test_credits_refresh_starts_mid_turn(void)
+{
+    test_unsetenv("NM_NO_UNBIDDEN_FETCH");
+
+    CreditRouteServer s;
+    memset(&s, 0, sizeof(s));
+    s.purse = 7.71;
+    s.tool_first = 1;
+    s.lfd = server_bind(&s.port);
+    ASSERT_TRUE(s.lfd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, credit_route_server_thread, &s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    AppHarness *h = harness_new("openrouter", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "run it");
+    harness_enter(h);
+    int spins = 0;
+    while (spins++ < 2000) {
+        if (nm_chat_app_state(h->app) == NM_AGENT_RUNNING_TOOL &&
+            app_fd(h->app) >= 0)
+            break;
+        int fd = app_fd(h->app);
+        unsigned in = app_interest(h->app);
+        if (fd >= 0 && in) {
+            fd_set r, w;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_ZERO(&w);
+            if (in & NM_INTEREST_READ)
+                FD_SET(fd, &r);
+            if (in & NM_INTEREST_WRITE)
+                FD_SET(fd, &w);
+            select(fd + 1, &r, &w, NULL, &tv);
+        }
+        nm_chat_app_step(h->app);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_FALSE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+
+    /* The deadline falls while the child runs (the store reads "never
+     * fetched" — due now; the clock itself must not jump, it would
+     * also expire the tool's own deadline) and the wire's purse moved. */
+    nm_credits_reset();
+    s.purse = 5.00;
+    nm_chat_app_tick(h->app);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
+    ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
+    /* The fetch's socket is in the app's declared wait set NEXT TO the
+     * running tool's: the loop is woken by it, not by a poll. */
+    {
+        NmSource set[TUI_IO_SOURCE_MAX];
+        size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
+        intptr_t want = nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle;
+        int found = 0;
+        for (size_t i = 0; i < n; i++)
+            found |= set[i].handle == want;
+        ASSERT_TRUE(want >= 0 && found);
+    }
+
+    ASSERT_EQ(harness_drive_events(h, 5000), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
+    ASSERT_EQ(s.n_credits, 1); /* the mid-turn fetch; the gate saw it fresh */
+    ASSERT_EQ(s.n_chat, 2);
+
+    s.stop = 1;
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(s.lfd);
+}
+#endif
+
 /* The idle half of the refresh: the TTL is not only a turn-end gate but
  * the app's own idle cadence, so the purse follows the wire while
  * nobody types. (Both idle tests lift the suite's NM_NO_UNBIDDEN_FETCH
@@ -3403,10 +3532,10 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), 0);
     nm_chat_app_tick(h->app);
     ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
-    /* Idle, the credits socket is the app's primary source: the loop
-     * pumps what the app declares. */
-    ASSERT_EQ((int)nm_chat_app_source(h->app).handle,
-              (int)nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle);
+    /* The credits socket is in the wait set: the loop pumps what the
+     * app declares. */
+    ASSERT_TRUE(interest_has(
+        h->app, nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle));
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
 
     /* The bar followed the wire — without one chat round. */
@@ -6827,13 +6956,8 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
 
     /* A few event-loop turns: the connect lands and the request goes
      * out. Still nothing to show. */
-    for (int i = 0; i < 5; i++) {
-        NmSource s = nm_chat_app_source(h->app);
-        if (s.handle < 0 || !s.flags)
-            break;
-        app_wait_src(&s, 10);
-        nm_chat_app_external_ready(h->app, s.handle, s.flags);
-    }
+    for (int i = 0; i < 5 && app_waiting(h->app); i++)
+        harness_event_once(h, 10);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT Astra") == NULL);
 
     /* The peer never answers: the fetch's own INACTIVITY budget (5 s
@@ -7229,9 +7353,11 @@ static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
      * after this one (they would then dial the real provider). */
     test_unsetenv("NM_NO_UNBIDDEN_FETCH");
     nm_chat_app_warm_catalog(h->app);
-    /* The fetch is in flight: the app's primary slot is the catalog's
-     * socket (the agent is idle). */
-    int in_flight = nm_chat_app_source(h->app).handle >= 0;
+    /* The fetch is in flight: its socket is the wait set's only entry
+     * (the agent is idle, no job runs). */
+    NmSource only[TUI_IO_SOURCE_MAX];
+    int in_flight =
+        nm_chat_app_interest(h->app, only, TUI_IO_SOURCE_MAX) == 1;
 
     harness_type(h, "read it");
     harness_enter(h);
@@ -7435,11 +7561,8 @@ static void test_catalog_fetch_budget_is_idle_not_total(void)
     /* Pump until the server has the first half of the body out (the
      * connect and the send need the event loop too). */
     for (int i = 0; i < 500 && !ss.first_sent; i++) {
-        NmSource s = nm_chat_app_source(h->app);
-        if (s.handle >= 0 && s.flags) {
-            app_wait_src(&s, 10);
-            nm_chat_app_external_ready(h->app, s.handle, s.flags);
-        }
+        if (app_waiting(h->app))
+            harness_event_once(h, 10);
         tui_runtime_flush(h->rt);
         usleep(1000);
     }
@@ -7746,7 +7869,7 @@ static void test_family_skip_notice_prints_once(void)
  * at runtime too. */
 static void test_job_cap_fits_the_fd_budget(void)
 {
-    ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 1 <= TUI_IO_SOURCE_MAX);
+    ASSERT_TRUE((size_t)NM_PROC_MAX_JOBS + 3 <= TUI_IO_SOURCE_MAX);
 #ifndef _WIN32
     AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -10509,7 +10632,7 @@ static void test_prism_tail_budget_ends_the_round_without_a_figure(void)
         NmAgentState st = nm_chat_app_state(h->app);
         if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR)
             break;
-        NmSource s = nm_chat_app_source(h->app);
+        NmSource s = app_source(h->app);
         if (s.handle >= 0 && s.flags)
             app_wait(h, 2); /* real readiness: the events, then quiet */
         harness_step_ack(h);
@@ -11531,6 +11654,9 @@ int main(void)
      * lifted value. The pin's own tripwire ran first, so the lift is
      * loud, not silent. */
     RUN_TEST(test_credits_idle_refresh_updates_the_bar_while_idle);
+#ifndef _WIN32
+    RUN_TEST(test_credits_refresh_starts_mid_turn);
+#endif
     RUN_TEST(test_credits_idle_refresh_backs_off_a_failed_fetch);
     TEST_SUMMARY();
 }

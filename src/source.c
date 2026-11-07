@@ -228,6 +228,14 @@ static NmSource catalog_fd(const NmListSource *s)
     return c->provider->models_source(c->provider);
 }
 
+static int catalog_wait_ms(const NmListSource *s)
+{
+    const CatalogSource *c = (const CatalogSource *)s;
+    if (!c->in_flight || !c->provider->models_wait_ms)
+        return -1;
+    return c->provider->models_wait_ms(c->provider);
+}
+
 static void catalog_cancel(NmListSource *s)
 {
     CatalogSource *c = (CatalogSource *)s;
@@ -281,6 +289,7 @@ NmListSource *nm_source_catalog_create(const NmProvider *provider,
     c->base.fetch_begin = catalog_fetch_begin;
     c->base.step = catalog_step;
     c->base.fd = catalog_fd;
+    c->base.wait_ms = catalog_wait_ms;
     c->base.cancel = catalog_cancel;
     c->base.items = catalog_items;
     c->base.free = catalog_free;
@@ -303,6 +312,11 @@ NmSource nm_source_fd(const NmListSource *s)
 {
     NmSource none = { -1, 0, NM_SRC_FD };
     return s && s->fd ? s->fd(s) : none;
+}
+
+int nm_source_wait_ms(const NmListSource *s)
+{
+    return s && s->wait_ms ? s->wait_ms(s) : -1;
 }
 
 void nm_source_cancel(NmListSource *s)

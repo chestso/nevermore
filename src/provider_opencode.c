@@ -613,6 +613,12 @@ NmSource nm_opencode_models_source(const NmProvider *p)
     return o->f ? nm_fetch_source(o->f) : none;
 }
 
+int nm_opencode_models_wait_ms(const NmProvider *p)
+{
+    OcFetch *o = &g_oc_fetches[oc_slot(p)];
+    return o->f ? nm_fetch_wait_ms(o->f) : -1;
+}
+
 void nm_opencode_models_end(const NmProvider *p)
 {
     oc_fetch_clear(&g_oc_fetches[oc_slot(p)]);
@@ -680,6 +686,7 @@ const struct NmProvider nm_opencode_provider = {
     nm_opencode_models_begin,
     nm_opencode_models_step,
     nm_opencode_models_source,
+    nm_opencode_models_wait_ms,
     nm_opencode_models_end,
     nm_opencode_needs_auth,
     opencode_env_key,

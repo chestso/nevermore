@@ -42,12 +42,14 @@ typedef struct NmProc NmProc;
  * job is drained only while its readiness handle is in the external
  * source set, so a job that cannot be subscribed would block its child
  * on a full pipe and stall it silently.  boba's TUI_IO_SOURCE_MAX (32)
- * slots must therefore hold every job PLUS one for the agent's own
- * stream/exec source — so the cap is 32 - 1, and a spawn one past it
+ * slots must therefore hold every job PLUS the app's own sources — the
+ * agent's stream/exec source, a catalog fetch and a balance fetch (the
+ * loop waits on each directly; none is polled) — so the cap is
+ * 32 - 3, and a spawn one past it
  * fails loudly ("job cap of N reached") instead of leaving a child
  * unsubscribed.  chat_app.c static-asserts the relationship against
  * boba's macro. */
-#define NM_PROC_MAX_JOBS 31
+#define NM_PROC_MAX_JOBS 29
 
 /* Which shell a job's command is handed to, and whether login
  * semantics apply.  The zero value (path NULL, login 0) is the

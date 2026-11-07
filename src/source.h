@@ -80,6 +80,11 @@ struct NmListSource
      * it directly. */
     NmSource (*fd)(const NmListSource *s);
 
+    /* The fetch's deadline seam: ms until it wants a step with no fd
+     * ready (a silent peer's budget), -1 when purely readiness-driven
+     * or NULL. The loop's timer for the fetch. */
+    int (*wait_ms)(const NmListSource *s);
+
     /* Abandon an in-flight fetch (modal popups cancel the old fetch
      * before opening a new one). Safe when idle. */
     void (*cancel)(NmListSource *s);
@@ -112,6 +117,7 @@ NmListSource *nm_source_catalog_create(const NmProvider *provider,
 int nm_source_fetch_begin(NmListSource *s, const char *query_hint);
 NmFetchStatus nm_source_step(NmListSource *s);
 NmSource nm_source_fd(const NmListSource *s);
+int nm_source_wait_ms(const NmListSource *s);
 void nm_source_cancel(NmListSource *s);
 const NmEntry *nm_source_items(const NmListSource *s, size_t *n);
 void nm_source_free(NmListSource *s);

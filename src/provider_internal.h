@@ -43,6 +43,7 @@ int nm_opencode_models_begin(const NmProvider *p, const char *base_url,
                              const char *api_key);
 NmCatalogStatus nm_opencode_models_step(const NmProvider *p);
 NmSource nm_opencode_models_source(const NmProvider *p);
+int nm_opencode_models_wait_ms(const NmProvider *p);
 void nm_opencode_models_end(const NmProvider *p);
 
 /* Shared Ollama wire surface (provider_ollama.c): the cloud vtable
@@ -59,6 +60,7 @@ int nm_ollama_models_begin(const NmProvider *p, const char *base_url,
                            const char *api_key);
 NmCatalogStatus nm_ollama_models_step(const NmProvider *p);
 NmSource nm_ollama_models_source(const NmProvider *p);
+int nm_ollama_models_wait_ms(const NmProvider *p);
 void nm_ollama_models_end(const NmProvider *p);
 int nm_ollama_needs_auth(const NmProvider *p, const char *base_url);
 

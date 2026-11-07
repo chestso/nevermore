@@ -39,6 +39,7 @@ const struct NmProvider nm_opencode_zen_provider = {
     nm_opencode_models_begin,
     nm_opencode_models_step,
     nm_opencode_models_source,
+    nm_opencode_models_wait_ms,
     nm_opencode_models_end,
     nm_opencode_needs_auth,
     opencode_zen_env_key,

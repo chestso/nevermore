@@ -125,13 +125,6 @@ void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
  *   on_tick             -> nm_chat_app_tick
  *   get_tick_timeout_ms -> nm_chat_app_tick_ms
  */
-int nm_chat_app_fd(NmChatApp *app);
-
-/* The agent's own wait source (handle + interest + kind) — the entry
- * nm_chat_app_interest emits first when the agent has something to wait
- * on.  handle is -1 when it does not (idle, or a provider without the
- * step API). */
-NmSource nm_chat_app_source(NmChatApp *app);
 
 /* The app's whole wait set, filled in priority order: the agent's live
  * stream/exec source first (when it has one), then one READ entry per
@@ -141,8 +134,8 @@ NmSource nm_chat_app_source(NmChatApp *app);
  * loop knows how to wait on it.  Returns the number of entries written
  * (<= cap), which is what main.c's TuiFillIoSources hands back.  A cap
  * too small for the set drops trailing jobs (they cannot be drained
- * while unsubscribed), which is why NM_PROC_MAX_JOBS leaves a slot for
- * the agent. */
+ * while unsubscribed), which is why NM_PROC_MAX_JOBS leaves the app's own slots
+ * (the agent, a catalog fetch, a balance fetch). */
 size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap);
 
 /* Dispatch one source's readiness.  The agent's own source steps the

@@ -2018,6 +2018,21 @@ NmSource nm_fetch_source(NmFetchStream *f)
     return nm_connection_interest(f->conn);
 }
 
+int nm_fetch_wait_ms(const NmFetchStream *f)
+{
+    if (!f || f->terminal || !f->conn)
+        return -1;
+    int ms = nm_connection_wait_ms(f->conn);
+    if (f->deadline > 0) {
+        int left = (int)((f->deadline - nm_monotonic_seconds()) * 1000.0);
+        if (left < 0)
+            left = 0;
+        if (ms < 0 || left < ms)
+            ms = left;
+    }
+    return ms;
+}
+
 NmJson *nm_fetch_take(NmFetchStream *f)
 {
     if (!f || !f->terminal || !f->ok)
@@ -2100,6 +2115,11 @@ NmSource nm_catalog_fetch_source(const NmCatalogFetch *cf)
 {
     NmSource none = { -1, 0, NM_SRC_FD };
     return cf && cf->f ? nm_fetch_source(cf->f) : none;
+}
+
+int nm_catalog_fetch_wait_ms(const NmCatalogFetch *cf)
+{
+    return cf && cf->f ? nm_fetch_wait_ms(cf->f) : -1;
 }
 
 void nm_catalog_fetch_end(NmCatalogFetch *cf)

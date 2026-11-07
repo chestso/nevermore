@@ -212,6 +212,11 @@ NmSource nm_openaicompat_models_source(const NmProvider *p)
     return nm_catalog_fetch_source(&g_slots[p->id].fetch);
 }
 
+int nm_openaicompat_models_wait_ms(const NmProvider *p)
+{
+    return nm_catalog_fetch_wait_ms(&g_slots[p->id].fetch);
+}
+
 void nm_openaicompat_models_end(const NmProvider *p)
 {
     nm_catalog_fetch_end(&g_slots[p->id].fetch);

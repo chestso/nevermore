@@ -597,6 +597,7 @@ struct NmProvider
      *           in flight, which is what makes models() safe to call
      *           mid-fetch (it must never start a second, blocking one)
      *   models_source(p)   -> what to wait on (fd + interest), or -1
+     *   models_wait_ms(p)  -> the deadline to wake at, or -1
      *   ready -> models_step(p)
      *     -> NM_CATALOG_PENDING  more to come
      *     -> NM_CATALOG_OK       the live catalog is now cached
@@ -610,6 +611,10 @@ struct NmProvider
                         const char *api_key);
     NmCatalogStatus (*models_step)(const NmProvider *p);
     NmSource (*models_source)(const NmProvider *p);
+    /* The fetch's deadline seam: ms until it wants a step with no fd
+     * ready (a silent peer's budget), -1 when purely readiness-driven
+     * or nothing is in flight. The event loop's timer for the fetch. */
+    int (*models_wait_ms)(const NmProvider *p);
     void (*models_end)(const NmProvider *p);
 
     /* Auth: whether this provider + endpoint requires an API key. */

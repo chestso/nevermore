@@ -207,13 +207,17 @@ Rules that follow from where the seam runs:
   model claims no capability and keeps its tools. The one-shot CLI is the
   exception, because it has no event loop to protect: ask mode warms the catalog
   before building the agent, as `nevermore models` does.
-- **The fetch borrows the app's primary source slot** (`TUI_IO_SOURCE_MAX` is
-  full: 31 jobs plus the agent). That is safe because the agent is idle whenever
-  `/model` can run. Asking "is the agent waiting on I/O?" is a question about
-  the agent (`nm_agent_source`), never the app's primary slot: during the tool
-  phase the agent has no source of its own, and reading the catalog's socket as
-  the agent's would end the step loop before the tool runs, with nothing left to
-  resume it.
+- **The fetch is waited on directly, never polled.** `nm_chat_app_interest`
+  emits the agent's source, an in-flight catalog fetch's socket, an in-flight
+  balance fetch's socket, then the jobs (`TUI_IO_SOURCE_MAX` is full: 29 jobs
+  plus those three). A fetch that goes silent is bounded by its own deadline
+  (`models_wait_ms` / `nm_credits_fetch_wait_ms`, folded into the tick timeout
+  by the app's timer table), so the loop is event driven end to end and no
+  fetch depends on which state the agent is in. Asking "is the agent waiting on
+  I/O?" is still a question about the agent (`nm_agent_source`), never the
+  app's first source: during the tool phase the agent has no source of its own,
+  and reading a fetch's socket as the agent's would end the step loop before the
+  tool runs, with nothing left to resume it.
 - **The context window, vision claim and tool claim are resolved at the point of
   use** through one lookup (`agent.c`'s `model_entry`), so a catalog warming
   mid-chat moves the gauge, the tier color and the `context-pressure` reminder

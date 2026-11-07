@@ -443,7 +443,7 @@ line per message carrying exact body byte counts. Images are not written; use
   the model and never streamed into the transcript.
 - You watch the same jobs with `/ps` and stop one with `/kill <id>` (the shell
   and its descendants).
-- At most 31 jobs run at once, and they die with nevermore.
+- At most 29 jobs run at once, and they die with nevermore.
 
 ## Smoke testing without a provider
 

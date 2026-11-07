@@ -509,6 +509,12 @@ NmSource nm_ollama_models_source(const NmProvider *p)
     return o->f ? nm_fetch_source(o->f) : none;
 }
 
+int nm_ollama_models_wait_ms(const NmProvider *p)
+{
+    OllamaFetch *o = &ollama_fetches[ollama_catalog_slot(p)];
+    return o->f ? nm_fetch_wait_ms(o->f) : -1;
+}
+
 void nm_ollama_models_end(const NmProvider *p)
 {
     ollama_fetch_clear(&ollama_fetches[ollama_catalog_slot(p)]);
@@ -585,6 +591,7 @@ const struct NmProvider nm_ollama_provider = {
     nm_ollama_models_begin,
     nm_ollama_models_step,
     nm_ollama_models_source,
+    nm_ollama_models_wait_ms,
     nm_ollama_models_end,
     nm_ollama_needs_auth,
     ollama_env_key,

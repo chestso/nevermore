@@ -49,6 +49,7 @@ const struct NmProvider nm_ollama_local_provider = {
     nm_ollama_models_begin,
     nm_ollama_models_step,
     nm_ollama_models_source,
+    nm_ollama_models_wait_ms,
     nm_ollama_models_end,
     nm_ollama_needs_auth,
     ollama_local_env_key,

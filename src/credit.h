@@ -210,6 +210,10 @@ NmCatalogStatus nm_credits_fetch_step(NmProviderId id);
 /* What socket/interest to wait on for `id`'s in-flight fetch. */
 NmSource nm_credits_fetch_source(NmProviderId id);
 
+/* The in-flight fetch's deadline seam: ms until it wants a step with no
+ * fd ready, -1 when purely readiness-driven or nothing is in flight. */
+int nm_credits_fetch_wait_ms(NmProviderId id);
+
 /* Cancel/finish any in-flight fetch for `id`. */
 void nm_credits_fetch_end(NmProviderId id);
 

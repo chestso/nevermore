@@ -135,6 +135,7 @@ int nm_openaicompat_models_begin(const NmProvider *p, const char *base_url,
                                  const char *api_key);
 NmCatalogStatus nm_openaicompat_models_step(const NmProvider *p);
 NmSource nm_openaicompat_models_source(const NmProvider *p);
+int nm_openaicompat_models_wait_ms(const NmProvider *p);
 void nm_openaicompat_models_end(const NmProvider *p);
 const NmModel *nm_openaicompat_models_cached(const NmProvider *p,
                                              size_t *n_out);

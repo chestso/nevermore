@@ -231,6 +231,14 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f);
 /* What to wait on (handle + interest), or {-1} when nothing is open. */
 NmSource nm_fetch_source(NmFetchStream *f);
 
+/* The fetch's deadline seam (the event loop's only timer input for a
+ * fetch): milliseconds until it wants a step with no fd ready — the
+ * transport's connect/handshake budget while those phases run, then
+ * the response's own inactivity budget — or -1 when it is purely
+ * interest-driven (or finished). 0 means a deadline is spent: the next
+ * step fails the fetch. */
+int nm_fetch_wait_ms(const NmFetchStream *f);
+
 /* Transfer the parsed document out (NM_FETCH_OK only; NULL otherwise).
  * The caller owns it: nm_json_free when done. */
 NmJson *nm_fetch_take(NmFetchStream *f);
@@ -267,6 +275,7 @@ int nm_catalog_fetch_begin(NmCatalogFetch *cf, const NmOpenaiEndpoint *ep,
                            void *ud);
 NmCatalogStatus nm_catalog_fetch_step(NmCatalogFetch *cf);
 NmSource nm_catalog_fetch_source(const NmCatalogFetch *cf);
+int nm_catalog_fetch_wait_ms(const NmCatalogFetch *cf);
 void nm_catalog_fetch_end(NmCatalogFetch *cf);
 
 /* GET {base_url}{path}/models as an async fetch (the OpenAI-shaped

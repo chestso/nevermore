@@ -1478,6 +1478,14 @@ NmSource nm_credits_fetch_source(NmProviderId id)
     return nm_fetch_source(st->f);
 }
 
+int nm_credits_fetch_wait_ms(NmProviderId id)
+{
+    if ((int)id < 0 || id >= NM_PROVIDER_COUNT)
+        return -1;
+    const NmCreditsFetchState *st = &g_fetch[id];
+    return st->f ? nm_fetch_wait_ms(st->f) : -1;
+}
+
 void nm_credits_fetch_end(NmProviderId id)
 {
     if ((int)id < 0 || id >= NM_PROVIDER_COUNT)

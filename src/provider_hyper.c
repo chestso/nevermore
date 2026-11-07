@@ -303,6 +303,7 @@ const struct NmProvider nm_hyper_provider = {
     nm_openaicompat_models_begin,
     nm_openaicompat_models_step,
     nm_openaicompat_models_source,
+    nm_openaicompat_models_wait_ms,
     nm_openaicompat_models_end,
     hyper_needs_auth,
     hyper_env_key,

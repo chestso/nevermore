@@ -2035,43 +2035,20 @@ void nm_chat_app_on_warning(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-int nm_chat_app_fd(NmChatApp *app)
-{
-    return (int)nm_chat_app_source(app).handle;
-}
+/* The app's own sources besides the jobs: the agent's stream/exec
+ * source, a catalog fetch, a balance fetch. */
+#define NM_APP_OWN_SOURCES 3
 
-NmSource nm_chat_app_source(NmChatApp *app)
-{
-    NmSource s = { -1, 0, NM_SRC_FD };
-    if (!app)
-        return s;
-    NmSource agent = nm_agent_source(app->agent);
-    if (agent.handle >= 0 && agent.flags)
-        return agent;
-    /* A catalog fetch borrows the primary slot: the agent is idle
-     * whenever one can start (/model is only reachable from submit,
-     * which is a no-op while a turn runs). If the agent does hold the
-     * slot the fetch is still stepped by the tick, and its own
-     * per-request deadline still bounds it. */
-    NmSource cat = nm_source_fd(app->catalog_src);
-    if (cat.handle >= 0 && cat.flags)
-        return cat;
-    if (app->provider && nm_credits_fetch_in_flight(app->provider->id)) {
-        NmSource cr_src = nm_credits_fetch_source(app->provider->id);
-        if (cr_src.handle >= 0 && cr_src.flags)
-            return cr_src;
-    }
-    return s;
-}
-
-/* boba's I/O-source pool must hold every job PLUS the agent's own
- * stream source: a job left out of the set is never drained, so its
- * child stalls on a full pipe (see NM_PROC_MAX_JOBS in proc.h). */
+/* boba's I/O-source pool must hold every job PLUS the app's own
+ * sources: a job left out of the set is never drained, so its child
+ * stalls on a full pipe (see NM_PROC_MAX_JOBS in proc.h). */
 typedef char nm_proc_source_budget_fits
-    [(TUI_IO_SOURCE_MAX >= NM_PROC_MAX_JOBS + 1) ? 1 : -1];
+    [(TUI_IO_SOURCE_MAX >= NM_PROC_MAX_JOBS + NM_APP_OWN_SOURCES) ? 1 : -1];
 
 /* The app's aggregate wait interest: the live agent source (handle +
- * flags + kind) first, then one READ entry per registered process job.
+ * flags + kind) first, then an in-flight catalog fetch's and balance
+ * fetch's own sockets (each waited on directly — nothing is polled),
+ * then one READ entry per registered process job.
  *
  * A job outlives the tool call that started it, so its handle must stay
  * subscribed or the child blocks writing; the agent's own stream/exec
@@ -2087,9 +2064,18 @@ size_t nm_chat_app_interest(NmChatApp *app, NmSource *out, size_t cap)
         return 0;
 
     size_t n = 0;
-    NmSource agent = nm_chat_app_source(app);
+    NmSource agent = nm_agent_source(app->agent);
     if (agent.handle >= 0 && agent.flags) {
         out[n++] = agent;
+    }
+    NmSource cat = nm_source_fd(app->catalog_src);
+    if (n < cap && cat.handle >= 0 && cat.flags)
+        out[n++] = cat;
+    if (n < cap && app->provider &&
+        nm_credits_fetch_in_flight(app->provider->id)) {
+        NmSource cr = nm_credits_fetch_source(app->provider->id);
+        if (cr.handle >= 0 && cr.flags)
+            out[n++] = cr;
     }
     /* The job tail comes from the process registry's ONE enumeration
      * (nm_proc_interest), skipping the agent's own handle — an active
@@ -2112,8 +2098,8 @@ void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
     (void)ready;
     if (!app)
         return;
-    /* The catalog fetch first: it borrows the primary slot only while
-     * the agent is idle, so the two handles never collide. */
+    /* The fetches first: each owns its own slot in the wait set
+     * (nm_chat_app_interest), so no handle is shared with the agent's. */
     if (app->catalog_src &&
         handle == nm_source_fd(app->catalog_src).handle) {
         catalog_step(app);
@@ -2155,15 +2141,11 @@ void nm_chat_app_step(NmChatApp *app)
         nm_agent_step(app->agent); /* 0 / -1; -1 printed via on_state(ERROR) */
         report_family_skips(app);
         tui_runtime_flush(app->rt);
-        /* The AGENT's own source decides, never the app's: a catalog
-         * fetch borrows the app's one primary source slot (the agent's
-         * source when it has one, else the catalog's wait target), and
-         * the tool phase is exactly the moment the agent has NO
-         * source. Reading the app's source there ended the loop on the
-         * catalog's socket: the tool never ran, and nothing else ever
-         * steps the agent in the tool phase (it has no deadline), so
-         * the turn waited for the catalog to land — and the landing
-         * did not resume it. */
+        /* The AGENT's own source decides, never a fetch's: the tool
+         * phase is exactly the moment the agent has NO source, and a
+         * fetch's socket is not the agent's to wait on — reading it as
+         * such would end the loop before the tool ran, with nothing
+         * left to resume the turn. */
         NmSource src = nm_agent_source(app->agent);
         if (src.handle >= 0 && src.flags)
             return; /* waiting on the stream; the loop will call us back */
@@ -2173,8 +2155,8 @@ void nm_chat_app_step(NmChatApp *app)
     }
 }
 
-/* The idle balance refresh: when may its next background attempt be
- * made? The LATEST of three gates wins — the purse's own TTL deadline
+/* The balance refresh: when may its next background attempt be made?
+ * The LATEST of three gates wins — the purse's own TTL deadline
  * (fetched_at + credits_ttl, and never-fetched means NOW, so a session
  * whose startup warm never landed self-heals), the store's rate latch
  * (Retry-After, a provider's refresh floor), and the app's own
@@ -2185,7 +2167,7 @@ void nm_chat_app_step(NmChatApp *app)
  * action at all, which is exactly the traffic the knob suppresses. The
  * post-turn gate is NOT so gated — it fires only after the user has
  * been talking to that provider — and /credits is bidden outright. */
-static int credits_idle_due(const NmChatApp *app, double *due)
+static int credits_due(const NmChatApp *app, double *due)
 {
     if (!app || !app->provider)
         return 0;
@@ -2210,57 +2192,102 @@ static int credits_idle_due(const NmChatApp *app, double *due)
     return 1;
 }
 
-/* One idle refresh attempt, if its deadline has come. The backoff is
- * armed FIRST, whatever nm_credits_fetch_begin then says: a refused
- * begin (the rate latch, an allocation failure) must not come back as
- * a 0 ms cadence on the next tick, or the loop spins. A started fetch
- * is stepped by the tick like any other, and its landing advances
+/* The app's timer events. The event loop is single-threaded and owns
+ * ONE wait; everything that wants the loop to wake without an fd — a
+ * silent peer's deadline, a fetch's deadline, the balance refresh — is an
+ * entry here, and none of them looks at the agent's state: whether a
+ * turn is streaming, running a tool or idle decides nothing about when
+ * the purse refreshes or a catalog fetch is stepped. next_ms is the
+ * time until the entry wants to run (-1 never, 0 now); an entry runs
+ * when its next_ms reaches 0 and re-arms itself in fire. Nothing is
+ * polled: a fetch is woken by its socket (nm_chat_app_interest) or by
+ * its own deadline here, never by a fixed cadence.
+ * nm_chat_app_tick_ms is the minimum over the table, nm_chat_app_tick
+ * runs what is due: one source of truth for both. */
+typedef struct
+{
+    int (*next_ms)(NmChatApp *app);
+    void (*fire)(NmChatApp *app);
+} NmAppTimer;
+
+/* The agent's own deadline (a silent stream, a tool's clock): drive a
+ * step exactly as an fd-ready event would. -1 when idle or purely
+ * readiness-driven. */
+static int timer_agent_ms(NmChatApp *app)
+{
+    return app->agent ? nm_agent_next_timeout_ms(app->agent) : -1;
+}
+
+static void timer_agent_fire(NmChatApp *app)
+{
+    nm_chat_app_step(app);
+}
+
+/* A catalog fetch in flight: its deadline fires even when the fd never
+ * becomes readable (an accepted-but-silent peer). */
+static int timer_catalog_ms(NmChatApp *app)
+{
+    return nm_source_wait_ms(app->catalog_src);
+}
+
+static void timer_catalog_fire(NmChatApp *app)
+{
+    catalog_step(app);
+}
+
+static int timer_credits_fetch_ms(NmChatApp *app)
+{
+    return app->provider && nm_credits_fetch_in_flight(app->provider->id)
+               ? nm_credits_fetch_wait_ms(app->provider->id)
+               : -1;
+}
+
+static void timer_credits_fetch_fire(NmChatApp *app)
+{
+    credits_step(app);
+}
+
+/* The refresh deadline. 0 means due now: the fire arms the next window
+ * FIRST, whatever nm_credits_fetch_begin then says — a refused begin
+ * (the rate latch, an allocation failure) must not come back as a 0 ms
+ * cadence on the next tick, or the loop spins. A started fetch is
+ * stepped by the fetch timer like any other, and its landing advances
  * fetched_at — so the next deadline falls a full TTL out either way:
- * one attempt per window, success or not. */
-static void credits_idle_attempt(NmChatApp *app)
+ * one attempt per window, success or not. A fetch already in flight
+ * has no deadline (the fetch timer owns it). */
+static int timer_credits_refresh_ms(NmChatApp *app)
 {
     double due;
-    if (!credits_idle_due(app, &due))
-        return;
-    if (nm_monotonic_seconds() < due)
-        return;
+    if (!credits_due(app, &due) || nm_credits_fetch_in_flight(app->provider->id))
+        return -1;
+    int ms = (int)((due - nm_monotonic_seconds()) * 1000.0);
+    return ms > 0 ? ms : 0;
+}
+
+static void timer_credits_refresh_fire(NmChatApp *app)
+{
     app->credits_retry_at = nm_monotonic_seconds() + credits_ttl_sec(app);
     const char *key = endpoint_key(app, app->provider);
     nm_credits_fetch_begin(app->provider->id, app->base_url, key);
 }
 
+static const NmAppTimer k_app_timers[] = {
+    { timer_agent_ms, timer_agent_fire },
+    { timer_catalog_ms, timer_catalog_fire },
+    { timer_credits_fetch_ms, timer_credits_fetch_fire },
+    { timer_credits_refresh_ms, timer_credits_refresh_fire },
+};
+
 void nm_chat_app_tick(NmChatApp *app)
 {
     if (!app)
         return;
-    /* Deadline first: the tick is the event loop's ONLY wakeup for a
-     * silent peer (an accepted connection that never answers, a tool
-     * whose deadline has passed). nm_agent_next_timeout_ms says when;
-     * when it is due now (0), drive a step exactly as an fd-ready
-     * event would, so the yield/request deadline fires. Then tick the
-     * spinner so its frame reflects the post-step state. */
-    if (app->agent && nm_agent_next_timeout_ms(app->agent) == 0)
-        nm_chat_app_step(app);
-
-    /* A catalog fetch in flight: step it so its per-request deadline
-     * (the fetch's own) fires even when the fd never becomes readable
-     * (an accepted-but-silent peer). tick_ms keeps the loop waking. */
-    if (app->catalog_src)
-        catalog_step(app);
-    /* The balance fetch: stepped while in flight (that is
-     * phase-independent), and STARTED when its own idle deadline has
-     * come. The start is idle-only — a running turn keeps the loop at
-     * its busy cadence and ends at the post-turn gate, which makes the
-     * same freshness call without waiting for a tick. */
-    if (app->provider) {
-        if (nm_credits_fetch_in_flight(app->provider->id)) {
-            credits_step(app);
-        } else {
-            NmAgentState st = app->agent ? nm_agent_state(app->agent)
-                                         : NM_AGENT_IDLE;
-            if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL)
-                credits_idle_attempt(app);
-        }
+    for (size_t i = 0; i < sizeof(k_app_timers) / sizeof(k_app_timers[0]);
+         i++) {
+        const NmAppTimer *t = &k_app_timers[i];
+        int ms = t->next_ms(app);
+        if (ms == 0)
+            t->fire(app);
     }
 
     NmSpinnerFrame frame = nm_spinner_tick(app->spinner, color_depth(app));
@@ -2273,38 +2300,21 @@ int nm_chat_app_tick_ms(NmChatApp *app)
 {
     if (!app)
         return -1;
-    NmAgentState st = nm_agent_state(app->agent);
-    if (st != NM_AGENT_STREAMING && st != NM_AGENT_RUNNING_TOOL) {
-        /* Idle: a catalog fetch is the one thing that wants a wakeup
-         * (its own deadline; the fd alone cannot fire a silent peer).
-         * The spinner is the turn's, so no cadence otherwise. */
-        if (app->catalog_src)
-            return 100;
-        if (app->provider && nm_credits_fetch_in_flight(app->provider->id))
-            return 100;
-        /* The idle balance refresh's deadline is the one cadence an
-         * idle session has of its own, so the purse follows the wire
-         * even while nobody types. 0 means due now: the tick attempts,
-         * and the attempt arms the next window, so this never spins. */
-        double due;
-        if (credits_idle_due(app, &due)) {
-            int ms = (int)((due - nm_monotonic_seconds()) * 1000.0);
-            return ms > 0 ? ms : 0;
-        }
-        return -1;
+    int best = -1;
+    for (size_t i = 0; i < sizeof(k_app_timers) / sizeof(k_app_timers[0]);
+         i++) {
+        int ms = k_app_timers[i].next_ms(app);
+        if (ms >= 0 && (best < 0 || ms < best))
+            best = ms;
     }
-    /* The animation's own cadence (100 ms: the dot's breath, the stars'
-     * rotation), shortened to the nearest agent deadline so a
-     * stalled stream / a due tool fires promptly. The step that results
-     * clears the deadline (tool done, new round, or the turn errors),
-     * so this cannot spin. */
+    /* The spinner's own frame clock (the dot's breath, the stars'
+     * rotation): the animation is a timer of its own, armed only while
+     * the style animates. Presentation only — the timers above never
+     * read the agent's state. */
     int ms = nm_spinner_tick_ms(app->spinner);
-    if (ms <= 0)
-        ms = 100; /* not animating: the plain busy cadence */
-    int to = nm_agent_next_timeout_ms(app->agent);
-    if (to >= 0 && to < ms)
-        ms = to;
-    return ms;
+    if (ms > 0 && (best < 0 || ms < best))
+        best = ms;
+    return best;
 }
 
 NmAgentState nm_chat_app_state(const NmChatApp *app)
