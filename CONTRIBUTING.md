@@ -188,6 +188,11 @@ prerequisite (skip).
 - **Windows blackholes loopback connects** (WinNAT: SYN dropped, no RST, ~20 s),
   and bind-then-close is not a guaranteed refusal. Use `127.0.0.1:1` for
   "nothing is listening".
+- **A refusal is read from `SO_ERROR`,** never from a second `connect()`:
+  macOS 26 answers a re-connect on a refused socket with 0/`EISCONN`
+  ("connected"), where the older kernels answered the refusal itself. A probe
+  that trusts the re-connect turns a refusal into a live socket, and the first
+  write into the dead peer takes SIGPIPE on macOS — the process dies on it.
 - **`select()`:** pass NULL for unset directions, never an empty non-NULL
   `fd_set` (Windows).
 - **PENDING is part of the contract:** continue on OK/PENDING, break only on a
