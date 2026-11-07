@@ -19,6 +19,7 @@
 #include <unistd.h>
 #endif
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -682,6 +683,9 @@ static void test_web_search_async_step_seam(void)
 
 int main(void)
 {
+#ifndef _WIN32
+    signal(SIGPIPE, SIG_IGN); /* writes to closed sockets: EPIPE, not a signal */
+#endif
     if (test_wsa_init() != 0) {
         fprintf(stderr, "  SKIP: WSAStartup failed\n");
         return 77;

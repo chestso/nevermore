@@ -668,8 +668,11 @@ int nm_socket_connect_walk(NmConnection *conn)
             /* An INSTANT failure (refused, unreachable) is not
              * evidence about the family: a refusal means the family
              * does reach the peer. Only silence — the budget — is. */
+            int reason = errno; /* the probe's verdict, before any other
+                                 * call touches errno */
             char target[300];
             target_text(conn, target, sizeof(target));
+            errno = reason;
             conn_set_err_detail(conn, "connect %s: %s", target,
                                 nm_sock_errstr());
             if (walk_next(conn) == 0)
@@ -869,9 +872,17 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
  * because the platforms disagree on how an async connect reports
  * completion AND failure:
  *
- *  - POSIX: re-connect the stored target. 0/EISCONN = connected,
- *    EALREADY = in flight (SO_ERROR consult as a belt), anything
- *    else = the failure (errno).
+ *  - POSIX: SO_ERROR is the truth about a FINISHED attempt — the
+ *    socket carries the refusal (ECONNREFUSED and friends) the
+ *    moment the RST lands, and it is the only channel that says so
+ *    on every kernel. The re-connect is only a hint about the
+ *    state, and it is not a reliable one: macOS 26 answers a
+ *    re-connect on a REFUSED socket with 0 (or EISCONN) — "connected"
+ *    — where the older kernels answered the refusal itself. A probe
+ *    that trusts the re-connect turns a refusal into a live
+ *    connection, and the first write into a dead peer (SIGPIPE on
+ *    macOS). So the socket's own error is asked FIRST, and the
+ *    re-connect only separates "connected" from "still in flight".
  *  - Winsock/MSYS2: a FAILED non-blocking connect keeps answering
  *    WSAEWOULDBLOCK on re-connect forever, and on MSYS2 SO_ERROR
  *    can stay 0 past the RST — neither channel carries the
@@ -917,6 +928,17 @@ int nm_socket_connect_probe(NmConnection *conn)
 #else
     if (conn->conn_addr_idx < 0 || conn->conn_addr_idx >= conn->conn_n_addrs)
         return -1;
+    /* The socket's own error first: a refusal is recorded there the
+     * moment the RST lands, and it is the one channel that says so on
+     * every kernel. errno carries the reason out to the detail. */
+    int soerr = 0;
+    socklen_t sl = sizeof(soerr);
+    getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
+    if (soerr != 0) {
+        errno = soerr;
+        return -1; /* the attempt failed; SO_ERROR has the reason */
+    }
+    /* The hint: the re-connect separates "connected" from "in flight". */
     int rc = connect(conn->fd,
                      (struct sockaddr *)&conn->conn_addrs[conn->conn_addr_idx],
                      conn->addr_len);
@@ -927,12 +949,6 @@ int nm_socket_connect_probe(NmConnection *conn)
         return 1;
     if (err != EALREADY)
         return -1; /* POSIX: the re-connect carries the failure */
-    /* Belt: SO_ERROR may report a failure the re-connect won't. */
-    int soerr = 0;
-    socklen_t sl = sizeof(soerr);
-    getsockopt(conn->fd, SOL_SOCKET, SO_ERROR, &soerr, &sl);
-    if (soerr != 0)
-        return -1; /* the attempt failed; SO_ERROR has the reason */
     return 0;      /* genuinely still in flight */
 #endif
 }
