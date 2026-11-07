@@ -648,10 +648,12 @@ int nm_socket_connect_walk(NmConnection *conn)
         if (conn->fd < 0)
             nm_socket_arm_attempt(conn, conn->conn_addr_idx);
         if (conn->fd < 0) {
+            /* Capture the error text before target_text(): its
+             * snprintf may touch errno. */
+            const char *reason = nm_sock_errstr();
             char target[300];
             target_text(conn, target, sizeof(target));
-            conn_set_err_detail(conn, "socket for %s: %s", target,
-                                nm_sock_errstr());
+            conn_set_err_detail(conn, "socket for %s: %s", target, reason);
             if (walk_next(conn) == 0)
                 continue;
             walk_fail(conn);
@@ -668,13 +670,12 @@ int nm_socket_connect_walk(NmConnection *conn)
             /* An INSTANT failure (refused, unreachable) is not
              * evidence about the family: a refusal means the family
              * does reach the peer. Only silence — the budget — is. */
-            int reason = errno; /* the probe's verdict, before any other
-                                 * call touches errno */
+            /* Capture the probe's verdict before target_text():
+             * its snprintf may touch errno. */
+            const char *reason = nm_sock_errstr();
             char target[300];
             target_text(conn, target, sizeof(target));
-            errno = reason;
-            conn_set_err_detail(conn, "connect %s: %s", target,
-                                nm_sock_errstr());
+            conn_set_err_detail(conn, "connect %s: %s", target, reason);
             if (walk_next(conn) == 0)
                 continue;
             walk_fail(conn);
