@@ -983,8 +983,9 @@ Two halves, one sniffer.
   frame the spinner hands over), then the gauge fields (counts, output count,
   cache rate; one segment each so each carries its own color:
   `nm_color_gauge_output` for the output, the tier's color for counts and rate),
-  then the reasoning effort when set (`◆` + a clipped token, left and fixed
-  like the gauge, in the identity's Foreground; unset declares no segment),
+  then the reasoning effort, always (`◆` + a clipped token, left and fixed
+  like the gauge, in the identity's Foreground; the token is the effective
+  effort — the set level, else the catalog default, else `-`),
   all left and fixed chrome that is never cut; then up to three **credit cells**
   (see below); then a `─` fill (priority 1) and the right-aligned identity
   (priority 2). The ladder is a declaration, not app arithmetic: the identity

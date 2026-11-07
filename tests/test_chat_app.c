@@ -1194,19 +1194,6 @@ static int has_background_sgr(const char *s)
     return 0;
 }
 
-/* The SGR the identity block is painted with (its span's prefix), for
- * "is there any identity on this row?" assertions. Caller frees. */
-static char *status_identity_sgr(void)
-{
-    char *s = span_bytes(nm_color_status_identity(NM_COLOR_16), "x");
-    if (s) {
-        char *x = strchr(s, 'x');
-        if (x)
-            *x = '\0';
-    }
-    return s;
-}
-
 /* ---------------------------------------------------------------- */
 /* Tests                                                            */
 /* ---------------------------------------------------------------- */
@@ -1356,8 +1343,8 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     char *glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 "); /* · */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *rule =
-        status_row_bytes("\xc2\xb7 -/- ", IDENT("ollama:local", "test-model"));
+    char *rule = status_row_bytes("\xc2\xb7 -/- \xe2\x97\x86- ",
+                                  IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(glyph);
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
@@ -1580,7 +1567,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_NOT_NULL(frame);
     char *dark = span_bytes(tui_color_ansi(10), "  ");
     char *dark_row =
-        status_row_bytes("  -/- ", IDENT("ollama:local", "test-model"));
+        status_row_bytes("  -/- \xe2\x97\x86- ", IDENT("ollama:local", "test-model"));
     char *lit_glyph = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
     ASSERT_NOT_NULL(dark);
     ASSERT_NOT_NULL(dark_row);
@@ -1653,18 +1640,23 @@ static void test_spinner_clears_when_round_completes(void)
      * identity stand without a spinner (the idle-row layout), and the
      * glyph that was animated above is gone. */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
-    char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
+    char *rule = status_row_bytes("-/- \xe2\x97\x86- ",
+                                  IDENT("ollama:local", "test-model"));
     char *dead = span_bytes(tui_color_ansi(10), "\xc2\xb7 ");
+    char *effort =
+        span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(rule);
     ASSERT_NOT_NULL(dead);
-    char joined[512];
-    snprintf(joined, sizeof(joined), "%s%s", gauge, rule);
+    ASSERT_NOT_NULL(effort);
+    char joined[768];
+    snprintf(joined, sizeof(joined), "%s%s%s", gauge, effort, rule);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
     ASSERT_TRUE(strstr(frame, dead) == NULL);
     free(gauge);
     free(rule);
     free(dead);
+    free(effort);
 
     harness_free(h);
     pthread_join(th, NULL);
@@ -1794,15 +1786,19 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     ASSERT_NOT_NULL(frame);
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *rule = status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
+    char *rule = status_row_bytes("-/- \xe2\x97\x86- ",
+                                  IDENT("ollama:local", "test-model"));
+    char *effort =
+        span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_NOT_NULL(prompt);
     ASSERT_NOT_NULL(rule);
-    /* The idle status row is the gauge, the rule and the identity, with no
-     * slot and no busy chrome (Q4); the prompt opens the NEXT row, so the
-     * gauge's width never moves it. */
-    char joined[512];
-    snprintf(joined, sizeof(joined), "%s%s", gauge, rule);
+    ASSERT_NOT_NULL(effort);
+    /* The idle status row is the gauge, the effort, the rule and the
+     * identity, with no slot and no busy chrome (Q4); the prompt opens
+     * the NEXT row, so the gauge's width never moves it. */
+    char joined[768];
+    snprintf(joined, sizeof(joined), "%s%s%s", gauge, effort, rule);
     ASSERT_TRUE(strstr(frame, joined) != NULL);
     char next_row[512];
     snprintf(next_row, sizeof(next_row), "\r\n\r\033[K%s", prompt);
@@ -1810,6 +1806,7 @@ static void test_context_gauge_unknown_reads_as_dash(void)
     free(gauge);
     free(prompt);
     free(rule);
+    free(effort);
 
     /* /context spells the same state out. */
     harness_type(h, "/context");
@@ -2144,11 +2141,11 @@ static void test_config_reports_the_kbd_tier(void)
     harness_free(h);
 }
 
-/* The status row carries the reasoning effort when set — and only
- * then: unset is no segment at all (zero columns), `none` prints in
- * full, and a model switch takes the segment away with the state.
- * OpenRouter's static catalog gives openai/gpt-oss-120b its effort
- * vocab (none|minimal|low|medium|high|xhigh|max). */
+/* The status row always carries the reasoning effort: the set level
+ * when set, else the catalog default the request will run at, else
+ * `-` when neither names one. OpenRouter's static catalog gives
+ * openai/gpt-oss-120b its effort vocab
+ * (none|minimal|low|medium|high|xhigh|max) and its default (medium). */
 static void test_status_row_carries_the_effort(void)
 {
     AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
@@ -2156,15 +2153,19 @@ static void test_status_row_carries_the_effort(void)
     NmAgent *agent = nm_chat_app_agent(h->app);
     ASSERT_NOT_NULL(agent);
 
+    /* Unset: the segment is present, carrying the default. */
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    ASSERT_TRUE(strstr(frame, "\xe2\x97\x86") == NULL); /* ◆ absent */
+    char *span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86med ");
+    ASSERT_NOT_NULL(span);
+    ASSERT_TRUE(strstr(frame, span) != NULL);
+    free(span);
 
     ASSERT_EQ(nm_agent_set_effort(agent, "high"), 1);
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    char *span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86hi ");
+    span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86hi ");
     ASSERT_NOT_NULL(span);
     ASSERT_TRUE(strstr(frame, span) != NULL);
     free(span);
@@ -2173,13 +2174,28 @@ static void test_status_row_carries_the_effort(void)
     ASSERT_EQ(nm_agent_set_effort(agent, "ultra"), 0); /* not listed here */
     ASSERT_STR_EQ(nm_agent_effort(agent), "high");     /* refused: unchanged */
 
-    /* Clearing removes the segment on the next frame. */
+    /* Clearing restores the default on the next frame. */
     ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
-    ASSERT_TRUE(strstr(frame, "\xe2\x97\x86") == NULL);
+    span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86med ");
+    ASSERT_NOT_NULL(span);
+    ASSERT_TRUE(strstr(frame, span) != NULL);
+    free(span);
 
+    harness_free(h);
+
+    /* A model with no levels and no default still carries the
+     * segment, as `◆-`. */
+    h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86- ");
+    ASSERT_NOT_NULL(span);
+    ASSERT_TRUE(strstr(frame, span) != NULL);
+    free(span);
     harness_free(h);
 }
 
@@ -2697,8 +2713,8 @@ static void test_status_row_paints_no_background(void)
     ASSERT_EQ(has_background_sgr(row), 0);
     /* And the row is still PAINTED: the chrome, the rule and the
      * identity are each foreground spans over the canvas. */
-    char *expected =
-        status_row_bytes("-/- ", IDENT("ollama:local", "test-model"));
+    char *expected = status_row_bytes("-/- \xe2\x97\x86- ",
+                                      IDENT("ollama:local", "test-model"));
     ASSERT_NOT_NULL(expected);
     ASSERT_TRUE(strstr(row, expected) != NULL);
     free(expected);
@@ -3009,9 +3025,10 @@ static void test_status_row_identity_dropped_when_short(void)
     AppHarness *h = harness_new(
         "openrouter", "vendor/very-long-model-identifier-abcdefghij", NULL);
     ASSERT_NOT_NULL(h);
-    /* 6 columns: the 4-column gauge and a one-column rule, with no room
-     * left for the identity's own one-column floor plus its pad. */
-    tui_runtime_send(h->rt, tui_msg_window_size(6, 24));
+    /* 7 columns: the 4-column gauge and the 3-column effort, with no
+     * room left for a rule or the identity's own one-column floor
+     * plus its pad. */
+    tui_runtime_send(h->rt, tui_msg_window_size(7, 24));
     tui_runtime_drain(h->rt);
     tui_runtime_flush(h->rt);
 
@@ -3021,15 +3038,13 @@ static void test_status_row_identity_dropped_when_short(void)
     ASSERT_NOT_NULL(prompt);
     char *row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
-    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 6u);
+    ASSERT_EQ(tui_utf8_display_width_ansi(row, strlen(row)), 7u);
     ASSERT_TRUE(strstr(row, "openrouter") == NULL);
     ASSERT_TRUE(strstr(row, "vendor/") == NULL);
-    /* No identity bytes at all — not even the elided head or the pad. */
-    char *sgr = status_identity_sgr();
-    ASSERT_NOT_NULL(sgr);
-    ASSERT_TRUE(strstr(row, sgr) == NULL);
-    free(sgr);
-    /* The chrome is whole and the rule fills what is left. */
+    /* No identity text at all — not even the elided head or the pad.
+     * (The effort segment shares the identity's color, so its SGR
+     * is present; the identity's words are not.) */
+    /* The chrome is whole: the gauge and the effort. */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_NOT_NULL(gauge);
     ASSERT_TRUE(strstr(row, gauge) != NULL);
@@ -3167,7 +3182,7 @@ static void test_status_row_credit_cells_shrink_in_rank_order(void)
         cr->brackets[i].limit = 100.0;
     }
 
-    static const int widths[] = { 80, 60, 40, 20, 14, 10 };
+    static const int widths[] = { 80, 60, 40, 23, 17, 13 };
     for (size_t w = 0; w < sizeof(widths) / sizeof(widths[0]); w++) {
         tui_runtime_send(h->rt, tui_msg_window_size(widths[w], 24));
         tui_runtime_drain(h->rt);
@@ -3190,11 +3205,11 @@ static void test_status_row_credit_cells_shrink_in_rank_order(void)
             /* Roomy: the identity elides, never a cell. */
             ASSERT_TRUE(has_5h && has_w && has_mo);
             break;
-        case 20:
+        case 23:
             /* The MIDDLE window is what goes first. */
             ASSERT_TRUE(!has_5h && has_w && has_mo);
             break;
-        case 14:
+        case 17:
             /* Then the gate; the budget is the last datum standing. */
             ASSERT_TRUE(!has_5h && !has_w && has_mo);
             break;

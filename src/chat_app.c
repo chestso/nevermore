@@ -4180,10 +4180,14 @@ static void effort_command(NmChatApp *app, const char *arg)
             if (def)
                 sys_line(app, "  (default: %s)", def);
         }
-        if (eff) {
+        /* The row spelling the status bar carries: the effective
+         * effort (set, else the catalog default, else `-`). */
+        const char *effective = eff ? eff : nm_agent_effort_default(app->agent);
+        {
             char row_text[32];
             snprintf(row_text, sizeof(row_text), "\xe2\x97\x86%s ",
-                     effort_row_token(eff));
+                     (effective && *effective) ? effort_row_token(effective)
+                                               : "-");
             sys_line(app, "  row: %s", row_text);
         }
         return;
@@ -5445,19 +5449,21 @@ static void compose_status(NmChatApp *app)
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
 
-    /* The reasoning effort, when set: ◆ + the clipped token (U+25C6
+    /* The reasoning effort, always: ◆ + the clipped token (U+25C6
      * BLACK DIAMOND, one column under every width model — no VS15,
-     * the ↓ precedent). Unset = no segment at all (zero columns),
-     * the gauge fields' own omission rule. Priority 0 like the
-     * rest of the chrome, in the identity's Foreground — a hard
-     * current-state fact, never a window-pressure color. */
+     * the ↓ precedent). The token is the effective effort — the set
+     * level, else the catalog default the request will run at, else
+     * `-` when neither names one — so an unset effort still shows
+     * what it will do. Priority 0 like the rest of the chrome, in
+     * the identity's Foreground — a hard current-state fact, never
+     * a window-pressure color. */
     const char *effort = nm_agent_effort(app->agent);
-    if (effort && *effort) {
-        snprintf(effort_text, sizeof(effort_text), "\xe2\x97\x86%s ",
-                 effort_row_token(effort));
-        segs[n++] = status_segment(effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
-                                   nm_color_status_identity(color_depth(app)));
-    }
+    if (!effort || !*effort)
+        effort = nm_agent_effort_default(app->agent);
+    snprintf(effort_text, sizeof(effort_text), "\xe2\x97\x86%s ",
+             (effort && *effort) ? effort_row_token(effort) : "-");
+    segs[n++] = status_segment(effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
+                               nm_color_status_identity(color_depth(app)));
 
     /* The credit cluster is ONE SEGMENT PER CELL, so each cell carries
      * its own pressure colour. The cells are ADMITTED here, by rank,
@@ -5485,8 +5491,7 @@ static void compose_status(NmChatApp *app)
             fixed += tui_utf8_display_width(g.out);
         if (g.rate[0])
             fixed += tui_utf8_display_width(g.rate);
-        if (effort && *effort)
-            fixed += tui_utf8_display_width(effort_text);
+        fixed += tui_utf8_display_width(effort_text);
         int avail = (app->term_w > 0 ? app->term_w : 80) - fixed;
 
         /* Admission runs in RANK order and STOPS at the first cell that
