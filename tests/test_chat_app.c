@@ -2158,6 +2158,137 @@ static void test_config_reports_the_kbd_tier(void)
     harness_free(h);
 }
 
+/* The status row carries the reasoning effort when set — and only
+ * then: unset is no segment at all (zero columns), `none` prints in
+ * full, and a model switch takes the segment away with the state.
+ * Hyper's static catalog gives gpt-oss-120b its low|medium|high. */
+static void test_status_row_carries_the_effort(void)
+{
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    ASSERT_NOT_NULL(h);
+    NmAgent *agent = nm_chat_app_agent(h->app);
+    ASSERT_NOT_NULL(agent);
+
+    const char *frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, "\xe2\x97\x86") == NULL); /* ◆ absent */
+
+    ASSERT_EQ(nm_agent_set_effort(agent, "high"), 1);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    char *span = span_bytes(nm_color_status_identity(NM_COLOR_16), "\xe2\x97\x86hi ");
+    ASSERT_NOT_NULL(span);
+    ASSERT_TRUE(strstr(frame, span) != NULL);
+    free(span);
+
+    /* `none` is an explicit set value: it prints in full. */
+    ASSERT_EQ(nm_agent_set_effort(agent, "none"), 0); /* not listed here */
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");    /* refused: unchanged */
+
+    /* Clearing removes the segment on the next frame. */
+    ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
+    tui_runtime_flush(h->rt);
+    frame = tui_runtime_render(h->rt);
+    ASSERT_NOT_NULL(frame);
+    ASSERT_TRUE(strstr(frame, "\xe2\x97\x86") == NULL);
+
+    harness_free(h);
+}
+
+/* /effort sets through the agent (validated against the current
+ * model's catalog list), bare lists the levels and the row
+ * spelling, and an unsupported model refuses. */
+static void test_effort_command_sets_and_lists(void)
+{
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    ASSERT_NOT_NULL(h);
+    NmAgent *agent = nm_chat_app_agent(h->app);
+    ASSERT_NOT_NULL(agent);
+
+    harness_type(h, "/effort high");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "reasoning_effort = high") != NULL);
+    size_t seen = strlen(out);
+
+    harness_type(h, "/effort");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "accepted: low|medium|high") != NULL);
+    ASSERT_TRUE(strstr(out + seen, "row: ") != NULL);
+    seen = strlen(out);
+
+    /* An unlisted level is refused with the accepted list. */
+    harness_type(h, "/effort ultra");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "invalid value") != NULL);
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");
+    seen = strlen(out);
+
+    /* `off` clears. */
+    harness_type(h, "/effort off");
+    harness_enter(h);
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "reasoning_effort = -") != NULL);
+
+    harness_free(h);
+}
+
+/* A provider/model with no effort vocab refuses the knob with the
+ * unsupported sentence — distinct from an invalid value. */
+static void test_effort_command_refused_without_levels(void)
+{
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+    NmAgent *agent = nm_chat_app_agent(h->app);
+    ASSERT_NOT_NULL(agent);
+
+    harness_type(h, "/effort low");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "has no selectable") != NULL);
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+
+    harness_free(h);
+}
+
+/* /config shows the effort row (this chat when set, unset when not)
+ * and sets it through the same write path as /effort. */
+static void test_config_shows_and_sets_the_effort(void)
+{
+    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_NOT_NULL(cfg);
+    NmAgent *agent = nm_chat_app_agent(h->app);
+    ASSERT_NOT_NULL(agent);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    const char *out = harness_read(h);
+    ASSERT_TRUE(strstr(out, "reasoning_effort") != NULL);
+    size_t seen = strlen(out);
+
+    harness_type(h, "/config set reasoning_effort high");
+    harness_enter(h);
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "config: reasoning_effort = high") != NULL);
+    seen = strlen(out);
+
+    harness_type(h, "/config");
+    harness_enter(h);
+    out = harness_read(h);
+    ASSERT_TRUE(strstr(out + seen, "this chat") != NULL);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 /* A bracketed paste lands in the input as TEXT: every line ending a * terminal sends for the same copied text (CR, CRLF, LF) is one
  * newline, and no part of the payload submits. A terminal without
  * bracketed paste delivers the same bytes as Enter presses — which is
@@ -11477,6 +11608,10 @@ int main(void)
     RUN_TEST(test_kbd_wire_lock_modifiers_keep_the_modifiers);
     RUN_TEST(test_kbd_mode_overrides_the_probe);
     RUN_TEST(test_config_reports_the_kbd_tier);
+    RUN_TEST(test_status_row_carries_the_effort);
+    RUN_TEST(test_effort_command_sets_and_lists);
+    RUN_TEST(test_effort_command_refused_without_levels);
+    RUN_TEST(test_config_shows_and_sets_the_effort);
     RUN_TEST(test_paste_lands_as_text_with_newlines);
     RUN_TEST(test_context_gauge_reports_usage_and_limit);
     RUN_TEST(test_context_gauge_cache_rate_is_cumulative);

@@ -2586,6 +2586,8 @@ static void print_help(NmChatApp *app)
                   "  /maxprice [p,c]    a price ceiling in $/Mtokens\n"
                   "  /preset <intent>   cheap (:floor+flex), fast (:nitro+priority)\n"
                   "                     or balanced (neither)\n"
+                  "  /effort [level]    the reasoning effort (bare lists the\n"
+                  "                     current model's levels; off clears)\n"
                   "  /context           context-window usage (provider-reported)\n"
                   "  /credits           provider credit and balance breakdown\n"
                   "  /skills            discovered Agent Skills (and any\n"
@@ -3774,6 +3776,19 @@ static void print_config(NmChatApp *app)
             nm_config_model_for(app->cfg, app->provider->name, &src);
         config_row(app, k, nm_config_view(v, src), NULL);
     }
+    /* The reasoning effort: agent-owned runtime state (never a store
+     * key), shown for every provider — unset is a fact, and an
+     * unsupported model says so on the accepted line. The layer is
+     * "this chat" when set, `unset` when not (the view's own). */
+    if (app->agent) {
+        const char *eff = nm_agent_effort(app->agent);
+        config_row(app, "reasoning_effort",
+                   nm_config_view(eff, NM_CFG_DEFAULT),
+                   eff ? "this chat" : NULL);
+        const char *levels = nm_agent_effort_levels(app->agent);
+        if (levels)
+            sys_line(app, "  accepted: %s", levels);
+    }
     /* The provider-scoped keys actually set, after the plain ones: the
      * per-provider model memory and the other providers' knobs. This
      * provider's own rows (its model above, its three knobs above) are
@@ -3841,6 +3856,11 @@ static void note_frozen_echo(NmChatApp *app, const char *key)
                  nm_config_reasoning_echo_name(frozen));
 }
 
+/* The effort write path (defined with /effort below): /config set
+ * and reset route reasoning_effort through it. */
+static int effort_apply(NmChatApp *app, const char *arg,
+                        const char **resolved);
+
 /* Apply one key from the store: clears the machinery's runtime layer
  * for it (if any) so the persisted layer below shows through, then
  * drops the shadow line so the user config / built-in default applies.
@@ -3855,6 +3875,10 @@ static int config_apply_reset(NmChatApp *app, const char *key)
     /* A cleared family latch must be re-earned (and re-announced). */
     if (!key || strcmp(key, NM_CFG_KEY_SKIP_FAMILIES) == 0)
         app->skipped_families = 0;
+    /* The effort is runtime state, so a reset — all, or this key —
+     * clears it with everything else. */
+    if ((!key || strcmp(key, "reasoning_effort") == 0) && app->agent)
+        nm_agent_set_effort(app->agent, NULL);
     return 1;
 }
 
@@ -3862,6 +3886,13 @@ static int config_apply_reset(NmChatApp *app, const char *key)
  * so the layer below applies again. `key` NULL = every key. */
 static void config_reset(NmChatApp *app, const char *key)
 {
+    /* The effort needs no cfg: a session without one still clears. */
+    if (key && strcmp(key, "reasoning_effort") == 0) {
+        if (app->agent)
+            nm_agent_set_effort(app->agent, NULL);
+        sys_line(app, "config: reasoning_effort reset");
+        return;
+    }
     if (!app->cfg) {
         sys_line(app, "no config: this session does not persist settings");
         return;
@@ -3872,7 +3903,8 @@ static void config_reset(NmChatApp *app, const char *key)
                  "'model.<provider>'");
         return;
     }
-    if (key && !nm_config_env_name(key) && !nm_config_scoped_key_ok(key)) {
+    if (key && strcmp(key, "reasoning_effort") != 0 &&
+        !nm_config_env_name(key) && !nm_config_scoped_key_ok(key)) {
         sys_role(app, NM_SGR_ERROR, "config: unknown key '%s'",
                  key);
         return;
@@ -3894,6 +3926,20 @@ static void config_reset(NmChatApp *app, const char *key)
  * their own commands (the picker), never here. */
 static void config_set(NmChatApp *app, const char *key, const char *value)
 {
+    /* `reasoning_effort` is not a store key: it is agent-owned
+     * runtime state, so this is the /effort setter by another name
+     * (one write path, nothing persisted). It needs no cfg. */
+    if (strcmp(key, "reasoning_effort") == 0) {
+        if (!app->agent) {
+            sys_role(app, NM_SGR_ERROR, "config: no agent");
+            return;
+        }
+        const char *resolved = NULL;
+        if (effort_apply(app, value, &resolved))
+            sys_line(app, "config: reasoning_effort = %s",
+                     resolved ? resolved : "-");
+        return;
+    }
     if (!app->cfg) {
         sys_line(app, "no config: this session does not persist settings");
         return;
@@ -4063,6 +4109,109 @@ static void preset_command(NmChatApp *app, const char *arg)
              "preset %s: %s = %s, %s = %s", arg, kr, r ? r : "-", kt,
              t ? t : "-");
     report_write(app, kr, head);
+}
+
+/* The effort token for the status row: the level clipped to its
+ * table spelling. `none` keeps its full word (the disable state must
+ * never be cryptic); a future catalog value prints in full (correct
+ * beats short for a value nobody has probed). Display-only — the
+ * wire and the store always carry the full catalog spelling. */
+static const char *effort_row_token(const char *level)
+{
+    static const char *const tokens[][2] = {
+        { "none", "none" },
+        { "minimal", "min" },
+        { "low", "lo" },
+        { "medium", "med" },
+        { "high", "hi" },
+        { "xhigh", "xhi" },
+        { "max", "max" },
+        { "ultra", "ult" },
+        { NULL, NULL },
+    };
+    for (size_t i = 0; tokens[i][0]; i++)
+        if (ascii_ieq(level, tokens[i][0]))
+            return tokens[i][1];
+    return level;
+}
+
+/* ---------------------------------------------------------------- */
+/* Reasoning effort: /effort (the dedicated surface)                   */
+/* ---------------------------------------------------------------- */
+
+/* One write path for the effort, shared by /effort and
+ * `/config set reasoning_effort`: `off`/`default` clear to unset,
+ * anything else validates against the current model's catalog list
+ * (the agent owns the check and the stored spelling). Returns 1 on
+ * success (with the resolved level in `resolved`, or NULL when
+ * cleared); 0 on refusal, having said why. Nothing is persisted —
+ * the effort is agent-owned runtime state (agent.h). */
+static int effort_apply(NmChatApp *app, const char *arg, const char **resolved)
+{
+    if (resolved)
+        *resolved = NULL;
+    if (ascii_ieq(arg, "off") || ascii_ieq(arg, "default")) {
+        if (!nm_agent_set_effort(app->agent, NULL)) {
+            sys_role(app, NM_SGR_ERROR, "reasoning_effort: no agent");
+            return 0;
+        }
+        return 1;
+    }
+    const char *levels = nm_agent_effort_levels(app->agent);
+    if (!levels) {
+        sys_role(app, NM_SGR_ERROR,
+                 "reasoning_effort: model '%s' on '%s' has no selectable "
+                 "reasoning effort (reasoning is implicit or fixed)",
+                 app->model ? app->model : "(no model)",
+                 app->provider ? app->provider->name : "?");
+        return 0;
+    }
+    if (!nm_agent_set_effort(app->agent, arg)) {
+        sys_role(app, NM_SGR_ERROR,
+                 "reasoning_effort: invalid value '%s' — accepted: %s",
+                 arg, levels);
+        return 0;
+    }
+    if (resolved)
+        *resolved = nm_agent_effort(app->agent);
+    return 1;
+}
+
+/* /effort [level]: bare prints the row (config_row over an
+ * nm_config_view — the same spelling /config prints) plus the
+ * accepted list and, when set, the status row's spelling; with an
+ * argument, validate + set through effort_apply and report the
+ * resolved value. */
+static void effort_command(NmChatApp *app, const char *arg)
+{
+    if (!app->agent) {
+        sys_role(app, NM_SGR_ERROR, "reasoning_effort: no agent");
+        return;
+    }
+    if (!*arg) {
+        const char *eff = nm_agent_effort(app->agent);
+        config_row(app, "reasoning_effort",
+                   nm_config_view(eff, NM_CFG_DEFAULT),
+                   eff ? "this chat" : NULL);
+        const char *levels = nm_agent_effort_levels(app->agent);
+        if (levels) {
+            sys_line(app, "  accepted: %s", levels);
+            const char *def = nm_agent_effort_default(app->agent);
+            if (def)
+                sys_line(app, "  (default: %s)", def);
+        }
+        if (eff) {
+            char row_text[32];
+            snprintf(row_text, sizeof(row_text), "\xe2\x97\x86%s ",
+                     effort_row_token(eff));
+            sys_line(app, "  row: %s", row_text);
+        }
+        return;
+    }
+    const char *resolved = NULL;
+    if (!effort_apply(app, arg, &resolved))
+        return;
+    sys_line(app, "reasoning_effort = %s", resolved ? resolved : "-");
 }
 
 /* ---------------------------------------------------------------- */
@@ -4610,6 +4759,10 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
         preset_command(app, arg);
         return;
     }
+    if (NAME_IS("effort")) {
+        effort_command(app, arg);
+        return;
+    }
     if (NAME_IS("context")) {
         print_context(app);
         return;
@@ -4768,7 +4921,7 @@ static void complete_commands(NmChatApp *app, const char *prefix, int word_start
     static const char *const commands[] = {
         "/help", "/model", "/provider", "/config", "/context", "/credits",
         "/skills", "/image", "/session", "/ps", "/kill", "/quit",
-        "/routing", "/tier", "/maxprice", "/preset", NULL
+        "/routing", "/tier", "/maxprice", "/preset", "/effort", NULL
     };
     const char *matches[20];
     size_t n_matches = 0;
@@ -5227,7 +5380,7 @@ static TuiSegment status_segment(const char *text, TuiSegmentAlign align,
 
 /* DECLARE the status row from the app's live state, before every
  * tui_textinput_view. The row, in declaration order: [spinner glyph]
- * [context gauge] [separator rule] [identity].
+ * [context gauge] [effort] [separator rule] [identity].
  *
  * boba owns the columns and the app owns the content, so the "what gives
  * when the row is narrow" ladder is a DECLARATION, not app arithmetic:
@@ -5279,10 +5432,12 @@ static void compose_status(NmChatApp *app)
      * would dangle by the time the row is declared. */
     NmCreditCell cells[NM_CREDIT_CELLS_MAX];
 
-    /* glyph + 3 gauge fields + 3 credit cells + rule + identity */
-    TuiSegment segs[10];
+    /* glyph + 3 gauge fields + effort + 3 credit cells + rule +
+     * identity */
+    TuiSegment segs[11];
     size_t n = 0;
     char glyph_text[16];
+    char effort_text[32];
     if (frame->glyph) {
         /* The dark phase of a blink keeps the column: the segment is
          * declared as spaces rather than dropped, or the gauge behind it
@@ -5310,6 +5465,20 @@ static void compose_status(NmChatApp *app)
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
 
+    /* The reasoning effort, when set: ◆ + the clipped token (U+25C6
+     * BLACK DIAMOND, one column under every width model — no VS15,
+     * the ↓ precedent). Unset = no segment at all (zero columns),
+     * the gauge fields' own omission rule. Priority 0 like the
+     * rest of the chrome, in the identity's Foreground — a hard
+     * current-state fact, never a window-pressure color. */
+    const char *effort = nm_agent_effort(app->agent);
+    if (effort && *effort) {
+        snprintf(effort_text, sizeof(effort_text), "\xe2\x97\x86%s ",
+                 effort_row_token(effort));
+        segs[n++] = status_segment(effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
+                                   nm_color_status_identity(color_depth(app)));
+    }
+
     /* The credit cluster is ONE SEGMENT PER CELL, so each cell carries
      * its own pressure colour. The cells are ADMITTED here, by rank,
      * against the columns that are left, and declared FIXED (priority 0):
@@ -5336,6 +5505,8 @@ static void compose_status(NmChatApp *app)
             fixed += tui_utf8_display_width(g.out);
         if (g.rate[0])
             fixed += tui_utf8_display_width(g.rate);
+        if (effort && *effort)
+            fixed += tui_utf8_display_width(effort_text);
         int avail = (app->term_w > 0 ? app->term_w : 80) - fixed;
 
         /* Admission runs in RANK order and STOPS at the first cell that
