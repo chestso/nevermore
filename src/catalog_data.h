@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 381 models.
+/* openrouter: 382 models.
  * Source: GET https://openrouter.ai/api/v1/models?limit=1000
  */
 static const NmModel nm_catalog_openrouter[] = {
@@ -53,11 +53,11 @@ static const NmModel nm_catalog_openrouter[] = {
     { "bytedance-seed/seed-2.0-mini", "ByteDance Seed: Seed-2.0-Mini", 1, 0, 262144, 1 },
     { "bytedance/ui-tars-1.5-7b", "ByteDance: UI-TARS 7B ", 1, 0, 128000, -1 },
     { "cognitivecomputations/dolphin-mistral-24b-venice-edition", "Venice: Uncensored", 0, 0, 128000, -1 },
-    { "cohere/command-a", "Cohere: Command A", 0, 0, 256000, -1 },
+    { "cohere/command-a", "Cohere: Command A", 0, 0, 256000, 1 },
     { "cohere/command-a-plus", "Cohere: Command A+", 1, 0, 192000, 1 },
     { "cohere/command-r-08-2024", "Cohere: Command R (08-2024)", 0, 0, 128000, 1 },
     { "cohere/command-r-plus-08-2024", "Cohere: Command R+ (08-2024)", 0, 0, 128000, 1 },
-    { "cohere/command-r7b-12-2024", "Cohere: Command R7B (12-2024)", 0, 0, 128000, -1 },
+    { "cohere/command-r7b-12-2024", "Cohere: Command R7B (12-2024)", 0, 0, 128000, 1 },
     { "cohere/north-mini-code:free", "Cohere: North Mini Code (free)", 0, 0, 256000, 1 },
     { "deepseek/deepseek-chat", "DeepSeek: DeepSeek V3", 0, 0, 163840, 1 },
     { "deepseek/deepseek-chat-v3-0324", "DeepSeek: DeepSeek V3 0324", 0, 0, 163840, 1 },
@@ -98,6 +98,8 @@ static const NmModel nm_catalog_openrouter[] = {
     { "google/gemini-3.8-flash", "Google: Gemini 3.8 Flash", 1, 0, 1048576, 1 },
     { "google/gemini-4-argon", "Google: Gemini 4 Argon", 1, 0, 1048576, 1 },
     { "google/gemini-nano-banana-2.1", "Google: Nano Banana 2.1", 1, 1, 65536, 1 },
+    { "google/gemini-omni-1.1-flash", "Google: Gemini Omni 1.1 Flash", 1, 0, 131072, -1 },
+    { "google/gemini-omni-1.2-flash", "Google: Gemini Omni 1.2 Flash", 1, 0, 131072, -1 },
     { "google/gemma-2-27b-it", "Google: Gemma 2 27B", 0, 0, 8192, -1 },
     { "google/gemma-3-12b-it", "Google: Gemma 3 12B", 1, 0, 131072, 1 },
     { "google/gemma-3-27b-it", "Google: Gemma 3 27B", 1, 0, 131072, 1 },
@@ -115,15 +117,18 @@ static const NmModel nm_catalog_openrouter[] = {
     { "inception/mercury-3", "Inception: Mercury 3", 0, 0, 1000000, 1 },
     { "inclusionai/ling-3.0-flash", "inclusionAI: Ling 3.0 Flash", 0, 0, 262144, 1 },
     { "inclusionai/ling-3.0-flash-vl", "inclusionAI: Ling 3.0 Flash VL", 1, 0, 131072, 1 },
+    { "inclusionai/ling-3.0-tiny", "inclusionAI: Ling 3.0 Tiny", 0, 0, 262144, 1 },
     { "inclusionai/ling-3.1-flash", "inclusionAI: Ling 3.1 Flash", 0, 0, 1000000, 1 },
     { "inference-net/schematron-v2-small", "Inference.net: Schematron V2 Small", 0, 0, 128000, -1 },
     { "inference-net/schematron-v2-turbo", "Inference.net: Schematron V2 Turbo", 0, 0, 128000, -1 },
     { "liquid/lfm-2.5-2.6b", "LiquidAI: LFM2.5-2.6B", 0, 0, 128000, 1 },
     { "liquid/lfm-2.5-2.6b:free", "LiquidAI: LFM2.5-2.6B (free)", 0, 0, 65536, 1 },
     { "liquid/lfm-2.5-24b-a2b", "LiquidAI: LFM2.5-24B-A2B", 0, 0, 128000, 1 },
+    { "liquid/lfm-3-1.7b", "LiquidAI: LFM3-1.7B", 0, 0, 262144, 1 },
+    { "liquid/lfm-3-1.7b:free", "LiquidAI: LFM3-1.7B (free)", 0, 0, 262144, 1 },
     { "mancer/weaver", "Mancer: Weaver (alpha)", 0, 0, 8000, -1 },
     { "meituan/longcat-2.0", "Meituan: LongCat 2.0", 0, 0, 1048756, 1 },
-    { "meta-llama/llama-3.1-70b-instruct", "Meta: Llama 3.1 70B Instruct", 0, 0, 131072, 1 },
+    { "meta-llama/llama-3.1-70b-instruct", "Meta: Llama 3.1 70B Instruct", 0, 0, 131072, -1 },
     { "meta-llama/llama-3.1-8b-instruct", "Meta: Llama 3.1 8B Instruct", 0, 0, 131072, 1 },
     { "meta-llama/llama-3.2-1b-instruct", "Meta: Llama 3.2 1B Instruct", 0, 0, 60000, -1 },
     { "meta-llama/llama-3.2-3b-instruct", "Meta: Llama 3.2 3B Instruct", 0, 0, 131072, -1 },
@@ -140,11 +145,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "meta/muse-spark-open", "Meta: Muse Spark Open", 1, 0, 1048576, 1 },
     { "meta/muse-wonder", "Meta: Muse Wonder", 1, 0, 1048576, 1 },
     { "microsoft/phi-4", "Microsoft: Phi 4", 0, 0, 16384, -1 },
-    { "minimax/minimax-01", "MiniMax: MiniMax-01", 1, 0, 1000192, -1 },
     { "minimax/minimax-m1", "MiniMax: MiniMax M1", 0, 0, 1000000, 1 },
-    { "minimax/minimax-m2", "MiniMax: MiniMax M2", 0, 0, 204800, 1 },
-    { "minimax/minimax-m2-her", "MiniMax: MiniMax M2-her", 0, 0, 65536, -1 },
-    { "minimax/minimax-m2.1", "MiniMax: MiniMax M2.1", 0, 0, 204800, 1 },
     { "minimax/minimax-m2.5", "MiniMax: MiniMax M2.5", 0, 0, 204800, 1 },
     { "minimax/minimax-m2.7", "MiniMax: MiniMax M2.7", 0, 0, 204800, 1 },
     { "minimax/minimax-m3", "MiniMax: MiniMax M3", 1, 0, 1048576, 1 },
@@ -183,8 +184,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "morph/morph-v3-large", "Morph: Morph V3 Large", 0, 0, 262144, -1 },
     { "nex-agi/nex-n2.5-mini", "Nex AGI: Nex-N2.5-Mini", 1, 0, 262144, -1 },
     { "nex-agi/nex-n2.5-pro", "Nex AGI: Nex-N2.5-Pro", 1, 0, 262144, 1 },
-    { "nousresearch/hermes-3-llama-3.1-405b", "Nous: Hermes 3 405B Instruct", 0, 0, 131072, -1 },
-    { "nousresearch/hermes-3-llama-3.1-70b", "Nous: Hermes 3 70B Instruct", 0, 0, 131072, -1 },
     { "nousresearch/hermes-4-405b", "Nous: Hermes 4 405B", 0, 0, 131072, -1 },
     { "nvidia/nemotron-3-nano-30b-a3b", "NVIDIA: Nemotron 3 Nano 30B A3B", 0, 0, 262144, 1 },
     { "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "NVIDIA: Nemotron 3 Nano Omni (free)", 1, 0, 256000, 1 },
@@ -192,7 +191,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "nvidia/nemotron-3-ultra-550b-a55b", "NVIDIA: Nemotron 3 Ultra", 0, 0, 262144, 1 },
     { "nvidia/nemotron-3-ultra-550b-a55b:free", "NVIDIA: Nemotron 3 Ultra (free)", 0, 0, 1000000, 1 },
     { "nvidia/nemotron-3.5-content-safety", "NVIDIA: Nemotron 3.5 Content Safety", 1, 0, 131072, -1 },
-    { "nvidia/nemotron-3.5-content-safety:free", "NVIDIA: Nemotron 3.5 Content Safety (free)", 1, 0, 128000, -1 },
     { "nvidia/nemotron-3.5-lightning", "NVIDIA: Nemotron 3.5 Lightning", 0, 0, 262144, 1 },
     { "nvidia/nemotron-3.5-lightning:free", "NVIDIA: Nemotron 3.5 Lightning (free)", 0, 0, 1000000, 1 },
     { "nvidia/nemotron-3.5-super-vl", "NVIDIA: Nemotron 3.5 Super VL", 1, 0, 1048576, 1 },
@@ -258,6 +256,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "openai/o3-pro", "OpenAI: o3 Pro", 1, 0, 200000, 1 },
     { "openrouter/auto", "Auto Router", 1, 1, 2000000, 1 },
     { "openrouter/auto-beta", "Auto Router (Beta)", 1, 1, 2000000, 1 },
+    { "openrouter/auto-code", "Auto Code", 1, 1, 2000000, 1 },
     { "openrouter/bodybuilder", "Body Builder (beta)", 0, 0, 128000, -1 },
     { "openrouter/free", "Free Models Router", 1, 0, 200000, 1 },
     { "openrouter/fusion", "OpenRouter: Fusion", 0, 0, 1000000, -1 },
@@ -308,7 +307,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "qwen/qwen3.7-max", "Qwen: Qwen3.7 Max", 0, 0, 1000000, 1 },
     { "qwen/qwen3.7-plus", "Qwen: Qwen3.7 Plus", 1, 0, 1000000, 1 },
     { "qwen/qwen3.8-2.4t-a95b", "Qwen: Qwen3.8 2.4T A95B", 0, 0, 1048576, 1 },
-    { "qwen/qwen3.8-27b", "Qwen: Qwen3.8 27B", 1, 0, 1000000, 1 },
+    { "qwen/qwen3.8-27b", "Qwen: Qwen3.8 27B", 1, 0, 1024000, 1 },
     { "qwen/qwen3.8-flash", "Qwen: Qwen3.8 Flash", 1, 0, 1000000, 1 },
     { "qwen/qwen3.8-max-0902", "Qwen: Qwen3.8 Max (0902)", 1, 0, 1000000, 1 },
     { "qwen/qwen3.8-max-prime", "Qwen: Qwen3.8 Max Prime", 1, 0, 1000000, 1 },
@@ -319,6 +318,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "rekaai/reka-flash-3", "Reka Flash 3", 0, 0, 65536, -1 },
     { "relace/relace-apply-3", "Relace: Relace Apply 3", 0, 0, 256000, -1 },
     { "relace/relace-search", "Relace: Relace Search", 0, 0, 256000, 1 },
+    { "ricursiveai/ripple-65b-preview", "Ricursive: Ripple 65B Preview", 0, 0, 1048576, 1 },
     { "sakana/fugu-max", "Sakana: Fugu Max", 1, 0, 1000000, 1 },
     { "sakana/fugu-ultra", "Sakana: Fugu Ultra", 1, 0, 1000000, 1 },
     { "sakana/fugu-ultra-v2", "Sakana: Fugu Ultra v2", 1, 0, 1000000, 1 },
@@ -327,6 +327,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "sao10k/l3.1-euryale-70b", "Sao10K: Llama 3.1 Euryale 70B v2.2", 0, 0, 131072, -1 },
     { "scaledown/extract", "ScaleDown: Extract", 1, 0, 1000000, -1 },
     { "scaledown/summarize", "ScaleDown: Summarize", 1, 0, 1000000, -1 },
+    { "stealth/crouton-alpha", "Crouton Alpha", 1, 0, 1048576, 1 },
     { "stepfun/step-3.5-flash", "StepFun: Step 3.5 Flash", 0, 0, 262144, 1 },
     { "stepfun/step-3.7-flash", "StepFun: Step 3.7 Flash", 1, 0, 262144, 1 },
     { "stepfun/step-5-preview", "StepFun: Step 5 Preview", 1, 0, 1048576, 1 },
@@ -336,14 +337,13 @@ static const NmModel nm_catalog_openrouter[] = {
     { "tencent/hy-mt2-7b", "Tencent: Hy-MT2-7B", 0, 0, 8192, -1 },
     { "tencent/hy3", "Tencent: Hy3", 0, 0, 262144, 1 },
     { "tencent/hy3-preview", "Tencent: Hy3 preview", 0, 0, 262144, 1 },
+    { "tencent/hy4", "Tencent: Hy4", 1, 0, 1048576, 1 },
     { "tencent/hy4-preview", "Tencent: Hy4 preview", 0, 0, 1048576, 1 },
     { "thedrummer/cydonia-24b-v4.1", "TheDrummer: Cydonia 24B V4.1", 0, 0, 131072, -1 },
     { "thedrummer/skyfall-36b-v2", "TheDrummer: Skyfall 36B V2", 0, 0, 32768, -1 },
     { "thedrummer/unslopnemo-12b", "TheDrummer: UnslopNemo 12B", 0, 0, 1024000, -1 },
     { "thinkingmachines/inkling", "Thinking Machines: Inkling", 1, 0, 524288, 1 },
     { "thinkingmachines/inkling-small", "Thinking Machines: Inkling Small", 1, 0, 524288, 1 },
-    { "thinkingmachines/inkling-small:free", "Thinking Machines: Inkling Small (free)", 1, 0, 1048576, 1 },
-    { "thinkingmachines/inkling:free", "Thinking Machines: Inkling (free)", 1, 0, 1048576, 1 },
     { "typesafe/jev-router", "TypeSafe: Jev Router", 1, 0, 1000000, 1 },
     { "unbiased/pareto-26.10", "Pareto 26.10", 1, 0, 1048576, 1 },
     { "unbiased/pareto-26.9", "Pareto 26.9", 1, 0, 262144, 1 },
@@ -358,7 +358,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "x-ai/grok-4.6", "SpaceXAI: Grok 4.6", 1, 0, 500000, 1 },
     { "x-ai/grok-4.7", "SpaceXAI: Grok 4.7", 1, 0, 500000, 1 },
     { "x-ai/grok-build-0.1", "SpaceXAI: Grok Build 0.1", 1, 0, 256000, 1 },
-    { "xiaomi/mimo-v2.5", "Xiaomi: MiMo-V2.5", 1, 0, 1050000, 1 },
+    { "xiaomi/mimo-v2.5", "Xiaomi: MiMo-V2.5", 1, 0, 1000000, 1 },
     { "xiaomi/mimo-v2.5-pro", "Xiaomi: MiMo-V2.5-Pro", 0, 0, 1050000, 1 },
     { "xiaomi/mimo-v2.6-flash", "Xiaomi: MiMo-V2.6-Flash", 1, 0, 1050000, 1 },
     { "xiaomi/mimo-v2.6-pro", "Xiaomi: MiMo-V2.6-Pro", 1, 0, 1050000, 1 },
@@ -378,6 +378,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "z-ai/glm-5.3", "Z.ai: GLM 5.3", 0, 0, 1048576, 1 },
     { "z-ai/glm-5.3-flash", "Z.ai: GLM 5.3 Flash", 1, 0, 1048576, 1 },
     { "z-ai/glm-5.3-flashx", "Z.ai: GLM 5.3 FlashX", 1, 0, 1048576, 1 },
+    { "z-ai/glm-5.3-flashx-legal", "Z.ai: GLM 5.3 FlashX Legal", 1, 0, 1048576, 1 },
     { "z-ai/glm-5.3-prime", "Z.ai: GLM 5.3 Prime", 0, 0, 1000000, 1 },
     { "z-ai/glm-5v-turbo", "Z.ai: GLM 5V Turbo", 1, 0, 202752, 1 },
     { "~anthropic/claude-fable-latest", "Anthropic: Claude Fable Latest", 1, 0, 1000000, 1 },
@@ -402,7 +403,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { 0 }
 };
 
-/* ollama: 25 models.
+/* ollama: 26 models.
  * Source: GET https://ollama.com/v1/models?verbose=true
  */
 static const NmModel nm_catalog_ollama[] = {
@@ -420,6 +421,7 @@ static const NmModel nm_catalog_ollama[] = {
     { "kimi-k2.6", "kimi-k2.6", 1, 0, 262144, 0 },
     { "kimi-k2.7-code", "kimi-k2.7-code", 1, 0, 262144, 0 },
     { "kimi-k3", "kimi-k3", 1, 0, 1048576, 0 },
+    { "kimi-k3.1-pro", "kimi-k3.1-pro", 1, 0, 1048576, 0 },
     { "mimo-v2.6-flash", "mimo-v2.6-flash", 1, 0, 1048576, 0 },
     { "mimo-v2.6-pro", "mimo-v2.6-pro", 1, 0, 1048576, 0 },
     { "minimax-m2.7", "minimax-m2.7", 0, 0, 196608, 0 },
@@ -434,29 +436,24 @@ static const NmModel nm_catalog_ollama[] = {
     { 0 }
 };
 
-/* hyper: 23 models.
+/* hyper: 18 models.
  * Source: GET https://hyper.charm.land/v1/models
  */
 static const NmModel nm_catalog_hyper[] = {
-    { "deepseek-v4-flash-0731", "DeepSeek V4 Flash 0731", 0, 0, 1000000, 1 },
     { "deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813", 0, 0, 1000000, 1 },
-    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 0, 1000000, 1 },
     { "deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017", 1, 0, 1000000, 1 },
     { "gemma-4-26b-a4b-it", "Gemma 4 26B A4B", 0, 0, 256000, 1 },
-    { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1 },
     { "glm-5.3", "GLM 5.3", 0, 0, 1000000, 1 },
     { "glm-5.3-flash", "GLM 5.3 Flash", 1, 0, 1048576, 1 },
     { "gpt-oss-120b", "gpt-oss-120b", 0, 0, 131072, 1 },
     { "inkling", "Inkling", 1, 0, 1048576, 1 },
-    { "kimi-k2-thinking", "Kimi K2 Thinking", 0, 0, 262144, 1 },
-    { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 256000, 1 },
     { "kimi-k3", "Kimi K3", 1, 0, 1048576, 1 },
-    { "minimax-m2.7", "MiniMax M2.7", 0, 0, 262100, 1 },
+    { "kimi-k3.1-pro", "Kimi K3.1 Pro", 1, 0, 1000000, 1 },
     { "minimax-m3", "MiniMax M3", 1, 0, 512000, 1 },
+    { "muse-spark-open", "Muse Spark Open", 1, 0, 1048576, 1 },
     { "prism", "Prism", 1, 0, 1000000, 1 },
-    { "qwen3.7-flash", "Qwen3.7-Flash", 1, 0, 1000000, 1 },
-    { "qwen3.7-max", "Qwen3.7-Max", 0, 0, 1000000, 1 },
-    { "qwen3.7-plus", "Qwen3.7-Plus", 1, 0, 1000000, 1 },
+    { "prism-core", "Prism Core", 1, 0, 1000000, 1 },
+    { "prism-flash", "Prism Flash", 1, 0, 1000000, 1 },
     { "qwen3.8-2.4t-a95b", "Qwen3.8-2.4T-A95B", 0, 0, 1000000, 1 },
     { "qwen3.8-27b", "Qwen3.8-27B", 1, 0, 1000000, 1 },
     { "qwen3.8-flash", "Qwen3.8-Flash", 1, 0, 1000000, 1 },
@@ -464,13 +461,14 @@ static const NmModel nm_catalog_hyper[] = {
     { 0 }
 };
 
-/* opencode-go: 28 models.
+/* opencode-go: 30 models.
  * Source: https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models
  */
 static const NmModel nm_catalog_opencode_go[] = {
     { "beam-free", "Beam Free", 0, 0, 1048576, 1 },
     { "claude-haiku-5-5", "Claude Haiku 5.5", 1, 0, 1000000, 1 },
-    { "deepseek-v4-pro", "DeepSeek V4 Pro (New)", 0, 0, 1000000, 1 },
+    { "crouton-alpha-free", "Crouton Alpha Free", 1, 0, 1048576, 1 },
+    { "deepseek-v4-pro", "DeepSeek V4 Pro", 0, 0, 1000000, 1 },
     { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 0, 1000000, 1 },
     { "gemini-4-argon", "Gemini 4 Argon", 1, 0, 1048576, 1 },
     { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1 },
@@ -480,6 +478,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { "gpt-6-luna", "GPT-6 Luna", 1, 0, 1050000, 1 },
     { "grok-4.7", "Grok 4.7", 1, 0, 500000, 1 },
     { "hy3", "Hy3", 0, 0, 256000, 1 },
+    { "hy4", "Hy4", 1, 0, 1048576, 1 },
     { "hy4-preview", "Hy4 preview", 0, 0, 1024000, 1 },
     { "iceman-contributor-free", "Iceman Contributor Free", 0, 0, 262144, 1 },
     { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 262144, 1 },
@@ -499,7 +498,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { 0 }
 };
 
-/* opencode-zen: 78 models.
+/* opencode-zen: 81 models.
  * Source: https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models
  */
 static const NmModel nm_catalog_opencode_zen[] = {
@@ -519,6 +518,7 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "claude-sonnet-4-6", "Claude Sonnet 4.6", 1, 0, 1000000, 1 },
     { "claude-sonnet-5", "Claude Sonnet 5", 1, 0, 1000000, 1 },
     { "claude-sonnet-5-5", "Claude Sonnet 5.5", 1, 0, 1000000, 1 },
+    { "crouton-alpha-free", "Crouton Alpha Free", 1, 0, 1048576, 1 },
     { "deepseek-v4-pro", "DeepSeek V4 Pro", 0, 0, 1000000, 1 },
     { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 0, 1000000, 1 },
     { "deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free", 1, 0, 200000, 1 },
@@ -563,6 +563,8 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "grok-4.6", "Grok 4.6", 1, 0, 500000, 1 },
     { "grok-4.7", "Grok 4.7", 1, 0, 500000, 1 },
     { "grok-build-0.1", "Grok Build 0.1", 1, 0, 256000, 1 },
+    { "iceman-free", "Iceman Free", 0, 0, 262144, 1 },
+    { "inkling-2-small-free", "Inkling 2 Small Free", 1, 0, 1048576, 1 },
     { "kimi-k2.5", "Kimi K2.5", 1, 0, 262144, 1 },
     { "kimi-k2.6", "Kimi K2.6", 1, 0, 262144, 1 },
     { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 262144, 1 },
