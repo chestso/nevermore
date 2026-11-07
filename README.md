@@ -163,6 +163,10 @@ off.
   argument prints the value and the accepted spellings)
 - `/preset cheap|fast|balanced`: both levers at once — `cheap` is `:floor` on the
   `flex` tier, `fast` `:nitro` on `priority`, `balanced` neither
+- `/effort [level]`: how hard the model thinks (bare lists the current
+  model's levels; `off` clears). The levels are per model, and changing the
+  model resets the effort to the provider default; the status row shows the
+  current level as `◆hi`-style shorthand
 - `/context`: the exact token breakdown (last round, session totals, cache read
   rate)
 - `/session`, `/session list`, `/session save [path]`: inspect or save the

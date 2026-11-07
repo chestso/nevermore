@@ -285,6 +285,23 @@ Sources:
 - The picker's right-aligned meta column (`ctx 👀 🖼 🔧`) is display-only. The
   row's item stays the bare id, so compose never sees the meta, and the item
   truncates first.
+- **Reasoning effort is a per-model catalog vocab, not a provider knob.**
+  `NmModel.effort_levels` is the `"|"`-joined level list and
+  `effort_default` the catalog's default (NULL = no selectable effort: the
+  model reasons implicitly or fixed, and there is no knob). Sources: Hyper's
+  `reasoning.effort_levels[].value`, Ollama Cloud's
+  `supported_reasoning_levels[].effort`, models.dev's first `type: effort`
+  `values` (toggle-only and budget-only rows get no knob), and OpenRouter's
+  provider-level shorthand enum gated on `supported_parameters` carrying
+  `reasoning`/`reasoning_effort`. The wire shape is one top-level
+  `reasoning_effort` field on every probed provider (the object shape is
+  rejected by OpenCode Go); the endpoint's `effort_wire` declares it, the
+  composer stays a dumb serializer, and the agent validates the level
+  against the current model's list — refuse, never clamp, because the wire
+  enum is wider than some catalogs and Hyper silently ignores an unlisted
+  value. Two Ollama-local facts are deliberately absent: the daemon was
+  unprobed, so local rows claim no levels and local endpoints send nothing.
+  See the `docs/*-API.md` wire specs for the probed shapes.
 
 ## Configuration
 
@@ -318,6 +335,16 @@ only the shadow, never the user file.
 - Values are resolved at the point of use, so `/config set temperature 0`
   applies to the next round. A request field with no default (`temperature`,
   `max_tokens`) is not sent when unset.
+- **Reasoning effort is runtime state, not a store key.** The vocab is per
+  model (see [Model flags](#model-flags)), so a durable `effort.<provider>`
+  key would survive exactly the model change that must clear it, and the
+  store's scoped grammar cannot spell per-model keys. The agent owns the
+  current level (`nm_agent_effort`), resets it on every model change
+  (re-setting the same id is not a change), and reads it at the point of
+  use; `/effort` and `/config set reasoning_effort` are one write path onto
+  it, and `/config` shows it as `this chat`. Unlike the echo modes it is
+  never frozen: the field rides top-level, outside the cached prefix, so a
+  change applies to the next round for free.
 - **One presentation rule for a config fact.** `nm_config_view` (`NmCfgView`)
   turns a resolution into the pair every surface prints: the value, and the
   layer that dictates it. A resolution with no text is `-` and `unset` — never
@@ -960,10 +987,12 @@ Two halves, one sniffer.
   render modes.
 - **Status row** (`compose_status`). A boba `TuiStatusLine` the app declares and
   boba lays out (it was once a field of the text input, which could not measure
-  it). At most nine segments: the spinner glyph (left, fixed; its color rides the
+  it). At most ten segments: the spinner glyph (left, fixed; its color rides the
   frame the spinner hands over), then the gauge fields (counts, output count,
   cache rate; one segment each so each carries its own color:
   `nm_color_gauge_output` for the output, the tier's color for counts and rate),
+  then the reasoning effort when set (`◆` + a clipped token, left and fixed
+  like the gauge, in the identity's Foreground; unset declares no segment),
   all left and fixed chrome that is never cut; then up to three **credit cells**
   (see below); then a `─` fill (priority 1) and the right-aligned identity
   (priority 2). The ladder is a declaration, not app arithmetic: the identity
