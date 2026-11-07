@@ -247,8 +247,10 @@ static void hyper_catalog_endpoint(const NmProvider *p, const char *api_key,
 }
 
 /* One /v1/models entry -> one row: label is display_name, context is
- * context_window, vision is capabilities.vision — and the tools rule
- * above applies to every row the wire yields. */
+ * context_window, vision is capabilities.vision, the effort vocab is
+ * reasoning.effort_levels[].value + default_effort_level (absent block
+ * = reasons implicitly, no selection — HYPER-API.md §5) — and the
+ * tools rule above applies to every row the wire yields. */
 static const char *hyper_row(NmJson *entry, NmModel *out, void *ud)
 {
     (void)ud;
@@ -259,6 +261,11 @@ static const char *hyper_row(NmJson *entry, NmModel *out, void *ud)
     /* The provider-level rule (see the note above): the wire
      * carries no tool-use claim, and every model takes tools. */
     out->tools = 1;
+    NmJson *reasoning = nm_json_get(entry, "reasoning");
+    out->effort_levels =
+        nm_effort_join(nm_json_get(reasoning, "effort_levels"), "value");
+    const char *def = nm_json_str(nm_json_get(reasoning, "default_effort_level"));
+    out->effort_default = (def && *def) ? strdup(def) : NULL;
     /* No display_name on the wire: the merge loop falls back to the id. */
     return nm_json_str(nm_json_get(entry, "display_name"));
 }

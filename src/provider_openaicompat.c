@@ -58,6 +58,47 @@ static const NmOpenaiCompat *openaicompat_of(const NmProvider *p)
     return (p && p->id < NM_PROVIDER_MAX) ? g_compat[p->id] : NULL;
 }
 
+/* nm_effort_join: one allocation, sized by the values themselves
+ * (never a guessed bound). Elements that are not strings — or, in
+ * the object shape, objects without the named field — are skipped;
+ * an array with no usable value is "no levels known" (NULL). */
+char *nm_effort_join(NmJson *arr, const char *field)
+{
+    if (!arr || nm_json_type(arr) != NM_JSON_ARRAY)
+        return NULL;
+    size_t n = nm_json_len(arr);
+    size_t total = 0;
+    for (size_t i = 0; i < n; i++) {
+        NmJson *e = nm_json_at(arr, i);
+        const char *v = field ? nm_json_str(nm_json_get(e, field))
+                              : nm_json_str(e);
+        if (v && *v)
+            total += strlen(v) + 1; /* value + '|' (or NUL on the last) */
+    }
+    if (total == 0)
+        return NULL;
+    char *out = malloc(total);
+    if (!out)
+        return NULL;
+    size_t off = 0;
+    int first = 1;
+    for (size_t i = 0; i < n; i++) {
+        NmJson *e = nm_json_at(arr, i);
+        const char *v = field ? nm_json_str(nm_json_get(e, field))
+                              : nm_json_str(e);
+        if (!v || !*v)
+            continue;
+        if (!first)
+            out[off++] = '|';
+        first = 0;
+        size_t len = strlen(v);
+        memcpy(out + off, v, len);
+        off += len;
+    }
+    out[off] = '\0';
+    return out;
+}
+
 /* Zero + preset an endpoint; the provider's builder then fills its own
  * wire facts. The zero-first rule is structural here: a field a builder
  * does not name (read_response_meta) must be NULL, not garbage — the
@@ -169,6 +210,11 @@ static int openaicompat_parse(const NmJson *doc, void *ud)
         if (!row_label) {
             free(row_id);
             models[out].id = NULL;
+            /* The mapper's owned effort strings die with the row. */
+            free((void *)models[out].effort_levels);
+            free((void *)models[out].effort_default);
+            models[out].effort_levels = NULL;
+            models[out].effort_default = NULL;
             continue; /* OOM: skip the row */
         }
         models[out].label = row_label;

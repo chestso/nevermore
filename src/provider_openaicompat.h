@@ -68,6 +68,12 @@ typedef void (*NmOpenaiCompatCatalogEndpoint)(
  *   - the numeric fields arrive preset: vision = image_gen = tools = 0
  *     (the "catalog says nothing" zero value) and context_length = -1
  *     (unknown); the mapper overwrites what its wire actually claims;
+ *   - the effort strings arrive preset NULL; the mapper sets each to
+ *     an OWNED (malloc'd) string or leaves NULL — the loop adopts
+ *     them verbatim (it does not copy) and frees them on the OOM
+ *     skip. A borrowed pointer here would dangle with the parsed
+ *     document; a joined level list has no borrowed form anyway.
+ *     Build one with nm_effort_join below;
  *   - return the LABEL source string (owned by the parsed document or
  *     by a static table — the loop copies it), or NULL for "the label
  *     falls back to the id".
@@ -142,6 +148,15 @@ const NmModel *nm_openaicompat_models_cached(const NmProvider *p,
 const NmModel *nm_openaicompat_models(const NmProvider *p,
                                       const char *base_url,
                                       const char *api_key, size_t *n_out);
+
+/* Join a catalog level list into the owned "|"-joined string
+ * NmModel.effort_levels holds. `arr` is a JSON array in one of two
+ * shapes: objects carrying the value in `field` (hyper's
+ * effort_levels[].value, ollama's supported_reasoning_levels[].effort)
+ * or plain strings (models.dev's effort values[]) when `field` is
+ * NULL. Returns the malloc'd string, or NULL when the array is
+ * absent/empty (no levels known). The caller owns it. */
+char *nm_effort_join(NmJson *arr, const char *field);
 
 /* The plain builders: the endpoint shapes shared by the providers with
  * no extra headers of their own. */

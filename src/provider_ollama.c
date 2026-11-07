@@ -145,7 +145,13 @@ static long model_info_context(NmJson *model_info)
 
 /* POST {api_root}/api/show for one model's metadata (capabilities,
  * model_info.context_length). Returns 0 on success (fields written),
- * -1 on any failure — the caller keeps defaults for that model. */
+ * -1 on any failure — the caller keeps defaults for that model.
+ *
+ * Effort levels: the native machine claims none. Ollama's docs name
+ * a `/api/show` thinking-values field for native `think` levels, but
+ * the local daemon was down for the 2026-11-07 probe, so no field
+ * name is verified and none is guessed — local rows stay knobless
+ * until probed (the cloud's verbose shape above is the proven one). */
 static void show_apply(NmJson *doc, NmModel *out)
 {
     NmJson *caps = nm_json_get(doc, "capabilities");
@@ -211,6 +217,8 @@ static void ollama_fetch_clear(OllamaFetch *o)
         for (size_t i = 0; i < o->n; i++) {
             free((void *)o->models[i].id);
             free((void *)o->models[i].label);
+            free((void *)o->models[i].effort_levels);
+            free((void *)o->models[i].effort_default);
         }
         free(o->models);
         o->models = NULL;
@@ -358,6 +366,14 @@ static int ollama_verbose_parse(OllamaFetch *o, const NmJson *doc)
         models[out].context_length = ctx > 0 ? (long)ctx : -1;
         if (models[out].context_length > 0)
             with_ctx++;
+        /* Reasoning effort: supported_reasoning_levels[].effort +
+         * default_reasoning_level (probed 2026-11-07; some models
+         * are binary none/medium toggles, some carry no levels at
+         * all — both read as-is, values only). */
+        models[out].effort_levels = nm_effort_join(
+            nm_json_get(e, "supported_reasoning_levels"), "effort");
+        const char *def = nm_json_str(nm_json_get(e, "default_reasoning_level"));
+        models[out].effort_default = (def && *def) ? strdup(def) : NULL;
         /* tools stays 0 ("the catalog says nothing"): the verbose
          * shape's experimental_supported_tools is empty for every
          * probed model, and an empty list is not a claim. The native
@@ -365,6 +381,10 @@ static int ollama_verbose_parse(OllamaFetch *o, const NmJson *doc)
         if (!models[out].id || !models[out].label) {
             free((void *)models[out].id);
             free((void *)models[out].label);
+            free((void *)models[out].effort_levels);
+            free((void *)models[out].effort_default);
+            models[out].effort_levels = NULL;
+            models[out].effort_default = NULL;
             continue;
         }
         out++;
@@ -381,6 +401,8 @@ static int ollama_verbose_parse(OllamaFetch *o, const NmJson *doc)
         for (size_t i = 0; i < out; i++) {
             free((void *)models[i].id);
             free((void *)models[i].label);
+            free((void *)models[i].effort_levels);
+            free((void *)models[i].effort_default);
         }
         free(models);
         return 0;

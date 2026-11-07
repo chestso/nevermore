@@ -4431,11 +4431,11 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
 static int g_blocking_models_calls;
 
 static const NmModel stub_blocking_models[] = {
-    { "stub-vision", "Stub (blocking)", 0, 0, 0, -1 },
+    { "stub-vision", "Stub (blocking)", 0, 0, 0, -1, NULL, NULL },
     { 0 }
 };
 static const NmModel stub_cached_models[] = {
-    { "stub-vision", "Stub (cached)", 1, 0, 128000, 0 },
+    { "stub-vision", "Stub (cached)", 1, 0, 128000, 0, NULL, NULL },
     { 0 }
 };
 
@@ -4537,28 +4537,28 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
  * user's `47.1k/-`) stayed `-` for the whole session, however warm
  * the cache got. */
 static const NmModel stub_cold_models[] = {
-    { "other-model", "Stub (static fallback)", 0, 0, 8192, 0 },
+    { "other-model", "Stub (static fallback)", 0, 0, 8192, 0, NULL, NULL },
     { 0 }
 };
 static const NmModel stub_live_models[] = {
-    { "stub-late", "Stub (live catalog)", 0, 0, 262144, 0 },
+    { "stub-late", "Stub (live catalog)", 0, 0, 262144, 0, NULL, NULL },
     { 0 }
 };
 /* The capability clause's rows: the SAME model id, first as a catalog
  * that says it can see, then as one that says it is text-only — so a
  * test can land a live catalog that contradicts the fallback. */
 static const NmModel stub_see_models[] = {
-    { "stub-see", "Stub (can see)", 1, 0, 128000, 0 },
+    { "stub-see", "Stub (can see)", 1, 0, 128000, 0, NULL, NULL },
     { 0 }
 };
 static const NmModel stub_textonly_models[] = {
-    { "stub-see", "Stub (text-only)", 0, 0, 128000, 0 },
+    { "stub-see", "Stub (text-only)", 0, 0, 128000, 0, NULL, NULL },
     { 0 }
 };
 /* Two models, one table: what a /model switch resolves against. */
 static const NmModel stub_switch_models[] = {
-    { "stub-see", "Stub (can see)", 1, 0, 128000, 0 },
-    { "stub-blind", "Stub (text-only)", 0, 0, 128000, 0 },
+    { "stub-see", "Stub (can see)", 1, 0, 128000, 0, NULL, NULL },
+    { "stub-blind", "Stub (text-only)", 0, 0, 128000, 0, NULL, NULL },
     { 0 }
 };
 

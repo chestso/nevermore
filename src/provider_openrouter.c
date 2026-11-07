@@ -352,6 +352,18 @@ static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
                      : 0;
     double ctx = nm_json_num(nm_json_get(entry, "context_length"));
     out->context_length = ctx > 0 ? (long)ctx : -1;
+    /* Reasoning effort: the catalog carries support, not levels, so
+     * the vocabulary is the provider-level shorthand enum (probed
+     * 2026-11-07: the top-level `reasoning_effort` field takes
+     * exactly these, and `none` disables reasoning outright).
+     * Gated on the claim the same way tools is: listed with
+     * `reasoning` or `reasoning_effort` = selectable; listed
+     * without either, or not listed at all, = no knob. Owned per
+     * the row contract (the loop adopts it). */
+    if (params && nm_json_type(params) == NM_JSON_ARRAY &&
+        (array_has(params, "reasoning_effort") ||
+         array_has(params, "reasoning")))
+        out->effort_levels = strdup("none|minimal|low|medium|high|xhigh|max");
     /* No "name" on the wire: the merge loop falls back to the id. */
     return nm_json_str(nm_json_get(entry, "name"));
 }

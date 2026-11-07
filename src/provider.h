@@ -97,6 +97,26 @@ typedef struct NmModel
      *        "tools" — the agent sends neither tools nor tool_choice.
      * agent.c's model_tools resolves it at the point of use. */
     int tools;
+    /* The catalog's selectable reasoning-effort levels, "|"-joined in
+     * catalog order ("low|medium|high"), or NULL/"" when the catalog
+     * names none (the model reasons implicitly or with a fixed
+     * depth — there is no knob to turn). A positive claim only, like
+     * vision: NULL means "none known", never "known absent". The
+     * values are the catalog's own spellings — the store and the
+     * wire carry them verbatim, with no canon in between.
+     *
+     * OWNERSHIP: static tables hold string literals (borrowed, never
+     * freed); live-catalog rows OWN heap strings (process-lifetime
+     * caches, freed only on a failed partial build). Row mappers
+     * hand the merge loop an owned string or NULL — see
+     * provider_openaicompat.h. */
+    const char *effort_levels;
+    /* The catalog's default effort level (hyper's
+     * `default_effort_level`, ollama's `default_reasoning_level`),
+     * or NULL when the catalog names none. Informational only: an
+     * unset effort sends nothing and the provider's own default
+     * rules apply, so this never changes what goes on the wire. */
+    const char *effort_default;
 } NmModel;
 
 typedef struct NmMessage

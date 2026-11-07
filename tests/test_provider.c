@@ -636,7 +636,11 @@ static void *hyper_models_server_thread(void *arg)
         "{\"object\":\"list\",\"data\":["
         "{\"id\":\"gpt-oss-120b\",\"display_name\":\"GPT OSS 120b\","
         "\"context_window\":131072,"
-        "\"capabilities\":{\"vision\":false}},"
+        "\"capabilities\":{\"vision\":false},"
+        "\"reasoning\":{\"effort_levels\":[{\"value\":\"low\","
+        "\"display\":\"Low\"},{\"value\":\"medium\",\"display\":\"Medium\"},"
+        "{\"value\":\"high\",\"display\":\"High\"}],"
+        "\"default_effort_level\":\"medium\"}},"
         "{\"id\":\"vision-test\",\"display_name\":\"Vision Test\","
         "\"context_window\":8192,"
         "\"capabilities\":{\"vision\":true}},"
@@ -957,18 +961,27 @@ static void test_hyper_models_fetch(void)
      * catalog's `capabilities` object carries only `vision`, so tools
      * is never read from the wire (see hyper_static_models). */
     ASSERT_EQ(models[0].tools, 1);
+    /* The effort vocab rides the same live row: the joined level
+     * list and the catalog default, in the catalog's own spellings. */
+    ASSERT_STR_EQ(models[0].effort_levels, "low|medium|high");
+    ASSERT_STR_EQ(models[0].effort_default, "medium");
     ASSERT_STR_EQ(models[1].id, "vision-test");
     ASSERT_STR_EQ(models[1].label, "Vision Test");
     ASSERT_EQ(models[1].context_length, 8192);
     ASSERT_EQ(models[1].vision, 1);
     ASSERT_EQ(models[1].image_gen, 0);
     ASSERT_EQ(models[1].tools, 1);
+    /* No `reasoning` block on the wire: no levels, no default —
+     * the model reasons implicitly and there is no knob. */
+    ASSERT_TRUE(models[1].effort_levels == NULL);
+    ASSERT_TRUE(models[1].effort_default == NULL);
     /* No display_name on the wire: the label falls back to the id. */
     ASSERT_STR_EQ(models[2].id, "no-name-model");
     ASSERT_STR_EQ(models[2].label, "no-name-model");
     ASSERT_EQ(models[2].context_length, 4096);
     ASSERT_EQ(models[2].vision, 0);
     ASSERT_EQ(models[2].tools, 1);
+    ASSERT_TRUE(models[2].effort_levels == NULL);
     pthread_join(th, NULL);
 
     /* GET /v1/models, and tokenless (no Authorization header —
@@ -1566,6 +1579,13 @@ static void test_openrouter_models_fetch(void)
     ASSERT_EQ(models[0].tools, 1);
     ASSERT_EQ(models[1].tools, 0);
     ASSERT_EQ(models[2].tools, -1);
+    /* The effort claim rides the same supported_parameters list:
+     * `reasoning` listed = the provider-level vocab; listed
+     * without it, or not listed at all, = no knob. */
+    ASSERT_STR_EQ(models[0].effort_levels,
+                  "none|minimal|low|medium|high|xhigh|max");
+    ASSERT_TRUE(models[1].effort_levels == NULL);
+    ASSERT_TRUE(models[2].effort_levels == NULL);
     /* The receive direction (IMAGEGEN): output_modalities contains
      * "image" — the vision scanner's twin (OPENROUTER-API.md §5.1). */
     ASSERT_STR_EQ(models[2].id, "google/gemini-3.1-flash-lite-image");

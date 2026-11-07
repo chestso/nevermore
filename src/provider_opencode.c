@@ -390,11 +390,12 @@ static NmJson *oc_document_model(const NmProvider *p, const char *id)
     return sib ? nm_json_get(sib, id) : NULL;
 }
 
-/* The document's model entry -> the row's claims. The four facts the
+/* The document's model entry -> the row's claims. The facts the
  * picker and the gauge read: the label, the window, the vision and
- * image-generation claims and the tool claim. The document's shape
- * (models.dev's): "name", "limit.context", "modalities.input" /
- * "modalities.output" ("image" in the list), "tool_call".
+ * image-generation claims, the tool claim and the effort vocab. The
+ * document's shape (models.dev's): "name", "limit.context",
+ * "modalities.input" / "modalities.output" ("image" in the list),
+ * "tool_call", "reasoning_options".
  *
  * The document is the LIVE truth, so its claims win over the table's
  * snapshot — but a row is only COMPLETE when it carries a window, and
@@ -416,6 +417,26 @@ static int oc_apply_document(NmJson *m, NmModel *out, const char **label)
      * "the catalog says nothing" (0), never -1: the tier takes a
      * toolset whatever the catalog says. */
     out->tools = nm_json_bool(nm_json_get(m, "tool_call")) ? 1 : 0;
+    /* Reasoning effort: the FIRST `type: effort` entry of
+     * reasoning_options, its values verbatim (probed 2026-11-07:
+     * Go's 400s name exactly these). `toggle`-only and
+     * `budget_tokens`-only rows get no knob — a toggle is on/off
+     * without a level, a budget is a token count, neither is an
+     * effort level. Borrowed from the document; the builder
+     * copies it into the row. models.dev names no per-model
+     * effort default, so effort_default stays NULL. */
+    NmJson *opts = nm_json_get(m, "reasoning_options");
+    if (opts && nm_json_type(opts) == NM_JSON_ARRAY) {
+        for (size_t i = 0; i < nm_json_len(opts); i++) {
+            NmJson *e = nm_json_at(opts, i);
+            const char *type = nm_json_str(nm_json_get(e, "type"));
+            if (type && strcmp(type, "effort") == 0) {
+                out->effort_levels =
+                    nm_effort_join(nm_json_get(e, "values"), NULL);
+                break;
+            }
+        }
+    }
     const char *name = nm_json_str(nm_json_get(m, "name"));
     if (name && *name)
         *label = name;
@@ -455,6 +476,14 @@ static NmModel *oc_build_rows(const NmProvider *p, const OcFetch *o,
                 row.image_gen = t->image_gen;
                 row.context_length = t->context_length;
                 row.tools = t->tools;
+                /* The table's effort strings are literals: copy
+                 * them so the row owns its strings like every
+                 * other field (the document path's join result is
+                 * already owned). */
+                row.effort_levels =
+                    t->effort_levels ? strdup(t->effort_levels) : NULL;
+                row.effort_default =
+                    t->effort_default ? strdup(t->effort_default) : NULL;
                 label = t->label;
                 covered = 1;
             }
@@ -462,11 +491,16 @@ static NmModel *oc_build_rows(const NmProvider *p, const OcFetch *o,
         if (!covered)
             continue; /* no coverage: not offered */
         row.id = strdup(id);
-        if (!row.id)
+        if (!row.id) {
+            free((void *)row.effort_levels);
+            free((void *)row.effort_default);
             continue; /* OOM: skip the row */
+        }
         row.label = strdup(label && *label ? label : id);
         if (!row.label) {
             free((void *)row.id);
+            free((void *)row.effort_levels);
+            free((void *)row.effort_default);
             continue; /* OOM: skip the row */
         }
         models[out++] = row;

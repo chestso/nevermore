@@ -90,8 +90,18 @@ def fetch_json(url, headers=None):
 # --------------------------------------------------------------------
 
 
-def row(model_id, label, context_length, vision, image_gen, tools):
-    """One catalog row. The four facts, and nothing else.
+def row(
+    model_id,
+    label,
+    context_length,
+    vision,
+    image_gen,
+    tools,
+    effort_levels=None,
+    effort_default=None,
+):
+    """One catalog row. The four facts, and nothing else — plus the
+    effort vocab when the source names one.
 
     context_length <= 0 means UNKNOWN: a row without a window has no
     coverage (the caller drops it).
@@ -103,7 +113,19 @@ def row(model_id, label, context_length, vision, image_gen, tools):
         "image_gen": 1 if image_gen else 0,
         "context_length": int(context_length),
         "tools": int(tools),
+        "effort_levels": effort_levels,
+        "effort_default": effort_default,
     }
+
+
+def effort_join(values):
+    """A level list -> the "|"-joined spelling NmModel holds.
+
+    Empty/absent is None (no levels known). The values are the
+    source's own spellings, in source order — no canon in between.
+    """
+    vals = [v for v in (values or []) if isinstance(v, str) and v]
+    return "|".join(vals) if vals else None
 
 
 def has_str(arr, want):
@@ -143,6 +165,16 @@ def resolve_openrouter():
             tools = 1 if has_str(params, "tools") else -1
         else:
             tools = 0  # the catalog says nothing
+        # Reasoning effort: the catalog carries support, not levels,
+        # so the vocabulary is the provider-level shorthand enum —
+        # the same constant the runtime row mapper fills (probed
+        # 2026-11-07). Gated on the claim like tools is.
+        effort = (
+            "none|minimal|low|medium|high|xhigh|max"
+            if isinstance(params, list)
+            and (has_str(params, "reasoning_effort") or has_str(params, "reasoning"))
+            else None
+        )
         rows.append(
             row(
                 model_id,
@@ -151,6 +183,8 @@ def resolve_openrouter():
                 has_str(arch.get("input_modalities"), "image"),
                 has_str(arch.get("output_modalities"), "image"),
                 tools,
+                effort,
+                None,
             )
         )
     return rows
@@ -183,6 +217,12 @@ def resolve_ollama():
                 has_str(entry.get("input_modalities"), "image"),
                 False,
                 0,
+                effort_join(
+                    e.get("effort")
+                    for e in (entry.get("supported_reasoning_levels") or [])
+                    if isinstance(e, dict)
+                ),
+                entry.get("default_reasoning_level") or None,
             )
         )
     return rows
@@ -201,6 +241,7 @@ def resolve_hyper():
         if not model_id:
             continue
         caps = entry.get("capabilities") or {}
+        reasoning = entry.get("reasoning") or {}
         rows.append(
             row(
                 model_id,
@@ -209,6 +250,12 @@ def resolve_hyper():
                 bool(caps.get("vision")),
                 False,
                 1,
+                effort_join(
+                    e.get("value")
+                    for e in (reasoning.get("effort_levels") or [])
+                    if isinstance(e, dict)
+                ),
+                reasoning.get("default_effort_level") or None,
             )
         )
     return rows
@@ -227,6 +274,20 @@ TIER_BASE = {
 # window always wins, because a tier may serve the same model with a
 # different one (minimax-m3: 1M on Go, 512k on Zen).
 CATALOG_ENTRY = {"opencode-go": "opencode-go", "opencode-zen": "opencode"}
+
+
+def opencode_effort(entry):
+    """The first `type: effort` entry of reasoning_options, joined.
+
+    Toggle-only and budget_tokens-only rows get no knob (a toggle is
+    on/off without a level, a budget is a token count). The runtime
+    row mapper (provider_opencode.c) applies the same rule, so the
+    generated fallback and the live resolution agree.
+    """
+    for opt in entry.get("reasoning_options") or []:
+        if isinstance(opt, dict) and opt.get("type") == "effort":
+            return effort_join(opt.get("values"))
+    return None
 
 
 def resolve_opencode(slug):
@@ -260,6 +321,8 @@ def resolve_opencode(slug):
                 has_str(modalities.get("input"), "image"),
                 has_str(modalities.get("output"), "image"),
                 1 if entry.get("tool_call") else 0,
+                opencode_effort(entry),
+                None,
             )
         )
     return rows
@@ -286,7 +349,8 @@ def header_text(tables):
     """The generated tables: the compiled-in fallback.
 
     One table per provider, sorted by id, in the row shape the app
-    reads (id, label, vision, image_gen, context_length, tools).
+    reads (id, label, vision, image_gen, context_length, tools,
+    effort_levels, effort_default).
     """
     out = []
     out.append("/* catalog_data.h - GENERATED model catalogs (every provider).")
@@ -312,7 +376,7 @@ def header_text(tables):
         out.append("static const NmModel nm_catalog_%s[] = {" % slug.replace("-", "_"))
         for r in rows:
             out.append(
-                '    { "%s", "%s", %d, %d, %d, %d },'
+                '    { "%s", "%s", %d, %d, %d, %d, %s, %s },'
                 % (
                     r["id"],
                     r["label"],
@@ -320,6 +384,8 @@ def header_text(tables):
                     r["image_gen"],
                     r["context_length"],
                     r["tools"],
+                    '"%s"' % r["effort_levels"] if r["effort_levels"] else "NULL",
+                    '"%s"' % r["effort_default"] if r["effort_default"] else "NULL",
                 )
             )
         out.append("    { 0 }")
