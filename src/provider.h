@@ -108,7 +108,8 @@ typedef struct NmModel
      * provider_openaicompat.h. */
     const char *effort_levels;
     /* The catalog's default effort level (ollama's
-     * `default_reasoning_level`),
+     * `default_reasoning_level`, openrouter's
+     * `reasoning.default_effort`),
      * or NULL when the catalog names none. Informational only: an
      * unset effort sends nothing and the provider's own default
      * rules apply, so this never changes what goes on the wire. */

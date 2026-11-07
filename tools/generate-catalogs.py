@@ -167,13 +167,20 @@ def resolve_openrouter():
         # Reasoning effort: the catalog carries support, not levels,
         # so the vocabulary is the provider-level shorthand enum —
         # the same constant the runtime row mapper fills (probed
-        # 2026-11-07). Gated on the claim like tools is.
+        # 2026-11-07). Gated on the claim like tools is. The default
+        # rides the same gate: reasoning.default_effort (probed:
+        # stealth/crouton-alpha "max"), informational only.
         effort = (
             "none|minimal|low|medium|high|xhigh|max"
             if isinstance(params, list)
             and (has_str(params, "reasoning_effort") or has_str(params, "reasoning"))
             else None
         )
+        effort_default = None
+        if effort is not None:
+            default = (entry.get("reasoning") or {}).get("default_effort")
+            if isinstance(default, str) and default:
+                effort_default = default
         rows.append(
             row(
                 model_id,
@@ -183,7 +190,7 @@ def resolve_openrouter():
                 has_str(arch.get("output_modalities"), "image"),
                 tools,
                 effort,
-                None,
+                effort_default,
             )
         )
     return rows
@@ -225,6 +232,7 @@ def resolve_ollama():
             )
         )
     return rows
+
 
 CATALOG_URL = "https://models.opencode.ai/api.json"
 TIER_BASE = {

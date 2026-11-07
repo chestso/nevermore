@@ -2205,6 +2205,10 @@ static void test_effort_command_sets_and_lists(void)
     out = harness_read(h);
     ASSERT_TRUE(strstr(out + seen, "accepted: none|minimal|low|medium|high|xhigh|max") != NULL);
     ASSERT_TRUE(strstr(out + seen, "row: ") != NULL);
+    /* The catalog's default for this row (reasoning.default_effort):
+     * shown when nothing is sent, so the bare command names what
+     * the request will do by default. */
+    ASSERT_TRUE(strstr(out + seen, "(default: medium)") != NULL);
     seen = strlen(out);
 
     /* An unlisted level is refused with the accepted list. */

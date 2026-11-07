@@ -362,11 +362,23 @@ static const char *openrouter_row(NmJson *entry, NmModel *out, void *ud)
      * Gated on the claim the same way tools is: listed with
      * `reasoning` or `reasoning_effort` = selectable; listed
      * without either, or not listed at all, = no knob. Owned per
-     * the row contract (the loop adopts it). */
+     * the row contract (the loop adopts it).
+     *
+     * The default is a separate fact: `reasoning.default_effort`
+     * (probed: stealth/crouton-alpha reports "max") — what the
+     * upstream applies when nevermore sends nothing. It rides the
+     * same gate (a default without a vocab is no knob either), is
+     * informational only, and is adopted verbatim: the catalog's
+     * own spelling, never validated against the shorthand enum. */
     if (params && nm_json_type(params) == NM_JSON_ARRAY &&
         (array_has(params, "reasoning_effort") ||
-         array_has(params, "reasoning")))
+         array_has(params, "reasoning"))) {
         out->effort_levels = strdup("none|minimal|low|medium|high|xhigh|max");
+        const char *def = nm_json_str(nm_json_get(
+            nm_json_get(entry, "reasoning"), "default_effort"));
+        if (def && *def)
+            out->effort_default = strdup(def);
+    }
     /* No "name" on the wire: the merge loop falls back to the id. */
     return nm_json_str(nm_json_get(entry, "name"));
 }

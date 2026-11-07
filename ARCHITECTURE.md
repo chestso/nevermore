@@ -290,7 +290,12 @@ Sources:
   Cloud's `supported_reasoning_levels[].effort`, models.dev's first `type: effort`
   `values` (toggle-only and budget-only rows get no knob), and OpenRouter's
   provider-level shorthand enum gated on `supported_parameters` carrying
-  `reasoning`/`reasoning_effort`. The wire shape is one top-level
+  `reasoning`/`reasoning_effort`. The default, where the catalog names one,
+  is that same row's own field (Ollama Cloud's `default_reasoning_level`,
+  OpenRouter's `reasoning.default_effort`; models.dev names none) — adopted
+  verbatim under the same gate as the levels, informational only, and shown
+  by `/effort` so an unset effort still names what the request will do by
+  default. The wire shape is one top-level
   `reasoning_effort` field on every probed provider (the object shape is
   rejected by OpenCode Go); the endpoint's `effort_wire` declares it, the
   composer stays a dumb serializer, and the agent validates the level

@@ -1014,7 +1014,10 @@ static void *openrouter_models_server_thread(void *arg)
         "\"context_length\":1050000,"
         "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
         "\"output_modalities\":[\"text\"]},"
-        "\"supported_parameters\":[\"tools\",\"tool_choice\",\"reasoning\"]},"
+        "\"supported_parameters\":[\"tools\",\"tool_choice\",\"reasoning\"],"
+        "\"reasoning\":{\"mandatory\":true,"
+        "\"supported_efforts\":[\"low\",\"high\"],"
+        "\"default_effort\":\"high\"}},"
         "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
         "\"context_length\":8192,"
         "\"architecture\":{\"input_modalities\":[\"text\"]}},"
@@ -1246,6 +1249,14 @@ static void test_openrouter_models_fetch(void)
                   "none|minimal|low|medium|high|xhigh|max");
     ASSERT_TRUE(models[1].effort_levels == NULL);
     ASSERT_TRUE(models[2].effort_levels == NULL);
+    /* The default rides the same gate: `reasoning.default_effort`
+     * is the upstream's own default (what applies when nevermore
+     * sends nothing) — adopted verbatim, informational only; no
+     * object on the wire = no default. */
+    ASSERT_STR_EQ(models[0].effort_default, "high");
+    ASSERT_TRUE(models[1].effort_default == NULL);
+    ASSERT_TRUE(models[2].effort_default == NULL);
+    ASSERT_TRUE(models[3].effort_default == NULL);
     /* The receive direction (IMAGEGEN): output_modalities contains
      * "image" — the vision scanner's twin (OPENROUTER-API.md §5.1). */
     ASSERT_STR_EQ(models[2].id, "google/gemini-3.1-flash-lite-image");
