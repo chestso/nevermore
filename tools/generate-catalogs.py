@@ -226,6 +226,34 @@ def resolve_ollama():
         )
     return rows
 
+CATALOG_URL = "https://models.opencode.ai/api.json"
+TIER_BASE = {
+    "opencode-go": "https://opencode.ai/zen/go/v1",
+    "opencode-zen": "https://opencode.ai/zen/v1",
+}
+# The catalog files a model under the tier(s) that offer it, and the
+# filing MOVES: a model the Go tier serves can be filed under the Zen
+# entry (grok-4.6, kimi-k2.6, qwen3.6-plus, glm-5.1, minimax-m2.5 did).
+# So the tier's own entry is the FIRST source and the sibling entry is
+# the fallback for an id the tier's entry lacks - and the tier's own
+# window always wins, because a tier may serve the same model with a
+# different one (minimax-m3: 1M on Go, 512k on Zen).
+CATALOG_ENTRY = {"opencode-go": "opencode-go", "opencode-zen": "opencode"}
+
+
+def opencode_effort(entry):
+    """The first `type: effort` entry of reasoning_options, joined.
+
+    Toggle-only and budget_tokens-only rows get no knob (a toggle is
+    on/off without a level, a budget is a token count). The runtime
+    row mapper (provider_opencode.c) applies the same rule, so the
+    generated fallback and the live resolution agree.
+    """
+    for opt in entry.get("reasoning_options") or []:
+        if isinstance(opt, dict) and opt.get("type") == "effort":
+            return effort_join(opt.get("values"))
+    return None
+
 
 def resolve_opencode(slug):
     """The catalog document (OpenCode's own domain) x the served list.
