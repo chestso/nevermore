@@ -27,7 +27,6 @@ int nm_unbidden_fetch_enabled(void)
 }
 
 static const struct NmProvider *const g_providers[] = {
-    &nm_hyper_provider,        /* provider_hyper.c */
     &nm_ollama_provider,       /* provider_ollama.c (ollama:cloud) */
     &nm_ollama_local_provider, /* provider_ollama_local.c (ollama:local) */
     &nm_openrouter_provider,   /* provider_openrouter.c */

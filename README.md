@@ -10,7 +10,7 @@ instance. It is a first-class citizen of the
 [portty](https://github.com/chestso/portty) terminal (kitty keyboard protocol,
 sixel image attach) and degrades gracefully elsewhere.
 
-- **Providers:** Charm Hyper, Ollama (`ollama:local`, `ollama:cloud`),
+- **Providers:** Ollama (`ollama:local`, `ollama:cloud`),
   OpenRouter, OpenCode (`opencode:go`, `opencode:zen`). The colon keeps the
   service and its endpoint tier distinct.
 - **Transport:** hand-rolled HTTP/1.1 + SSE with the OS's own TLS. No libcurl.
@@ -41,8 +41,8 @@ sixel image attach) and degrades gracefully elsewhere.
   way, and the principles behind it
 - [CONTRIBUTING.md](CONTRIBUTING.md): gates, test conventions, CI, and traps
 - [docs/PORTTY.md](docs/PORTTY.md): the terminal-feature matrix
-- Provider API notes (live-probed wire behavior): [Hyper](docs/HYPER-API.md),
-  [Ollama Cloud](docs/OLLAMA-CLOUD-API.md), [OpenCode](docs/OPENCODE-API.md),
+- Provider API notes (live-probed wire behavior): [Ollama Cloud](docs/OLLAMA-CLOUD-API.md),
+  [OpenCode](docs/OPENCODE-API.md),
   [OpenRouter](docs/OPENROUTER-API.md)
 - [Ask DeepWiki](https://deepwiki.com/chestso/nevermore): AI-generated wiki and
   code index
@@ -103,12 +103,11 @@ usage error, not a prompt.
 
 ### API keys
 
-Keys come from the environment (`HYPER_API_KEY`, `OLLAMA_API_KEY`,
+Keys come from the environment (`OLLAMA_API_KEY`,
 `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`) or, when the variable is unset, from
 `~/.authinfo` (override with `NEVERMORE_AUTHINFO`):
 
 ```text
-machine hyper.charm.land   login apikey password ...
 machine ollama.com         login apikey password ...
 machine openrouter.ai      login apikey password ...
 machine opencode.ai        login apikey password ...
@@ -288,9 +287,6 @@ variable says so with an `_MS` suffix.
   `auto` goes by `COLORTERM`, and `rgb` is the escape hatch
 - `spinner_ramp` (default on): the thinking dot breathes `· • ● •`; off holds
   one `●`
-- `prism_notice` (default on): Hyper's `prism` models are a server-side router
-  that picks an upstream model per request; print which one answered, once per
-  routed round
 - `served_notice` (default on): print which upstream served a round and at which
   service tier (`openrouter: served by Azure (flex tier)`), when it carries
   signal — a non-`default` tier, or an upstream that changed. `/context` reports
@@ -370,7 +366,7 @@ what the next request will actually send.
 
 ### Prompt cache and usage
 
-Hyper, OpenRouter and the OpenCode tiers report cache reads; the OpenCode
+OpenRouter and the OpenCode tiers report cache reads; the OpenCode
 upstreams also report cache writes; Ollama reports cache reads, but never cache
 writes and never a per-request cost. Where a fact is not reported the display
 degrades instead of inventing it.

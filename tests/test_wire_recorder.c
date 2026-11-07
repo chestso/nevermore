@@ -130,10 +130,9 @@ static int server_listen(int *port)
 }
 
 /* A response whose head carries a header and whose chunked TRAILER
- * section carries another — the shape of Hyper's Prism router
- * (docs/HYPER-API.md §3.5.2). The recorder logs the head group on the
+ * section carries another. The recorder logs the head group on the
  * response-head event and the trailer group on its own event. */
-static void *prism_roundtrip_server_thread(void *arg)
+static void *trailer_roundtrip_server_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
     int cfd = accept(lfd, NULL, NULL);
@@ -144,11 +143,11 @@ static void *prism_roundtrip_server_thread(void *arg)
     static const char resp[] =
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/event-stream\r\n"
-        "X-Prism-Model-Id: glm-5.3-flash\r\n"
+        "X-Head-Field: head-value\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "12\r\ndata: hello-event\n\n\r\n" /* 18 = 0x12 */
         "0\r\n"
-        "X-Prism-Dollar-Savings: 0.0021\r\n"
+        "X-Trailer-Field: trailer-value\r\n"
         "\r\n";
     send(cfd, resp, sizeof(resp) - 1, 0);
     close(cfd);
@@ -217,9 +216,9 @@ static void test_banner_and_redaction(void)
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
 
     /* The banner lists key NAMES only. */
-    const char *keys[] = { "HYPER_API_KEY" };
+    const char *keys[] = { "OPENROUTER_API_KEY" };
     nm_wire_recorder_set_env_keys(keys, 1);
-    ASSERT_EQ(nm_wire_recorder_init("hyper", "gpt-oss-120b"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("openrouter", "gpt-oss-120b"), 1);
     ASSERT_NOT_NULL(nm_wire_tap());
 
     /* Simulate a request build: marked + unmarked headers. The
@@ -227,7 +226,7 @@ static void test_banner_and_redaction(void)
      * always must. */
     NmRequestHeader hdrs[2] = { 0 };
     hdrs[0].name = "Authorization";
-    hdrs[0].value = "Bearer sk-hyper-SUPER-SECRET";
+    hdrs[0].value = "Bearer sk-or-SUPER-SECRET";
     hdrs[0].secret = 1;
     hdrs[1].name = "X-Plain-Header";
     hdrs[1].value = "plain-value";
@@ -267,11 +266,11 @@ static void test_banner_and_redaction(void)
 
     /* Banner present, '#'-prefixed, self-describing. */
     ASSERT_TRUE(strstr(log, "# nevermore wire debug") == log);
-    ASSERT_TRUE(strstr(log, "# provider hyper model gpt-oss-120b") != NULL);
-    ASSERT_TRUE(strstr(log, "HYPER_API_KEY") != NULL);
+    ASSERT_TRUE(strstr(log, "# provider openrouter model gpt-oss-120b") != NULL);
+    ASSERT_TRUE(strstr(log, "OPENROUTER_API_KEY") != NULL);
 
     /* Redaction: the marked value NEVER appears... */
-    ASSERT_TRUE(strstr(log, "sk-hyper-SUPER-SECRET") == NULL);
+    ASSERT_TRUE(strstr(log, "sk-or-SUPER-SECRET") == NULL);
     /* ...the marker does (in the request line)... */
     ASSERT_TRUE(strstr(log, "<redacted>") != NULL);
     /* ...and the unmarked header rides through untouched. */
@@ -295,17 +294,17 @@ static void test_response_headers_and_trailers_recorded(void)
 {
     /* The retained response headers land in the dump: the head group on
      * the response-head event, the chunked trailer group on its own
-     * "trailers" event (the wire-dump home of a streamed Prism savings).
+     * "trailers" event.
      * Response headers are never secret, so they ride verbatim. */
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
-    ASSERT_EQ(nm_wire_recorder_init("hyper", "glm-5.3-flash"), 1);
+    ASSERT_EQ(nm_wire_recorder_init("openrouter", "head-value"), 1);
 
     int port;
     int lfd = server_listen(&port);
     ASSERT_TRUE(lfd >= 0);
     pthread_t th;
-    pthread_create(&th, NULL, prism_roundtrip_server_thread,
+    pthread_create(&th, NULL, trailer_roundtrip_server_thread,
                    (void *)(intptr_t)lfd);
 
     NmConnectInfo ci;
@@ -328,11 +327,11 @@ static void test_response_headers_and_trailers_recorded(void)
     char *log = log_read();
     ASSERT_NOT_NULL(log);
     ASSERT_TRUE(strstr(log, "\"kind\":\"response-head\"") != NULL);
-    ASSERT_TRUE(strstr(log, "X-Prism-Model-Id") != NULL);
-    ASSERT_TRUE(strstr(log, "glm-5.3-flash") != NULL);
+    ASSERT_TRUE(strstr(log, "X-Head-Field") != NULL);
+    ASSERT_TRUE(strstr(log, "head-value") != NULL);
     ASSERT_TRUE(strstr(log, "\"kind\":\"trailers\"") != NULL);
-    ASSERT_TRUE(strstr(log, "X-Prism-Dollar-Savings") != NULL);
-    ASSERT_TRUE(strstr(log, "0.0021") != NULL);
+    ASSERT_TRUE(strstr(log, "X-Trailer-Field") != NULL);
+    ASSERT_TRUE(strstr(log, "trailer-value") != NULL);
     size_t parsed = assert_lines_parse(log);
     ASSERT_TRUE(parsed >= 4); /* connect + request + response-head + trailers */
     free(log);

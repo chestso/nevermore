@@ -4,7 +4,6 @@
 check_PROGRAMS = \
     test_sse \
     test_json \
-    test_xxh3 \
     test_addr_cache \
     test_authinfo \
     test_config \
@@ -122,11 +121,6 @@ test_sse_CFLAGS = $(TEST_CFLAGS)
 test_json_SOURCES = test_json.c ../src/json.c
 test_json_CFLAGS = $(TEST_CFLAGS)
 
-# XXH3-64 (seed 0) against reference-generated vectors: pure C, no
-# network, no deps. Pins the Hyper affinity header digest values.
-test_xxh3_SOURCES = test_xxh3.c ../src/xxh3.c
-test_xxh3_CFLAGS = $(TEST_CFLAGS)
-
 # The name service's answers, remembered: a pure table, so the only
 # dependency is the clock — and this binary owns it (fake_clock.c INSTEAD
 # of src/clock.c), which is how expiry is moved through instead of waited
@@ -185,7 +179,7 @@ $(top_builddir)/src/nevermore_version.h:
 # them at once instead of in each hand-kept list.
 TEST_PROVIDER_SOURCES = \
     ../src/provider_openaicompat.c \
-    ../src/provider_hyper.c ../src/provider_ollama.c \
+    ../src/provider_ollama.c \
     ../src/provider_ollama_local.c \
     ../src/provider_openrouter.c \
     ../src/provider_opencode.c ../src/provider_opencode_zen.c \
@@ -196,7 +190,7 @@ TEST_PROVIDER_SOURCES = \
 test_provider_SOURCES = test_provider.c ../src/clock.c ../src/conf.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
-    ../src/conversation_id.c ../src/xxh3.c \
+    ../src/conversation_id.c \
     $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
@@ -209,7 +203,7 @@ test_provider_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 test_source_SOURCES = test_source.c ../src/clock.c ../src/source.c ../src/conf.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
-    ../src/conversation_id.c ../src/xxh3.c \
+    ../src/conversation_id.c \
     $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
@@ -243,7 +237,7 @@ test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
 test_openai_client_SOURCES = test_openai_client.c ../src/clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
-    ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c ../src/xxh3.c \
+    ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c \
     $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
@@ -292,7 +286,7 @@ endif
 # spawn source is still needed for run_command's vtable.
 test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.c \
     ../src/tools_websearch.c ../src/tools_exec.c \
-    ../src/file_ledger.c ../src/xxh3.c ../src/skills.c \
+    ../src/file_ledger.c ../src/skills.c \
     ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
@@ -307,7 +301,7 @@ test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 # reachability cache and its timeout.
 test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
-    ../src/file_ledger.c ../src/xxh3.c ../src/skills.c \
+    ../src/file_ledger.c ../src/skills.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
@@ -325,7 +319,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
-test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c \
+test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
     ../src/image_bytes.c ../src/size.c \
     ../src/context.c ../src/reminder.c \
     ../src/skills.c \
@@ -438,7 +432,7 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # 7200 ran below zero.
 test_credit_SOURCES = test_credit.c fake_clock.c ../src/conf.c \
     ../src/nevermore.c ../src/authinfo.c \
-    ../src/conversation_id.c ../src/xxh3.c \
+    ../src/conversation_id.c \
     $(TEST_PROVIDER_SOURCES) \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
@@ -454,7 +448,7 @@ test_credit_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c ../src/colors.c \
     ../src/markdown.c ../src/markdown_render.c ../src/highlight.c \
-    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/xxh3.c ../src/session.c ../src/context.c ../src/reminder.c ../src/skills.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
+    ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/reminder.c ../src/skills.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
     $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c \
     ../src/openai_client.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
@@ -532,7 +526,7 @@ compile-check:
 # that exercise wire paths point at scripted loopback servers via
 # explicit base URLs; but catalog sources default to probing the
 # provider's default endpoint (local daemon 127.0.0.1:11434,
-# hyper.charm.land, ...) when no base URL is given — on CI that probe's
+# ...) when no base URL is given — on CI that probe's
 # refusal latency is environment-dependent (a blackholed loopback
 # connect stalled Windows CI past the 10s watchdog). NM_NO_UNBIDDEN_FETCH
 # makes default-base probes no-ops (static fallback); explicit-base
@@ -562,7 +556,6 @@ EXTRA_DIST = test_helpers.h test_net_helpers.h fake_clock.h \
 # passes.
 CLEANFILES = test-progress.log
 
-# Wire tests (dummy local servers, no real network) — separate target,
-# like quoth's `make test-wire`.
+# Wire tests (dummy local servers, no real network) — separate target.
 check-wire:
 	@echo "wire tests not yet implemented (phase 1)"

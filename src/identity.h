@@ -25,8 +25,8 @@
  * so a GNU system on the Linux kernel says GNU/Linux — see the mapping
  * in configure.ac.
  *
- * Identifies, does not impersonate: quoth's "Charm-Fantasy/<ver>"
- * Crush emulation is still deliberately not ported.
+ * Identifies as nevermore — no other client's identity string is
+ * ever impersonated.
  */
 
 #ifndef NM_IDENTITY_H

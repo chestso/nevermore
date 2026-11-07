@@ -295,7 +295,7 @@ void nm_proc_os_write_eof(NmProcOs *os)
 {
     if (!os || os->fd < 0)
         return;
-    /* quoth's process-send-eof dance: a C-d mid-line only flushes the
+    /* The process-send-eof dance: a C-d mid-line only flushes the
      * partial line, so a body not ending in a newline needs a flush C-d
      * before the EOF one.  A job that never received a byte is at the
      * start of a line (stdin_last is the calloc'd 0), so one C-d

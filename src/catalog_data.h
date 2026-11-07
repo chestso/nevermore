@@ -436,31 +436,6 @@ static const NmModel nm_catalog_ollama[] = {
     { 0 }
 };
 
-/* hyper: 18 models.
- * Source: GET https://hyper.charm.land/v1/models
- */
-static const NmModel nm_catalog_hyper[] = {
-    { "deepseek-v4-pro-0813", "DeepSeek V4 Pro 0813", 0, 0, 1000000, 1, "low|high|max", "high" },
-    { "deepseek-v4.1-flash-1017", "DeepSeek V4.1 Flash 1017", 1, 0, 1000000, 1, "low|high|max", "high" },
-    { "gemma-4-26b-a4b-it", "Gemma 4 26B A4B", 0, 0, 256000, 1, NULL, NULL },
-    { "glm-5.3", "GLM 5.3", 0, 0, 1000000, 1, "low|high|max", "high" },
-    { "glm-5.3-flash", "GLM 5.3 Flash", 1, 0, 1048576, 1, "low|high|max", "high" },
-    { "gpt-oss-120b", "gpt-oss-120b", 0, 0, 131072, 1, "low|medium|high", "medium" },
-    { "inkling", "Inkling", 1, 0, 1048576, 1, "low|medium|high", "medium" },
-    { "kimi-k3", "Kimi K3", 1, 0, 1048576, 1, "low|high|max", "high" },
-    { "kimi-k3.1-pro", "Kimi K3.1 Pro", 1, 0, 1000000, 1, "low|high|max", "high" },
-    { "minimax-m3", "MiniMax M3", 1, 0, 512000, 1, "low|medium|high", "medium" },
-    { "muse-spark-open", "Muse Spark Open", 1, 0, 1048576, 1, "low|medium|high|xhigh", "xhigh" },
-    { "prism", "Prism", 1, 0, 1000000, 1, NULL, NULL },
-    { "prism-core", "Prism Core", 1, 0, 1000000, 1, NULL, NULL },
-    { "prism-flash", "Prism Flash", 1, 0, 1000000, 1, NULL, NULL },
-    { "qwen3.8-2.4t-a95b", "Qwen3.8-2.4T-A95B", 0, 0, 1000000, 1, "minimal|low|medium|high", "medium" },
-    { "qwen3.8-27b", "Qwen3.8-27B", 1, 0, 1000000, 1, "none|minimal|low|medium|high", "medium" },
-    { "qwen3.8-flash", "Qwen3.8-Flash", 1, 0, 1000000, 1, "none|minimal|low|medium|high", "medium" },
-    { "qwen3.8-max", "Qwen3.8-Max", 1, 0, 1000000, 1, NULL, NULL },
-    { 0 }
-};
-
 /* opencode-go: 30 models.
  * Source: https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models
  */

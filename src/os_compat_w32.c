@@ -4,7 +4,7 @@
  * codepage (437 on a US box) while everything nevermore writes is
  * UTF-8 — sources, banner, transcript, the elbow, the live frame —
  * so an unswitched console renders the banner as "nevermore
- * 0.0.137 โ€” hyper". Switching the console to UTF-8 on both
+ * 0.0.137". Switching the console to UTF-8 on both
  * directions (output so the app's bytes are read as UTF-8, input so
  * typed non-ASCII arrives as UTF-8) is the whole fix.
  *

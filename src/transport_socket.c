@@ -1730,8 +1730,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             if (c == '\n') {
                 if (conn->trailer_line_empty) {
                     conn->chunk_state = CHUNK_DONE;
-                    /* Trailers complete: the late headers (a streamed
-                     * Prism savings, docs/HYPER-API.md §3.5.2) are all
+                    /* Trailers complete: the late headers are all
                      * retained now. Fired only when at least one
                      * trailer line was actually stored. */
                     if (conn->resp_hdr_n > conn->resp_head_hdr_n)

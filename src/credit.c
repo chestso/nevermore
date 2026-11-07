@@ -216,9 +216,6 @@ int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
         case NM_CREDIT_USD:
             snprintf(out, cap, "$!");
             break;
-        case NM_CREDIT_HYPER:
-            snprintf(out, cap, "hc!");
-            break;
         case NM_CREDIT_ZEN:
             snprintf(out, cap, "cr!");
             break;
@@ -250,19 +247,6 @@ int nm_credit_format_cell(const NmCreditBracket *b, char *out, size_t cap,
             snprintf(amount, sizeof(amount), "$%s/$%s", val_buf, lim_buf);
         } else {
             snprintf(amount, sizeof(amount), "$%s", val_buf);
-        }
-        break;
-    }
-    case NM_CREDIT_HYPER:
-    {
-        char val_buf[32];
-        format_credits_value(b->value, val_buf, sizeof(val_buf));
-        if (b->limit > 0 && (!compress || !is_full)) {
-            char lim_buf[32];
-            format_credits_value(b->limit, lim_buf, sizeof(lim_buf));
-            snprintf(amount, sizeof(amount), "%s/%shc", val_buf, lim_buf);
-        } else {
-            snprintf(amount, sizeof(amount), "%shc", val_buf);
         }
         break;
     }
@@ -603,7 +587,7 @@ NmCredits *nm_credits_get(NmProviderId id)
         nm_credits_reset();
     }
     if ((int)id < 0 || id >= NM_PROVIDER_COUNT)
-        id = NM_PROVIDER_HYPER;
+        id = NM_PROVIDER_OLLAMA;
     return &g_credits[id];
 }
 
@@ -635,31 +619,13 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
                           const NmRoundMeta *meta, int http_status,
                           const char *msg)
 {
+    (void)usage;
+    (void)meta;
     if ((int)id < 0 || id >= NM_PROVIDER_COUNT)
         return;
 
-    NmCredits *cr = nm_credits_get(id);
-    long now = (long)nm_monotonic_seconds();
-
     if (http_status == 402) {
         nm_credit_fold_refusal(id, msg);
-        /* Hyper may still report rate-limit headers on 402 */
-        if (id == NM_PROVIDER_HYPER && meta && cr->n_brackets >= 3) {
-            if (meta->req_remaining_day >= 0) {
-                cr->brackets[1].state = NM_CREDIT_KNOWN;
-                cr->brackets[1].value = (double)meta->req_remaining_day;
-                cr->brackets[1].limit = (double)meta->req_limit_day;
-                cr->brackets[1].origin = NM_CREDIT_FROM_ROUND_HEADER;
-                cr->brackets[1].observed_at = now;
-            }
-            if (meta->req_remaining_hour >= 0) {
-                cr->brackets[2].state = NM_CREDIT_KNOWN;
-                cr->brackets[2].value = (double)meta->req_remaining_hour;
-                cr->brackets[2].limit = (double)meta->req_limit_hour;
-                cr->brackets[2].origin = NM_CREDIT_FROM_ROUND_HEADER;
-                cr->brackets[2].observed_at = now;
-            }
-        }
         return;
     }
 
@@ -667,45 +633,11 @@ void nm_credit_fold_round(NmProviderId id, const NmUsage *usage,
         return;
 
     /* A fold makes the store fresher ONLY when it stamps a bracket.
-     * Hyper's round body carries the purse and its headers the rate
-     * windows; the other providers' rounds report neither, so a bare
-     * 200 there says nothing about the balance and must leave
-     * observed_at alone — /credits prints it as the age, and a round
-     * that told us nothing is not an observation. (The background
-     * refresh TTL never reads this field; see NmCredits::fetched_at.) */
-    int folded = 0;
-
-    if (id == NM_PROVIDER_HYPER && cr->n_brackets >= 3) {
-        if (usage && usage->remaining_credits >= 0) {
-            cr->brackets[0].state = NM_CREDIT_KNOWN;
-            cr->brackets[0].value = usage->remaining_credits;
-            cr->brackets[0].limit = -1;
-            cr->brackets[0].origin = NM_CREDIT_FROM_ROUND_BODY;
-            cr->brackets[0].observed_at = now;
-            folded = 1;
-        }
-        if (meta) {
-            if (meta->req_remaining_day >= 0) {
-                cr->brackets[1].state = NM_CREDIT_KNOWN;
-                cr->brackets[1].value = (double)meta->req_remaining_day;
-                cr->brackets[1].limit = (double)meta->req_limit_day;
-                cr->brackets[1].origin = NM_CREDIT_FROM_ROUND_HEADER;
-                cr->brackets[1].observed_at = now;
-                folded = 1;
-            }
-            if (meta->req_remaining_hour >= 0) {
-                cr->brackets[2].state = NM_CREDIT_KNOWN;
-                cr->brackets[2].value = (double)meta->req_remaining_hour;
-                cr->brackets[2].limit = (double)meta->req_limit_hour;
-                cr->brackets[2].origin = NM_CREDIT_FROM_ROUND_HEADER;
-                cr->brackets[2].observed_at = now;
-                folded = 1;
-            }
-        }
-    }
-
-    if (folded)
-        cr->observed_at = now;
+     * No provider's round currently folds a bracket, so a bare 200
+     * says nothing about the balance and must leave observed_at alone
+     * — /credits prints it as the age, and a round that told us
+     * nothing is not an observation. (The background refresh TTL
+     * never reads this field; see NmCredits::fetched_at.) */
 }
 
 void nm_credit_fold_refusal(NmProviderId id, const char *msg)
@@ -727,79 +659,7 @@ void nm_credit_fold_refusal(NmProviderId id, const char *msg)
 /* Provider slot tables & endpoint mappers                            */
 /* ------------------------------------------------------------------ */
 
-/* 1. Hyper */
-static void hyper_init_brackets(NmCreditBracket *b, size_t max_b, size_t *n_out)
-{
-    if (max_b < 3)
-        return;
-    memset(b, 0, sizeof(*b) * 3);
-
-    b[0].unit = NM_CREDIT_HYPER;
-    b[0].window = NM_CREDIT_PURSE;
-    b[0].kind = NM_CREDIT_LEFT;
-    b[0].state = NM_CREDIT_UNKNOWN;
-    b[0].limit = -1;
-    b[0].percent_used = -1;
-    snprintf(b[0].label, sizeof(b[0].label), "hypercredits purse");
-    snprintf(b[0].origin_desc, sizeof(b[0].origin_desc), "GET /v1/credits");
-
-    b[1].unit = NM_CREDIT_REQUESTS;
-    b[1].window = NM_CREDIT_DAY;
-    b[1].kind = NM_CREDIT_LEFT;
-    b[1].state = NM_CREDIT_UNKNOWN;
-    b[1].limit = -1;
-    b[1].percent_used = -1;
-    snprintf(b[1].label, sizeof(b[1].label), "requests day limit");
-    snprintf(b[1].origin_desc, sizeof(b[1].origin_desc), "x-ratelimit-*-day");
-
-    b[2].unit = NM_CREDIT_REQUESTS;
-    b[2].window = NM_CREDIT_HOUR;
-    b[2].kind = NM_CREDIT_LEFT;
-    b[2].state = NM_CREDIT_UNKNOWN;
-    b[2].limit = -1;
-    b[2].percent_used = -1;
-    snprintf(b[2].label, sizeof(b[2].label), "requests hour limit");
-    snprintf(b[2].origin_desc, sizeof(b[2].origin_desc), "x-ratelimit-*-hour");
-
-    *n_out = 3;
-}
-
-static int hyper_map_endpoint(const NmJson *doc, int step,
-                              NmCreditBracket *brackets, size_t max_brackets,
-                              size_t *n_brackets)
-{
-    (void)step;
-    (void)max_brackets;
-    if (!doc || *n_brackets < 1)
-        return 0;
-
-    long now = (long)nm_monotonic_seconds();
-    NmJson *bal = nm_json_get(doc, "balance");
-    if (bal && nm_json_type(bal) == NM_JSON_NUMBER) {
-        brackets[0].state = NM_CREDIT_KNOWN;
-        brackets[0].value = nm_json_num(bal);
-        brackets[0].limit = -1;
-        brackets[0].origin = NM_CREDIT_FROM_ENDPOINT;
-        brackets[0].observed_at = now;
-    } else {
-        /* A wire that says "no balance member" clears it */
-        brackets[0].state = NM_CREDIT_UNKNOWN;
-        brackets[0].value = -1;
-    }
-    return 1;
-}
-
-const NmProviderCredits nm_hyper_credits = {
-    "/v1/credits",
-    "Bearer %s",
-    0,
-    1,
-    NULL,
-    hyper_init_brackets,
-    hyper_map_endpoint,
-};
-
-/* 2. Ollama Cloud */
+/* 1. Ollama Cloud */
 static void ollama_init_brackets(NmCreditBracket *b, size_t max_b,
                                  size_t *n_out)
 {
@@ -954,7 +814,7 @@ const NmProviderCredits nm_ollama_credits = {
     ollama_map_endpoint,
 };
 
-/* 3. OpenRouter */
+/* 2. OpenRouter */
 static void openrouter_init_brackets(NmCreditBracket *b, size_t max_b,
                                      size_t *n_out)
 {
@@ -1161,7 +1021,7 @@ const NmProviderCredits nm_openrouter_credits = {
     openrouter_map_endpoint,
 };
 
-/* 4. OpenCode Go */
+/* 3. OpenCode Go */
 static void opencode_init_brackets(NmCreditBracket *b, size_t max_b,
                                    size_t *n_out)
 {
@@ -1303,7 +1163,7 @@ const NmProviderCredits nm_opencode_credits = {
     opencode_map_endpoint,
 };
 
-/* 5. OpenCode Zen */
+/* 4. OpenCode Zen */
 static void opencode_zen_init_brackets(NmCreditBracket *b, size_t max_b,
                                        size_t *n_out)
 {

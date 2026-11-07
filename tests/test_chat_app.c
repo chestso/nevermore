@@ -136,22 +136,14 @@ struct ServerScript
     int n_rounds;
     int port;
     int fd;
-    int delay_us;              /* between events of each round (0 = none) */
-    int stall_at_end;          /* keep the last round's connection open (no
-                                * terminating chunk) until the peer closes */
-    const char *prism_head;    /* extra response-head lines, in wire form
-                                * (CRLF-terminated) — a routed round's
-                                * `X-Prism-*` headers. NULL = the direct
-                                * case. */
-    const char *prism_trailer; /* extra trailer-section lines, in wire
-                                * form — the savings a routed round
-                                * reports AFTER the final chunk. NULL =
-                                * the empty trailer section. */
-    int terminator_delay_ms;   /* hold between the last event and the
-                                * 0-chunk: the late-trailer shape, where
-                                * the gateway computes the figure after
-                                * [DONE]. 0 = the terminator rides the
-                                * last event's read (today's gateway). */
+    int delay_us;            /* between events of each round (0 = none) */
+    int stall_at_end;        /* keep the last round's connection open (no
+                              * terminating chunk) until the peer closes */
+    int terminator_delay_ms; /* hold between the last event and the
+                              * 0-chunk: a late-trailer shape, where an
+                              * upstream computes the figure after
+                              * [DONE]. 0 = the terminator rides the
+                              * last event's read. */
 
     /* Rendezvous pacing — the deterministic replacement for delay_us
      * for tests that need ONE event per client step. With `paced` set,
@@ -220,9 +212,7 @@ static void sse_send_chunked(int cfd, const char *body, struct ServerScript *sc)
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
                       "Content-Type: text/event-stream\r\n"
-                      "%s"
-                      "Transfer-Encoding: chunked\r\n\r\n",
-                      (sc && sc->prism_head) ? sc->prism_head : "");
+                      "Transfer-Encoding: chunked\r\n\r\n");
     send(cfd, head, (size_t)hl, 0);
     size_t bl = strlen(body);
     size_t off = 0;
@@ -329,14 +319,10 @@ static void *chat_server_thread(void *arg)
         }
         /* The 0-chunk terminator + trailer section. The hold makes the
          * trailer arrive in a segment AFTER [DONE] was read (the
-         * framing tail — a server that computes the figure after the
-         * stream ends, docs/HYPER-API.md §3.5.2). */
+         * framing tail). */
         if (sc->terminator_delay_ms)
             usleep((unsigned)sc->terminator_delay_ms * 1000);
-        send(cfd, "0\r\n", 3, 0);
-        if (sc->prism_trailer)
-            send(cfd, sc->prism_trailer, strlen(sc->prism_trailer), 0);
-        send(cfd, "\r\n", 2, 0);
+        send(cfd, "0\r\n\r\n", 5, 0);
         close(cfd);
     }
     return NULL;
@@ -2161,10 +2147,11 @@ static void test_config_reports_the_kbd_tier(void)
 /* The status row carries the reasoning effort when set — and only
  * then: unset is no segment at all (zero columns), `none` prints in
  * full, and a model switch takes the segment away with the state.
- * Hyper's static catalog gives gpt-oss-120b its low|medium|high. */
+ * OpenRouter's static catalog gives openai/gpt-oss-120b its effort
+ * vocab (none|minimal|low|medium|high|xhigh|max). */
 static void test_status_row_carries_the_effort(void)
 {
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     NmAgent *agent = nm_chat_app_agent(h->app);
     ASSERT_NOT_NULL(agent);
@@ -2182,9 +2169,9 @@ static void test_status_row_carries_the_effort(void)
     ASSERT_TRUE(strstr(frame, span) != NULL);
     free(span);
 
-    /* `none` is an explicit set value: it prints in full. */
-    ASSERT_EQ(nm_agent_set_effort(agent, "none"), 0); /* not listed here */
-    ASSERT_STR_EQ(nm_agent_effort(agent), "high");    /* refused: unchanged */
+    /* An unlisted level is refused: the value is unchanged. */
+    ASSERT_EQ(nm_agent_set_effort(agent, "ultra"), 0); /* not listed here */
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");     /* refused: unchanged */
 
     /* Clearing removes the segment on the next frame. */
     ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
@@ -2201,7 +2188,7 @@ static void test_status_row_carries_the_effort(void)
  * spelling, and an unsupported model refuses. */
 static void test_effort_command_sets_and_lists(void)
 {
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     NmAgent *agent = nm_chat_app_agent(h->app);
     ASSERT_NOT_NULL(agent);
@@ -2216,7 +2203,7 @@ static void test_effort_command_sets_and_lists(void)
     harness_type(h, "/effort");
     harness_enter(h);
     out = harness_read(h);
-    ASSERT_TRUE(strstr(out + seen, "accepted: low|medium|high") != NULL);
+    ASSERT_TRUE(strstr(out + seen, "accepted: none|minimal|low|medium|high|xhigh|max") != NULL);
     ASSERT_TRUE(strstr(out + seen, "row: ") != NULL);
     seen = strlen(out);
 
@@ -2260,7 +2247,7 @@ static void test_effort_command_refused_without_levels(void)
  * and sets it through the same write path as /effort. */
 static void test_config_shows_and_sets_the_effort(void)
 {
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     ASSERT_NOT_NULL(cfg);
@@ -2321,7 +2308,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
-    /* Hyper rides usage on the finish_reason chunk or a standalone
+    /* OpenRouter rides usage on the finish_reason chunk or a standalone
      * choices:[] chunk; either way the agent keeps the LAST report. */
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
@@ -2336,9 +2323,9 @@ static void test_context_gauge_reports_usage_and_limit(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    /* hyper's static catalog carries gpt-oss-120b's window (131072), so
+    /* openrouter's static catalog carries openai/gpt-oss-120b's window (131072), so
      * the denominator is real catalog metadata, not an estimate. */
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "hi");
@@ -2392,7 +2379,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "context: limit 131,072 tokens (model "
-                            "gpt-oss-120b)") != NULL);
+                            "openai/gpt-oss-120b)") != NULL);
     ASSERT_TRUE(strstr(out, "context: 12,400 / 131,072 tokens used "
                             "(9.5%)") != NULL);
     ASSERT_TRUE(strstr(out, "context: 8,100 tokens cached (65.3% of the "
@@ -2444,10 +2431,10 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    /* hyper's static catalog carries gpt-oss-120b's window (131072), so
+    /* openrouter's static catalog carries openai/gpt-oss-120b's window (131072), so
      * the denominator is real catalog metadata resolved at the point of
      * use — no push. */
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     /* Round 1: usage, but no cache read ever reported => no ⚡ at all
@@ -2551,7 +2538,7 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     /* Round 1: the counts and the ⚡ rate, and no ↓ anywhere in the paint
@@ -2643,7 +2630,7 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
 
     /* The 16-color tier: the palette index, and the 24-bit sequence
      * nowhere in the paint. */
-    AppHarness *h16 = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h16 = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h16);
     harness_type(h16, "hi");
     harness_enter(h16);
@@ -2663,7 +2650,7 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
     harness_free(h16);
 
     /* The truecolor tier: the spec's Cyan hex. */
-    AppHarness *h32 = harness_new_rgb("hyper", "gpt-oss-120b", base);
+    AppHarness *h32 = harness_new_rgb("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h32);
     harness_type(h32, "hi");
     harness_enter(h32);
@@ -2785,7 +2772,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "one");
@@ -2820,7 +2807,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
 
 /* The gauge's tier tracks how full the window is: Orange past ~85 % of a
  * KNOWN limit, Red past ~95 % (Comment at rest). The window is the
- * catalog's (hyper's gpt-oss-120b, 131072 — the same shipped row the two
+ * catalog's (openrouter's openai/gpt-oss-120b, 131072 — the same shipped row the two
  * gauge tests above resolve), so the tiers are exercised through the real
  * path, not a pushed fixture. */
 static void test_context_gauge_warns_near_the_limit(void)
@@ -2845,7 +2832,7 @@ static void test_context_gauge_warns_near_the_limit(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", base);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "one");
@@ -2927,7 +2914,7 @@ static void test_status_row_identity_follows_model(void)
 static void test_status_row_identity_follows_provider(void)
 {
     pin_cfg_paths("statusrow-provider");
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h); /* an empty store: no model memory */
 
@@ -2942,7 +2929,7 @@ static void test_status_row_identity_follows_provider(void)
     ASSERT_NOT_NULL(identity);
     ASSERT_TRUE(strstr(frame, identity) != NULL);
     /* The previous provider's id is nowhere on the row. */
-    ASSERT_TRUE(strstr(frame, IDENT("hyper", "gpt-oss-120b")) == NULL);
+    ASSERT_TRUE(strstr(frame, IDENT("openrouter", "openai/gpt-oss-120b")) == NULL);
     free(identity);
 
     nm_config_free(cfg);
@@ -3049,55 +3036,24 @@ static void test_status_row_identity_dropped_when_short(void)
     harness_free(h);
 }
 
-/* Status row credit cluster for all six ladders */
+/* Status row credit cluster for all five ladders */
 static void test_status_row_credit_ladders(void)
 {
     nm_credits_reset();
-    AppHarness *h = harness_new("hyper", "prism", NULL);
+    AppHarness *h = harness_new("ollama:cloud", "kimi-k3", NULL);
     ASSERT_NOT_NULL(h);
-
-    /* 1. Hyper: 0hc 100k·d */
-    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
-    cr->brackets[0].unit = NM_CREDIT_HYPER;
-    cr->brackets[0].window = NM_CREDIT_PURSE;
-    cr->brackets[0].state = NM_CREDIT_KNOWN;
-    cr->brackets[0].value = 0.0;
-    cr->brackets[0].limit = -1;
-
-    cr->brackets[1].unit = NM_CREDIT_REQUESTS;
-    cr->brackets[1].window = NM_CREDIT_DAY;
-    cr->brackets[1].state = NM_CREDIT_KNOWN;
-    cr->brackets[1].value = 100000;
-    cr->brackets[1].limit = 100000;
-
-    tui_runtime_flush(h->rt);
-    const char *frame = tui_runtime_render(h->rt);
-    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    char *row = frame_status_row(frame, prompt);
-    ASSERT_NOT_NULL(row);
-    /* Two cells, two spans: the purse is the budget (declared first, so
-     * it keeps the left slot) and the day window is the gate. */
-    TuiColor base = nm_color_credit(NM_COLOR_16);
-    const TuiColor two_base[2] = { base, base };
-    const char *hyper_texts[2] = { "0hc ", "100k\xc2\xb7"
-                                           "d " };
-    ASSERT_TRUE(row_has_cells(row, two_base, hyper_texts, 2));
-    free(prompt);
-    free(row);
-    harness_free(h);
-
-    /* 2. Ollama Cloud: $13.23/$60 */
-    h = harness_new("ollama:cloud", "kimi-k3", NULL);
-    cr = nm_credits_get(NM_PROVIDER_OLLAMA);
+    /* 1. Ollama Cloud: $13.23/$60 */
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_OLLAMA);
     cr->brackets[0].unit = NM_CREDIT_USD;
     cr->brackets[0].window = NM_CREDIT_PURSE;
     cr->brackets[0].state = NM_CREDIT_KNOWN;
     cr->brackets[0].value = 13.23;
     cr->brackets[0].limit = 60.0;
     tui_runtime_flush(h->rt);
-    frame = tui_runtime_render(h->rt);
-    prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
-    row = frame_status_row(frame, prompt);
+    const char *frame = tui_runtime_render(h->rt);
+    char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
+    char *row = frame_status_row(frame, prompt);
+    TuiColor base = nm_color_credit(NM_COLOR_16);
     ASSERT_NOT_NULL(row);
     const char *ollama_texts[1] = { "$13.23/$60 " };
     ASSERT_TRUE(row_has_cells(row, &base, ollama_texts, 1));
@@ -3105,7 +3061,7 @@ static void test_status_row_credit_ladders(void)
     free(row);
     harness_free(h);
 
-    /* 3. OpenRouter: $7.71 */
+    /* 2. OpenRouter: $7.71 */
     h = harness_new("openrouter", "qwen3-coder", NULL);
     cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
     cr->brackets[0].unit = NM_CREDIT_USD;
@@ -3124,7 +3080,7 @@ static void test_status_row_credit_ladders(void)
     free(row);
     harness_free(h);
 
-    /* 4. OpenCode Go: 100%·5h 74%·w */
+    /* 3. OpenCode Go: 100%·5h 74%·w */
     h = harness_new("opencode:go", "deepseek", NULL);
     cr = nm_credits_get(NM_PROVIDER_OPENCODE);
     cr->brackets[0].unit = NM_CREDIT_PERCENT;
@@ -3142,6 +3098,7 @@ static void test_status_row_credit_ladders(void)
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
+    const TuiColor two_base[2] = { base, base };
     const char *go_texts[2] = { "100%\xc2\xb7"
                                 "5h ",
                                 "74%\xc2\xb7"
@@ -3151,7 +3108,7 @@ static void test_status_row_credit_ladders(void)
     free(row);
     harness_free(h);
 
-    /* 5. OpenCode Zen: cr! in red */
+    /* 4. OpenCode Zen: cr! in red */
     h = harness_new("opencode:zen", "deepseek", NULL);
     cr = nm_credits_get(NM_PROVIDER_OPENCODE_ZEN);
     cr->brackets[0].state = NM_CREDIT_EXHAUSTED;
@@ -3167,7 +3124,7 @@ static void test_status_row_credit_ladders(void)
     free(row);
     harness_free(h);
 
-    /* 6. Ollama Local: unmetered, no credit cluster */
+    /* 5. Ollama Local: unmetered, no credit cluster */
     h = harness_new("ollama:local", "qwen3", NULL);
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
@@ -3254,11 +3211,11 @@ static void test_status_row_credit_cells_shrink_in_rank_order(void)
 static void test_status_row_credit_boba_shrink_order(void)
 {
     nm_credits_reset();
-    AppHarness *h = harness_new("hyper", "vendor/some-model-identifier", NULL);
+    AppHarness *h = harness_new("openrouter", "vendor/some-model-identifier", NULL);
     ASSERT_NOT_NULL(h);
 
-    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
-    cr->brackets[0].unit = NM_CREDIT_HYPER;
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
+    cr->brackets[0].unit = NM_CREDIT_USD;
     cr->brackets[0].window = NM_CREDIT_PURSE;
     cr->brackets[0].state = NM_CREDIT_KNOWN;
     cr->brackets[0].value = 0.0;
@@ -3280,9 +3237,9 @@ static void test_status_row_credit_boba_shrink_order(void)
     ASSERT_NOT_NULL(row);
     TuiColor base = nm_color_credit(NM_COLOR_16);
     const TuiColor two_base[2] = { base, base };
-    const char *hyper_texts[2] = { "0hc ", "100k\xc2\xb7"
-                                           "d " };
-    ASSERT_TRUE(row_has_cells(row, two_base, hyper_texts, 2));
+    const char *or_texts[2] = { "$0 ", "100k\xc2\xb7"
+                                       "d " };
+    ASSERT_TRUE(row_has_cells(row, two_base, or_texts, 2));
     free(prompt);
     free(row);
 
@@ -3299,7 +3256,7 @@ static void test_status_row_credit_boba_shrink_order(void)
     row = frame_status_row(frame, prompt);
     ASSERT_NOT_NULL(row);
     /* Credit cluster was dropped whole */
-    ASSERT_TRUE(strstr(row, "0hc") == NULL);
+    ASSERT_TRUE(strstr(row, "$0") == NULL);
     /* Gauge is still present */
     char *gauge = span_bytes(nm_color_gauge(NM_COLOR_16), "-/- ");
     ASSERT_TRUE(strstr(row, gauge) != NULL);
@@ -4125,7 +4082,6 @@ static void test_provider_command_switches_provider(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_TRUE(strstr(frame, "ollama:cloud") != NULL);
     ASSERT_TRUE(strstr(frame, "openrouter") != NULL);
-    ASSERT_TRUE(strstr(frame, "hyper") != NULL);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "ollama:local");
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
 
@@ -4669,7 +4625,7 @@ static void test_reasoning_prints_before_answer(void)
 }
 
 /* Regression: a provider error body that ends with a trailing
- * newline (hyper's does — wire framing) must NOT staircase the
+ * newline (wire framing) must NOT staircase the
  * transcript. The error line — message + any follow-on text — must
  * land as whole \r\n-terminated lines; a bare \n inside the captured
  * output is the bug (raw mode: the terminal does not translate). */
@@ -4689,7 +4645,7 @@ static void test_error_line_endings_are_crnl(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
-    AppHarness *h = harness_new("hyper", "test-model", base);
+    AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
     /* No key: the agent's env-var hint rides the same error line. */
 
@@ -4704,7 +4660,7 @@ static void test_error_line_endings_are_crnl(void)
      * not one contiguous run. */
     ASSERT_TRUE(strstr(out, "chat failed: auth rejected (HTTP 401)") != NULL);
     ASSERT_TRUE(strstr(out, "missing authorizatio") != NULL);
-    ASSERT_TRUE(strstr(out, "export HYPER_API_KEY") != NULL);
+    ASSERT_TRUE(strstr(out, "export OPENROUTER_API_KEY") != NULL);
     /* No bare LF anywhere the app wrote: every line break is \r\n
      * (the transcript is captured verbatim; a bare \n IS the
      * staircase in raw mode). */
@@ -4716,7 +4672,7 @@ static void test_error_line_endings_are_crnl(void)
      * same env-var name earlier in the scrollback. */
     const char *msg = strstr(out, "chat failed:");
     ASSERT_NOT_NULL(msg);
-    const char *hint = strstr(msg, "export HYPER_API_KEY");
+    const char *hint = strstr(msg, "export OPENROUTER_API_KEY");
     ASSERT_NOT_NULL(hint);
     ASSERT_TRUE(msg < hint);
 
@@ -6328,25 +6284,25 @@ static void test_provider_switch_resolves_new_provider_key(void)
     ASSERT_NOT_NULL(h);
 
     /* Switch to a different keyed provider carrying a different key. */
-    test_setenv("HYPER_API_KEY", "sk-new-hyper");
+    test_setenv("OPENROUTER_API_KEY", "sk-new-or");
     g_request[0] = '\0';
-    harness_type(h, "/provider hyper");
+    harness_type(h, "/provider openrouter");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "hyper");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
 
     /* The next turn must authorize with the NEW provider's key. */
     harness_type(h, "hi");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_TRUE(strstr(g_request,
-                       "Authorization: Bearer sk-new-hyper") != NULL);
+                       "Authorization: Bearer sk-new-or") != NULL);
     ASSERT_TRUE(strstr(g_request, "sk-old-openrouter") == NULL);
 
     harness_free(h);
     pthread_join(th, NULL);
     close(sc.fd);
     test_unsetenv("OPENROUTER_API_KEY");
-    test_unsetenv("HYPER_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
 }
 
 /* The app installs its per-stream highlighter state as the
@@ -6979,12 +6935,12 @@ static void test_model_memory_is_per_provider(void)
 
     /* A provider with no memory for this model: the switch lands on the
      * ask (no model), not the previous provider's id. */
-    harness_type(h, "/provider hyper");
+    harness_type(h, "/provider openrouter");
     harness_enter(h);
-    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "hyper");
+    ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
     ASSERT_NULL(nm_chat_app_model(h->app));
     ASSERT_TRUE(strstr(harness_read(h),
-                       "no model for provider 'hyper'") != NULL);
+                       "no model for provider 'openrouter'") != NULL);
 
     /* Back to ollama:local: the memory restores the id. */
     harness_type(h, "/provider ollama:local");
@@ -7033,7 +6989,7 @@ static void test_missing_key_preflight_warns(void)
 {
     test_unsetenv("OPENROUTER_API_KEY");
     test_unsetenv("OLLAMA_API_KEY");
-    test_unsetenv("HYPER_API_KEY");
+    test_unsetenv("OPENROUTER_API_KEY");
 
     /* A keyless provider (the local daemon) never warns. */
     AppHarness *h0 = harness_new("ollama:local", "m", NULL);
@@ -7195,8 +7151,9 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
     pthread_join(th, NULL);
 }
 
-/* A canned hyper catalog: ONE id the shipped static table does not carry,
- * with the wire's context_window (hyper's parse reads that key). The
+/* A canned ollama:cloud verbose catalog: ONE id the shipped static
+ * table does not carry, in the "models" array (the verbose parse reads
+ * that key for the window). The
  * request is drained before the reply: the client must READ this body,
  * and a close over an unread request is an RST — which on macOS/BSD can
  * discard the reply (the gauge then stayed cold and CI went red there). */
@@ -7224,9 +7181,10 @@ static void *warm_catalog_server_thread(void *arg)
             break;
     }
     static const char body[] =
-        "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"wire-only-model\",\"display_name\":\"Wire Only\","
-        "\"context_window\":1048576,\"capabilities\":{\"vision\":false}}]}";
+        "{\"object\":\"list\",\"data\":[{\"id\":\"wire-only-model\"}],"
+        "\"models\":[{\"slug\":\"wire-only-model\","
+        "\"display_name\":\"Wire Only\",\"context_window\":1048576,"
+        "\"input_modalities\":[\"text\"]}]}";
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
@@ -7246,8 +7204,8 @@ static void *warm_catalog_server_thread(void *arg)
  * cannot be the only warm site, because the model id is PERSISTED (the
  * config shadow), so a session that never opens the picker reads the
  * catalog cold. That was the reported bug's remaining half: after the
- * point-of-use fix, `11k/-` against `hyper · deepseek-v4.1-flash`
- * still lasted the whole session — hyper's static fallback is one row,
+ * point-of-use fix, `11k/-` against the live row
+ * still lasted the whole session — the static fallback is one row,
  * and nothing else had warmed the cache.
  *
  * The warm is silent and shows nothing (it is the gauge's, not the
@@ -7277,7 +7235,7 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("hyper", "wire-only-model", base);
+    AppHarness *h = harness_new("ollama:cloud", "wire-only-model", base);
     ASSERT_NOT_NULL(h);
 
     /* Cold: the static fallback does not carry the id, so the limit is
@@ -7565,11 +7523,11 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
     pin_cfg_paths("catdeadline");
     char base[64];
     snprintf(base, sizeof(base), "http://%s:9/v1", NM_BLACK_HOLE_HOST);
-    /* hyper: the ONLY provider whose live cache is still clean here
-     * (the picker tests pin it offline, and the warm test that commits
-     * a live one runs LAST) — an already-cached catalog would answer
-     * READY and never start the fetch this test is about. */
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", base);
+    /* ollama:cloud: its live cache is still clean here (the picker
+     * tests pin it offline, and the warm test that commits a live one
+     * runs LAST) — an already-cached catalog would answer READY and
+     * never start the fetch this test is about. */
+    AppHarness *h = harness_new("ollama:cloud", "gpt-oss:20b", base);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
     /* The walk's own budget must outlast the fetch deadline, or the
@@ -7580,7 +7538,7 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
      * unroutable address, so nothing is on the wire yet. */
     harness_type(h, "/model");
     harness_enter(h);
-    ASSERT_TRUE(strstr(harness_read(h), "loading the hyper") != NULL);
+    ASSERT_TRUE(strstr(harness_read(h), "loading the ollama:cloud") != NULL);
 
     /* The clock crosses the fetch's own INACTIVITY budget (5 s) while
      * the fetch is still CONNECTING. */
@@ -7591,7 +7549,7 @@ static void test_catalog_fetch_deadline_does_not_bound_the_connect(void)
     /* Still in flight: the deadline did not fire (no note, no popup —
      * the note and the built-in list are what a FAILED fetch opens). */
     ASSERT_TRUE(strstr(harness_read(h),
-                       "could not load the live hyper catalog") == NULL);
+                       "could not load the live ollama:cloud catalog") == NULL);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "GPT OSS 120b") == NULL);
 
     nm_config_free(cfg);
@@ -8893,7 +8851,7 @@ static void test_img_submit_sends_parts_and_echoes(void)
 }
 
 /* Vision gating is a warning, never a refusal (the wire takes the
- * image and the model answers blind — live-probed on hyper), and the
+ * image and the model answers blind), and the
  * catalog flag is the only authority. opencode:go's static catalog
  * carries text-only ids; the offline pin keeps the lookup static. */
 static void test_img_text_only_model_warns(void)
@@ -9796,15 +9754,15 @@ static void test_model_picker_capability_query_tools_empty(void)
 }
 
 /* The tool claim reaches the picker for the two providers whose whole
- * catalog claims it: hyper by a PROVIDER-level rule (its wire carries
+ * catalog claims it: by a PROVIDER-level rule (a wire that carries
  * no per-model tool field; every model takes tools) and opencode by
  * models.dev's `tool_call` (true for every row). So both badge every
  * row with the 🔧, not just OpenRouter's `supported_parameters` rows. */
-static void test_model_picker_tool_badge_for_hyper_and_opencode(void)
+static void test_model_picker_tool_badge_for_openrouter_and_opencode(void)
 {
-    /* hyper: the offline pin keeps the lookup on the shipped one-row
+    /* The offline pin keeps the lookup on the shipped one-row
      * static catalog, whose row carries the provider rule. */
-    AppHarness *h = harness_new("hyper", "gpt-oss-120b", NULL);
+    AppHarness *h = harness_new("openrouter", "openai/gpt-oss-120b", NULL);
     ASSERT_NOT_NULL(h);
     harness_type(h, "/model");
     harness_enter(h);
@@ -10361,7 +10319,7 @@ static void test_void_round_warning_is_a_red_system_error(void)
  * above it and closes itself with a blank row, because what follows is a
  * block of its own — a tool panel, the next round's answer. Glued, that
  * block's header reads as part of the notice, which is the exact defect
- * the Prism routing line had (test_prism_notice_closes_its_own_block);
+ * earlier notices had);
  * the connect-walk notice, the USER-channel reminder and the forged-tag
  * warning share the seam, so they share the pin. Each pair below is the
  * real shape: the news, then a full tool round after it. */
@@ -10410,7 +10368,7 @@ static void test_notice_sites_each_close_their_block(void)
         const char *plan = strstr(news, pairs[i][1]);
         ASSERT_NOT_NULL(plan);
         /* EXACTLY one blank row between the news and the panel header —
-         * not zero (the glue the Prism notice had) and not a stack (the
+         * not zero and not a stack (the
          * separator is owed once, like every other block). Counted
          * non-overlapping, so "\n\n\n" would read as two. */
         int blanks = 0;
@@ -10425,367 +10383,6 @@ static void test_notice_sites_each_close_their_block(void)
     free(clean);
 
     harness_free(h);
-}
-
-/* One-shot Prism responder: the whole response in one write, so the
- * chunked trailer section rides the [DONE] read (docs/HYPER-API.md
- * §3.5.2). Drives the /context routed-model line. */
-static void *prism_responder_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    char resp[1024];
-    size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                          strlen(body));
-    memcpy(resp + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
-                          "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
-                          "X-Prism-Dollar-Savings: 0.0021\r\n\r\n");
-    send(cfd, resp, n, 0);
-    for (;;) {
-        struct timeval tv = { 0, 50 * 1000 };
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(cfd, &rfds);
-        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-            break;
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break; /* peer gone */
-    }
-    close(cfd);
-    close(lfd);
-    return NULL;
-}
-
-/* /context spells out the last completed round's Prism routing: which
- * model actually answered, and the savings (docs/HYPER-API.md §3.5.2).
- * A turn with no routing headers shows neither line (the "direct"
- * case, which is what the gateway does today). */
-static void test_context_reports_the_prism_routed_model(void)
-{
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-
-    harness_type(h, "hi");
-    harness_enter(h);
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    harness_type(h, "/context");
-    harness_enter(h);
-    const char *out = harness_read(h);
-    ASSERT_NOT_NULL(out);
-    ASSERT_TRUE(strstr(out, "context: last round routed to glm-5.3-flash "
-                            "(GLM 5.3 Flash)") != NULL);
-    ASSERT_TRUE(strstr(out, "context: routing saved 12.5 hypercredits / "
-                            "$0.0021") != NULL);
-
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
-/* The notice the `prism_notice` key gates (default on): a routed round
- * says which model actually answered, on the SYSTEM stream, under the
- * round it describes. The line is terminal-only — the conversation the
- * model receives never carries it, so /session's counts stay what a
- * direct round's are and no request prefix can change. The savings
- * figure rides the same line when the gateway reported one (the canned
- * trailers here). */
-static void test_prism_notice_prints_under_a_routed_round(void)
-{
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-
-    harness_type(h, "hi");
-    harness_enter(h);
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    const char *out = harness_read(h);
-    ASSERT_NOT_NULL(out);
-    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
-                            "(GLM 5.3 Flash) · saved 12.5 hypercredits / "
-                            "$0.0021") != NULL);
-    /* The conversation is untouched: /session counts the same three
-     * messages a direct round leaves (user, assistant, the system
-     * prompt) — a notice is UI output, never transcript material. */
-    harness_type(h, "/session");
-    harness_enter(h);
-    out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "session: 3 messages — 1 user, 1 assistant, "
-                            "0 tool, 1 system") != NULL);
-
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
-/* The notice is a BLOCK, not a prefix: one blank line closes it, the
- * same separator every other system-stream block ends with. A routed
- * TOOL round is the shape that shows the difference — the round streams
- * its text, the notice lands at the round's finish, and that SAME
- * round's tool panel is flushed right after it, inside one step. With no
- * closing blank the panel header starts on the notice's heels and reads
- * as part of it. Both canned rounds carry the routing headers in the
- * response head (the streaming case, docs/HYPER-API.md §3.5.2). */
-static void test_prism_notice_closes_its_own_block(void)
-{
-    FILE *f = fopen(FIXTURE_PATH, "wb");
-    ASSERT_NOT_NULL(f);
-    fputs("the quick brown fox\n", f);
-    fclose(f);
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 2;
-    sc.prism_head = "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                    "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
-    sc.sse[0] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"let me edit\","
-        "\"tool_calls\":[{\"index\":0,\"id\":\"call_1\","
-        "\"type\":\"function\",\"function\":{\"name\":\"edit_file\","
-        "\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE_PATH
-        "\\\",\\\"old_string\\\":\\\"quick brown\\\",\\\"new_string\\\":"
-        "\\\"slow red\\\"}\"}}]}}]}\n\n"
-        "data: [DONE]\n\n";
-    sc.sse[1] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"edited the file\"}}]}\n\n"
-        "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-
-    harness_type(h, "change quick to slow");
-    harness_enter(h);
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    char *clean = strip_frames(harness_read(h));
-    ASSERT_NOT_NULL(clean);
-    const char *answer = strstr(clean, "let me edit");
-    const char *notice =
-        strstr(clean, "prism: routed to glm-5.3-flash (GLM 5.3 Flash)");
-    const char *plan = strstr(clean, "edit_file");
-    ASSERT_NOT_NULL(answer);
-    ASSERT_NOT_NULL(notice);
-    ASSERT_NOT_NULL(plan);
-    /* The round's own bookends: the notice sits UNDER the text the round
-     * streamed and ABOVE the tool call that same round made — it
-     * describes the round that just answered, never the next one. */
-    ASSERT_TRUE(answer < notice);
-    ASSERT_TRUE(notice < plan);
-    /* And it stands alone at both ends: no neighbour shares its rows. */
-    ASSERT_TRUE(has_blank_row(answer, notice));
-    ASSERT_TRUE(has_blank_row(notice, plan));
-    free(clean);
-
-    remove(FIXTURE_PATH);
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
-}
-
-/* The gate: `prism_notice off` silences the LINE and nothing else —
- * /context still reports the routing, because the key owns the notice,
- * not the capture (conf.h). */
-static void test_prism_notice_off_silences_only_the_line(void)
-{
-    pin_cfg_paths("prism-notice-off");
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, prism_responder_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-    NmConfig *cfg = cfg_for(h);
-    ASSERT_NOT_NULL(cfg);
-    /* The runtime layer, the way /config set does — takes effect this
-     * chat, and /config reports it. */
-    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_PRISM_NOTICE, "off"), 0);
-
-    harness_type(h, "hi");
-    harness_enter(h);
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    const char *out = harness_read(h);
-    ASSERT_NOT_NULL(out);
-    ASSERT_TRUE(strstr(out, "prism: routed") == NULL);
-
-    /* The capture is untouched: /context still answers. */
-    harness_type(h, "/context");
-    harness_enter(h);
-    out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "context: last round routed to glm-5.3-flash "
-                            "(GLM 5.3 Flash)") != NULL);
-
-    nm_config_free(cfg);
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
-/* The framing tail, full stack: a routed round whose trailer section
- * (the savings) arrives AFTER the [DONE] read — the shape of a gateway
- * that computes the figure once the stream ends (docs/HYPER-API.md
- * §3.5.2). The round must stay PENDING through the tail and still
- * produce the complete notice: the line is composed from the round
- * meta at the framing end, so it carries the figure, not a partial. */
-static void test_prism_notice_prints_under_a_late_trailer_round(void)
-{
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 1;
-    sc.sse[0] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    sc.prism_head =
-        "X-Prism-Model-Id: glm-5.3-flash\r\n"
-        "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
-    sc.prism_trailer =
-        "X-Prism-Hypercredit-Savings: 12.5\r\n"
-        "X-Prism-Dollar-Savings: 0.0021\r\n";
-    sc.terminator_delay_ms = 40; /* well inside the tail budget */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-
-    harness_type(h, "hi");
-    harness_enter(h);
-    ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    const char *out = harness_read(h);
-    ASSERT_NOT_NULL(out);
-    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
-                            "(GLM 5.3 Flash) · saved 12.5 hypercredits / "
-                            "$0.0021") != NULL);
-
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
-}
-
-/* The tail budget's expiry, on the fake clock: [DONE] arrives, the
- * connection is held WITHOUT the terminating chunk, and no trailer
- * ever comes. The round still ends DONE — routing, no figure, no
- * error — because the tail's own budget (the stream's deadline seam,
- * 250 ms) is what ends it, and a no-figure answer beats a stalled or
- * failed one. Virtual time is the only honest way to spend a
- * deadline; real readiness consumes the events first. */
-static void test_prism_tail_budget_ends_the_round_without_a_figure(void)
-{
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 1;
-    sc.sse[0] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    sc.prism_head =
-        "X-Prism-Model-Id: glm-5.3-flash\r\n"
-        "X-Prism-Model-Name: GLM 5.3 Flash\r\n";
-    sc.stall_at_end = 1; /* no terminator, no trailer: the tail hangs */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    AppHarness *h = harness_new("hyper", "glm-5.3-flash", base);
-    ASSERT_NOT_NULL(h);
-
-    harness_type(h, "hi");
-    harness_enter(h);
-    for (int i = 0; i < 400; i++) {
-        NmAgentState st = nm_chat_app_state(h->app);
-        if (st == NM_AGENT_DONE || st == NM_AGENT_ERROR)
-            break;
-        NmSource s = app_source(h->app);
-        if (s.handle >= 0 && s.flags)
-            app_wait(h, 2); /* real readiness: the events, then quiet */
-        harness_step_ack(h);
-        nm_test_clock_advance_ms(25); /* the 250 ms budget: due by spin 10 */
-        nm_chat_app_tick(h->app);     /* fires only when it is due NOW */
-        tui_runtime_flush(h->rt);
-    }
-    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
-
-    const char *out = harness_read(h);
-    ASSERT_NOT_NULL(out);
-    /* The routing rode the head, so it is named; the figure never
-     * arrived, so no savings — and no failure anywhere. */
-    ASSERT_TRUE(strstr(out, "prism: routed to glm-5.3-flash "
-                            "(GLM 5.3 Flash)") != NULL);
-    ASSERT_NULL(strstr(out, "saved"));
-    ASSERT_NULL(strstr(out, "timed out"));
-    ASSERT_NULL(strstr(out, "chat failed"));
-
-    harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
 }
 
 /* The Agent Skills round trip on the real transcript: the menu is what
@@ -11018,7 +10615,7 @@ static void test_preset_writes_both_keys(void)
  * silently writing a key that would never reach a wire. */
 static void test_knob_commands_refuse_a_provider_without_knobs(void)
 {
-    pin_cfg_paths("knobs-hyper");
+    pin_cfg_paths("knobs");
     AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
@@ -11047,7 +10644,7 @@ static void test_knob_commands_refuse_a_provider_without_knobs(void)
 
 /* A round that reports its upstream and tier gets a system line, and the
  * `served_notice` key silences the LINE alone: /context still answers
- * with the last round's facts (the Prism contract). The line joins
+ * with the last round's facts (the served contract). The line joins
  * neither the conversation nor the saved transcript, so the request
  * prefix is untouched. */
 static void test_served_notice_prints_and_the_key_gates_it(void)
@@ -11582,12 +11179,6 @@ int main(void)
     RUN_TEST(test_separator_blank_line_after_answer);
     RUN_TEST(test_separator_collapses_trailing_blank_lines);
     RUN_TEST(test_blank_line_inside_a_run_renders);
-    RUN_TEST(test_context_reports_the_prism_routed_model);
-    RUN_TEST(test_prism_notice_prints_under_a_routed_round);
-    RUN_TEST(test_prism_notice_closes_its_own_block);
-    RUN_TEST(test_prism_notice_off_silences_only_the_line);
-    RUN_TEST(test_prism_notice_prints_under_a_late_trailer_round);
-    RUN_TEST(test_prism_tail_budget_ends_the_round_without_a_figure);
     RUN_TEST(test_separator_between_reasoning_and_answer);
     RUN_TEST(test_delta_line_continuation_is_preserved);
     RUN_TEST(test_busy_frame_with_empty_tail_has_no_phantom_row);
@@ -11725,7 +11316,7 @@ int main(void)
     RUN_TEST(test_model_picker_capability_query_image);
     RUN_TEST(test_model_picker_capability_query_tools);
     RUN_TEST(test_model_picker_capability_query_tools_empty);
-    RUN_TEST(test_model_picker_tool_badge_for_hyper_and_opencode);
+    RUN_TEST(test_model_picker_tool_badge_for_openrouter_and_opencode);
     RUN_TEST(test_model_picker_capability_query_vision);
     RUN_TEST(test_model_picker_capability_query_unknown);
     RUN_TEST(test_model_picker_old_capability_spelling_is_refused);
@@ -11773,7 +11364,7 @@ int main(void)
     RUN_TEST(test_catalog_fetch_deadline_does_not_bound_the_connect);
     RUN_TEST(test_catalog_fetch_budget_is_idle_not_total);
     RUN_TEST(test_tool_runs_while_a_catalog_fetch_is_in_flight);
-    /* LAST on purpose: this one commits a live hyper catalog, and the
+    /* LAST on purpose: this one commits a live catalog, and the
      * provider catalogs are process-global — every test after it would
      * read the canned catalog instead of the static fallback it pins. */
     RUN_TEST(test_startup_warm_fills_the_gauge_without_a_popup);

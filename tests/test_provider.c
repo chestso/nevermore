@@ -1,10 +1,9 @@
 /* test_provider.c - provider registry + provider vtable tests.
  *
- * Registry tests run offline. The hyper tests run the provider's
- * real chat/models vtables against a canned loopback OpenAI-shaped
+ * Registry tests run offline. The openrouter tests run the provider's
+ * real chat vtables against a canned loopback OpenAI-shaped
  * server (never a real API — house rule), exactly as test_openai_client
- * drives the shared client: request validation, SSE delta assembly,
- * catalog fetch + fallback.
+ * drives the shared client: request validation, SSE delta assembly.
  */
 
 #ifdef _WIN32
@@ -72,7 +71,6 @@ static const char *write_authinfo(const char *content)
 
 static void test_provider_registry_complete(void)
 {
-    ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_HYPER));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OLLAMA_LOCAL));
     ASSERT_NOT_NULL(nm_provider_get(NM_PROVIDER_OPENROUTER));
@@ -116,12 +114,12 @@ static void test_provider_knob_vocabulary(void)
     ASSERT_STR_EQ(out, "0.5,2");
 
     /* Every other provider has no vocabulary at all: a line naming one
-     * of its keys is refused by the store. (The variable is not named
-     * `hyper`: MinGW's headers define that as an integer type.) */
-    const NmProvider *hyper_provider = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(hyper_provider);
-    ASSERT_NULL(hyper_provider->knobs);
-    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "hyper", "flex",
+     * of its keys is refused by the store. */
+    const NmProvider *cloud_provider = nm_provider_by_name("ollama:cloud");
+    ASSERT_NOT_NULL(cloud_provider);
+    ASSERT_NULL(cloud_provider->knobs);
+    ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER,
+                                        "ollama:cloud", "flex",
                                         out, sizeof(out)));
     ASSERT_FALSE(nm_provider_knob_canon(NULL, NM_CFG_KEY_TIER, "nosuch",
                                         "flex", out, sizeof(out)));
@@ -218,7 +216,6 @@ static void test_openrouter_request_model_composition(void)
 
 static void test_provider_lookup_by_name(void)
 {
-    ASSERT_NOT_NULL(nm_provider_by_name("hyper"));
     ASSERT_NOT_NULL(nm_provider_by_name("ollama:cloud"));
     ASSERT_NOT_NULL(nm_provider_by_name("ollama:local"));
     ASSERT_NOT_NULL(nm_provider_by_name("openrouter"));
@@ -306,16 +303,12 @@ static void test_provider_api_key_env_then_authinfo(void)
     test_unsetenv("OPENROUTER_API_KEY");
     nm_authinfo_set_path(NULL);
 
-    /* Providers with an authinfo machine but no key for it: NULL.
-     * Not named `hyper`: MinGW's rpcndr.h (reachable through
-     * windows.h, which winsock2.h pulls in) #defines hyper as a
-     * MIDL 64-bit integer spelling, so the identifier cannot be a
-     * variable in any TU that sees windows.h. */
-    const NmProvider *hyper_provider = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(hyper_provider);
-    test_unsetenv("HYPER_API_KEY");
+    /* Providers with an authinfo machine but no key for it: NULL. */
+    const NmProvider *cloud_provider = nm_provider_by_name("ollama:cloud");
+    ASSERT_NOT_NULL(cloud_provider);
+    test_unsetenv("OLLAMA_API_KEY");
     nm_authinfo_set_path(path);
-    ASSERT_NULL(nm_provider_api_key(hyper_provider));
+    ASSERT_NULL(nm_provider_api_key(cloud_provider));
 
     /* The local daemon has no authinfo machine at all. */
     const NmProvider *local = nm_provider_by_name("ollama:local");
@@ -333,8 +326,6 @@ static void test_provider_authinfo_machines(void)
 {
     /* One machine name per keyed provider, and it matches the names
      * the box's ~/.authinfo uses (README documents them). */
-    ASSERT_STR_EQ(nm_provider_by_name("hyper")->authinfo_machine,
-                  "hyper.charm.land");
     ASSERT_STR_EQ(nm_provider_by_name("ollama:cloud")->authinfo_machine,
                   "ollama.com");
     ASSERT_STR_EQ(nm_provider_by_name("openrouter")->authinfo_machine,
@@ -348,7 +339,7 @@ static void test_provider_authinfo_machines(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Canned loopback servers (hyper vtable tests)                      */
+/* Canned loopback servers (openrouter vtable tests)                  */
 /* ---------------------------------------------------------------- */
 
 /* Shared plumbing: listen on loopback, one scripted round. */
@@ -558,7 +549,7 @@ static int server_start(void *(*thread)(void *), pthread_t *th, char *base,
 
 /* Chat server: two content deltas then [DONE], chunked. Chunk sizes
  * computed: 0x33, 0x35, 0xe (verified: printf | wc -c pattern). */
-static void *hyper_chat_server_thread(void *arg)
+static void *canned_chat_server_thread(void *arg)
 {
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
@@ -569,86 +560,6 @@ static void *hyper_chat_server_thread(void *arg)
         "e\r\ndata: [DONE]\n\n\r\n"
         "0\r\n\r\n";
     serve_reply((int)(intptr_t)arg, sse);
-    return NULL;
-}
-
-/* The trailer section both Prism servers end with: the chunked
- * terminator and the two savings as trailers. */
-static const char PRISM_TAIL[] =
-    "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
-    "X-Prism-Dollar-Savings: 0.0021\r\n\r\n";
-
-/* The Prism reply up to the trailer section: the head with the two
- * model headers, then the one SSE chunk (its size computed from the
- * body, never hand-counted). The two Prism servers differ only in
- * WHEN the trailer lands, so they share this. */
-static size_t prism_reply_head(char *out, size_t cap)
-{
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    size_t n = (size_t)snprintf(out, cap,
-                                "HTTP/1.1 200 OK\r\n"
-                                "Content-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "X-Prism-Model-Name: GLM 5.3 Flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(out + n, cap - n, "%zx\r\n", strlen(body));
-    memcpy(out + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(out + n, cap - n, "\r\n");
-    return n;
-}
-
-/* Prism chat server: the four Hyper Prism headers — model id/name on
- * the head, the two savings as chunked TRAILERS — sent in ONE write so
- * the trailer section rides the [DONE] read and the transport retains
- * it before the round completes (docs/HYPER-API.md §3.5.2). */
-static void *hyper_prism_server_thread(void *arg)
-{
-    char resp[512];
-    size_t n = prism_reply_head(resp, sizeof(resp));
-    snprintf(resp + n, sizeof(resp) - n, "%s", PRISM_TAIL); /* one write */
-    serve_reply((int)(intptr_t)arg, resp);
-    return NULL;
-}
-
-/* Late-trailer Prism server: identical payload, but the terminator +
- * trailer section arrive ~40 ms AFTER [DONE] — the late-segment shape
- * of a server that computes the savings after the stream ends
- * (docs/HYPER-API.md §3.5.2). The client must not lose the figure:
- * the content is complete at [DONE], the framing tail wait covers the
- * gap, and the framing end delivers the trailer into the store. */
-static void *hyper_prism_late_trailer_server_thread(void *arg)
-{
-    char resp[512];
-    prism_reply_head(resp, sizeof(resp));
-    serve_round((int)(intptr_t)arg, resp, PRISM_TAIL, 40 * 1000);
-    return NULL;
-}
-
-/* Catalog server: the OpenAI {"object": "list", "data": [...]} shape
- * hyper's /v1/models answers (tokenless — HYPER-API.md §5), with
- * Content-Length (no chunked, exercise the other body path). */
-static void *hyper_models_server_thread(void *arg)
-{
-    static const char body[] =
-        "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"gpt-oss-120b\",\"display_name\":\"GPT OSS 120b\","
-        "\"context_window\":131072,"
-        "\"capabilities\":{\"vision\":false},"
-        "\"reasoning\":{\"effort_levels\":[{\"value\":\"low\","
-        "\"display\":\"Low\"},{\"value\":\"medium\",\"display\":\"Medium\"},"
-        "{\"value\":\"high\",\"display\":\"High\"}],"
-        "\"default_effort_level\":\"medium\"}},"
-        "{\"id\":\"vision-test\",\"display_name\":\"Vision Test\","
-        "\"context_window\":8192,"
-        "\"capabilities\":{\"vision\":true}},"
-        /* No display_name: the label falls back to the id. */
-        "{\"id\":\"no-name-model\",\"context_window\":4096,"
-        "\"capabilities\":{\"vision\":false}}"
-        "]}";
-    serve_json((int)(intptr_t)arg, body);
     return NULL;
 }
 
@@ -742,8 +653,7 @@ static void *ollama_catalog_server_thread(void *arg)
     return NULL;
 }
 
-/* ---------------------------------------------------------------- */
-/* Hyper vtable (real provider code, canned wire)                    */
+/* OpenRouter vtable (real provider code, canned wire)                */
 /* ---------------------------------------------------------------- */
 
 typedef struct
@@ -806,7 +716,7 @@ static NmChatResult canned_chat_round(const char *provider,
     return r;
 }
 
-static void test_hyper_chat_end_to_end(void)
+static void test_openrouter_chat_end_to_end(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
@@ -815,74 +725,27 @@ static void test_hyper_chat_end_to_end(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
-                                       "sk-hyper-test");
+    NmChatResult r = canned_chat_round("openrouter", canned_chat_server_thread, &req,
+                                       "sk-or-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
 
-    /* The request the server received: hyper path, Bearer auth,
+    /* The request the server received: path, Bearer auth,
      * model, stream:true, messages. */
     ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-hyper-test") != NULL);
+    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"model\":\"gpt-oss-120b\"") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
     ASSERT_TRUE(strstr(last_request, "\"role\":\"user\"") != NULL);
 }
 
-/* The provider's Prism hook reads all four Hyper router headers off the
- * response — the model id/name from the head, the two savings from the
- * chunked TRAILERS — into the round meta (docs/HYPER-API.md §3.5.2).
- * Driven through the hyper vtable, so the hook is the provider's own,
- * not a test stand-in. */
-static void test_hyper_prism_round_meta(void)
+static void test_openrouter_chat_begin_step(void)
 {
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1,
-        "nm-conv-prism", /* conversation_id */
-        capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult r = canned_chat_round("hyper", hyper_prism_server_thread,
-                                       &req, "sk-hyper-test");
-    ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_STR_EQ(r.meta.routed_model, "glm-5.3-flash");
-    ASSERT_STR_EQ(r.meta.routed_name, "GLM 5.3 Flash");
-    ASSERT_STR_EQ(r.meta.hc_savings, "12.5");
-    ASSERT_STR_EQ(r.meta.usd_savings, "0.0021");
-}
-
-/* The same four headers, but the terminator + trailer section arrive
- * AFTER the [DONE] read (the late-trailer server above): the round
- * stays PENDING through the framing tail and the figure still lands in
- * the round meta once the framing ends. The 40 ms gap sits well inside
- * the client's framing-tail budget, so this pins the capture, not the
- * budget's expiry (that is the chat_app test's, on the fake clock). */
-static void test_hyper_prism_late_trailer(void)
-{
-    NmMessage msg = { "user", "hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "glm-5.3-flash", &msg, 1, NULL, NULL, -1, -1,
-        "nm-conv-prism", /* conversation_id */
-        capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult r = canned_chat_round(
-        "hyper", hyper_prism_late_trailer_server_thread, &req, "sk-hyper-test");
-    ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_STR_EQ(r.meta.routed_model, "glm-5.3-flash");
-    ASSERT_STR_EQ(r.meta.routed_name, "GLM 5.3 Flash");
-    ASSERT_STR_EQ(r.meta.hc_savings, "12.5");
-    ASSERT_STR_EQ(r.meta.usd_savings, "0.0021");
-}
-
-static void test_hyper_chat_begin_step(void)
-{
-    const NmProvider *p = nm_provider_by_name("hyper");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     pthread_t th;
     char base[64];
-    ASSERT_EQ(server_start(hyper_chat_server_thread, &th, base, sizeof(base)),
+    ASSERT_EQ(server_start(canned_chat_server_thread, &th, base, sizeof(base)),
               0);
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
@@ -893,7 +756,7 @@ static void test_hyper_chat_begin_step(void)
         capture_delta, NULL, &cap, NULL
     };
     NmChatResult err = { 0 };
-    NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
+    NmChatStream *h = p->chat_begin(p, &req, base, "sk-or-test", &err);
     ASSERT_NOT_NULL(h);
 
     /* Blocking pump over the step seam: poll until the collector has
@@ -911,209 +774,6 @@ static void test_hyper_chat_begin_step(void)
     ASSERT_STR_EQ(cap.text, "Hello, world");
     p->chat_end(h);
     pthread_join(th, NULL);
-}
-
-static void test_hyper_models_live_then_fallback(void)
-{
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-
-    /* Offline/unroutable base: static fallback. */
-    size_t n = 0;
-    const NmModel *models = p->models(p, "http://127.0.0.1:1/v1", NULL, &n);
-    ASSERT_NOT_NULL(models);
-    ASSERT_TRUE(n > 0);
-    ASSERT_STR_EQ(models[0].id, "gpt-oss-120b");
-    /* The provider-level rule: hyper's catalog claims tools for every
-     * model (the wire carries no per-model tool signal — see
-     * hyper_static_models). */
-    ASSERT_EQ(models[0].tools, 1);
-
-    /* Note: the live-catalog path can't be exercised in-process after
-     * the fallback test (the cache is process-global by design), so
-     * the fetch itself is covered by test_hyper_models_fetch below,
-     * which runs FIRST in main via a dedicated round. */
-    (void)models;
-}
-
-static void test_hyper_models_fetch(void)
-{
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    pthread_t th;
-    char base[64];
-    ASSERT_EQ(server_start(hyper_models_server_thread, &th, base, sizeof(base)),
-              0);
-
-    size_t n = 0;
-    const NmModel *models = p->models(p, base, NULL, &n);
-    ASSERT_NOT_NULL(models);
-    ASSERT_EQ(n, 3);
-    /* EVERY NmModel field a live row carries is pinned here: the merge
-     * loop must copy the whole row, not just the fields a caller
-     * happens to read today. */
-    ASSERT_STR_EQ(models[0].id, "gpt-oss-120b");
-    ASSERT_STR_EQ(models[0].label, "GPT OSS 120b");
-    ASSERT_EQ(models[0].context_length, 131072);
-    ASSERT_EQ(models[0].vision, 0);
-    ASSERT_EQ(models[0].image_gen, 0);
-    /* The live scanner applies the same provider-level tools rule: the
-     * catalog's `capabilities` object carries only `vision`, so tools
-     * is never read from the wire (see hyper_static_models). */
-    ASSERT_EQ(models[0].tools, 1);
-    /* The effort vocab rides the same live row: the joined level
-     * list and the catalog default, in the catalog's own spellings. */
-    ASSERT_STR_EQ(models[0].effort_levels, "low|medium|high");
-    ASSERT_STR_EQ(models[0].effort_default, "medium");
-    ASSERT_STR_EQ(models[1].id, "vision-test");
-    ASSERT_STR_EQ(models[1].label, "Vision Test");
-    ASSERT_EQ(models[1].context_length, 8192);
-    ASSERT_EQ(models[1].vision, 1);
-    ASSERT_EQ(models[1].image_gen, 0);
-    ASSERT_EQ(models[1].tools, 1);
-    /* No `reasoning` block on the wire: no levels, no default —
-     * the model reasons implicitly and there is no knob. */
-    ASSERT_TRUE(models[1].effort_levels == NULL);
-    ASSERT_TRUE(models[1].effort_default == NULL);
-    /* No display_name on the wire: the label falls back to the id. */
-    ASSERT_STR_EQ(models[2].id, "no-name-model");
-    ASSERT_STR_EQ(models[2].label, "no-name-model");
-    ASSERT_EQ(models[2].context_length, 4096);
-    ASSERT_EQ(models[2].vision, 0);
-    ASSERT_EQ(models[2].tools, 1);
-    ASSERT_TRUE(models[2].effort_levels == NULL);
-    pthread_join(th, NULL);
-
-    /* GET /v1/models, and tokenless (no Authorization header —
-     * the catalog answers without a key, HYPER-API.md §5). It still
-     * carries x-crush-id (Crush sends it on every request); the
-     * session-affinity pair is chat-only. */
-    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL);
-    ASSERT_TRUE(strstr(last_request, "x-crush-id: ") != NULL);
-    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") == NULL);
-}
-
-/* Cache affinity: every hyper chat request carries the three routing
- * headers (HYPER-API.md §3.1), and the two session headers are the
- * same XXH3-64 hash of the request's conversation id — stable across
- * the blocking and step paths. */
-static void test_hyper_chat_carries_affinity_headers(void)
-{
-    const char *conv = "nm-0123456789abcdef0123456789abcdef";
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        conv, capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
-                                       "sk-hyper-test");
-    ASSERT_EQ(r.status, NM_CHAT_OK);
-
-    ASSERT_TRUE(strstr(last_request, "x-session-id: ed926fff3042616d") != NULL);
-    ASSERT_TRUE(strstr(last_request,
-                       "x-session-affinity: ed926fff3042616d") != NULL);
-    /* x-crush-id is present and non-empty (its value is machine-local). */
-    const char *crush = strstr(last_request, "x-crush-id: ");
-    ASSERT_NOT_NULL(crush);
-    ASSERT_TRUE(crush[sizeof("x-crush-id: ") - 1] != '\r');
-    ASSERT_TRUE(crush[sizeof("x-crush-id: ") - 1] != '\0');
-    /* None is redacted: these are routing hashes, not secrets. */
-    ASSERT_TRUE(strstr(last_request, "<redacted>") == NULL);
-}
-
-/* A request without a conversation id still sends the affinity
- * headers, pinning the fallback path (a missing header would silently
- * disable caching). */
-static void test_hyper_chat_null_conversation_id_falls_back(void)
-{
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        NULL, capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
-                                       "sk-hyper-test");
-    ASSERT_EQ(r.status, NM_CHAT_OK);
-
-    const char *sid = strstr(last_request, "x-session-id: ");
-    const char *aff = strstr(last_request, "x-session-affinity: ");
-    ASSERT_NOT_NULL(sid);
-    ASSERT_NOT_NULL(aff);
-    /* Same hash in both, non-empty, and not the input id verbatim. */
-    ASSERT_TRUE(sid[sizeof("x-session-id: ") - 1] != '\r');
-    ASSERT_TRUE(strncmp(sid + sizeof("x-session-id: ") - 1,
-                        aff + sizeof("x-session-affinity: ") - 1,
-                        16) == 0);
-}
-
-/* The affinity pair is unconditional. HYPER_NO_SESSION_CACHE is the
- * retired opt-out; setting it must change nothing, so a reintroduced
- * one is caught here. */
-static void test_hyper_affinity_headers_always_sent(void)
-{
-    test_setenv("HYPER_NO_SESSION_CACHE", "1");
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
-                                       "sk-hyper-test");
-    ASSERT_EQ(r.status, NM_CHAT_OK);
-    test_unsetenv("HYPER_NO_SESSION_CACHE");
-
-    ASSERT_TRUE(strstr(last_request, "x-session-id:") != NULL);
-    ASSERT_TRUE(strstr(last_request, "x-session-affinity:") != NULL);
-    ASSERT_TRUE(strstr(last_request, "x-crush-id:") != NULL);
-}
-
-/* The affinity hash of the same conversation id is stable across the
- * blocking and step paths — the point of affinity is that every turn
- * hashes identically. The step path is driven here; the blocking path
- * is pinned by test_hyper_chat_carries_affinity_headers. */
-static void test_hyper_affinity_stable_across_paths(void)
-{
-    const char *conv = "nm-0123456789abcdef0123456789abcdef";
-
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    pthread_t th;
-    char base[64];
-    ASSERT_EQ(server_start(hyper_chat_server_thread, &th, base, sizeof(base)),
-              0);
-    NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
-    Capture cap = { 0 };
-    NmChatRequest req = {
-        "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
-        conv, capture_delta, NULL, &cap, NULL
-    };
-    NmChatResult err = { 0 };
-    NmChatStream *h = p->chat_begin(p, &req, base, "sk-hyper-test", &err);
-    ASSERT_NOT_NULL(h);
-    NmChatResult res = { 0 };
-    NmChatStatus st = NM_CHAT_PENDING;
-    int guard = 0;
-    while (st == NM_CHAT_PENDING && guard++ < 2000) {
-        st = p->chat_step(h, &res);
-        if (st == NM_CHAT_PENDING)
-            usleep(10 * 1000);
-    }
-    ASSERT_EQ(st, NM_CHAT_OK);
-    p->chat_end(h);
-    pthread_join(th, NULL);
-    ASSERT_TRUE(strstr(last_request,
-                       "x-session-affinity: ed926fff3042616d") != NULL);
-}
-
-static void test_hyper_needs_auth(void)
-{
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    ASSERT_TRUE(p->needs_auth(p, NULL) != 0);
 }
 
 /* ---------------------------------------------------------------- */
@@ -1259,7 +919,7 @@ static void test_ollama_local_chat_never_carries_a_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("ollama:local", hyper_chat_server_thread,
+    NmChatResult r = canned_chat_round("ollama:local", canned_chat_server_thread,
                                        &req, api_key);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
@@ -1295,7 +955,7 @@ static void test_ollama_cloud_chat_carries_the_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("ollama:cloud", hyper_chat_server_thread,
+    NmChatResult r = canned_chat_round("ollama:cloud", canned_chat_server_thread,
                                        &req, api_key);
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
@@ -2057,7 +1717,7 @@ static void test_openrouter_body_carries_the_pricing_knobs(void)
 /* A provider with no body seam sends neither field, whatever the store
  * says for another provider: the seam is the endpoint's, not a global
  * switch on the store. */
-static void test_hyper_round_carries_no_pricing_knobs(void)
+static void test_cloud_round_carries_no_pricing_knobs(void)
 {
     NmConfig *cfg = nm_config_new();
     ASSERT_NOT_NULL(cfg);
@@ -2072,8 +1732,8 @@ static void test_hyper_round_carries_no_pricing_knobs(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("hyper", hyper_chat_server_thread, &req,
-                                       "sk-hyper-test");
+    NmChatResult r = canned_chat_round("ollama:cloud", canned_chat_server_thread, &req,
+                                       "sk-or-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_TRUE(strstr(last_request, "service_tier") == NULL);
     ASSERT_TRUE(strstr(last_request, "\"provider\"") == NULL);
@@ -2127,9 +1787,9 @@ static void *openrouter_served_server_thread(void *arg)
 }
 
 /* A chunk that LIES with a generic top-level `provider` on a wire whose
- * endpoint leaves the parse off (hyper): the gate is the endpoint's
+ * endpoint leaves the parse off: the gate is the endpoint's
  * flag, not a check of what the other providers happen to send. */
-static void *hyper_lying_provider_server_thread(void *arg)
+static void *lying_provider_server_thread(void *arg)
 {
     static const char *const events[] = {
         "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
@@ -2182,10 +1842,6 @@ static void test_openrouter_round_reports_the_served_meta(void)
     ASSERT_STR_EQ(r.meta.served_provider, "Azure");
     ASSERT_STR_EQ(r.meta.service_tier, "flex");
     ASSERT_STR_EQ(r.meta.source, "openrouter");
-    /* A routing fact is not a routing NOTICE: Prism's fields stay empty
-     * (the two sources are separate). */
-    ASSERT_STR_EQ(r.meta.routed_model, "");
-
     /* The plain canned round carries neither field. */
     Capture cap2 = { 0 };
     r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
@@ -2208,13 +1864,13 @@ static void test_openrouter_round_reports_the_served_meta(void)
     /* The tier on the same chunk IS a report. */
     ASSERT_STR_EQ(r.meta.service_tier, "flex");
 
-    /* A wire whose endpoint leaves the parse off (hyper) reports nothing,
+    /* A wire whose endpoint leaves the parse off reports nothing,
      * however its chunks lie about a top-level `provider`. */
     Capture cap4 = { 0 };
     NmChatRequest hreq = { "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1, NULL,
                            capture_delta, NULL, &cap4, NULL };
-    r = canned_chat_round("hyper", hyper_lying_provider_server_thread, &hreq,
-                          "sk-hyper-test");
+    r = canned_chat_round("ollama:cloud", lying_provider_server_thread, &hreq,
+                          "sk-or-test");
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.served_provider, "");
     ASSERT_STR_EQ(r.meta.service_tier, "");
@@ -2247,7 +1903,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_catalog_model_grammar);
     RUN_TEST(test_openrouter_request_model_composition);
     RUN_TEST(test_openrouter_body_carries_the_pricing_knobs);
-    RUN_TEST(test_hyper_round_carries_no_pricing_knobs);
+    RUN_TEST(test_cloud_round_carries_no_pricing_knobs);
     RUN_TEST(test_openrouter_round_reports_the_served_meta);
     RUN_TEST(test_provider_lookup_by_name);
     RUN_TEST(test_provider_names_are_tier_qualified);
@@ -2256,17 +1912,9 @@ int main(int argc, char *argv[])
     /* Fetch BEFORE the fallback test: the live catalog cache is
      * process-global (memory-reuse principle), and the fallback test
      * must not poison it with a failed fetch. */
-    RUN_TEST(test_hyper_models_fetch);
-    RUN_TEST(test_hyper_models_live_then_fallback);
-    RUN_TEST(test_hyper_chat_end_to_end);
-    RUN_TEST(test_hyper_prism_round_meta);
-    RUN_TEST(test_hyper_prism_late_trailer);
-    RUN_TEST(test_hyper_chat_begin_step);
-    RUN_TEST(test_hyper_chat_carries_affinity_headers);
-    RUN_TEST(test_hyper_chat_null_conversation_id_falls_back);
-    RUN_TEST(test_hyper_affinity_headers_always_sent);
-    RUN_TEST(test_hyper_affinity_stable_across_paths);
-    RUN_TEST(test_hyper_needs_auth);
+    RUN_TEST(test_openrouter_chat_end_to_end);
+    RUN_TEST(test_openrouter_chat_begin_step);
+    RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_ollama_models_tags_and_show);
     RUN_TEST(test_ollama_models_verbose_catalog);
     RUN_TEST(test_ollama_needs_auth_local_vs_cloud);
@@ -2283,7 +1931,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_openrouter_prompt_cache_ttl_1h);
     RUN_TEST(test_openrouter_chat_carries_session_id);
     RUN_TEST(test_openrouter_chat_without_session_id);
-    RUN_TEST(test_openrouter_needs_auth);
     RUN_TEST(test_opencode_registry_and_identity);
     RUN_TEST(test_opencode_chat_carries_session_header);
     RUN_TEST(test_opencode_chat_without_done_is_complete);

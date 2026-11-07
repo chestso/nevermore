@@ -1,6 +1,6 @@
 /* context.h - system-prompt context assembly (AGENTS.md)
  *
- * The port of quoth-context.el's project-context half: discover the
+ * Project-context assembly: discover the
  * AGENTS.md files that apply to the current working directory and
  * fold them into the agent's system prompt as one <project_context>
  * block. The assembled prompt is provider-agnostic — every provider
@@ -21,7 +21,7 @@
  *      comes last and wins by recency.
  *   3. One global file is prepended first: ~/.config/AGENTS.md
  *      ($XDG_CONFIG_HOME/AGENTS.md when set). Personal instructions
- *      that apply to every project; quoth's <user_preferences> slot.
+ *      that apply to every project (the <user_preferences> slot).
  *
  * Files are labeled with their path (<file path="...">) so the model
  * can tell scope. Content is byte-exact (no newline translation, no
@@ -36,7 +36,7 @@
  * Memory model: ONE growable buffer per NmContext, assembled once at
  * construction and reused for the context's lifetime (a provider
  * switch rebuilds the agent, and the context with it — same
- * fresh-chat semantics as quoth's cache key). nm_context_system_prompt
+ * fresh-chat semantics — a rebuild drops the cache). nm_context_system_prompt
  * returns a borrowed pointer, valid until nm_context_free.
  */
 
@@ -109,7 +109,7 @@ int nm_context_set_vision(NmContext *c, int vision);
  * assembled synchronously at construction — all local, bounded work.
  * Its git SECTION is not: `git status` on a monorepo can hang for
  * seconds, so it runs as a subprocess the agent drives from its event
- * loop (the same discipline quoth-context.el stages it with). The
+ * loop (a deliberately staged discipline). The
  * split of duties: THIS module owns the command and the assembly, the
  * AGENT owns the process (it owns the event loop's source/step/deadline
  * seam and the turn lifecycle).
@@ -123,7 +123,7 @@ int nm_context_set_vision(NmContext *c, int vision);
 int nm_context_env_git_pending(const NmContext *c);
 
 /* How long the git stage may take before it is abandoned and the prompt
- * is delivered gitless (quoth-context-git-timeout's 10 s). A hung `git
+ * is delivered gitless (the 10 s bound). A hung `git
  * status` on a monorepo must not hold the first round longer than this;
  * a fast repo answers in milliseconds, so the bound is only ever seen
  * when something is wrong. */
@@ -141,7 +141,7 @@ const char *nm_context_env_git_command(void);
 /* Parse the git stage's marker-delimited output and splice the section
  * into the assembled prompt's <env> block. A NULL/empty/garbled output
  * (git unavailable, a failed stage, an abandoned timeout) leaves the
- * prompt gitless — the same degrade quoth takes. Idempotent per
+ * prompt gitless. Idempotent per
  * context: applying twice would duplicate the section, so the agent
  * calls it once. Returns 0, or -1 on OOM. */
 int nm_context_env_apply_git(NmContext *c, const char *output);

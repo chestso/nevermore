@@ -2,8 +2,9 @@
  *
  * POST {base_url}/chat/completions with "stream": true, parse SSE
  * deltas, drive req->on_delta. Shared by the openai, ollama, and
- * openrouter providers — only the endpoint struct differs. Port of
- * quoth-openai-client.el (wire truth: docs/OLLAMA-CLOUD-API.md).
+ * openrouter providers — only the endpoint struct differs. Wire truth:
+ * docs/OLLAMA-CLOUD-API.md (Ollama), docs/OPENROUTER-API.md
+ * (OpenRouter).
  *
  * Streaming loop: pull nm_read_body chunks into the connection's
  * reused read buffer, feed the SSE parser, dispatch complete events.
@@ -41,12 +42,12 @@
 
 /* The framing-tail budget, in milliseconds: how long a stream that has
  * seen [DONE] keeps waiting for the chunked terminator and trailer
- * section (where a streamed Prism savings lands — docs/HYPER-API.md
+ * section
  * §3.5.2) before completing the round without it. The terminator
  * normally rides the same read as [DONE], so the budget costs nothing;
  * a server that computes the figure after the marker sends it in a
- * LATER segment (crush's client pays an unbounded drain-to-EOF for
- * that shape; a laggy gateway is exactly what we do not want to copy).
+ * LATER segment (draining to EOF for that shape would let a laggy
+ * gateway stall the turn — exactly what we do not want).
  * The figure is worth a bounded wait and nothing more: telemetry,
  * never a reason to stall — or fail — a turn whose answer has already
  * rendered. The wait itself is fd-driven with this as the deadline;
@@ -296,8 +297,8 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
     nm_json_set(body, "messages", messages);
     nm_json_set(body, "stream", nm_json_new_bool(1));
     /* stream_options.include_usage asks the provider to emit a usage
-     * chunk while streaming (OpenAI/Ollama/Hyper; OpenRouter/OpenCode
-     * always send usage, the flag is harmless). Kept off unless the
+     * chunk while streaming (OpenAI/Ollama; OpenRouter/OpenCode always
+     * send usage, the flag is harmless). Kept off unless the
      * endpoint opted in, so a provider that rejects unknown fields is
      * never handed one. */
     if (ep->include_usage) {
@@ -378,11 +379,6 @@ struct NmChatStream
     NmStreamCallback on_delta;
     NmUsageFn on_usage;
     void *userdata;
-    /* Provider response-metadata hook (endpoint's, copied at begin):
-     * called once per round with the live connection, so the provider
-     * can fill result->meta from the retained response headers. NULL
-     * for a provider with no such metadata. */
-    void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
     /* The served-upstream parse is this endpoint's dialect fact (copied
      * at begin). 0 = the client never reads a top-level `provider` /
      * `service_tier`: the words are generic and another wire's
@@ -403,7 +399,7 @@ struct NmChatStream
                            * logically complete, but the transport may still
                            * carry the chunked trailer section: the transport
                            * framing end, not [DONE], is what completes the
-                           * round — docs/HYPER-API.md §3.5.2). */
+                           * round). */
     int in_tail;          /* [DONE] seen and the framing tail (terminator +
                            * trailer section) is still owed: the content is
                            * complete, the round waits — fd-driven, bounded by
@@ -502,7 +498,7 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n)
  *  - total_tokens comes from the wire, or is derived as prompt+completion
  *    when both are present (belt-and-braces for a terse upstream).
  *  - cache read and cache write are DISTINCT facts with distinct billing
- *    (Hyper's pricing.cache_create vs cache_hit) and are read from
+ *    and are read from
  *    distinct keys; prompt_tokens_details carries both on the providers
  *    that report them. DeepSeek's `prompt_cache_hit_tokens` is a second
  *    spelling of the read count, never a second source — it is not read
@@ -526,8 +522,6 @@ static void parse_usage(NmJson *uobj, NmUsage *u)
     u->cache_write_tokens = cw ? (long)nm_json_num(cw) : -1;
 
     u->cost_usd = -1.0;
-    u->cost_credits = -1.0;
-    u->remaining_credits = -1.0;
     u->opencode_list_cost = -1.0;
     u->opencode_allowance = -1.0;
 
@@ -535,21 +529,11 @@ static void parse_usage(NmJson *uobj, NmUsage *u)
     if (cost) {
         if (nm_json_type(cost) == NM_JSON_OBJECT) {
             NmJson *usd = nm_json_get(cost, "usd");
-            NmJson *hc = nm_json_get(cost, "hypercredits");
             if (usd && nm_json_type(usd) == NM_JSON_NUMBER)
                 u->cost_usd = nm_json_num(usd);
-            if (hc && nm_json_type(hc) == NM_JSON_NUMBER)
-                u->cost_credits = nm_json_num(hc);
         } else if (nm_json_type(cost) == NM_JSON_NUMBER) {
             u->cost_usd = nm_json_num(cost);
         }
-    }
-
-    NmJson *rem = nm_json_get(uobj, "remaining");
-    if (rem && nm_json_type(rem) == NM_JSON_OBJECT) {
-        NmJson *hc = nm_json_get(rem, "hypercredits");
-        if (hc && nm_json_type(hc) == NM_JSON_NUMBER)
-            u->remaining_credits = nm_json_num(hc);
     }
 
     NmJson *oc = nm_json_get(uobj, "opencode");
@@ -586,9 +570,9 @@ static int rd_put(NmChatStream *st, const char *s)
 }
 
 /* Handle one complete SSE event's data payload (already JSON-parsed
- * arena tree `obj`, borrowed). Port of quoth's sse-extract-deltas +
- * merge-tool-calls; tool_calls are reported through on_delta as
- * complete JSON strings when finish_reason arrives. */
+ * arena tree `obj`, borrowed). Delta extraction + tool-call merging;
+ * tool_calls are reported through on_delta as complete JSON strings
+ * when finish_reason arrives. */
 static void handle_event(NmChatStream *st, const char *data, size_t len)
 {
     if (strcmp(data, "[DONE]") == 0) {
@@ -600,7 +584,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
     if (!obj)
         return; /* per-event malformed payload: skip, stream continues */
 
-    /* Provider error event: {"error": {...}} — fatal, like quoth. */
+    /* Provider error event: {"error": {...}} — fatal. */
     NmJson *eobj = nm_json_get(obj, "error");
     if (eobj) {
         st->done = 1;
@@ -618,7 +602,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
     }
 
     /* Token usage: an independent carrier (not tied to `choices`). It may
-     * ride the finish_reason chunk (Hyper without stream_options), a
+     * ride the finish_reason chunk, a
      * standalone choices:[] chunk (most providers), or more than one
      * chunk (OpenCode Zen) — so fire on any event that has it; the
      * receiver keeps the last.
@@ -688,7 +672,7 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
         if (delta) {
             /* Reasoning first: providers stream it phase-sequential
              * with content (never concurrent). Two key spellings:
-             * reasoning_content (GLM/Go, hyper, OpenRouter) and
+             * reasoning_content (GLM/Go, OpenRouter) and
              * reasoning (Zen free models, OpenRouter's other shape).
              * Read the first present one; both carry the same text. */
             const char *reasoning =
@@ -765,10 +749,9 @@ static void handle_event(NmChatStream *st, const char *data, size_t len)
                     st->on_delta(NM_STREAM_IMAGE, url, NULL, 0,
                                  st->userdata);
             }
-            /* Tool-call deltas: merge fragments by index (port of
-             * quoth's sse-merge-tool-calls). Arguments accumulate
-             * across chunks; assembled calls are delivered from
-             * finish_stream when the stream completes.
+            /* Tool-call deltas: merge fragments by index. Arguments
+             * accumulate across chunks; assembled calls are delivered
+             * from finish_stream when the stream completes.
              *
              * The wire index is a PER-DELTA fragment key, not a
              * stable slot id: providers emitting parallel calls in
@@ -939,8 +922,8 @@ static int feed_and_dispatch(NmChatStream *st, const char *data, size_t len)
 /* The framing tail: everything after [DONE]. The content is complete
  * the moment the marker is dispatched, but a chunked response is not —
  * the 0-chunk terminator and the trailer section are still owed, and a
- * server that computes a streamed Prism savings after the marker sends
- * them in a LATER segment. Read what is buffered; if none of the tail
+ * server that computes a trailer after the marker sends it in a LATER
+ * segment. Read what is buffered; if none of the tail
  * is here yet, arm the budget (once) and return PENDING — the wait
  * hook (nm_openai_stream_wait_ms) gives the loop the deadline, the fd
  * gives it the bytes, and neither blocks.
@@ -1073,7 +1056,7 @@ static NmChatStatus stream_one_step(NmChatStream *st)
             return st->status;
         /* [DONE]: the content is complete; the framing tail (the
          * chunked terminator + trailer section, where a streamed
-         * Prism savings lands — docs/HYPER-API.md §3.5.2) is all that
+         * is all that
          * can still arrive. The dispatch guard above keeps the SSE
          * parser out of the tail bytes; tail_step owns the bounded,
          * fd-driven wait for them. */
@@ -1181,21 +1164,13 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
      * "" when the wire reported none. */
     snprintf(result->native_finish_reason, sizeof(result->native_finish_reason),
              "%s", h->native_finish_reason);
-    /* Provider response metadata (Hyper's Prism routing, §3.5.2): read
-     * from the live connection's retained headers/trailers. All-empty
-     * when the provider reports none — the "direct" case. The
-     * connection is still open here (every caller publishes before
-     * stream_teardown). */
+    /* Provider response metadata: the round's served upstream and tier
+     * (D6), captured whatever the keys say — the notice's key gates the
+     * LINE, never the capture. Empty = the wire reported none, and then
+     * the source name is empty too: the meta records a REPORT, not a
+     * provider's willingness to report. All-empty when the provider
+     * reports none. */
     memset(&result->meta, 0, sizeof(result->meta));
-    result->meta.req_limit_day = -1;
-    result->meta.req_remaining_day = -1;
-    result->meta.req_limit_hour = -1;
-    result->meta.req_remaining_hour = -1;
-    /* The round's served upstream and tier (D6), captured whatever the
-     * keys say — the notice's key gates the LINE, never the capture
-     * (the Prism contract). Empty = the wire reported none, and then the
-     * source name is empty too: the meta records a REPORT, not a
-     * provider's willingness to report. */
     if (h->served_provider[0] || h->service_tier[0]) {
         snprintf(result->meta.source, sizeof(result->meta.source), "%s",
                  h->source);
@@ -1205,8 +1180,6 @@ static void result_publish(const NmChatStream *h, NmChatResult *result)
         snprintf(result->meta.service_tier, sizeof(result->meta.service_tier),
                  "%s", h->service_tier);
     }
-    if (h->read_response_meta && h->conn)
-        h->read_response_meta(h->conn, result);
     switch (h->status) {
     case NM_CHAT_OK:
     case NM_CHAT_PENDING:
@@ -1298,8 +1271,8 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     }
 
     /* Headers: Content-Type, auth, provider extras, User-Agent
-     * (nevermore as itself; no Crush emulation — see
-     * openai_client.h). The auth header is built here and marked
+     * (nevermore as itself — see openai_client.h). The auth header is
+     * built here and marked
      * secret HERE — the recorder redacts marked values at log-write
      * time; onboarding a provider via NmOpenaiEndpoint carries
      * redaction with it. Extras sit between auth
@@ -1343,7 +1316,6 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     st->on_delta = req->on_delta;
     st->on_usage = req->on_usage;
     st->userdata = req->userdata;
-    st->read_response_meta = ep->read_response_meta;
     st->parse_served_meta = ep->parse_served_meta;
     if (ep->provider && ep->provider->name)
         snprintf(st->source, sizeof(st->source), "%s", ep->provider->name);
@@ -1458,10 +1430,6 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         result->finish_reason[0] = '\0';
         result->native_finish_reason[0] = '\0';
         memset(&result->meta, 0, sizeof(result->meta));
-        result->meta.req_limit_day = -1;
-        result->meta.req_remaining_day = -1;
-        result->meta.req_limit_hour = -1;
-        result->meta.req_remaining_hour = -1;
     }
     if (!h) {
         if (result) {
@@ -1557,8 +1525,8 @@ static NmChatStatus chat_step_impl(NmChatStream *h, NmChatResult *result)
         /* Complete stream. stream_one_step returns OK either because
          * the TRANSPORT reached its framing end (nm_read_body == 0) or
          * because `[DONE]` was seen and the transport's already-buffered
-         * tail (the chunked terminator + trailer section, where a
-         * streamed Prism savings lands) was drained. What "complete"
+         * tail (the chunked terminator + trailer section) was drained.
+         * What "complete"
          * means for the CONTENT:
          *
          *  - `[DONE]` was seen (h->saw_done), the OpenAI-compatible
@@ -1851,7 +1819,7 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
     }
 
     /* Same header set as chat: Content-Type (bodies), auth (absent
-     * for tokenless catalogs, e.g. hyper /v1/models — HYPER-API.md
+     * for tokenless catalogs (e.g. a tokenless /v1/models)
      * §5), provider extras, + User-Agent. The auth header is marked
      * secret at its construction site (the redaction seam). */
     NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];

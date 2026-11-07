@@ -376,9 +376,8 @@ const NmResponse *nm_response(NmConnection *conn);
 
 /* Bounded retention of response headers — the head AND, for a chunked
  * response, its trailers — so a caller can read a header AFTER the
- * exchange. Two live readers motivate it: Hyper's Prism router headers
- * (whose savings figures arrive as chunked TRAILERS, docs/HYPER-API.md
- * §3.5.2) and Hyper's rate-limit headers (§3.5.3). The store is
+ * exchange. The wire recorder motivates it (chunked TRAILERS are
+ * logged as their own event). The store is
  * FIXED-SIZE (memory-reuse principle: nothing allocated per header,
  * per read, or per chunk); a response carrying more than
  * NM_RESPONSE_HEADERS_MAX headers keeps the first N and drops the
@@ -543,7 +542,7 @@ typedef struct NmWireTap
     /* Chunked trailers complete: the trailer section ended (its
      * terminating empty line). Fired only when the response carried at
      * least one trailer line — the moment a streamed response's late
-     * headers (Hyper's Prism savings, docs/HYPER-API.md §3.5.2) are all
+     * headers are all
      * retained; nm_response_header reads them. */
     void (*on_response_trailers)(const struct NmConnection *conn);
     void (*on_response)(const struct NmConnection *conn, const char *body,

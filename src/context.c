@@ -15,7 +15,7 @@
  * Synchronous by design: this is construction-time I/O (one agent
  * build = one context), each read bounded by NM_CONTEXT_MAX_BYTES.
  * The phase-B <env> stage (git status/commits) is the part that must
- * become async, the way quoth-context.el stages it — a hung git on a
+ * become async, staged by the agent — a hung git on a
  * monorepo must not stall a chat send.
  */
 
@@ -106,7 +106,7 @@ static const char *const vision_clause =
     "what you see directly, and never say you cannot see an image that "
     "is in the conversation.";
 
-/* The block scaffolding, quoth-context.el's exact shape (the prompt
+/* The block scaffolding: one block per file, exact shape (the prompt
  * in the project's own system message). */
 static const char *const block_header =
     "\n\n"
@@ -328,7 +328,7 @@ void nm_context_set_global_dir(const char *dir)
 }
 
 /* ~/.config equivalent: $XDG_CONFIG_HOME wins, then HOME (USERPROFILE
- * on Windows) + "/.config". quoth-context.el's chain. */
+ * on Windows) + "/.config". */
 static const char *global_dir(void)
 {
     if (g_global_override[0])
@@ -368,7 +368,7 @@ static int append_entry(NmContext *c, size_t block_start, size_t cap,
     size_t avail =
         (used + join + scaffold < cap) ? cap - used - join - scaffold : 0;
 
-    /* Entries are joined by a blank line (quoth's mapconcat "\n");
+    /* Entries are joined by a blank line;
      * the block header already ended with a newline. */
     if (join && append_str(c, "\n") != 0)
         return -1;
@@ -431,7 +431,7 @@ static const char *platform_name(void)
 #endif
 }
 
-/* Today's LOCAL date as "M/D/YYYY" — quoth's `%-m/%-d/%Y`, unpadded. */
+/* Today's LOCAL date as "M/D/YYYY", unpadded. */
 static void today(char *out, size_t cap)
 {
 #ifdef _WIN32
@@ -454,7 +454,7 @@ static void today(char *out, size_t cap)
 #define GIT_STATUS_MARKER  "NM_STATUS_MARKER"
 #define GIT_COMMITS_MARKER "NM_COMMITS_MARKER"
 
-/* Status-line cap (quoth's `head -20`), applied while PARSING rather
+/* Status-line cap (20 lines), applied while PARSING rather
  * than in the command: cmd.exe has no `head`. */
 #define NM_CONTEXT_GIT_STATUS_LINES 20
 
@@ -487,8 +487,8 @@ const char *nm_context_env_cwd(const NmContext *c)
  * leave behind) and trailing whitespace. Leading SPACES are KEPT —
  * `git status --short`'s first column is meaningful (` M` = modified in
  * the worktree, `M ` = staged), so trimming it would change what the
- * model reads. quoth's plain string-trim would eat it; this is a
- * deliberate improvement. */
+ * model reads. A plain string-trim would eat it; this is a deliberate
+ * improvement. */
 static char *trim_in_place(char *s, size_t *len)
 {
     while (*s == '\n' || *s == '\r')
@@ -506,7 +506,7 @@ static char *trim_in_place(char *s, size_t *len)
 }
 
 /* The text between the START_MARKER line and the END_MARKER line (or
- * the end of RAW), trimmed — quoth's marker-section, a character scan
+ * the end of RAW), trimmed — a marker-section, a character scan
  * (no regex). Returns a heap copy (caller frees), or NULL when the
  * start marker is absent. */
 static char *marker_section(const char *raw, const char *start_marker,
@@ -606,7 +606,7 @@ int nm_context_env_apply_git(NmContext *c, const char *output)
     if (status && *status)
         keep_lines(status, NM_CONTEXT_GIT_STATUS_LINES);
 
-    /* quoth's section shape: branch line, status (clean or listed),
+    /* The section shape: branch line, status (clean or listed),
      * recent commits — each present only when it has content. */
     size_t cap = (branch ? strlen(branch) : 0) +
                  (status ? strlen(status) : 0) +
@@ -764,13 +764,13 @@ NmContext *nm_context_new(const char *dir, int vision)
     }
     strip_trailing_seps(wd);
 
-    /* The <env> block (quoth-context parity): working directory, the
+    /* The <env> block: working directory, the
      * git-repo flag, platform, date. All local and cheap, so it is
      * assembled HERE — but its git SECTION is a subprocess, spliced in
      * later by nm_context_env_apply_git (the agent drives that stage,
      * so a hung `git status` on a monorepo never blocks a chat send).
      * The block sits between the capability clause and the project
-     * block, quoth's order. */
+     * block, in that order. */
     if (wd[0]) {
         snprintf(c->wd, sizeof(c->wd), "%s", wd);
         char gitprobe[NM_CONTEXT_DIR_MAX + 16];

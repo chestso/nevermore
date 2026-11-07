@@ -2,14 +2,12 @@
  *
  * One HTTP+SSE chat-completions client shared by the openai, ollama,
  * and openrouter providers. Only base URL, auth headers, and model
- * catalogs differ between them. Port of quoth-openai-client.el; wire
- * behavior is specified in quoth/OLLAMA-CLOUD-API.md (Ollama) and
- * docs/OPENROUTER-API.md (OpenRouter).
+ * catalogs differ between them. Wire behavior is specified in
+ * docs/OLLAMA-CLOUD-API.md (Ollama) and docs/OPENROUTER-API.md
+ * (OpenRouter).
  *
- * Note: quoth sends "User-Agent: Charm-Fantasy/<ver>" on the OpenAI
- * chat path (it emulates the Crush CLI when talking to Hyper). We do
- * not need that emulation for direct OpenAI/Ollama/OpenRouter calls;
- * nevermore identifies as itself.
+ * nevermore identifies as itself on every wire surface; no other
+ * client's identity string is ever impersonated.
  */
 
 #ifndef NM_OPENAI_CLIENT_H
@@ -67,7 +65,7 @@ typedef enum
                            unprobed wire: local ollama until probed) */
     NM_EFFORT_TOP,      /* "reasoning_effort": "<level>" — proven on
                            openrouter, ollama:cloud and opencode:go
-                           (2026-11-07); hyper's docs name it too */
+                           (2026-11-07) */
     NM_EFFORT_OBJECT    /* "reasoning": {"effort": "<level>"} — accepted
                            by openrouter/ollama, REJECTED by
                            opencode:go, so no provider sets it today */
@@ -86,14 +84,6 @@ typedef struct NmOpenaiEndpoint
      * stream_options field is sent. The composer decides nothing: this is
      * the provider's wire fact, set where the endpoint is built. */
     int include_usage;
-    /* Optional response-metadata hook: called once per round, when the
-     * round completes and the connection is still open (before the
-     * result is published), so a provider can read response
-     * headers/trailers (nm_response_header) into result->meta. NULL =
-     * none. Hyper wires this for its Prism router headers, whose
-     * savings arrive as chunked trailers (docs/HYPER-API.md §3.5.2).
-     * The connection is borrowed, valid only for the call. */
-    void (*read_response_meta)(const NmConnection *conn, NmChatResult *result);
     /* The catalog request's query string ("?limit=1000"), or NULL for
      * none. A provider whose catalog endpoint PAGES its list sets it
      * here: the default page size is the provider's own, and a list
@@ -301,7 +291,7 @@ int nm_catalog_fetch_wait_ms(const NmCatalogFetch *cf);
 void nm_catalog_fetch_end(NmCatalogFetch *cf);
 
 /* GET {base_url}{path}/models as an async fetch (the OpenAI-shaped
- * catalog: openai, hyper, openrouter, opencode). */
+ * catalog: openai, openrouter, opencode). */
 NmFetchStream *nm_openai_models_begin(const NmOpenaiEndpoint *ep);
 
 /* The BLOCKING drive of the provider's catalog seam: begin + step +

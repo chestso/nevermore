@@ -79,8 +79,8 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
     (void)args_json;
     const NmTool *t = nm_toolset_find(ts, name);
     if (!t) {
-        /* A refusal, in the one refusal shape (same convention as
-         * quoth's unknown-tool result), never a silent no-op. */
+        /* A refusal, in the one refusal shape (the unknown-tool
+         * result convention), never a silent no-op. */
         char msg[64 + 128];
         snprintf(msg, sizeof(msg), "unknown tool: %s", name ? name : "(null)");
         return nm_tool_result_error(msg);
@@ -177,7 +177,7 @@ char *nm_clamp_output(const char *text, size_t *omitted)
  * marker between the halves. A finished build's failures, a test
  * summary and a crash dump all live in the last lines, so the head-only
  * cut the other tools use would drop exactly the part being asked for.
- * quoth spends the same 70/30 on exec output. */
+ * the same 70/30 split. */
 char *nm_clamp_job_output(const char *text, size_t *omitted_out)
 {
     if (omitted_out)

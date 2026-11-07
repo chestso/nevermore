@@ -221,97 +221,6 @@ static void *agent_server_thread(void *arg)
     return NULL;
 }
 
-/* One-shot Prism responder: the whole response in ONE write, so the
- * chunked trailer section rides the [DONE] read and the transport
- * retains it before the round completes (docs/HYPER-API.md §3.5.2).
- * The agent's own round-meta copy is what this test drives. */
-static void *agent_prism_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    char resp[1024];
-    size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                          strlen(body));
-    memcpy(resp + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n,
-                          "0\r\nX-Prism-Dollar-Savings: 0.0021\r\n\r\n");
-    send(cfd, resp, n, 0);
-    close(cfd);
-    close(lfd);
-    return NULL;
-}
-
-/* Late-trailer variant: the terminator + trailer section go out ~40 ms
- * AFTER [DONE] — a server that computes the savings after the stream
- * ends (docs/HYPER-API.md §3.5.2). The agent's drive sees the framing
- * tail: PENDING through the gap, the figure on the round meta once the
- * framing ends. */
-static void *agent_prism_late_trailer_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    static const char body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    static const char tail[] =
-        "0\r\nX-Prism-Hypercredit-Savings: 12.5\r\n"
-        "X-Prism-Dollar-Savings: 0.0021\r\n\r\n";
-    char resp[1024];
-    size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
-                                "X-Prism-Model-Id: glm-5.3-flash\r\n"
-                                "Transfer-Encoding: chunked\r\n\r\n");
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                          strlen(body));
-    memcpy(resp + n, body, strlen(body));
-    n += strlen(body);
-    n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-    send(cfd, resp, n, 0);
-    usleep(40 * 1000); /* the tail: sent well after [DONE] was read */
-    send(cfd, tail, strlen(tail), 0);
-    close(cfd);
-    close(lfd);
-    return NULL;
-}
-
-/* Two rounds, each stamped with a DIFFERENT routed model: see
- * test_agent_round_meta_notice_fires_per_round (the script needs
- * FIXTURE, so it lives below that define). */
-static void *agent_prism_two_round_thread(void *arg);
-
 /* One-shot stall responder (the P0 deadline test): accept once, drain
  * the request, then sit silent — no bytes, no terminal chunk — until
  * the peer tears down. A closed peer is READABLE (EOF), so the loop
@@ -1885,7 +1794,7 @@ static void test_agent_exec_command_yields_job(void)
  * re-sent as reasoning_content on the next request carrying the turn
  * when the agent's echo is enabled, and never mixed into the answer
  * text. The canned server scripts reasoning in round 1 (a tool round
- * — the case HYPER-API.md calls out) and records round 2's request. */
+ * — the case docs call out) and records round 2's request. */
 static void test_agent_reasoning_collected_and_echoed(void)
 {
     reset_capture();
@@ -3550,7 +3459,7 @@ static void test_agent_error_message_is_informative(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("hyper");
+    const NmProvider *p = nm_provider_by_name("openrouter");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -3841,7 +3750,7 @@ static void test_agent_error_message_hints_env_var(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("hyper");
+    const NmProvider *p = nm_provider_by_name("openrouter");
 
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -3855,7 +3764,7 @@ static void test_agent_error_message_hints_env_var(void)
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
     ASSERT_NOT_NULL(err);
-    ASSERT_TRUE(strstr(err, "no API key set — export HYPER_API_KEY") != NULL);
+    ASSERT_TRUE(strstr(err, "no API key set — export OPENROUTER_API_KEY") != NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
@@ -4533,7 +4442,7 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
  * when the cache warms — the /model popup's async fetch is what fills it
  * — the gauge follows with NO push and NO agent rebuild. The bug this
  * pins: the limit used to be a copy pushed at construction, so a model
- * the static fallback did not carry (hyper's `deepseek-v4.1-flash`, the
+ * the static fallback did not carry (the live catalog's
  * user's `47.1k/-`) stayed `-` for the whole session, however warm
  * the cache got. */
 static const NmModel stub_cold_models[] = {
@@ -4661,7 +4570,7 @@ static void test_agent_effort_resets_on_model_change(void)
     nm_toolset_free(tools);
 }
 
-/* The set level rides the request (hyper's TOP shape), and clearing
+/* The set level rides the request (the TOP shape), and clearing
  * stops it on the very next round. */
 static void test_agent_effort_rides_the_request(void)
 {
@@ -4685,9 +4594,9 @@ static void test_agent_effort_rides_the_request(void)
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
 
-    /* Hyper's builder sets the TOP shape; the stub catalog supplies
-     * the vocab. (Ollama:local would send nothing by design.) */
-    struct NmProvider p = nm_hyper_provider;
+    /* OpenRouter's builder sets the TOP shape; the stub catalog
+     * supplies the vocab. (Ollama:local would send nothing by design.) */
+    struct NmProvider p = nm_openrouter_provider;
     p.models_cached = stub_catalog_read;
     g_stub_catalog = stub_effort_models;
     NmToolset *tools = nm_toolset_new_defaults();
@@ -6802,92 +6711,9 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
     remove(img);
 }
 
-/* The agent keeps the last COMPLETED round's provider response metadata
- * (Hyper's Prism routing) and exposes it through nm_agent_round_meta:
- * which model actually answered, and the savings. Driven through the
- * hyper vtable against a Prism-stamping canned server. */
-static void test_agent_round_meta_from_prism(void)
-{
-    reset_capture();
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_prism_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "glm-5.3-flash", tools, NULL);
-    ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_state(agent, cap_state);
-
-    ASSERT_EQ(nm_agent_start(agent, "hi", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 5000), 0);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-
-    NmRoundMeta meta;
-    nm_agent_round_meta(agent, &meta);
-    ASSERT_STR_EQ(meta.routed_model, "glm-5.3-flash");
-    ASSERT_STR_EQ(meta.usd_savings, "0.0021");
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
-/* Same routing headers, but the trailer section lands AFTER the [DONE]
- * read: the round stays PENDING through the framing tail and the round
- * meta is still complete once the framing ends (docs/HYPER-API.md
- * §3.5.2). The 40 ms server gap is well inside the tail budget — this
- * pins the wait's capture, not its expiry. */
-static void test_agent_round_meta_from_late_trailer(void)
-{
-    reset_capture();
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_prism_late_trailer_server_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "glm-5.3-flash", tools, NULL);
-    ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
-    nm_agent_on_delta(agent, cap_delta);
-    nm_agent_on_state(agent, cap_state);
-
-    ASSERT_EQ(nm_agent_start(agent, "hi", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 5000), 0);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-
-    NmRoundMeta meta;
-    nm_agent_round_meta(agent, &meta);
-    ASSERT_STR_EQ(meta.routed_model, "glm-5.3-flash");
-    ASSERT_STR_EQ(meta.hc_savings, "12.5");
-    ASSERT_STR_EQ(meta.usd_savings, "0.0021");
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(lfd);
-}
-
-static void *agent_prism_two_round_thread(void *arg)
+static void *agent_two_round_thread(void *arg)
 {
     int lfd = (int)(intptr_t)arg;
-    static const char *models[2] = { "glm-5.3-flash", "kimi-k3" };
     static const char tool_body[] =
         "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
         "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
@@ -6924,22 +6750,12 @@ static void *agent_prism_two_round_thread(void *arg)
         size_t n = (size_t)snprintf(resp, sizeof(resp),
                                     "HTTP/1.1 200 OK\r\n"
                                     "Content-Type: text/event-stream\r\n"
-                                    "X-Prism-Model-Id: %s\r\n"
-                                    "X-Prism-Model-Name: Round %d\r\n"
-                                    "Transfer-Encoding: chunked\r\n\r\n",
-                                    models[round], round + 1);
+                                    "Transfer-Encoding: chunked\r\n\r\n");
         n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
                               strlen(body));
         memcpy(resp + n, body, strlen(body));
         n += strlen(body);
-        n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n");
-        /* Round 0 also carries a savings trailer; round 1 does not, so
-         * the two notices cannot be the same text by accident. */
-        n += (size_t)snprintf(
-            resp + n, sizeof(resp) - n,
-            round == 0 ? "0\r\nX-Prism-Hypercredit-Savings: "
-                         "0.031577247999999995\r\n\r\n"
-                       : "0\r\n\r\n");
+        n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n0\r\n\r\n");
         send(cfd, resp, n, 0);
         for (;;) {
             struct timeval tv = { 0, 50 * 1000 };
@@ -6956,134 +6772,6 @@ static void *agent_prism_two_round_thread(void *arg)
     }
     close(lfd);
     return NULL;
-}
-
-/* The notice seam: one fire per COMPLETED round that reported routing,
- * carrying THAT round's metadata (a turn's two rounds route
- * separately), and a text that reads like a line, not like a float. */
-static int g_meta_fires;
-static NmRoundMeta g_meta_last;
-static char g_meta_first_model[64];
-
-static void cap_round_meta(const NmRoundMeta *meta, void *userdata)
-{
-    (void)userdata;
-    if (!meta)
-        return;
-    if (g_meta_fires == 0)
-        snprintf(g_meta_first_model, sizeof(g_meta_first_model), "%s",
-                 meta->routed_model);
-    g_meta_last = *meta;
-    g_meta_fires++;
-}
-
-static void test_agent_round_meta_notice_fires_per_round(void)
-{
-    reset_capture();
-    write_fixture();
-    g_meta_fires = 0;
-    g_meta_first_model[0] = '\0';
-    memset(&g_meta_last, 0, sizeof(g_meta_last));
-
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_prism_two_round_thread,
-                   (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "prism", tools, NULL);
-    ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
-    nm_agent_on_state(agent, cap_state);
-    nm_agent_on_round_meta(agent, cap_round_meta);
-
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-
-    /* Two rounds, two fires — the tool round and the final round each
-     * carry their own routing, and the getter still reports the LAST
-     * one (the /context contract is unchanged). */
-    ASSERT_EQ(g_meta_fires, 2);
-    ASSERT_STR_EQ(g_meta_first_model, "glm-5.3-flash");
-    ASSERT_STR_EQ(g_meta_last.routed_model, "kimi-k3");
-    NmRoundMeta got;
-    nm_agent_round_meta(agent, &got);
-    ASSERT_STR_EQ(got.routed_model, "kimi-k3");
-
-    /* The notice's text: rounded savings, the name in parentheses, and
-     * no savings segment at all for the round that reported none. */
-    char line[256];
-    nm_agent_round_meta_text(&got, line, sizeof(line));
-    ASSERT_STR_EQ(line, "prism: routed to kimi-k3 (Round 2)");
-
-    NmRoundMeta with_savings;
-    memset(&with_savings, 0, sizeof(with_savings));
-    snprintf(with_savings.routed_model, sizeof(with_savings.routed_model),
-             "%s", "glm-5.3-flash");
-    snprintf(with_savings.hc_savings, sizeof(with_savings.hc_savings), "%s",
-             "0.031577247999999995");
-    nm_agent_round_meta_text(&with_savings, line, sizeof(line));
-    ASSERT_STR_EQ(line,
-                  "prism: routed to glm-5.3-flash · saved 0.0315772 "
-                  "hypercredits");
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(lfd);
-    remove(FIXTURE);
-}
-
-/* The direct case: a round whose provider reported no routing is never
- * announced (the notice seam stays silent for every non-Prism turn,
- * which is what a user with `prism_notice` on actually sees). */
-static void test_agent_round_meta_notice_silent_when_direct(void)
-{
-    reset_capture();
-    g_meta_fires = 0;
-
-    struct ServerScript sc;
-    memset(&sc, 0, sizeof(sc));
-    sc.n_rounds = 1;
-    sc.sse[0] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"plain\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
-    const NmProvider *p = nm_provider_by_name("hyper");
-    ASSERT_NOT_NULL(p);
-    NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "glm-5.3-flash", tools, NULL);
-    ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
-    nm_agent_on_round_meta(agent, cap_round_meta);
-
-    ASSERT_EQ(nm_agent_turn(agent, "hi", NULL, 0), 0);
-    ASSERT_EQ(g_meta_fires, 0);
-
-    /* And the composed text for an empty meta is the empty string, so a
-     * caller can print whatever it built without testing fields. */
-    NmRoundMeta none;
-    nm_agent_round_meta(agent, &none);
-    char line[256];
-    ASSERT_EQ(nm_agent_round_meta_text(&none, line, sizeof(line)), 0);
-    ASSERT_STR_EQ(line, "");
-
-    nm_agent_free(agent);
-    nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
 }
 
 static int g_fold_fires;
@@ -7115,17 +6803,16 @@ static void test_agent_credit_fold_fires_per_round(void)
     int lfd = server_bind(&port);
     ASSERT_TRUE(lfd >= 0);
     pthread_t th;
-    pthread_create(&th, NULL, agent_prism_two_round_thread,
-                   (void *)(intptr_t)lfd);
+    pthread_create(&th, NULL, agent_two_round_thread, (void *)(intptr_t)lfd);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "prism", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "openai/gpt-4o", tools, NULL);
     ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_set_endpoint(agent, base, "sk-or-test");
     nm_agent_on_credit_fold(agent, cap_credit_fold);
 
     ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
@@ -7171,17 +6858,13 @@ static void *agent_402_server_thread(void *arg)
     }
 
     const char body[] =
-        "{\"error\":{\"message\":\"You're out of credits. Add more at "
-        "https://hyper.charm.land\",\"type\":\"billing_error\",\"code\":null}}";
+        "{\"error\":{\"message\":\"You're out of credits.\","
+        "\"type\":\"billing_error\",\"code\":null}}";
     char resp[1024];
     int n = snprintf(resp, sizeof(resp),
                      "HTTP/1.1 402 Payment Required\r\n"
                      "Content-Type: application/json\r\n"
                      "Content-Length: %zu\r\n"
-                     "x-ratelimit-limit-day: 100000\r\n"
-                     "x-ratelimit-remaining-day: 100000\r\n"
-                     "x-ratelimit-limit-hour: 10000\r\n"
-                     "x-ratelimit-remaining-hour: 10000\r\n"
                      "\r\n"
                      "%s",
                      strlen(body), body);
@@ -7205,12 +6888,12 @@ static void test_agent_credit_fold_fires_on_credit_refusal(void)
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    const NmProvider *p = nm_provider_by_name("hyper");
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmToolset *tools = nm_toolset_new_defaults();
-    NmAgent *agent = nm_agent_new(p, "prism", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "openai/gpt-4o", tools, NULL);
     ASSERT_NOT_NULL(agent);
-    nm_agent_set_endpoint(agent, base, "sk-hyper-test");
+    nm_agent_set_endpoint(agent, base, "sk-or-test");
     nm_agent_on_credit_fold(agent, cap_credit_fold);
 
     /* Turn fails with 402 */
@@ -7218,61 +6901,16 @@ static void test_agent_credit_fold_fires_on_credit_refusal(void)
     /* The fold hook fires on 402 refusal */
     ASSERT_EQ(g_fold_fires, 1);
     ASSERT_EQ(g_fold_last_http_status, 402);
-    ASSERT_EQ(g_fold_last_meta.req_remaining_day, 100000);
 
-    /* Round meta preserved even across failed turn */
+    /* Round meta preserved even across failed turn (empty: the quote
+     * wire reported no served facts). */
     NmRoundMeta got;
     nm_agent_round_meta(agent, &got);
-    ASSERT_EQ(got.req_remaining_day, 100000);
-    ASSERT_EQ(got.req_limit_day, 100000);
-    ASSERT_EQ(got.req_remaining_hour, 10000);
-    ASSERT_EQ(got.req_limit_hour, 10000);
+    ASSERT_STR_EQ(got.served_provider, "");
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
     pthread_join(th, NULL);
-}
-
-/* The text builder's remaining shapes, without a socket: a nameless
- * routing, both savings at once, and a value that is not a number (it
- * rides through verbatim — a notice never invents or zeroes a figure). */
-static void test_agent_round_meta_text_shapes(void)
-{
-    NmRoundMeta m;
-    char line[256];
-
-    memset(&m, 0, sizeof(m));
-    snprintf(m.routed_model, sizeof(m.routed_model), "%s", "kimi-k3");
-    ASSERT_TRUE(nm_agent_round_meta_text(&m, line, sizeof(line)) > 0);
-    ASSERT_STR_EQ(line, "prism: routed to kimi-k3");
-
-    memset(&m, 0, sizeof(m));
-    snprintf(m.routed_model, sizeof(m.routed_model), "%s", "qwen3.8-flash");
-    snprintf(m.routed_name, sizeof(m.routed_name), "%s", "Qwen3.8-Flash");
-    snprintf(m.hc_savings, sizeof(m.hc_savings), "%s", "12.5");
-    snprintf(m.usd_savings, sizeof(m.usd_savings), "%s", "0.0021");
-    ASSERT_TRUE(nm_agent_round_meta_text(&m, line, sizeof(line)) > 0);
-    ASSERT_STR_EQ(line,
-                  "prism: routed to qwen3.8-flash (Qwen3.8-Flash) · saved "
-                  "12.5 hypercredits / $0.0021");
-
-    /* A dollar figure alone still reads as a savings. */
-    memset(&m, 0, sizeof(m));
-    snprintf(m.routed_model, sizeof(m.routed_model), "%s", "inkling");
-    snprintf(m.usd_savings, sizeof(m.usd_savings), "%s", "0.5");
-    ASSERT_TRUE(nm_agent_round_meta_text(&m, line, sizeof(line)) > 0);
-    ASSERT_STR_EQ(line, "prism: routed to inkling · saved $0.5");
-
-    /* Not a number: verbatim, never 0. */
-    memset(&m, 0, sizeof(m));
-    snprintf(m.routed_model, sizeof(m.routed_model), "%s", "inkling");
-    snprintf(m.hc_savings, sizeof(m.hc_savings), "%s", "n/a");
-    ASSERT_TRUE(nm_agent_round_meta_text(&m, line, sizeof(line)) > 0);
-    ASSERT_STR_EQ(line, "prism: routed to inkling · saved n/a hypercredits");
-
-    /* NULL meta and a zero-size buffer are both safe, empty answers. */
-    ASSERT_EQ(nm_agent_round_meta_text(NULL, line, sizeof(line)), 0);
-    ASSERT_STR_EQ(line, "");
 }
 
 /* The age rule on the wire: the window is the store's `image_live`
@@ -7811,11 +7449,6 @@ int main(void)
     RUN_TEST(test_agent_connect_notice_names_the_family);
     RUN_TEST(test_agent_void_round_ends_the_turn);
     RUN_TEST(test_agent_system_message_carries_agents_md);
-    RUN_TEST(test_agent_round_meta_from_prism);
-    RUN_TEST(test_agent_round_meta_from_late_trailer);
-    RUN_TEST(test_agent_round_meta_notice_fires_per_round);
-    RUN_TEST(test_agent_round_meta_notice_silent_when_direct);
-    RUN_TEST(test_agent_round_meta_text_shapes);
     RUN_TEST(test_agent_env_git_stage_lands_in_the_system_prompt);
     RUN_TEST(test_agent_env_stage_is_skipped_outside_a_repo);
     RUN_TEST(test_agent_vision_model_prompt_declares_the_capability);

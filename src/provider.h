@@ -1,6 +1,6 @@
 /* provider.h - model provider backends
  *
- * Six providers, one function-pointer interface (the portty
+ * Five providers, one function-pointer interface (the portty
  * backend pattern).
  *
  * NAMING INVARIANT: a service with more than one endpoint-tier
@@ -11,8 +11,6 @@
  * a silent pick of one tier). Single-endpoint services keep a bare
  * name. Enforced by test_provider_names_are_tier_qualified.
  *
- *   hyper          Charm Hyper gateway (OpenAI-compatible /v1 chat
- *                  surface plus OAuth device flow; docs/HYPER-API.md)
  *   ollama:cloud   Ollama Cloud (https://ollama.com) — OpenAI-compatible
  *                  chat surface plus the native /api catalog
  *   ollama:local   the local Ollama daemon (http://localhost:11434,
@@ -30,8 +28,7 @@
  * the merge loop) is provider_openaicompat.c, and each provider's file
  * is its own wire truth: the static table, a row mapper for one catalog
  * entry, its extra headers, and the vtable. Provider-specific surfaces
- * are narrow: hyper's OAuth device flow, ollama's native /api catalog,
- * opencode's session header.
+ * are narrow: ollama's native /api catalog, opencode's session header.
  *
  * API keys resolve via nm_provider_api_key: $<env_key>, else the
  * provider's authinfo_machine password in ~/.authinfo (authinfo.h).
@@ -62,7 +59,6 @@ typedef struct NmProvider NmProvider;
 
 typedef enum
 {
-    NM_PROVIDER_HYPER = 0,
     NM_PROVIDER_OLLAMA,       /* Ollama Cloud */
     NM_PROVIDER_OLLAMA_LOCAL, /* the local daemon */
     NM_PROVIDER_OPENROUTER,
@@ -111,8 +107,8 @@ typedef struct NmModel
      * hand the merge loop an owned string or NULL — see
      * provider_openaicompat.h. */
     const char *effort_levels;
-    /* The catalog's default effort level (hyper's
-     * `default_effort_level`, ollama's `default_reasoning_level`),
+    /* The catalog's default effort level (ollama's
+     * `default_reasoning_level`),
      * or NULL when the catalog names none. Informational only: an
      * unset effort sends nothing and the provider's own default
      * rules apply, so this never changes what goes on the wire. */
@@ -162,8 +158,7 @@ typedef struct NmMessage
      * the array is DROPPED and the marker rides the content string.
      *
      * Only user and assistant messages carry images: a `tool` message's
-     * content is a string by wire contract, and hyper silently DROPS
-     * images on one (the tool-result fan-out answers that). */
+     * content is a string by wire contract. */
     const char *const *image_parts;
     size_t n_images;
     /* Assistant reasoning trace. When attached, the client serializes
@@ -279,13 +274,12 @@ void nm_tool_calls_free(NmToolCall *calls, size_t n);
  *                      and is not a second source.
  *   cache_write_tokens cache WRITE: the prefix written INTO the cache.
  *                      Read and write are distinct quantities with
- *                      distinct billing (Hyper's pricing.cache_create
- *                      vs pricing.cache_hit; Anthropic-shaped upstreams
+ *                      distinct billing (Anthropic-shaped upstreams
  *                      bill cache creation separately) — never conflate
- *                      them. Reported by only some providers (the
- * Anthropic-shaped upstreams behind opencode);
- * tracked here but not yet rated or displayed
- * beyond an absolute count. */
+ *                      them. Reported by the Anthropic-shaped
+ *                      upstreams behind opencode; tracked here but not
+ *                      yet rated or displayed beyond an absolute
+ *                      count. */
 typedef struct NmUsage
 {
     long prompt_tokens;      /* input sent this round; -1 unknown */
@@ -295,16 +289,13 @@ typedef struct NmUsage
     long cache_write_tokens; /* cache WRITE (prefix stored); -1 unknown */
     /* Credit tier: -1.0 = not reported */
     double cost_usd;
-    double cost_credits;
-    double remaining_credits;
     double opencode_list_cost;
     double opencode_allowance;
 } NmUsage;
 
 /* Fired whenever a streamed event carries a usage object. May fire more
- * than once per round — OpenCode rides usage on two chunks; Hyper on the
- * finish_reason chunk or, with stream_options, a standalone choices: []
- * chunk — so the receiver keeps the LAST report. Absent fields are -1.
+ * than once per round — OpenCode rides usage on two chunks — so the
+ * receiver keeps the LAST report. Absent fields are -1.
  * A `"usage":null` member is a placeholder, not a report (the DeepSeek
  * endpoint behind opencode:go stamps one on every chunk; docs/
  * OPENCODE-API.md §3), so the client fires only for a real OBJECT.
@@ -335,24 +326,14 @@ typedef enum
 #define NM_CHAT_FINISH_MAX 32
 
 /* Provider response metadata for one round: facts the wire reported
- * ABOUT the round, distinct from content and usage. Currently Hyper's
- * Prism model router (docs/HYPER-API.md §3.5.2) — which model actually
- * answered a routed turn and the savings it produced. Response-side
- * only: a client never sends these. All-empty = not reported (the
- * "direct" case: the turn was not routed, or the provider has no such
- * metadata). */
+ * ABOUT the round, distinct from content and usage. Currently the
+ * served upstream and tier (OpenRouter, docs/OPENROUTER-API.md §7.9).
+ * Response-side only: a client never sends these. All-empty = not
+ * reported (the provider has no such metadata). */
 #define NM_ROUND_META_STR_MAX 64
 
 typedef struct NmRoundMeta
 {
-    /* The model that actually answered (Hyper's X-Prism-Model-Id /
-     * -Name), empty when the turn was not routed. */
-    char routed_model[NM_ROUND_META_STR_MAX];
-    char routed_name[NM_ROUND_META_STR_MAX];
-    /* Savings produced by routing (Hyper's X-Prism-Hypercredit-Savings
-     * / -Dollar-Savings), verbatim, empty when not reported. */
-    char hc_savings[NM_ROUND_META_STR_MAX];
-    char usd_savings[NM_ROUND_META_STR_MAX];
     /* The reporting provider's own name ("openrouter"), from the
      * endpoint that read the fact — so the notice can name the
      * vocabulary it speaks. Empty when no provider reported one. */
@@ -366,11 +347,6 @@ typedef struct NmRoundMeta
      * not reported. */
     char served_provider[NM_ROUND_META_STR_MAX];
     char service_tier[NM_ROUND_META_STR_MAX];
-    /* Rate-window members: -1 = unknown */
-    long req_limit_day;
-    long req_remaining_day;
-    long req_limit_hour;
-    long req_remaining_hour;
 } NmRoundMeta;
 
 /* A chat call's outcome. message is ALWAYS set when status is an
@@ -409,8 +385,8 @@ typedef struct NmChatResult
      * "MALFORMED_FUNCTION_CALL" is the whole story, and the round's
      * own `finish_reason` only says "error"). */
     char native_finish_reason[NM_CHAT_FINISH_MAX];
-    /* Provider response metadata for the round (Prism routing, §3.5.2).
-     * All-empty when the provider reports none (the "direct" case). */
+    /* Provider response metadata for the round (the served upstream
+     * and tier). All-empty when the provider reports none. */
     NmRoundMeta meta;
 } NmChatResult;
 
@@ -485,7 +461,8 @@ typedef struct NmKnobName
  * config line naming one is REFUSED (refuse, never clamp).
  *
  * Why the vocabulary is provider DATA: the words are provider-specific.
- * `nitro` means nothing to hyper, and a global `tier = flex` would be a
+ * `nitro` means nothing to the other providers, and a global
+ * `tier = flex` would be a
  * lie for every other provider. The tables below are NULL-terminated. */
 typedef struct NmProviderKnobs
 {
@@ -527,7 +504,7 @@ typedef struct NmProviderCredits
 struct NmProvider
 {
     NmProviderId id;
-    const char *name; /* "hyper", "ollama:cloud", "ollama:local",
+    const char *name; /* "ollama:cloud", "ollama:local",
                        * "openrouter", "opencode:go",
                        * "opencode:zen" */
     const char *default_base_url;
@@ -596,7 +573,7 @@ struct NmProvider
      * catalogs get provider-owned reused buffers). Borrowed by the
      * caller: valid until the next call into this provider.
      * Providers that must fetch catalogs over the wire (ollama native
-     * /api/tags + /api/show) do so here; static catalogs (hyper,
+     * /api/tags + /api/show) do so here; static catalogs (
      * openrouter, opencode) are embedded from data/nm-*-models.json.
      *
      * This is the BLOCKING drive: it pumps the async seam below to
@@ -649,7 +626,7 @@ struct NmProvider
     int (*needs_auth)(const NmProvider *p, const char *base_url);
 
     /* The environment variable holding this provider's API key
-     * (e.g. "HYPER_API_KEY"), or NULL when auth is not env-driven.
+     * (e.g. "OPENROUTER_API_KEY"), or NULL when auth is not env-driven.
      * One source of truth for both lookups and error hints — the
      * UI never hand-rolls a provider->env map. */
     const char *(*env_key)(const NmProvider *p);

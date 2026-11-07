@@ -542,7 +542,7 @@ static void test_shell_flag_table(void)
     n = nm_proc_shell_flags(NM_SHELL_ZSH, 0, "x", f);
     ASSERT_EQ(n, 2);
     ASSERT_STR_EQ(f[0], "-c");
-    /* An unknown name is spawned sh-like (quoth's fallback), never
+    /* An unknown name is spawned sh-like (the fallback), never
      * refused. */
     n = nm_proc_shell_flags(NM_SHELL_OTHER, 1, "x", f);
     ASSERT_EQ(n, 2);

@@ -1,6 +1,6 @@
 /* provider_openaicompat.h - the shared OpenAI-compatible provider surface
  *
- * All six providers speak the same wire (openai_client.h):
+ * All five providers speak the same wire (openai_client.h):
  * only the base URL, the auth headers, a few extra headers, and the
  * model catalogs differ. This is where the plumbing every one of them
  * needs lives — the endpoint pair, the process-lifetime live-catalog
@@ -119,7 +119,6 @@ struct NmOpenaiCompat
 };
 
 /* One descriptor per provider, defined in that provider's file. */
-extern const NmOpenaiCompat nm_hyper_compat;
 /* One descriptor for both ollama tiers (base URL and authinfo machine
  * are vtable data), and the chat half only — the native /api catalog
  * is provider_ollama.c's own machine. */
@@ -151,8 +150,8 @@ const NmModel *nm_openaicompat_models(const NmProvider *p,
 
 /* Join a catalog level list into the owned "|"-joined string
  * NmModel.effort_levels holds. `arr` is a JSON array in one of two
- * shapes: objects carrying the value in `field` (hyper's
- * effort_levels[].value, ollama's supported_reasoning_levels[].effort)
+ * shapes: objects carrying the value in `field` (ollama's
+ * supported_reasoning_levels[].effort)
  * or plain strings (models.dev's effort values[]) when `field` is
  * NULL. Returns the malloc'd string, or NULL when the array is
  * absent/empty (no levels known). The caller owns it. */

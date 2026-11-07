@@ -117,11 +117,30 @@ static void setup_tree(const char *name, char *out, size_t cap)
     mkdir_p(marker);
 }
 
-/* Convenience: path under the project dir. */
+/* Convenience: path under the project dir. Bounded join without a
+ * single snprintf: '%s/%s' in one call trips -Wformat-truncation at
+ * every call site because proj's length is not provable there. Copy
+ * piecewise with explicit headroom instead. */
 static void proj_path(char *out, size_t cap, const char *proj,
                       const char *rel)
 {
-    snprintf(out, cap, "%s/%s", proj, rel);
+    if (cap == 0)
+        return;
+    size_t room = cap - 1; /* max characters, NUL excluded */
+    size_t plen = strlen(proj);
+    if (plen > room)
+        plen = room;
+    memcpy(out, proj, plen);
+    out[plen] = '\0';
+    if (plen == room)
+        return;                     /* proj alone fills the buffer */
+    size_t avail = room - plen - 1; /* rel chars that fit after '/' */
+    size_t rlen = strlen(rel);
+    if (rlen > avail)
+        rlen = avail;
+    out[plen] = '/';
+    memcpy(out + plen + 1, rel, rlen);
+    out[plen + 1 + rlen] = '\0';
 }
 
 /* ---------------------------------------------------------------- */
@@ -705,7 +724,7 @@ static void test_env_git_section_is_spliced(void)
     nm_context_free(c);
 }
 
-/* An empty status section reads "Status: clean" (quoth's shape). */
+/* An empty status section reads "Status: clean". */
 /* A clause set AFTER assembly shifts the <env> footer, and the git
  * section's splice offset must move with it — in either order, since
  * the agent sets the clause at the first turn and the git stage lands
@@ -775,7 +794,7 @@ static void test_env_git_clean_status(void)
     nm_context_free(c);
 }
 
-/* The status list is capped at 20 lines (quoth's `head -20`), applied
+/* The status list is capped at 20 lines, applied
  * while parsing so it holds on cmd.exe too. */
 static void test_env_git_status_is_capped(void)
 {

@@ -1,8 +1,8 @@
 /* tools_file.c - built-in file tools
  *
- * read_file, write_file, edit_file, list_dir, search_dir — ports of
- * quoth's tool semantics (quoth-tools.el): byte-exact UTF-8 reads and
- * writes, cat -n numbering, literal whole-text matching (multiline
+ * read_file, write_file, edit_file, list_dir, search_dir — byte-exact
+ * UTF-8 reads and writes, cat -n numbering, literal whole-text
+ * matching (multiline
  * spans are first-class; matching is character-level, never per-line,
  * never regex). Edit_file requires a unique match unless replace_all;
  * zero or ambiguous matches are error results naming the match lines,
@@ -55,11 +55,10 @@
 #include "size.h"
 #include "skills.h"
 #include "tools.h"
-#include "xxh3.h"
 
 #include "tools_internal.h"
 
-/* Result shaping (quoth's format-result convention) and the args
+/* Result shaping (the format-result convention) and the args
  * plumbing: the status line + Output: section is the SHARED
  * nm_tool_format_result (tools_internal.h) — one shaper for the file
  * tools and web_search alike. */
@@ -252,8 +251,8 @@ static NmToolResult read_failed_result(const char *path)
     return r;
 }
 
-/* UTF-8 validity scan (port of quoth's utf8-valid-p): accepts 1-4
- * byte sequences, rejects overlongs, surrogates, and > U+10FFFF. */
+/* UTF-8 validity scan: accepts 1-4 byte sequences, rejects
+ * overlongs, surrogates, and > U+10FFFF. */
 static int utf8_valid(const unsigned char *b, size_t n)
 {
     size_t i = 0;
@@ -1005,6 +1004,20 @@ static long long stat_mtime_ns(const struct stat *st)
 #endif
 }
 
+/* The ledger's content hash: FNV-1a-64 over the bytes the tool just
+ * read. A fingerprint, not a checksum contract: equal means "the
+ * same bytes were already shown", and at 64 bits a false positive is
+ * not a realistic read of a local file. */
+static unsigned long long fnv1a_64(const char *data, size_t len)
+{
+    unsigned long long h = 1469598103934665603ULL;
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned long long)(unsigned char)data[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
 static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
                                    const NmToolCtx *ctx)
 {
@@ -1171,7 +1184,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
             .offset = offset,
             .limit = limit,
             .numbered = numbered,
-            .hash = nm_xxh3_64(text, len),
+            .hash = fnv1a_64(text, len),
             .size = have_pre ? (long long)pre.st_size : 0,
             .mtime_ns = have_pre ? stat_mtime_ns(&pre) : 0,
         };
@@ -1245,7 +1258,7 @@ static NmToolResult read_file_exec(const NmTool *tool, const char *args_json,
     }
 
     /* Truncation marker when lines were actually dropped (budget or
-     * limit): names the omitted range and the resume offset (quoth's
+     * limit): names the omitted range and the resume offset (the
      * marker shape). A window that reaches the last line emits
      * nothing — the old `limit == 0` special case counted 0 lines and
      * still printed "lines A-B omitted (0 lines)". */
@@ -1480,8 +1493,8 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
         nm_file_ledger_note_write(ctx->ledger, path);
 
     /* Status line: path, count, match lines; then a mini context
-     * diff of the replaced span (port of quoth's context-diff — the
-     * span is short by construction). The diff's exact size is
+     * diff of the replaced span (the span is short by construction).
+     * The diff's exact size is
      * computed, never estimated: a multi-line new_string can need
      * several times olen + nlen once markers and terminators are
      * counted. */
@@ -1514,7 +1527,7 @@ static NmToolResult edit_file_exec(const NmTool *tool, const char *args_json,
     used = (size_t)(p - body);
     p += (size_t)snprintf(p, bcap - used, "\n");
     /* Mini diff: '-'-prefixed old lines, then '+'-prefixed new lines
-     * (split on LF only, like quoth). */
+     * (split on LF only). */
     for (const char *q = old; *q;) {
         const char *nl = strchr(q, '\n');
         size_t ll = nl ? (size_t)(nl - q) : strlen(q);
@@ -1738,7 +1751,7 @@ static NmToolResult list_dir_exec(const NmTool *tool, const char *args_json,
     do {
         char name[256];
         /* names are UTF-16; downconvert to the active code page —
-         * ASCII-safe for our own files, quoth-grade fidelity is a
+         * ASCII-safe for our own files; non-ASCII fidelity is a
          * phase-6 concern (kitty charset frames). */
         WideCharToMultiByte(CP_UTF8, 0, fd.cFileName, -1, name,
                             sizeof(name), NULL, NULL);

@@ -264,7 +264,7 @@ configure. Extract this folder anywhere and run it from any terminal.
 Add the folder to PATH (or make a shortcut to nevermore.exe) and `nevermore`
 works from PowerShell, cmd, or Windows Terminal.
 
-Keys: set HYPER_API_KEY / OLLAMA_API_KEY / OPENAI_API_KEY /
+Keys: set OLLAMA_API_KEY / OPENAI_API_KEY /
 OPENROUTER_API_KEY / OPENCODE_API_KEY, or put one
 `machine <name> password <secret>` line per provider in %USERPROFILE%\.authinfo.
 `ollama:local` - the default - needs no key at all.
@@ -302,7 +302,7 @@ attribute and try again:
 
   xattr -d com.apple.quarantine nevermore
 
-Keys: set HYPER_API_KEY / OLLAMA_API_KEY / OPENAI_API_KEY /
+Keys: set OLLAMA_API_KEY / OPENAI_API_KEY /
 OPENROUTER_API_KEY / OPENCODE_API_KEY, or put one
 `machine <name> password <secret>` line per provider in ~/.authinfo.
 `ollama:local` - the default - needs no key at all.

@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 27
+#define NM_CFG_NKEYS 26
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -167,9 +167,8 @@ static const struct
     { NM_CFG_KEY_KBD, "NEVERMORE_KBD", "auto" },
     { NM_CFG_KEY_COLOR, "NEVERMORE_COLOR", "auto" },
     { NM_CFG_KEY_SPINNER_RAMP, "NEVERMORE_SPINNER_RAMP", "on" },
-    { NM_CFG_KEY_PRISM_NOTICE, "NEVERMORE_PRISM_NOTICE", "on" },
-    /* The served-by line's own key (the Prism contract, another
-     * source): a terminal-only notice, gated separately. */
+    /* The served-by line's own key: a terminal-only notice, gated
+     * separately. */
     { NM_CFG_KEY_SERVED_NOTICE, "NEVERMORE_SERVED_NOTICE", "on" },
     { NM_CFG_KEY_SKILLS, "NEVERMORE_SKILLS", "on" },
     /* The sampling knobs have NO built-in default: unset is the value
@@ -426,7 +425,7 @@ int nm_config_valid_image_live(const char *value)
  *   value = 1*8 DIGIT [ '.' 1*9 DIGIT ]      with 0 <= value <= 2
  *
  * The bound is the OpenAI-compatible range the gateways publish
- * (docs/HYPER-API.md's request table). `2.1` and `3` are REFUSED rather
+ * (docs/OPENROUTER-API.md's request table). `2.1` and `3` are REFUSED rather
  * than clamped: the upstream 400s on them, and a refusal that names the
  * key beats a silent rewrite of what the user typed. `0` is a real
  * value (greedy decoding), so "not set" is spelled by the key being
@@ -1074,7 +1073,6 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_SPINNER_RAMP) == 0 ||
                strcmp(key, NM_CFG_KEY_MENTIONS) == 0 ||
-               strcmp(key, NM_CFG_KEY_PRISM_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SERVED_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SKILLS) == 0 ||
                strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {

@@ -75,8 +75,7 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd,
 
 /* The shell vocabulary behind NmProcShell: one classification, so the
  * flag vector and the "does this shell have a login mode" question
- * cannot drift apart.  Codex's `derive_exec_args` shapes (quoth's
- * `quoth-process--shell-args` is the same table in Elisp). */
+ * cannot drift apart.  Codex's `derive_exec_args` shapes. */
 typedef enum
 {
     NM_SHELL_SH = 0, /* also the platform default (NULL path) */

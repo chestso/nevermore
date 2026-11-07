@@ -64,20 +64,14 @@ static void test_credit_format_grammar(void)
     ASSERT_STR_EQ(buf, "-$0.55\xc2\xb7"
                        "d");
 
-    /* Hypercredits */
+    /* Zen credits */
     memset(&b, 0, sizeof(b));
-    b.unit = NM_CREDIT_HYPER;
+    b.unit = NM_CREDIT_ZEN;
     b.window = NM_CREDIT_PURSE;
     b.kind = NM_CREDIT_LEFT;
     b.state = NM_CREDIT_KNOWN;
-    b.value = 0.0;
-    b.limit = -1;
-    nm_credit_format_cell(&b, buf, sizeof(buf), 1);
-    ASSERT_STR_EQ(buf, "0hc");
-
-    /* Zen credits */
-    b.unit = NM_CREDIT_ZEN;
     b.value = 100.0;
+    b.limit = -1;
     nm_credit_format_cell(&b, buf, sizeof(buf), 1);
     ASSERT_STR_EQ(buf, "100cr");
 
@@ -155,10 +149,6 @@ static void test_credit_exhausted_is_not_zero(void)
     b.unit = NM_CREDIT_USD;
     nm_credit_format_cell(&b, buf, sizeof(buf), 1);
     ASSERT_STR_EQ(buf, "$!");
-
-    b.unit = NM_CREDIT_HYPER;
-    nm_credit_format_cell(&b, buf, sizeof(buf), 1);
-    ASSERT_STR_EQ(buf, "hc!");
 
     b.unit = NM_CREDIT_ZEN;
     nm_credit_format_cell(&b, buf, sizeof(buf), 1);
@@ -260,12 +250,12 @@ static void cells_text(const NmCreditCell *cells, size_t n, char *out,
         off += (size_t)snprintf(out + off, cap - off, "%s", cells[i].text);
 }
 
-static void hyper_three_windows(NmCredits *cr)
+static void three_windows(NmCredits *cr)
 {
     memset(cr, 0, sizeof(*cr));
     cr->n_brackets = 3;
 
-    cr->brackets[0].unit = NM_CREDIT_HYPER;
+    cr->brackets[0].unit = NM_CREDIT_USD;
     cr->brackets[0].window = NM_CREDIT_PURSE;
     cr->brackets[0].kind = NM_CREDIT_LEFT;
     cr->brackets[0].state = NM_CREDIT_KNOWN;
@@ -305,14 +295,14 @@ static void test_credit_status_cells_rank(void)
                                      NM_COLOR_16),
               0);
 
-    /* Hyper: purse + day + hour, all declared and all known */
-    hyper_three_windows(&cr);
+    /* Purse + day + hour, all declared and all known */
+    three_windows(&cr);
     size_t n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX,
                                       NM_COLOR_16);
     ASSERT_EQ(n, 3);
     cells_text(cells, n, buf, sizeof(buf));
     /* DECLARATION order — the provider's own ladder — never a rank order */
-    ASSERT_STR_EQ(buf, "0hc 100k\xc2\xb7"
+    ASSERT_STR_EQ(buf, "$0 100k\xc2\xb7"
                        "d 10k\xc2\xb7"
                        "h ");
     /* purse = budget (rank 1: admitted first, dropped last), day = gate,
@@ -327,7 +317,7 @@ static void test_credit_status_cells_rank(void)
     n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
     ASSERT_EQ(n, 3);
     cells_text(cells, n, buf, sizeof(buf));
-    ASSERT_STR_EQ(buf, "0hc 100k\xc2\xb7"
+    ASSERT_STR_EQ(buf, "$0 100k\xc2\xb7"
                        "d h! ");
     TuiColor hot = nm_color_gauge_warn_hot(NM_COLOR_16);
     ASSERT_EQ(cells[2].color.v.ansi, hot.v.ansi);
@@ -338,7 +328,7 @@ static void test_credit_status_cells_rank(void)
     /* A tight day window makes the GATE the day (the hour is the middle),
      * and the purse still holds its budget slot: the rank is pressure,
      * the layout is the ladder. */
-    hyper_three_windows(&cr);
+    three_windows(&cr);
     cr.brackets[1].value = 4000; /* 4 % left */
     n = nm_credit_status_cells(&cr, cells, NM_CREDIT_CELLS_MAX, NM_COLOR_16);
     ASSERT_EQ(n, 3);
@@ -789,43 +779,6 @@ static void *simple_server_thread(void *arg)
     return NULL;
 }
 
-static void test_credit_fetch_hyper(void)
-{
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
-    const char resp[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/json\r\n"
-        "Content-Length: 14\r\n"
-        "\r\n"
-        "{\"balance\": 0}";
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-
-    nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_HYPER, base, "sk-hyper-test");
-    ASSERT_EQ(ok, 1);
-
-    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
-    ASSERT_EQ(cr->brackets[0].state, NM_CREDIT_KNOWN);
-    ASSERT_EQ((long)cr->brackets[0].value, 0);
-
-    char status[64];
-    NmCreditCell cells[NM_CREDIT_CELLS_MAX];
-    size_t n_cells = nm_credit_status_cells(cr, cells, NM_CREDIT_CELLS_MAX,
-                                            NM_COLOR_16);
-    cells_text(cells, n_cells, status, sizeof(status));
-    ASSERT_STR_EQ(status, "0hc ");
-
-    pthread_join(th, NULL);
-}
-
 static void test_credit_fetch_ollama_standard(void)
 {
     int port;
@@ -1118,14 +1071,14 @@ static void test_credit_fetch_429_retry_after_latch(void)
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_HYPER, base, "sk-test");
+    int ok = nm_credits_refresh_sync(NM_PROVIDER_OLLAMA, base, "sk-test");
     ASSERT_EQ(ok, 0);
 
-    NmCredits *cr = nm_credits_get(NM_PROVIDER_HYPER);
+    NmCredits *cr = nm_credits_get(NM_PROVIDER_OLLAMA);
     ASSERT_TRUE(cr->next_fetch_allowed_at >= nm_monotonic_seconds() + 3.0);
 
     /* Immediate next attempt is latched */
-    ASSERT_EQ(nm_credits_fetch_begin(NM_PROVIDER_HYPER, base, "sk-test"), 0);
+    ASSERT_EQ(nm_credits_fetch_begin(NM_PROVIDER_OLLAMA, base, "sk-test"), 0);
 
     pthread_join(th, NULL);
 }
@@ -1158,7 +1111,6 @@ int main(int argc, char *argv[])
     RUN_TEST(test_credit_ladder_columns_align);
     RUN_TEST(test_columns_field_is_measured_in_columns);
     RUN_TEST(test_credit_age_and_iso8601);
-    RUN_TEST(test_credit_fetch_hyper);
     RUN_TEST(test_credit_fetch_ollama_standard);
     RUN_TEST(test_credit_fetch_ollama_legacy);
     RUN_TEST(test_credit_fetch_openrouter_chain);

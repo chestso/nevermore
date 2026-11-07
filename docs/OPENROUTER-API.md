@@ -7,7 +7,7 @@
 > in §10 on 2026-10-28). Every claim below was probed on the real
 > endpoint unless marked otherwise.
 > nevermore consumes OpenRouter through the shared OpenAI-compatible
-> client (`src/openai_client.c`) exactly as quoth does.
+> client (`src/openai_client.c`).
 
 ## 1. Overview
 

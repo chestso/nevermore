@@ -10,7 +10,8 @@
  * nm_config_no_model_hint); this module is the carrier BELOW that
  * text: the line's composition cap, its terminator, and the invariant
  * that a block ends with a blank row. Before it, each path
- * re-implemented all three separately — which is how the Prism notice
+ * re-implemented all three separately — which is how the round-meta
+ * notice
  * kept its closing blank row in the TUI and lost it on stderr.
  *
  * What stays per-mode, deliberately:

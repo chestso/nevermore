@@ -28,7 +28,7 @@
  * Grammar (character-level scan, no regex, no quoting, no sections):
  *
  *   # comment to end of line; blank lines ignored
- *   provider  = hyper
+ *   provider  = ollama:cloud
  *   model     = glm-5.3
  *   rounds    = 40
  *   reasoning_echo = tools
@@ -256,8 +256,7 @@ extern "C" {
  * default OFF). A TUI started from a desktop launcher or a session
  * manager has a minimal PATH, so `bash -lc` is the standard fix — but
  * it executes the user's own profile, which is why it is opt-in
- * (quoth's `quoth-tool-allow-login-shell`, Codex's
- * `allow_login_shell`). `exec_command`'s `login` argument is the
+ * (Codex's `allow_login_shell`). `exec_command`'s `login` argument is the
  * override: absent = this key, present = the call's own value. Never
  * applies to `run_command` or nevermore's own stages. Env spelling:
  * NEVERMORE_LOGIN_SHELL. */
@@ -313,36 +312,11 @@ extern "C" {
  * than no picker. Env spelling: NEVERMORE_MENTIONS. */
 #define NM_CFG_KEY_MENTIONS "mentions"
 
-/* Whether a round Hyper's Prism model router answered prints a
- * terminal-only notice (`prism: routed to qwen3.8-flash (Qwen3.8-Flash)`,
- * plus the savings figure when the gateway reports one). A bool,
- * default on.
- *
- * The notice is a SYSTEM line — the same stream the connect-walk notice
- * and the reminder lines use. It is echoed to the terminal and joins
- * neither the conversation nor the saved transcript, which is what makes
- * it free to print: a line the model never sees cannot change the
- * request prefix or the provider's cached prefix. It gates the NOTICE
- * only, never the capture — `/context` and the wire recorder report
- * routing facts with this key off, because those read the round's
- * `NmRoundMeta`, not this setting.
- *
- * Wire facts behind it (docs/HYPER-API.md §3.5.2, live-probed
- * 2026-10-16): `X-Prism-Model-Id`/`-Name` ride the response head of
- * EVERY `model: "prism"` request, streamed or not; the savings figure
- * arrives on non-streamed responses only (never as a chunked trailer),
- * so a streaming client sees the routed model and, today, no savings.
- * Env spelling: NEVERMORE_PRISM_NOTICE. */
-#define NM_CFG_KEY_PRISM_NOTICE "prism_notice"
-
 /* Whether a completed round prints the SERVED-by line: which upstream
  * answered and at which service tier (`openrouter: served by Azure (flex
- * tier)`). A bool, default on. Its OWN key, not `prism_notice`: the two
- * facts have two sources and two vocabularies — Prism is a gateway
- * HEADER (Hyper), the served upstream and tier are response BODY fields
- * (OpenRouter) — and one listener composes two lines.
+ * tier)`). A bool, default on.
  *
- * Same contract as `prism_notice`: a terminal-only SYSTEM line, echoed to
+ * Terminal-only SYSTEM line, echoed to
  * the terminal and joined to neither the conversation nor the saved
  * transcript, which is what makes it free to print. It gates the LINE
  * only, never the capture: `/context` reports the last round's served
@@ -371,7 +345,7 @@ extern "C" {
 #define NM_CFG_KEY_SKILLS "skills"
 
 /* Sampling temperature for a chat round: a decimal in `0`–`2`, the
- * OpenAI-compatible range the gateways publish (docs/HYPER-API.md's
+ * OpenAI-compatible range the gateways publish (docs/OPENROUTER-API.md's
  * request table). NO built-in default: unset means the field never
  * rides the request and the model runs on its provider's own default —
  * exactly what every build did before this key existed.

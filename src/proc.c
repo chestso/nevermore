@@ -821,7 +821,7 @@ static void render_line(RBuf *out, const char *line, size_t n)
     }
 
     /* Trailing spaces written by a tab or erase-to-start are part of
-     * the visible line (quoth keeps them). */
+     * the visible line (they are kept). */
     if (len)
         rbuf_puts(out, cols, len);
     free(cols);

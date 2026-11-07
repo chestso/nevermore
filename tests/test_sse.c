@@ -1,6 +1,6 @@
 /* test_sse.c - SSE parser tests
  *
- * Replays recorded SSE streams (from quoth's wire tests) through
+ * Replays recorded SSE streams through
  * nm_sse_feed and checks event assembly. Runs offline.
  */
 

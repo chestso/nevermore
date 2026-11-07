@@ -97,11 +97,36 @@ static void make_skill(const char *base, const char *name,
 /* Per-test setup: a user-tier directory and a project root marked with
  * .git, the seams pointed at this test's tree. `proj` receives the
  * project path. */
+/* Bounded join of root + '/' + leaf into out[cap]: a single snprintf
+ * trips -Wformat-truncation because the root's length is not
+ * provable at the call site. Copy piecewise with explicit headroom. */
+static void join_leaf(char *out, size_t cap, const char *root,
+                      const char *leaf)
+{
+    if (cap == 0)
+        return;
+    size_t room = cap - 1; /* max characters, NUL excluded */
+    size_t rlen = strlen(root);
+    if (rlen > room)
+        rlen = room;
+    memcpy(out, root, rlen);
+    out[rlen] = '\0';
+    if (rlen == room)
+        return;                     /* root alone fills the buffer */
+    size_t avail = room - rlen - 1; /* leaf chars that fit after '/' */
+    size_t llen = strlen(leaf);
+    if (llen > avail)
+        llen = avail;
+    out[rlen] = '/';
+    memcpy(out + rlen + 1, leaf, llen);
+    out[rlen + 1 + llen] = '\0';
+}
+
 static void setup_tree(const char *name, char *proj, size_t cap)
 {
-    char p[700];
+    char p[512];
     mkdir_p(scratch_root());
-    snprintf(p, sizeof(p), "%s/%s", scratch_root(), name);
+    join_leaf(p, sizeof(p), scratch_root(), name);
     mkdir_p(p);
 
     char g[760];
@@ -109,7 +134,7 @@ static void setup_tree(const char *name, char *proj, size_t cap)
     mkdir_p(g);
     nm_skills_set_global_dir(g);
 
-    snprintf(proj, cap, "%s/proj", p);
+    join_leaf(proj, cap, p, "proj");
     mkdir_p(proj);
     char marker[820];
     snprintf(marker, sizeof(marker), "%s/.git", proj);

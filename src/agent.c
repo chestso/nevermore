@@ -117,7 +117,7 @@ struct NmAgent
     NmAgentStateFn on_state;   /* spinner state */
     NmAgentNoticeFn on_notice; /* transport notices (connect walk) */
     /* Provider response metadata, one fire per round that reported any
-     * (Hyper's Prism router today — see nm_agent_on_round_meta). */
+     * (see nm_agent_on_round_meta). */
     NmAgentRoundMetaFn on_round_meta;
     /* Credit fold hook: fired on each completed round and on credit refusal. */
     NmAgentCreditFoldFn on_credit_fold;
@@ -306,9 +306,8 @@ struct NmAgent
     int sess_rounds, sess_in_seen, sess_out_seen, sess_read_seen,
         sess_write_seen;
 
-    /* The last COMPLETED round's provider response metadata (Hyper's
-     * Prism routing: which model actually answered, savings — §3.5.2;
-     * and the served upstream + tier, §7.9). Zeroed at round start and
+    /* The last COMPLETED round's provider response metadata (the
+     * the served upstream + tier, §7.9). Zeroed at round start and
      * on a failed round; set at finish_round from the result. All-empty
      * = the provider reported none (the "direct" case). Read through
      * nm_agent_round_meta. */
@@ -447,8 +446,6 @@ static void usage_reset(NmUsage *u)
     u->cached_tokens = -1;
     u->cache_write_tokens = -1;
     u->cost_usd = -1.0;
-    u->cost_credits = -1.0;
-    u->remaining_credits = -1.0;
     u->opencode_list_cost = -1.0;
     u->opencode_allowance = -1.0;
 }
@@ -922,7 +919,7 @@ const char *nm_agent_effort_default(const NmAgent *a)
  * catalog spelling — and refused (0, state unchanged) when the
  * model names no levels or the level is not listed. Refuse, never
  * clamp: the wire's own enum is wider than some catalogs and
- * silently ignores an unlisted value (hyper), so the catalog is
+ * silently ignores an unlisted value, so the catalog is
  * the only honest guard. A change applies to the very next round
  * (top-level field, never frozen). */
 int nm_agent_set_effort(NmAgent *a, const char *level)
@@ -1001,26 +998,6 @@ void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out)
         *out = a->round_meta;
 }
 
-/* A savings header, rounded for reading. The gateway sends a float's
- * whole tail ("0.031577247999999995") and a notice is prose, so six
- * significant digits — far past anything the figure carries — keep every
- * value it has sent readable. A value that does not parse rides through
- * VERBATIM: a notice never invents a number, and never replaces one it
- * cannot read with a 0. */
-static void round_meta_savings(const char *raw, char *out, size_t cap)
-{
-    out[0] = '\0';
-    if (!raw || !*raw)
-        return;
-    char *end = NULL;
-    double v = strtod(raw, &end);
-    if (end == raw) {
-        snprintf(out, cap, "%s", raw);
-        return;
-    }
-    snprintf(out, cap, "%.6g", v);
-}
-
 /* Bounded append for the composed notice line: advances `off` by what
  * actually landed, never past the buffer's last byte, so a truncated
  * notice loses its tail and nothing else. */
@@ -1039,32 +1016,6 @@ static size_t round_meta_append(char *out, size_t cap, size_t off,
     if (adv > cap - off - 1)
         adv = cap - off - 1;
     return off + adv;
-}
-
-int nm_agent_round_meta_text(const NmRoundMeta *meta, char *out, size_t cap)
-{
-    if (!out || !cap)
-        return 0;
-    out[0] = '\0';
-    if (!meta || !meta->routed_model[0])
-        return 0; /* the direct case: nothing to say */
-    size_t off = 0;
-    off = round_meta_append(out, cap, off, "prism: routed to %s",
-                            meta->routed_model);
-    if (meta->routed_name[0])
-        off = round_meta_append(out, cap, off, " (%s)", meta->routed_name);
-    char hc[NM_ROUND_META_STR_MAX], usd[NM_ROUND_META_STR_MAX];
-    round_meta_savings(meta->hc_savings, hc, sizeof(hc));
-    round_meta_savings(meta->usd_savings, usd, sizeof(usd));
-    if (hc[0] || usd[0]) {
-        off = round_meta_append(out, cap, off, " · saved");
-        if (hc[0])
-            off = round_meta_append(out, cap, off, " %s hypercredits", hc);
-        if (usd[0])
-            off = round_meta_append(out, cap, off, "%s$%s", hc[0] ? " / " : " ",
-                                    usd);
-    }
-    return (int)off;
 }
 
 /* The SERVED line (D6), one spelling for both carriers. See agent.h for
@@ -2071,7 +2022,7 @@ static void session_account_round(NmAgent *a)
 
 /* Was this round cut off by the model's OUTPUT limit? The wire spells it
  * `finish_reason: "length"` (the OpenAI-compatible wire every onboarded
- * provider speaks; hyper's values are recorded in docs/HYPER-API.md
+ * provider speaks.
  * §3.5), matched without case so an upstream that shouts it is still
  * recognized, and exactly so a claim we have never seen ("lengthy") is
  * not. */
@@ -2166,7 +2117,7 @@ static int void_round(NmAgent *a, const NmChatResult *r)
 
 static int finish_round(NmAgent *a, const NmChatResult *r)
 {
-    /* The round's provider response metadata (Hyper's Prism routing,
+    /* The round's provider response metadata (the served upstream
      * rate windows): preserved across every finish (including failed rounds). */
     a->round_meta = r->meta;
 
@@ -2182,17 +2133,10 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
         return -1;
     }
 
-    /* Hand it to the UI too, once per routed round: the human picks a
-     * router model precisely to have someone else answer, and the fact
-     * is worth a line the moment it lands rather than only under a
-     * `/context` they have to think to ask for. A round that reported
-     * nothing does not fire — the listener sees routed rounds only, and
-     * each tool round of one turn is its own request with its own
-     * routing decision. */
-    /* Hand it to the UI too, once per round that has something to say. A
-     * Hyper routed round is always worth a line; an OpenRouter round is
-     * worth one only when it carries SIGNAL (D6) — a non-`default` tier,
-     * or an upstream that differs from the previous completed round's.
+    /* Hand it to the UI too, once per round that has something to say:
+     * an OpenRouter round is worth one only when it carries SIGNAL (D6)
+     * — a non-`default` tier, or an upstream that differs from the
+     * previous completed round's.
      * Every OpenRouter chunk carries `provider`, so a line per round
      * would print "served by OpenAI (default tier)" on every round of a
      * coding turn and bury the interesting case: the upstream changed
@@ -2204,7 +2148,7 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
              strcmp(r->meta.service_tier, "default") != 0) ||
             strcmp(r->meta.served_provider, a->prev_served_provider) != 0;
     }
-    if (a->on_round_meta && (r->meta.routed_model[0] || served_signal))
+    if (a->on_round_meta && served_signal)
         a->on_round_meta(&r->meta, a->userdata);
     if (r->meta.served_provider[0])
         snprintf(a->prev_served_provider, sizeof(a->prev_served_provider),
@@ -2577,7 +2521,7 @@ static int tool_step(NmAgent *a)
  * child exited, the deadline passed, or there was no stage — and 0
  * while it is still running. A resolved stage has applied its git
  * section (or deliberately not: a timeout or a garbled output degrades
- * to the gitless prompt, quoth's behavior). */
+ * to the gitless prompt). */
 static int env_stage_step(NmAgent *a)
 {
     if (a->env_job <= 0) {

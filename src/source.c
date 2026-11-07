@@ -23,8 +23,8 @@ typedef struct
 /* Provider display labels — the human name for each built-in, indexed
  * by NmProviderId: one entry per enum arm, in enum order. */
 static const char *const provider_labels[] = {
-    "Charm Hyper", "Ollama Cloud", "Ollama Local",
-    "OpenRouter", "OpenCode Go", "OpenCode Zen"
+    "Ollama Cloud", "Ollama Local", "OpenRouter",
+    "OpenCode Go", "OpenCode Zen"
 };
 #define PROVIDER_LABELS_N \
     (sizeof(provider_labels) / sizeof(provider_labels[0]))
@@ -34,7 +34,7 @@ static const char *const provider_labels[] = {
  * from the middle of the enum once shifted every label after it by
  * one, and the compile-time count is what makes the next such edit
  * fail here instead of shipping as an OpenRouter row named "OpenAI". */
-_Static_assert(PROVIDER_LABELS_N == (size_t)NM_PROVIDER_OPENCODE_ZEN + 1,
+_Static_assert(PROVIDER_LABELS_N == (size_t)NM_PROVIDER_COUNT,
                "one provider_labels[] entry per NmProviderId arm, in order");
 
 static int registry_fetch_begin(NmListSource *s, const char *query_hint)

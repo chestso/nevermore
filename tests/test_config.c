@@ -51,13 +51,13 @@ static void test_unsetenv(const char *name)
  * Stand in for main.c's nm_provider_by_name check. */
 static int test_valid_provider(const char *name)
 {
-    return strcmp(name, "hyper") == 0 || strcmp(name, "ollama:local") == 0 ||
+    return strcmp(name, "opencode:go") == 0 || strcmp(name, "ollama:local") == 0 ||
            strcmp(name, "openrouter") == 0;
 }
 
 /* The scoped-value validator is the second installed hook: stand in for
  * main.c's nm_provider_knob_canon with openrouter's vocabulary and the
- * same tier gate. `hyper` deliberately has none — a base it does not
+ * same tier gate. `openrouter` deliberately has none — a base it does not
  * declare is refused. */
 typedef struct
 {
@@ -215,17 +215,17 @@ static void test_user_file_parses(void)
     write_file_at(g_user,
                   "# nevermore config\n"
                   "\n"
-                  "provider  = hyper\n"
-                  "model.hyper = glm-5.3\n"
+                  "provider  = openrouter\n"
+                  "model.openrouter = glm-5.3\n"
                   "rounds    = 40\n"
                   "reasoning_echo = on\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "glm-5.3");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openrouter");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "glm-5.3");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "40");
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
-    ASSERT_EQ(nm_config_source(c, "model.hyper"), NM_CFG_USER);
+    ASSERT_EQ(nm_config_source(c, "model.openrouter"), NM_CFG_USER);
     ASSERT_EQ(nm_config_get_int(c, NM_CFG_KEY_ROUNDS, 25), 40);
     ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_config_user_present(c), 1);
@@ -307,11 +307,11 @@ static void test_bad_lines_are_skipped(void)
 static void test_shadow_overrides_user(void)
 {
     pin_paths("shadow-over-user");
-    write_file_at(g_user, "provider = hyper\nrounds = 4\n");
+    write_file_at(g_user, "provider = openrouter\nrounds = 4\n");
     write_file_at(g_shadow, "rounds = 9\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openrouter");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_USER);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_ROUNDS), "9");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_ROUNDS), NM_CFG_SHADOW);
@@ -322,8 +322,8 @@ static void test_shadow_overrides_user(void)
 static void test_env_overrides_shadow(void)
 {
     pin_paths("env-over-shadow");
-    write_file_at(g_user, "provider = hyper\nmodel.hyper = from-user\n");
-    write_file_at(g_shadow, "model.hyper = from-shadow\n");
+    write_file_at(g_user, "provider = openrouter\nmodel.openrouter = from-user\n");
+    write_file_at(g_shadow, "model.openrouter = from-shadow\n");
     test_setenv("NEVERMORE_MODEL", "from-env");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
@@ -331,12 +331,12 @@ static void test_env_overrides_shadow(void)
     /* The env override is the TOP layer of the provider it was bound
      * to (the run's provider), above the scoped shadow. */
     NmCfgSource src = NM_CFG_DEFAULT;
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-env");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", &src), "from-env");
     ASSERT_EQ(src, NM_CFG_ENV);
     /* It is NOT a global id: a provider with no memory stays empty. */
-    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
     /* Untouched keys still resolve below. */
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openrouter");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_USER);
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MODEL");
@@ -346,16 +346,16 @@ static void test_cli_overrides_env(void)
 {
     pin_paths("cli-over-env");
     test_setenv("NEVERMORE_MODEL", "from-env");
-    test_setenv("NEVERMORE_PROVIDER", "hyper");
+    test_setenv("NEVERMORE_PROVIDER", "openrouter");
     NmConfig *c = nm_config_load();
     nm_config_set_env(c);
     nm_config_bind_model(c, "from-flag");
     NmCfgSource src = NM_CFG_DEFAULT;
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-flag");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", &src), "from-flag");
     ASSERT_EQ(src, NM_CFG_CLI);
     /* -m is scoped the same way: another provider never inherits it. */
-    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
-    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "hyper");
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_PROVIDER), "openrouter");
     ASSERT_EQ(nm_config_source(c, NM_CFG_KEY_PROVIDER), NM_CFG_ENV);
     nm_config_free(c);
     test_unsetenv("NEVERMORE_MODEL");
@@ -671,19 +671,19 @@ static void test_shadow_write_and_reload(void)
     pin_paths("write");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "hyper"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PROVIDER, "openrouter"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_ROUNDS, "7"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_REASONING_ECHO, "TRUE"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 3);
     ASSERT_STR_EQ(read_file_at(g_shadow),
-                  "provider = hyper\nrounds = 7\nreasoning_echo = all\n");
+                  "provider = openrouter\nrounds = 7\nreasoning_echo = all\n");
     nm_config_free(c);
 
     /* A fresh load reads the shadow as the shadow layer. */
     NmConfig *c2 = nm_config_load();
     ASSERT_NOT_NULL(c2);
     ASSERT_EQ(nm_config_source(c2, NM_CFG_KEY_PROVIDER), NM_CFG_SHADOW);
-    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PROVIDER), "hyper");
+    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PROVIDER), "openrouter");
     ASSERT_EQ(nm_config_get_int(c2, NM_CFG_KEY_ROUNDS, 25), 7);
     ASSERT_EQ(nm_config_reasoning_echo_mode(c2), NM_REASONING_ECHO_ALL);
     nm_config_free(c2);
@@ -693,11 +693,11 @@ static void test_shadow_write_and_reload(void)
 static void test_shadow_write_leaves_user_file_alone(void)
 {
     pin_paths("untouched");
-    write_file_at(g_user, "provider = hyper\n");
+    write_file_at(g_user, "provider = openrouter\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "glm-5.3"), 0);
-    ASSERT_STR_EQ(read_file_at(g_user), "provider = hyper\n");
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "glm-5.3"), 0);
+    ASSERT_STR_EQ(read_file_at(g_user), "provider = openrouter\n");
     nm_config_free(c);
 }
 
@@ -832,7 +832,7 @@ static void test_provider_validator_hook(void)
     ASSERT_FALSE(nm_config_valid_provider(""));
     ASSERT_FALSE(nm_config_valid_provider(NULL));
     nm_config_set_provider_validator(test_valid_provider);
-    ASSERT_TRUE(nm_config_valid_provider("hyper"));
+    ASSERT_TRUE(nm_config_valid_provider("openrouter"));
     ASSERT_FALSE(nm_config_valid_provider("bogus"));
     ASSERT_FALSE(nm_config_valid_provider(""));
 }
@@ -858,15 +858,14 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(16), NM_CFG_KEY_KBD);
     ASSERT_STR_EQ(nm_config_key_at(17), NM_CFG_KEY_COLOR);
     ASSERT_STR_EQ(nm_config_key_at(18), NM_CFG_KEY_SPINNER_RAMP);
-    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_PRISM_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SERVED_NOTICE);
-    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_SKILLS);
-    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_TEMPERATURE);
-    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_MAX_TOKENS);
-    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_IMAGE_LIVE);
-    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_CREDITS_TTL);
-    ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_MENTIONS);
-    ASSERT_NULL(nm_config_key_at(27));
+    ASSERT_STR_EQ(nm_config_key_at(19), NM_CFG_KEY_SERVED_NOTICE);
+    ASSERT_STR_EQ(nm_config_key_at(20), NM_CFG_KEY_SKILLS);
+    ASSERT_STR_EQ(nm_config_key_at(21), NM_CFG_KEY_TEMPERATURE);
+    ASSERT_STR_EQ(nm_config_key_at(22), NM_CFG_KEY_MAX_TOKENS);
+    ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_IMAGE_LIVE);
+    ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_CREDITS_TTL);
+    ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_MENTIONS);
+    ASSERT_NULL(nm_config_key_at(26));
     /* The model is not a key: no plain spelling, no env name of its own
      * (the run-level override's spelling is NM_ENV_MODEL). */
     ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));
@@ -1544,43 +1543,6 @@ static void test_mentions_key(void)
     nm_config_free(c);
 }
 
-/* The Prism notice gate (`prism_notice`): a bool, ON by default — a
- * round Hyper's model router answered says so on the terminal, and the
- * key is the user's volume knob for that line, nothing more. The CAPTURE
- * is not this key's business: the round's NmRoundMeta and `/context`
- * report routing with the key off (conf.h). */
-static void test_prism_notice_key(void)
-{
-    pin_paths("prismnotice");
-    NmConfig *c = nm_config_load();
-    ASSERT_NOT_NULL(c);
-    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1));
-    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_PRISM_NOTICE), "on");
-    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_PRISM_NOTICE),
-                  "NEVERMORE_PRISM_NOTICE");
-
-    write_file_at(g_user, "prism_notice = off\n");
-    NmConfig *c2 = nm_config_load();
-    ASSERT_NOT_NULL(c2);
-    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_PRISM_NOTICE, 1));
-
-    test_setenv("NEVERMORE_PRISM_NOTICE", "YES");
-    nm_config_set_env(c2);
-    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_PRISM_NOTICE, 0));
-    /* Normalized to the file vocabulary, like every bool key. */
-    ASSERT_STR_EQ(nm_config_get(c2, NM_CFG_KEY_PRISM_NOTICE), "on");
-    nm_config_free(c2);
-    test_unsetenv("NEVERMORE_PRISM_NOTICE");
-
-    /* A shadow write round-trips; a garbage value is refused. */
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PRISM_NOTICE, "off"), 0);
-    ASSERT_STR_EQ(read_file_at(g_shadow), "prism_notice = off\n");
-    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_PRISM_NOTICE, "maybe"), -1);
-    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_PRISM_NOTICE), 0);
-    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1));
-    nm_config_free(c);
-}
-
 /* The sampling knobs. Neither key has a built-in default: unset means
  * the field never rides the request and the provider's own default
  * rules — the shape every shipped build has used all along.
@@ -1713,42 +1675,42 @@ static void test_scoped_model_resolution(void)
 {
     pin_paths("scoped");
     write_file_at(g_user,
-                  "provider = hyper\n"
+                  "provider = openrouter\n"
                   "model = plain-user\n"
-                  "model.hyper = scoped-user\n"
+                  "model.openrouter = scoped-user\n"
                   "model.ollama:local = local-user\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
 
-    /* The active provider (hyper) picks its scoped value; the plain
+    /* The active provider (openrouter) picks its scoped value; the plain
      * line is not a key at all (it warned and was skipped). */
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-user");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "scoped-user");
     ASSERT_NULL(nm_config_resolve(c, NM_CFG_KEY_MODEL, NULL));
 
     /* Another provider with a scoped value of its own uses it; one with
      * NO memory has none — it asks, never falls back to another id. */
     ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
-    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
 
     /* The shadow's scoped spelling outranks the user's. */
-    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "scoped-shadow"), 0);
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "scoped-shadow");
-    ASSERT_EQ(nm_config_source(c, "model.hyper"), NM_CFG_SHADOW);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "scoped-shadow"), 0);
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "scoped-shadow");
+    ASSERT_EQ(nm_config_source(c, "model.openrouter"), NM_CFG_SHADOW);
 
     /* -m / $NEVERMORE_MODEL are the run's overrides for the provider
      * they were bound to: they beat its memory, and no other provider
      * inherits them. */
     nm_config_bind_model(c, "from-cli");
     NmCfgSource src = NM_CFG_DEFAULT;
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", &src), "from-cli");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", &src), "from-cli");
     ASSERT_EQ(src, NM_CFG_CLI);
     ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
-    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
 
     /* Switching the provider does not carry the pin: the new provider
      * resolves from its own memory (and asks when it has none). */
-    nm_config_set_cli(c, NM_CFG_KEY_PROVIDER, "openrouter");
-    ASSERT_NULL(nm_config_model_for(c, "openrouter", NULL));
+    nm_config_set_cli(c, NM_CFG_KEY_PROVIDER, "opencode:go");
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
     ASSERT_STR_EQ(nm_config_model_for(c, "ollama:local", NULL), "local-user");
     nm_config_free(c);
 }
@@ -1761,23 +1723,23 @@ static void test_scoped_key_vocabulary(void)
     pin_paths("scoped-keys");
     nm_config_set_provider_validator(test_valid_provider);
 
-    ASSERT_TRUE(nm_config_scoped_key_ok("model.hyper"));
+    ASSERT_TRUE(nm_config_scoped_key_ok("model.openrouter"));
     ASSERT_TRUE(nm_config_scoped_key_ok("model.ollama:local"));
     ASSERT_FALSE(nm_config_scoped_key_ok("model.nosuchprovider"));
-    ASSERT_FALSE(nm_config_scoped_key_ok("model"));        /* the plain key */
-    ASSERT_FALSE(nm_config_scoped_key_ok("rounds.hyper")); /* not a scoped base */
+    ASSERT_FALSE(nm_config_scoped_key_ok("model"));             /* the plain key */
+    ASSERT_FALSE(nm_config_scoped_key_ok("rounds.openrouter")); /* not a scoped base */
     ASSERT_FALSE(nm_config_scoped_key_ok("model."));
     ASSERT_FALSE(nm_config_scoped_key_ok("model..x"));
 
     write_file_at(g_user,
                   "model.nosuchprovider = x\n"
-                  "model.hyper = gpt-x\n");
+                  "model.openrouter = gpt-x\n");
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "gpt-x");
+    ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "gpt-x");
     ASSERT_NULL(nm_config_model_for(c, "nosuchprovider", NULL));
 
-    ASSERT_STR_EQ(nm_config_scoped_key_at(c, 0), "model.hyper");
+    ASSERT_STR_EQ(nm_config_scoped_key_at(c, 0), "model.openrouter");
     ASSERT_NULL(nm_config_scoped_key_at(c, 1));
     nm_config_free(c);
 }
@@ -1791,26 +1753,26 @@ static void test_scoped_shadow_write_and_reset(void)
     NmConfig *c = nm_config_load();
     ASSERT_NOT_NULL(c);
 
-    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "gpt-x"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, "model.ollama:local", "local-x"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 2);
     ASSERT_STR_EQ(read_file_at(g_shadow),
-                  "model.hyper = gpt-x\nmodel.ollama:local = local-x\n");
+                  "model.openrouter = gpt-x\nmodel.ollama:local = local-x\n");
 
     /* A fresh load reads them back as scoped shadow values. */
     NmConfig *c2 = nm_config_load();
-    ASSERT_STR_EQ(nm_config_model_for(c2, "hyper", NULL), "gpt-x");
-    ASSERT_EQ(nm_config_source(c2, "model.hyper"), NM_CFG_SHADOW);
+    ASSERT_STR_EQ(nm_config_model_for(c2, "openrouter", NULL), "gpt-x");
+    ASSERT_EQ(nm_config_source(c2, "model.openrouter"), NM_CFG_SHADOW);
     nm_config_free(c2);
 
     /* Resetting one scoped key leaves the other. */
-    ASSERT_EQ(nm_config_shadow_reset(c, "model.hyper"), 0);
+    ASSERT_EQ(nm_config_shadow_reset(c, "model.openrouter"), 0);
     ASSERT_STR_EQ(read_file_at(g_shadow), "model.ollama:local = local-x\n");
     ASSERT_EQ(nm_config_shadow_count(c), 1);
 
     /* The plain spelling is not a key, so it has no reset either. */
     ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_MODEL), -1);
-    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "gpt-x"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "gpt-x"), 0);
     /* `reset all` is the way to forget every provider at once. */
     ASSERT_EQ(nm_config_shadow_reset(c, NULL), 0);
     ASSERT_FALSE(file_present(g_shadow));
@@ -1882,9 +1844,9 @@ static void test_knob_value_spaces(void)
     ASSERT_TRUE(nm_config_shadow_set(c, "max_price.openrouter", "abc") != 0);
 
     /* A base the provider does not declare is REFUSED, never clamped. */
-    ASSERT_TRUE(nm_config_shadow_set(c, "routing.hyper", "nitro") != 0);
-    ASSERT_TRUE(nm_config_shadow_set(c, "tier.hyper", "flex") != 0);
-    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.hyper", "3,15") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "routing.ollama:local", "nitro") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "tier.ollama:local", "flex") != 0);
+    ASSERT_TRUE(nm_config_shadow_set(c, "max_price.ollama:local", "3,15") != 0);
     /* An unknown provider in a scoped key is not a key at all. */
     ASSERT_FALSE(nm_config_scoped_key_ok("routing.nosuchprovider"));
 
@@ -1954,17 +1916,17 @@ static void test_knob_scoping(void)
      * data-loss boundary, not a scratch limit). */
     ASSERT_EQ(nm_config_shadow_set(c, "max_price.openrouter", "2,10"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, "model.openrouter", "gpt-x"), 0);
-    ASSERT_EQ(nm_config_shadow_set(c, "model.hyper", "glm-5.3"), 0);
+    ASSERT_EQ(nm_config_shadow_set(c, "model.opencode:go", "glm-5.3"), 0);
     ASSERT_EQ(nm_config_shadow_set(c, "model.ollama:local", "qwen3"), 0);
     ASSERT_EQ(nm_config_shadow_count(c), 5);
     ASSERT_NOT_NULL(nm_config_scoped_for(c, NM_CFG_KEY_MAX_PRICE, "openrouter",
                                          NULL));
     ASSERT_STR_EQ(nm_config_model_for(c, "openrouter", NULL), "gpt-x");
-    ASSERT_STR_EQ(nm_config_model_for(c, "hyper", NULL), "glm-5.3");
+    ASSERT_STR_EQ(nm_config_model_for(c, "opencode:go", NULL), "glm-5.3");
 
     /* A scoped reset clears its own slot, not another base's. */
-    ASSERT_EQ(nm_config_shadow_reset(c, "model.hyper"), 0);
-    ASSERT_NULL(nm_config_model_for(c, "hyper", NULL));
+    ASSERT_EQ(nm_config_shadow_reset(c, "model.opencode:go"), 0);
+    ASSERT_NULL(nm_config_model_for(c, "opencode:go", NULL));
     ASSERT_STR_EQ(nm_config_scoped_for(c, NM_CFG_KEY_ROUTING, "openrouter",
                                        NULL),
                   "exacto");
@@ -2075,7 +2037,6 @@ int main(void)
     RUN_TEST(test_login_shell_key);
     RUN_TEST(test_spinner_ramp_key);
     RUN_TEST(test_mentions_key);
-    RUN_TEST(test_prism_notice_key);
     RUN_TEST(test_sampling_knobs);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);

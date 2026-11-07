@@ -2,8 +2,8 @@
  * kill_job
  *
  * The model-facing surface over src/proc.c's PTY job registry
- * (a port of quoth's quoth-process.el / quoth-tools.el exec_command +
- * write_stdin pair). exec_command starts a long-lived command — a dev
+ * (the model-facing surface of the PTY job registry).
+ * exec_command starts a long-lived command — a dev
  * server, a REPL, `ssh`, a test watcher — and reports either its exit
  * or, once the yield window closes, a job id; write_stdin feeds it
  * stdin and reports what it has printed since; kill_job stops it.
@@ -22,8 +22,8 @@
  * NmProc pointer — kill_job / teardown may free a job while a
  * call's handle is still alive, and a stale pointer would be a UAF.
  *
- * Result text follows Codex's prose convention (the same shape quoth
- * emits), so models read it without a parser:
+ * Result text follows Codex's prose convention, so models read it
+ * without a parser:
  *
  *   Process exited with code 0
  *   Output:
@@ -276,7 +276,7 @@ static int ends_with_eof_marker(const char *input, size_t n)
 
 /* Does the marker appear anywhere but the very end? An interior marker
  * would be delivered as literal text after a truncated write, so the
- * call is rejected instead (quoth's rule). */
+ * call is rejected instead. */
 static int has_interior_eof_marker(const char *input, size_t n)
 {
     if (!input || n <= NM_EXEC_EOF_MARKER_LEN)

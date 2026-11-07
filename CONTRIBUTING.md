@@ -527,4 +527,4 @@ Re-run after any transcript-region change. Bytes go through tmux
   an image attach and a vision round-trip, and the sixel tier (portty answers
   kitty, so force the tier or emit a pinned DCS through the `-S` script: one
   image, `"source": "sixel"`, the cursor on the image's last row);
-- live turns through hyper, openrouter and `opencode:go`.
+- live turns through openrouter and `opencode:go`.

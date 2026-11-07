@@ -8,8 +8,8 @@ the root, not worked around.
 Wire truth lives in the tracked `docs/*-API.md` specs. A rule is stated here as
 the rule, never as a pointer to a note that does not ship.
 
-nevermore is an interactive coding agent in pure C: six providers (Charm Hyper,
-Ollama local and cloud, OpenRouter, OpenCode Go and Zen) over a hand-rolled
+nevermore is an interactive coding agent in pure C: five providers (Ollama
+local and cloud, OpenRouter, OpenCode Go and Zen) over a hand-rolled
 HTTP/1.1 + SSE transport with OS-native TLS, a boba TUI front end modeled on
 ditty, and first-class portty support.
 
@@ -137,8 +137,8 @@ a field, or commits a cache, so a provider cannot silently drop a field the
 picker or agent reads. A table-enriched live catalog must copy every field those
 readers use.
 
-**Request headers** a provider needs (Hyper's affinity pair, OpenCode's session
-id, OpenRouter's app attribution) go through the shared client's `NmExtraHeader`
+**Request headers** a provider needs (OpenCode's session id,
+OpenRouter's app attribution) go through the shared client's `NmExtraHeader`
 array, between the auth header and the UA. The shared client appends them in
 order so the blocking and event-driven drives cannot drift. A value must outlive
 the queue call: a literal, a process-static slot, or the environment's own
@@ -246,7 +246,6 @@ Sources:
 - Ollama cloud: `/v1/models?verbose=true` (the whole catalog in one request; the
   native `/api/tags` plus one `/api/show` per model cost 29.9 s for 23 models).
   The native machine is the fallback for a peer that does not speak it.
-- Hyper: `/v1/models`.
 - OpenCode tiers: their inference API is ids-only, so rows come from a
   **two-stage machine** (`provider_opencode.c`). Membership comes from the
   tier's own tokenless `GET {base}/models`; coverage (label, window, claims)
@@ -272,8 +271,7 @@ Sources:
   = the catalog says nothing (send, as before); `-1` = listed without tools
   (omit `tools` and `tool_choice`). Sources: OpenRouter's `supported_parameters`
   (the only place `-1` arises), OpenCode tables' `tool_call` (never `-1`, since
-  its endpoint takes a toolset regardless), Hyper (a provider-level `1` on every
-  row, since its wire has no per-model field), and Ollama (`0`). See
+  its endpoint takes a toolset regardless), and Ollama (`0`). See
   `docs/OPENROUTER-API.md` §2.
 - The `/model` argument is a small query grammar (`ModelQuery`,
   `model_query_parse`): free text (id substring) plus `cap:vision`,
@@ -288,9 +286,8 @@ Sources:
 - **Reasoning effort is a per-model catalog vocab, not a provider knob.**
   `NmModel.effort_levels` is the `"|"`-joined level list and
   `effort_default` the catalog's default (NULL = no selectable effort: the
-  model reasons implicitly or fixed, and there is no knob). Sources: Hyper's
-  `reasoning.effort_levels[].value`, Ollama Cloud's
-  `supported_reasoning_levels[].effort`, models.dev's first `type: effort`
+  model reasons implicitly or fixed, and there is no knob). Sources: Ollama
+  Cloud's `supported_reasoning_levels[].effort`, models.dev's first `type: effort`
   `values` (toggle-only and budget-only rows get no knob), and OpenRouter's
   provider-level shorthand enum gated on `supported_parameters` carrying
   `reasoning`/`reasoning_effort`. The wire shape is one top-level
@@ -298,8 +295,7 @@ Sources:
   rejected by OpenCode Go); the endpoint's `effort_wire` declares it, the
   composer stays a dumb serializer, and the agent validates the level
   against the current model's list — refuse, never clamp, because the wire
-  enum is wider than some catalogs and Hyper silently ignores an unlisted
-  value. Two Ollama-local facts are deliberately absent: the daemon was
+  enum is wider than some catalogs. Two Ollama-local facts are deliberately absent: the daemon was
   unprobed, so local rows claim no levels and local endpoints send nothing.
   See the `docs/*-API.md` wire specs for the probed shapes.
 
@@ -358,9 +354,9 @@ only the shadow, never the user file.
 
 ### `openai_client.c`
 
-The shared OpenAI-compatible client: Hyper, Ollama, OpenRouter and OpenCode all
+The shared OpenAI-compatible client: Ollama, OpenRouter and OpenCode all
 reuse it, and only endpoint, auth, headers and catalog differ. Wire truth:
-`docs/HYPER-API.md`, `docs/OLLAMA-CLOUD-API.md`, `docs/OPENROUTER-API.md`,
+`docs/OLLAMA-CLOUD-API.md`, `docs/OPENROUTER-API.md`,
 `docs/OPENCODE-API.md`, all live-probed.
 
 **Usage accounting is a contract** (`NmUsage` in `provider.h`): `prompt_tokens`
@@ -388,37 +384,28 @@ level-triggered poll only masks it. The one PENDING whose wakeup is not the fd
 is the post-`[DONE]` tail below.
 
 **Provider response metadata is a per-round fact** with its own seam
-(`NmRoundMeta` in `NmChatResult.meta`). Hyper's `prism` router names the
-upstream that answered in `X-Prism-Model-Id` / `-Name` and its savings in
-`X-Prism-*-Savings` (`docs/HYPER-API.md` §3.5.2; the savings arrive only on
-non-streamed responses).
+(`NmRoundMeta` in `NmChatResult.meta`): the upstream that served
+the round and the tier it was billed at (OpenRouter's chunk-level `provider`
+and final-chunk `service_tier`), read by the client only when the endpoint's
+`parse_served_meta` is set — `provider` is a generic word, and another wire's
+means something else, so the gate is structural rather than a check of what
+the other providers happen to send. `NmRoundMeta.source` names the reporting
+provider, and it is set only when the wire actually reported something.
 
-- `NmOpenaiEndpoint.read_response_meta` is an optional hook called once per
-  round while the connection is open. `provider_hyper.c` implements it over the
-  transport's retained headers (`nm_response_header`, case-insensitive across
-  head headers and chunked trailers). Fields are copied verbatim, and all-empty
-  means "not routed".
-- The same metadata carries a SECOND provider's facts: the upstream that served
-  the round and the tier it was billed at (OpenRouter's chunk-level `provider`
-  and final-chunk `service_tier`), read by the client only when the endpoint's
-  `parse_served_meta` is set — `provider` is a generic word, and another wire's
-  means something else, so the gate is structural rather than a check of what
-  the other providers happen to send. `NmRoundMeta.source` names the reporting
-  provider, and it is set only when the wire actually reported something.
 - The agent keeps the last completed round's copy (`nm_agent_round_meta`, zeroed
   at round start) and fires `nm_agent_on_round_meta` once per round that has
-  something to say, since each tool round is a request of its own. A Prism
-  routed round always speaks; a served-by round speaks only when it carries
+  something to say, since each tool round is a request of its own. A
+  served-by round speaks only when it carries
   SIGNAL (a non-`default` tier, or an upstream different from the previous
   completed round's), because every chunk carries the upstream and a line per
   round is noise that buries the fallback it should reveal. The text has one
-  spelling for both entry paths (`nm_agent_round_meta_text`,
-  `nm_agent_round_meta_served_text`) and prints through `nm_sysout_notice`, so a
+  spelling for both entry paths
+  (`nm_agent_round_meta_served_text`) and prints through `nm_sysout_notice`, so a
   tool panel never starts on the notice's heels on either carrier.
-- `prism_notice` and `served_notice` each gate their **line**, not the capture:
+- `served_notice` gates the **line**, not the capture:
   the hooks, the meta and `/context` ignore them. The notice is a system message
-  that joins neither the conversation nor the saved transcript. Savings are
-  never computed client-side, and an unreported tier reads "tier unknown" — a
+  that joins neither the conversation nor the saved transcript. An unreported
+  tier reads "tier unknown" — a
   workspace default fills the field in server-side, so absent is not `default`.
 - **A trailer that lands after `[DONE]` is still captured, on a bounded wait**
   (`tail_step`, 250 ms): a chunked response's terminator and trailers can arrive
@@ -744,8 +731,8 @@ read. Pure C, no I/O (`test_file_ledger`): the tool observes and hands in facts,
 the ledger answers. It lives and dies with the agent.
 
 - **Two proofs, deliberately different.** "These bytes are already in the
-  conversation" is a **content hash** (xxh3 of what the tool just read; free and
-  cannot lie). "The file is not what the session read" is a **size + mtime
+  conversation" is a **content hash** (FNV-1a-64 of what the tool just read;
+  free and — at 64 bits — cannot lie in practice). "The file is not what the session read" is a **size + mtime
   heuristic**, where a coarse stamp costs a missed nudge, never a wrong skip. A
   record lasts for the session, since the whole transcript rides every request.
 - On a repeat read, `read_file` answers with a **pointer body** instead of the
@@ -1127,7 +1114,7 @@ messages; boba is the only caller of `tui_runtime_transcript_write`.
   stderr is a sink of the same shape, so the composition cap, empty-line rule
   and notice ordering (close the run, print, close the block with a blank row)
   are one implementation for both entry paths. Unsolicited news (connect-walk
-  notice, USER-channel reminder, forged-tag warning, Prism line) is a notice on
+  notice, USER-channel reminder, forged-tag warning, served line) is a notice on
   both carriers; `report_family_skips` deliberately is not (it runs after every
   step and would split a streaming answer).
 - **When it prints.** The commit pass runs at the top of every

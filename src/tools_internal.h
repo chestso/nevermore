@@ -63,7 +63,7 @@ char *nm_tool_result_body(const char *status, const char *clamped);
  * multi-byte character is never split into invalid UTF-8. */
 size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
 
-/* The one result shaper every tool rides (quoth's format-result
+/* The one result shaper every tool rides (the format-result
  * convention): a one-line STATUS, then the tool's product under
  * "Output:" — or the structural "(empty)" marker when the call ran and
  * produced nothing (`body` NULL, never fake text a reader could

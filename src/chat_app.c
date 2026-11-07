@@ -321,7 +321,7 @@ struct NmChatApp
      * purse's TTL deadline and the store's rate latch live in the
      * credits store; this one is the app's because a FAILED attempt
      * arms no store state of its own — and without it a provider that
-     * declares no rate floor (openrouter, hyper) would leave the
+     * declares no rate floor (openrouter) would leave the
      * refresh due every tick, a 0 ms cadence the loop spins on. One
      * attempt per TTL window, started or refused. Reset on a /provider
      * switch: the new provider's store owes nothing to the old one's
@@ -1059,8 +1059,8 @@ static int model_vision(const NmChatApp *app, const NmProvider *p)
 }
 
 /* Vision gating is a WARNING, never a refusal: the wire takes the
- * image and the model answers blind (live-probed on hyper — no 4xx, the
- * image is stripped), so the catalog flag is UX, not validity. */
+ * image and the model answers blind (no 4xx, the image is stripped),
+ * so the catalog flag is UX, not validity. */
 static void warn_text_only(NmChatApp *app)
 {
     if (model_vision(app, app->provider) != 0)
@@ -1935,14 +1935,13 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
     tui_runtime_wakeup(app->rt);
 }
 
-/* A round's provider response metadata (nm_agent_on_round_meta): TWO
- * facts from TWO sources, each composed under its OWN key and printed on
- * the SYSTEM stream — the same seam the connect notice uses. Both lines
- * are terminal-only by construction: they join neither the conversation
- * (so they cannot shift the request prefix or the provider's cached
- * prefix) nor the saved transcript. `prism_notice` gates Hyper's routed
- * line, `served_notice` the served-by one; each gates the LINE only, never
- * the capture (`/context` still reports both with the keys off).
+/* A round's provider response metadata (nm_agent_on_round_meta): the
+ * served-by line, printed on the SYSTEM stream — the same seam the
+ * connect notice uses. Terminal-only by construction: it joins neither
+ * the conversation (so it cannot shift the request prefix or the
+ * provider's cached prefix) nor the saved transcript. `served_notice`
+ * gates the LINE only, never the capture (`/context` still reports it
+ * with the key off).
  *
  * Called from inside nm_agent_step at the round's finish, which is
  * BEFORE the round's own text is committed — so a notice closes the
@@ -1977,13 +1976,6 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata)
         return;
 
     char line[SYS_LINE_BUF];
-    /* Hyper's Prism router: the model that actually answered, plus the
-     * savings when the gateway reported them (docs/HYPER-API.md §3.5.2). */
-    if (!app->cfg ||
-        nm_config_resolve_bool(app->cfg, NM_CFG_KEY_PRISM_NOTICE, 1)) {
-        if (nm_agent_round_meta_text(meta, line, sizeof(line)))
-            notice_print(app, line);
-    }
     /* The served upstream and tier (docs/OPENROUTER-API.md §7.9). */
     if (!app->cfg ||
         nm_config_resolve_bool(app->cfg, NM_CFG_KEY_SERVED_NOTICE, 1)) {
@@ -2631,27 +2623,14 @@ static void print_context(NmChatApp *app)
         sys_line(app, "context: limit unknown (the catalog reports none "
                       "for this model)");
 
-    /* Prism routing (Hyper): the model that ACTUALLY answered the last
-     * completed round, and the savings — reported only when the turn
-     * was routed (docs/HYPER-API.md §3.5.2). The "direct" case shows
-     * nothing, which is what the gateway does today. */
-    NmRoundMeta meta;
-    nm_agent_round_meta(app->agent, &meta);
-    if (meta.routed_model[0]) {
-        sys_line(app, "context: last round routed to %s (%s)",
-                 meta.routed_model,
-                 meta.routed_name[0] ? meta.routed_name : "?");
-        if (meta.hc_savings[0] || meta.usd_savings[0])
-            sys_line(app, "context: routing saved %s hypercredits / $%s",
-                     meta.hc_savings[0] ? meta.hc_savings : "0",
-                     meta.usd_savings[0] ? meta.usd_savings : "0");
-    }
-
     /* The served upstream and tier (docs/OPENROUTER-API.md §7.9): the
      * always-available record, printed whatever `served_notice` says —
-     * the key gates the live line, not the capture (the Prism contract).
-     * The source prefix is dropped here because the sentence names the
-     * round ("last round served by ..."), not the vocabulary. */
+     * the key gates the live line, not the capture. The source prefix
+     * is dropped here because the sentence names the round ("last round
+     * served by ..."), not the vocabulary. */
+    NmRoundMeta meta;
+    nm_agent_round_meta(app->agent, &meta);
+
     if (meta.served_provider[0] || meta.service_tier[0]) {
         NmRoundMeta served = meta;
         served.source[0] = '\0';
@@ -3994,7 +3973,8 @@ static void config_set(NmChatApp *app, const char *key, const char *value)
 /* ---------------------------------------------------------------- */
 
 /* One refusal for a provider with no such vocabulary: the words are the
- * provider's OWN, so a hyper profile has no routing mode to name — the
+ * provider's OWN, so a provider with no vocabulary has no routing
+ * mode to name — the
  * refusal comes from the vocabulary hook, never from a hardcoded
  * provider name. */
 static void knob_refuse_unknown(NmChatApp *app, const char *base)

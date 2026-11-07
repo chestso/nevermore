@@ -21,7 +21,6 @@ extern "C" {
 typedef enum
 {                     /* what the number is denominated in */
   NM_CREDIT_USD,      /* dollars */
-  NM_CREDIT_HYPER,    /* Hyper hypercredits */
   NM_CREDIT_ZEN,      /* Zen credits (no readable purse) */
   NM_CREDIT_REQUESTS, /* request counts in a window */
   NM_CREDIT_PERCENT   /* a percent of an unpublished cap */
@@ -81,8 +80,8 @@ typedef struct
     NmCreditBracket brackets[NM_CREDIT_BRACKETS_MAX];
     size_t n_brackets;
     /* TWO clocks, never one. observed_at is the NEWEST fact of any
-     * origin (an in-band round fold counts: hyper's round body carries
-     * the purse), and it is what `/credits` reports as the age.
+     * origin (an in-band round fold counts), and it is what `/credits`
+     * reports as the age.
      * fetched_at is the last OUT-OF-BAND endpoint fetch's landing
      * (0 = never), and it is the ONLY field the background refresh TTL
      * may gate on: a provider whose rounds fold nothing (openrouter,

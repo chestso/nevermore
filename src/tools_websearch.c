@@ -1,6 +1,6 @@
 /* tools_websearch.c - web_search: a local SearXNG query tool
  *
- * Port of quoth's quoth-searxng.el: GET {base}/search?q=<q>&format=json
+ * GET {base}/search?q=<q>&format=json
  * from a local SearXNG instance, normalize the JSON into a markdown
  * list of results (engine + score on each, so the model can weigh
  * relevance), sort by score, dedup by URL, cap at max_results, and
@@ -15,7 +15,7 @@
  * that needs WRITE interest (connect, then send), which is why NmTool
  * carries an interest callback; run_command's pipe only ever reads.
  *
- * Reachability (quoth's gating): the first request is the probe. An
+ * Reachability gating: the first request is the probe. An
  * unreachable instance or a timeout sets the store's `searxng_enabled`
  * RUNTIME value to `off`, so later calls short-circuit with no HTTP
  * request — a dead server must not be hammered on every tool round,
@@ -64,7 +64,7 @@
 
 #define NM_WEBSEARCH_DEFAULT_URL         "http://127.0.0.1:8888"
 #define NM_WEBSEARCH_DEFAULT_MAX_RESULTS 8
-#define NM_WEBSEARCH_MAX_RESULTS         8 /* quoth's cap (== the default) */
+#define NM_WEBSEARCH_MAX_RESULTS         8 /* the default cap */
 #define NM_WEBSEARCH_BODY_MAX            (4u * 1024u * 1024u)
 #define NM_WEBSEARCH_URL_MAX             1024
 
@@ -299,7 +299,7 @@ static int parse_url(const char *url, char **host_out, int *port_out,
 }
 
 /* ---------------------------------------------------------------- */
-/* Response normalization (quoth's search-result rendering)          */
+/* Response normalization (search-result rendering)                  */
 /* ---------------------------------------------------------------- */
 
 static double score_of(const NmJson *r)
@@ -431,7 +431,7 @@ static void normalize(const NmJson *doc, Buf *b, long max)
         scores[i] = items[i] ? score_of(items[i]) : 0.0;
     }
     /* Stable insertion sort, descending by score (ties keep result
-     * order — quoth sorts the same way). */
+     * order). */
     for (size_t i = 1; i < n; i++) {
         const NmJson *it = items[i];
         double sc = scores[i];
@@ -691,8 +691,8 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     (void)tool;
     (void)ctx;
 
-    /* Disabled short-circuit: no HTTP request (quoth's "do not hammer
-     * a dead server"). The store's `searxng_enabled` is off either
+    /* Disabled short-circuit: no HTTP request (do not hammer a dead
+     * server). The store's `searxng_enabled` is off either
      * because a previous probe failed (the tool latched it) or because
      * the user turned it off — both mean "do not dial". */
     if (!nm_tool_web_search_enabled())

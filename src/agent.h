@@ -122,31 +122,11 @@ long nm_agent_context_limit(const NmAgent *a);
  * the same list the model was offered. */
 NmSkills *nm_agent_skills(const NmAgent *a);
 
-/* The last COMPLETED round's provider response metadata — Hyper's Prism * router facts (which model actually answered, the savings it produced;
- * docs/HYPER-API.md §3.5.2). out is zeroed first and filled from the
- * last round; all-empty means the provider reported none (the "direct"
- * case, which is what hyper.charm.land does today). Safe with a NULL
+/* The last COMPLETED round's provider response metadata (the served
+ * upstream and tier). out is zeroed first and filled from the last
+ * round; all-empty means the provider reported none. Safe with a NULL
  * agent or a NULL out. */
 void nm_agent_round_meta(const NmAgent *a, NmRoundMeta *out);
-
-/* The routing notice's text, ONE spelling for both entry paths (the
- * TUI's system line, ask mode's stderr line — the same reason the
- * no-model hint has one):
- *
- *   prism: routed to qwen3.8-flash (Qwen3.8-Flash)
- *   prism: routed to qwen3.8-flash (Qwen3.8-Flash) · saved 0.03158 hypercredits
- *
- * The savings segments appear only when the gateway reported the figure
- * (docs/HYPER-API.md §3.5.2: today, non-streamed responses only).
- * Numbers are ROUNDED for reading — a header value like
- * 0.031577247999999995 is what the gateway sent, and the verbatim text
- * stays available to `/context` and the wire dump, which are diagnostics
- * and print it as-is.
- *
- * `out` is empty when the round reported no routing at all (the "direct"
- * case), so a caller may print whatever this returns without testing the
- * fields itself. Returns snprintf's would-be length. */
-int nm_agent_round_meta_text(const NmRoundMeta *meta, char *out, size_t cap);
 
 /* The SERVED line's text, the same one spelling for both entry paths:
  *
@@ -351,21 +331,19 @@ void nm_agent_on_state(NmAgent *a, NmAgentStateFn cb);   /* spinner state */
 typedef void (*NmAgentNoticeFn)(const char *msg, void *userdata);
 void nm_agent_on_notice(NmAgent *a, NmAgentNoticeFn cb);
 
-/* A completed round whose provider reported response metadata — today,
- * Hyper's Prism model router: which model actually answered, and the
- * savings when the gateway reports them (docs/HYPER-API.md §3.5.2).
- * Fired from inside nm_agent_step at the round's finish, ONCE PER ROUND
- * that reported something, in `meta` being that round's own — not the
- * accumulated `nm_agent_round_meta` (which is the last round only, and
- * is what /context reads). A round that reported nothing never fires,
- * so a UI listener prints exactly the routed rounds and needs no diff
- * logic of its own.
+/* A completed round whose provider reported response metadata (the
+ * served upstream and tier). Fired from inside nm_agent_step at the
+ * round's finish, ONCE PER ROUND that reported something, in `meta`
+ * being that round's own — not the accumulated `nm_agent_round_meta`
+ * (which is the last round only, and is what /context reads). A round
+ * that reported nothing never fires, so a UI listener prints exactly
+ * the rounds with something to say and needs no diff logic of its own.
  *
  * This is a FACT FOR THE HUMAN, which is why it has its own seam: like
  * the connect notice it belongs on the terminal's system stream, but it
  * is not transport progress, not harness speech (on_reminder) and not a
  * warning (on_warning) — and one slot cannot serve two owners. `meta` is
- * borrowed, valid for the call. The store's `prism_notice` key decides
+ * borrowed, valid for the call. The store's `served_notice` key decides
  * whether a UI prints it; the capture, this callback and `/context` all
  * ignore that key, so turning the notice off loses no information that
  * a diagnostic command still owns. */

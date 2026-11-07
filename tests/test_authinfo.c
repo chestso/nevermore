@@ -107,13 +107,13 @@ static void test_box_line_shape_and_ignored_keys(void)
     const char *path = write_fixture(
         "boxshape",
         "machine openrouter.ai user apikey password ord\n"
-        "machine hyper.charm.land login apikey password hyp\n"
+        "machine other.example login apikey password hyp\n"
         "machine example.com account bob port 443 password ok\n");
     ASSERT_NOT_NULL(path);
     nm_authinfo_set_path(path);
 
     ASSERT_STR_EQ(nm_authinfo_password("openrouter.ai"), "ord");
-    ASSERT_STR_EQ(nm_authinfo_password("hyper.charm.land"), "hyp");
+    ASSERT_STR_EQ(nm_authinfo_password("other.example"), "hyp");
     ASSERT_STR_EQ(nm_authinfo_password("example.com"), "ok");
     /* `apikey`, `bob`, `443` must never have become machine names. */
     ASSERT_NULL(nm_authinfo_password("apikey"));

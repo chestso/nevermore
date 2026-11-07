@@ -134,7 +134,6 @@ nevermore_SOURCES = \
     provider_internal.h \
     provider_openaicompat.h \
     provider_openaicompat.c \
-    provider_hyper.c \
     provider_ollama.c \
     provider_ollama_local.c \
     provider_openrouter.c \
@@ -155,8 +154,6 @@ nevermore_SOURCES = \
     wire_recorder.c \
     sse.c \
     json.c \
-    xxh3.h \
-    xxh3.c \
     clock.c \
     size.c \
     agent.c \

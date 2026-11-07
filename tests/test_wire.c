@@ -237,8 +237,7 @@ static void test_wire_chunked_sse(void)
 static void test_wire_response_headers_and_trailers(void)
 {
     /* Head headers are retained for nm_response_header; a chunked
-     * response's TRAILERS (the late headers — e.g. a streamed Prism
-     * savings, docs/HYPER-API.md §3.5.2) are retained the same way and
+     * response's TRAILERS (late headers) are retained the same way and
      * become readable once the body completes. */
     struct ServerCase sc = {
         "HTTP/1.1 200 OK\r\n"
@@ -247,8 +246,8 @@ static void test_wire_response_headers_and_trailers(void)
         "Transfer-Encoding: chunked\r\n\r\n"
         "e\r\ndata: [DONE]\n\n\r\n" /* 14 = 0xe */
         "0\r\n"
-        "X-Prism-Model-Id: glm-5.3-flash\r\n"
-        "X-Prism-Dollar-Savings: 0.0021\r\n"
+        "X-Head-Field: head-value\r\n"
+        "X-Trailer-Field: trailer-value\r\n"
         "\r\n",
         0, 0, 0
     };
@@ -270,7 +269,7 @@ static void test_wire_response_headers_and_trailers(void)
     ASSERT_STR_EQ(nm_response_header(c, "X-RateLimit-Limit-Day"), "10000");
     ASSERT_STR_EQ(nm_response_header(c, "x-ratelimit-limit-day"), "10000");
     /* A trailer is NOT there before the body completes. */
-    ASSERT_NULL(nm_response_header(c, "X-Prism-Model-Id"));
+    ASSERT_NULL(nm_response_header(c, "X-Head-Field"));
 
     /* Drain the body to its framing end: the trailers land. */
     char buf[256];
@@ -279,11 +278,10 @@ static void test_wire_response_headers_and_trailers(void)
         if (n <= 0)
             break;
     }
-    ASSERT_STR_EQ(nm_response_header(c, "X-Prism-Model-Id"),
-                  "glm-5.3-flash");
-    ASSERT_STR_EQ(nm_response_header(c, "x-prism-dollar-savings"), "0.0021");
+    ASSERT_STR_EQ(nm_response_header(c, "X-Head-Field"), "head-value");
+    ASSERT_STR_EQ(nm_response_header(c, "x-trailer-field"), "trailer-value");
     /* An absent header is NULL, never "". */
-    ASSERT_NULL(nm_response_header(c, "X-Prism-Model-Name"));
+    ASSERT_NULL(nm_response_header(c, "X-Absent-Field"));
 
     nm_connection_close(c);
     pthread_join(th, NULL);

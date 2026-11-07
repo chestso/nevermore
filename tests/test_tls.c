@@ -1109,7 +1109,7 @@ static void test_tls_handshake_budget_bounds_a_silent_peer(void)
 static void live_tls_probe(void)
 {
     /* A real HTTPS fetch against a provider endpoint nevermore
-     * actually dials (Hyper's /v1 is public and TLS-only).
+     * actually dials (OpenRouter's model list is public and TLS-only).
      * Run: NM_LIVE_TLS=1 ./tests/test_tls -v */
     if (!getenv("NM_LIVE_TLS") || !nm_tls_backend()) {
         printf("live TLS probe: skipped (set NM_LIVE_TLS=1, needs "
@@ -1117,13 +1117,13 @@ static void live_tls_probe(void)
         return;
     }
     NmConnectInfo ci = { 0 };
-    NmConnection *c = nm_connect("hyper.charm.land", 443, NM_TRANSPORT_TLS, &ci);
+    NmConnection *c = nm_connect("openrouter.ai", 443, NM_TRANSPORT_TLS, &ci);
     if (!c) {
         printf("live TLS probe: connect failed: %s\n",
                *ci.detail ? ci.detail : "(no detail)");
         return;
     }
-    ASSERT_EQ(nm_request(c, "GET", "/v1/models", NULL, 0, NULL, 0),
+    ASSERT_EQ(nm_request(c, "GET", "/api/v1/models", NULL, 0, NULL, 0),
               NM_TRANSPORT_OK);
     const NmResponse *r = nm_response(c);
     printf("live TLS probe: status=%d ct=%s\n", r->status,

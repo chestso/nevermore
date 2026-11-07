@@ -72,7 +72,7 @@ typedef struct NmFileRead
     const char *path;        /* the resolved path (borrowed) */
     long offset, limit;      /* the read's window (limit 0 = to EOF) */
     int numbered;            /* cat -n rendering requested */
-    unsigned long long hash; /* xxh3-64 of the bytes returned */
+    unsigned long long hash; /* FNV-1a-64 of the bytes returned */
     long long size;          /* the file's size in bytes */
     long long mtime_ns;      /* its modification time (ns where the host
                               * has them, seconds x 1e9 otherwise) */

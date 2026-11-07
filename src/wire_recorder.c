@@ -339,10 +339,9 @@ static void tap_request(const NmConnection *conn, const char *method,
 }
 
 /* Build a JSON array of the retained response headers [from, to) —
- * the head group and the trailer group are logged separately (a
- * trailer is where a streamed Prism savings lands, docs/HYPER-API.md
- * §3.5.2). Response headers are never secret (a routed model id, a
- * rate-limit quota, a savings figure), so they are logged verbatim,
+ * the head group and the trailer group are logged separately.
+ * Response headers are never secret (a model id, a rate-limit quota),
+ * so they are logged verbatim,
  * exactly as the routing hashes are. */
 static NmJson *response_headers_json(const NmConnection *conn, size_t from,
                                      size_t to)
@@ -386,8 +385,8 @@ static void tap_response_head(const NmConnection *conn, int status,
 }
 
 /* The chunked trailer section ended: log the trailer headers (the ones
- * retained after the head group) — the wire-dump home of a streamed
- * Prism savings. Fired only when the response carried trailers. */
+ * retained after the head group). Fired only when the response carried
+ * trailers. */
 static void tap_response_trailers(const NmConnection *conn)
 {
     if (!g_rec.f || !conn)

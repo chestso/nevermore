@@ -17,7 +17,7 @@
  *   built-in default < user config ~/.config/nevermore/config
  *   < runtime shadow ~/.local/state/nevermore/config (written by the
  *   chat's /model /provider /config) < environment < -p/-m.
- * Provider keys come from the environment (HYPER_API_KEY,
+ * Provider keys come from the environment (
  * OLLAMA_API_KEY, OPENROUTER_API_KEY,
  * OPENCODE_API_KEY) or, when unset, from ~/.authinfo
  * ($NEVERMORE_AUTHINFO, then $HOME/.authinfo) via authinfo.h — see
@@ -72,7 +72,7 @@ static void usage(FILE *out)
             "prompt is ask mode (nevermore \"prompt\").\n"
             "\n"
             "options:\n"
-            "  -p, --provider NAME   hyper | ollama:cloud | ollama:local |\n"
+            "  -p, --provider NAME   ollama:cloud | ollama:local |\n"
             "                        openrouter | opencode:go | opencode:zen\n"
             "  -m, --model ID        model id (provider-specific)\n"
             "  -i, --image PATH      attach an image to the prompt (repeatable)\n"
@@ -314,24 +314,17 @@ static void ask_on_warning(const char *msg, void *userdata)
     nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", msg);
 }
 
-/* A round's provider response metadata: two notices from two sources,
- * each under its OWN key. Hyper's Prism router answers the first (which
- * model actually did the work, plus the savings), OpenRouter's served
- * upstream and tier the second — the same notice the TUI prints on its
- * system stream, dimmed to STDERR so the answer on stdout stays
- * pipe-clean, exactly like the reasoning trace. The text spellings are
- * shared with the TUI (nm_agent_round_meta_text /
- * nm_agent_round_meta_served_text), and so is the block: a notice closes
- * itself with a blank row on either carrier (nm_sysout_notice). */
+/* A round's provider response metadata: OpenRouter's served upstream
+ * and tier — the same notice the TUI prints on its system stream,
+ * dimmed to STDERR so the answer on stdout stays pipe-clean, exactly
+ * like the reasoning trace. The text spelling is shared with the TUI
+ * (nm_agent_round_meta_served_text), and so is the block: a notice
+ * closes itself with a blank row on either carrier (nm_sysout_notice). */
 static void ask_on_round_meta(const NmRoundMeta *meta, void *userdata)
 {
     (void)userdata;
     NmConfig *c = nm_config_store();
     char line[512];
-    if (!c || nm_config_resolve_bool(c, NM_CFG_KEY_PRISM_NOTICE, 1)) {
-        if (nm_agent_round_meta_text(meta, line, sizeof(line)))
-            nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);
-    }
     if (!c || nm_config_resolve_bool(c, NM_CFG_KEY_SERVED_NOTICE, 1)) {
         if (nm_agent_round_meta_served_text(meta, line, sizeof(line)))
             nm_sysout_notice(&g_ask_out, "\033[2m%s\033[0m", line);

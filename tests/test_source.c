@@ -27,8 +27,8 @@ static void test_registry_source_lists_all_providers(void)
     size_t n = 0;
     const NmEntry *items = nm_source_items(s, &n);
     ASSERT_NOT_NULL(items);
-    ASSERT_EQ(n, 6); /* hyper, ollama:cloud, ollama:local,
-                        openrouter, opencode:go, opencode:zen */
+    ASSERT_EQ(n, 5); /* ollama:cloud, ollama:local, openrouter,
+                        opencode:go, opencode:zen */
 
     /* Every entry is a registered provider; id is the router's
      * vocabulary (what /provider <name> accepts). */
@@ -126,8 +126,8 @@ static void test_static_source_refetch_reuses(void)
 
 static void test_static_source_empty_catalog(void)
 {
-    /* A provider with no catalog yields an empty view, not a crash. */
-    const NmProvider *p = nm_provider_by_name("hyper");
+    /* A provider's catalog view, not a crash. */
+    const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmListSource *s = nm_source_catalog_create(p, NULL, NULL);
     ASSERT_TRUE(nm_source_fetch_begin(s, NULL) == 0);

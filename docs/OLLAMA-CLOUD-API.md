@@ -3,14 +3,14 @@
 ## 1. Overview
 
 This document specifies the **HTTP API of Ollama Cloud** (`https://ollama.com`)
-— the hosted fleet behind the subscription tiers — as consumed by the ollama
-provider in Quoth. The local daemon (`http://localhost:11434`, no auth) speaks
-the same protocol, so pointing `quoth-ollama-base-url` at it is a user-side
-configuration; this reference keeps cloud-verified behavior in the foreground.
+— the hosted fleet behind the subscription tiers — as consumed by nevermore's
+ollama provider. The local daemon (`http://localhost:11434`, no auth) speaks
+the same protocol, so pointing a client at it is a user-side configuration;
+this reference keeps cloud-verified behavior in the foreground.
 
-Quoth consumes the **OpenAI-compatible surface** (`/v1/chat/completions`, usage
-streaming, vision content-parts) through the shared client
-`quoth-openai-client.el`, and the **native `/api` surface** for exactly one
+nevermore consumes the **OpenAI-compatible surface** (`/v1/chat/completions`,
+usage streaming, vision content-parts) through the shared client
+`src/openai_client.c`, and the **native `/api` surface** for exactly one
 thing the OpenAI protocol cannot do: the model catalog, assembled from
 `GET /api/tags` (membership) plus a parallel `POST /api/show` fan-out
 (capabilities, context length). The cloud's
@@ -282,13 +282,13 @@ never needs the keys page at all:
 > billing HTML — it is a **credential factory** for the JSON realm. Anyone with
 > the cookie can mint unlimited first-class API keys. This raises the stakes of
 > the section-6.0 storage advice (treat it as a full account password; keep it
-> in `auth-source`). Upside for Quoth: a user who pastes the cookie once never
+> in `auth-source`). Upside for nevermore: a user who pastes the cookie once never
 > needs to visit `/settings/keys` to bootstrap an API key.
 
 #### JSON API (bearer + signature realms)
 
 - **API key** (`Authorization: Bearer <KEY>`, from
-  `https://ollama.com/settings/keys`): the realm Quoth uses.
+  `https://ollama.com/settings/keys`): the realm nevermore uses.
 - **ollama CLI signature**: how `ollama signin` actually authenticates. The CLI
   holds an SSH ed25519 keypair (`~/.ollama/id_ed25519`); `ollama signin` opens
   `https://ollama.com/connect?name=<hostname>&key=<ssh-pubkey>`, and approving
@@ -319,7 +319,7 @@ pair (`verification_uri_complete` → `signin.ollama.com/device?user_code=…`),
 the token exchange is `POST api.workos.com/user_management/authenticate` with
 `grant_type=urn:ietf:params:oauth:grant-type:device_code` (correctly returned
 `authorization_pending` while unapproved). Two blockers make it unusable for
-Quoth:
+a CLI client:
 
 1. **The approval page lives on `signin.ollama.com`, a separate AuthKit host
    with its own session.** The `ollama.com` `__Secure-session` cookie does not
@@ -1504,7 +1504,7 @@ per-request cost out of the settings-page ledger (section 3):
 | the 21.7k prompt again, ~1 min after a larger prompt displaced it                      | $0.00262 | **pro-rata partial hit** (~78% of blocks still cached)    |
 | the 21.7k prompt again, ~2 min later                                                   | $0.00032 | full hit restored (the partial-hit request re-cached it)  |
 
-> **What this means for a chat client that resends history (Quoth's model):**
+> **What this means for a chat client that resends history:**
 >
 > - **History resends are rebated.** Every turn after the first bills only the
 >   new tail tokens at the full input rate; the resent history bills at the
@@ -1547,9 +1547,7 @@ reports it with the cloud edge's own wording:
 request body"_, which reads like a transport failure and is not one —
 a client that retries it will fail forever with the same body. The
 native `/api/chat` route says it plainly instead
-(`400 "http: request body too large"`), and Hyper has the same 32 MiB
-ceiling with its own wording (`413 "request body exceeds 32 MiB
-limit"`).
+(`400 "http: request body too large"`).
 
 **What makes a chat cross it**: images. A body is ~99 % image data
 when the conversation carries pictures, and a client that re-sends
