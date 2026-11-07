@@ -222,6 +222,9 @@ static void hyper_chat_endpoint(const NmProvider *p, const NmChatRequest *req,
      * the flag Hyper emits a standalone choices:[] usage chunk; without it
      * usage still rides the finish_reason chunk. */
     ep->include_usage = 1;
+    /* Reasoning effort rides the top-level field (HYPER-API.md
+     * §3.2, the wire's own spelling). */
+    ep->effort_wire = NM_EFFORT_TOP;
     /* Prism router metadata (which model answered, savings). */
     ep->read_response_meta = hyper_read_response_meta;
 }

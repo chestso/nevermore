@@ -60,9 +60,26 @@ static void ollama_api_root(const char *chat_base, char *out, size_t cap)
  * (a NULL key means no auth header at all, which is the local daemon's
  * case), and the base URL is the tier's own vtable default. The
  * catalog half is NOT wired there — the native /api machine below is
- * ollama's own. */
+ * ollama's own.
+ *
+ * The builder is a thin wrapper, not the plain bearer one, for one
+ * reason: the effort wire shape is tier-split. The cloud's
+ * top-level field is proven (2026-11-07); the local daemon's
+ * OpenAI-surface mapping is unprobed, so local sends nothing
+ * (NM_EFFORT_NONE) rather than guessing a field. */
+static void ollama_chat_endpoint(const NmProvider *p, const NmChatRequest *req,
+                                 const char *api_key,
+                                 NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX],
+                                 NmOpenaiEndpoint *ep)
+{
+    nm_openaicompat_bearer_chat_endpoint(p, req, api_key, hdrs, ep);
+    ep->effort_wire =
+        (p && p->id == NM_PROVIDER_OLLAMA_LOCAL) ? NM_EFFORT_NONE
+                                                 : NM_EFFORT_TOP;
+}
+
 const NmOpenaiCompat nm_ollama_compat = {
-    nm_openaicompat_bearer_chat_endpoint,
+    ollama_chat_endpoint,
     NULL,
     NULL,
     NULL,

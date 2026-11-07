@@ -445,6 +445,14 @@ typedef struct NmChatRequest
      * usage object (see NmUsageFn). NULL = the caller does not want it. */
     NmUsageFn on_usage;
     void *userdata;
+    /* The reasoning-effort level to send, in the catalog's own
+     * spelling, or NULL = send no field at all (the provider's own
+     * default rules). The agent fills it from its effort state at
+     * the point of use; the composer emits per the endpoint's wire
+     * shape (NmOpenaiEndpoint.effort_wire) and sends nothing on a
+     * NONE endpoint even when this is set. Borrowed — the owner
+     * must outlive the request. */
+    const char *reasoning_effort;
 } NmChatRequest;
 
 /* A provider's async catalog fetch (the /model popup's non-blocking

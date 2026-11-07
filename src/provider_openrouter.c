@@ -261,6 +261,9 @@ static void openrouter_chat_endpoint(const NmProvider *p,
     /* The pricing knobs (§7.8/§7.10): the service tier and the price
      * ceiling ride the provider's own body seam. */
     ep->body_extra = openrouter_body_extra;
+    /* Reasoning effort rides the top-level shorthand (probed
+     * 2026-11-07: the wire takes exactly the catalog vocab). */
+    ep->effort_wire = NM_EFFORT_TOP;
     /* The response's own routing report (§7.9): read the served upstream
      * and the tier into the round's meta. OpenRouter-only by flag — the
      * word `provider` is generic. */

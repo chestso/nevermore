@@ -322,6 +322,23 @@ static char *compose_body(const NmOpenaiEndpoint *ep,
         nm_json_set(body, "temperature", nm_json_new_number(req->temperature));
     if (req->max_tokens >= 0)
         nm_json_set(body, "max_tokens", nm_json_new_number((double)req->max_tokens));
+    /* Reasoning effort: the request's level (the agent's effort
+     * state), emitted in the endpoint's wire shape. NULL/"" sends
+     * nothing — the provider's own default rules. A NONE endpoint
+     * sends nothing even when set (defence in depth: the agent
+     * already refuses, but a hand-built request can never put a
+     * field on a wire that does not speak it). */
+    if (req->reasoning_effort && *req->reasoning_effort) {
+        if (ep->effort_wire == NM_EFFORT_TOP) {
+            nm_json_set(body, "reasoning_effort",
+                        nm_json_new_string(req->reasoning_effort));
+        } else if (ep->effort_wire == NM_EFFORT_OBJECT) {
+            NmJson *obj = nm_json_new_object();
+            nm_json_set(obj, "effort",
+                        nm_json_new_string(req->reasoning_effort));
+            nm_json_set(body, "reasoning", obj);
+        }
+    }
 
     /* tools_json: pre-serialized array from the toolset, embedded
      * verbatim via a raw parse (arena document, short-lived). */

@@ -101,6 +101,10 @@ static void opencode_chat_endpoint(const NmProvider *p,
     ep->api_key = api_key;
     ep->extra_headers = hdrs;
     ep->n_extra_headers = 1;
+    /* Reasoning effort rides the top-level field — the object shape
+     * is REJECTED by Go (probed 2026-11-07), so TOP is the only
+     * shape either tier speaks. */
+    ep->effort_wire = NM_EFFORT_TOP;
     /* Usage rides the wire with or without the flag here (OPENCODE-API.md
      * §3); request it explicitly for uniformity. */
     ep->include_usage = 1;

@@ -57,6 +57,22 @@ typedef struct NmExtraHeader
     int secret;        /* redaction marker (wire_recorder) */
 } NmExtraHeader;
 
+/* The reasoning-effort wire shape: how NmChatRequest.reasoning_effort
+ * reaches the body. The endpoint's dialect fact (cache_control's
+ * precedent) — the provider's builder sets it where the endpoint is
+ * born. */
+typedef enum
+{
+    NM_EFFORT_NONE = 0, /* send no effort field, even when set (an
+                           unprobed wire: local ollama until probed) */
+    NM_EFFORT_TOP,      /* "reasoning_effort": "<level>" — proven on
+                           openrouter, ollama:cloud and opencode:go
+                           (2026-11-07); hyper's docs name it too */
+    NM_EFFORT_OBJECT    /* "reasoning": {"effort": "<level>"} — accepted
+                           by openrouter/ollama, REJECTED by
+                           opencode:go, so no provider sets it today */
+} NmEffortWire;
+
 typedef struct NmOpenaiEndpoint
 {
     const char *base_url;    /* e.g. "https://api.openai.com/v1" */
@@ -125,6 +141,12 @@ typedef struct NmOpenaiEndpoint
      * 0 = never read them: `provider` is a generic word, and another
      * wire's means something else. Set only by the openrouter builder. */
     int parse_served_meta;
+    /* The reasoning-effort wire shape (NmEffortWire above): how the
+     * request's reasoning_effort reaches the body. A tail field (the
+     * struct's positional-initializer rule): set by the provider's
+     * chat-endpoint builder; the zero value is NONE, so a hand-built
+     * endpoint sends nothing. */
+    NmEffortWire effort_wire;
 } NmOpenaiEndpoint;
 
 /* POST {base_url}/chat/completions, stream: true. Parses SSE deltas

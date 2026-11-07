@@ -1866,7 +1866,8 @@ static int begin_round(NmAgent *a)
         a->conversation_id, /* borrowed; outlives compose+queue */
         round_on_delta,
         round_on_usage,
-        a
+        a,
+        NULL /* reasoning_effort: the agent's effort state (step 4) */
     };
 
     NmChatResult err = { 0 };
