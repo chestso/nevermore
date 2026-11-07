@@ -4562,6 +4562,15 @@ static const NmModel stub_switch_models[] = {
     { 0 }
 };
 
+/* Effort stubs: one model with a vocab + default, one with none —
+ * so validation, refusal and reset each have a row to land on. */
+static const NmModel stub_effort_models[] = {
+    { "stub-reason", "Stub (reasoning)", 0, 0, 128000, 0,
+      "low|medium|high", "medium" },
+    { "stub-plain", "Stub (no levels)", 0, 0, 128000, 0, NULL, NULL },
+    { 0 }
+};
+
 /* The provider's process-global cache: the seam the async fetch writes. */
 static const NmModel *g_stub_catalog;
 
@@ -4574,6 +4583,132 @@ static const NmModel *stub_catalog_read(const NmProvider *p, size_t *n_out)
     if (n_out)
         *n_out = n;
     return g_stub_catalog;
+}
+
+/* Effort set/get/clear: validation is against the current model's
+ * catalog list, case-insensitive, stored in catalog spelling. */
+static void test_agent_effort_set_get_clear(void)
+{
+    struct NmProvider p = nm_ollama_local_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_effort_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-reason", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+    ASSERT_STR_EQ(nm_agent_effort_levels(agent), "low|medium|high");
+    ASSERT_STR_EQ(nm_agent_effort_default(agent), "medium");
+
+    ASSERT_EQ(nm_agent_set_effort(agent, "HIGH"), 1);
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high"); /* catalog spelling */
+
+    /* An unlisted level is refused, state unchanged (never clamp). */
+    ASSERT_EQ(nm_agent_set_effort(agent, "ultra"), 0);
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");
+
+    ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+    ASSERT_EQ(nm_agent_set_effort(agent, "low"), 1);
+    ASSERT_EQ(nm_agent_set_effort(agent, ""), 1);
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+}
+
+/* A model with no levels names no knob: every set is refused. */
+static void test_agent_effort_refused_without_levels(void)
+{
+    struct NmProvider p = nm_ollama_local_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_effort_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-plain", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+
+    ASSERT_TRUE(nm_agent_effort_levels(agent) == NULL);
+    ASSERT_TRUE(nm_agent_effort_default(agent) == NULL);
+    ASSERT_EQ(nm_agent_set_effort(agent, "low"), 0);
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+}
+
+/* Every model change resets to unset — including switching away and
+ * back (no per-model memory) — while a re-set of the same id does
+ * not reset (not a change). */
+static void test_agent_effort_resets_on_model_change(void)
+{
+    struct NmProvider p = nm_ollama_local_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_effort_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-reason", tools, NULL);
+    ASSERT_NOT_NULL(agent);
+
+    ASSERT_EQ(nm_agent_set_effort(agent, "high"), 1);
+    nm_agent_set_model(agent, "stub-reason"); /* re-set: not a change */
+    ASSERT_STR_EQ(nm_agent_effort(agent), "high");
+
+    nm_agent_set_model(agent, "stub-plain");
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+    nm_agent_set_model(agent, "stub-reason"); /* back: still unset */
+    ASSERT_TRUE(nm_agent_effort(agent) == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+}
+
+/* The set level rides the request (hyper's TOP shape), and clearing
+ * stops it on the very next round. */
+static void test_agent_effort_rides_the_request(void)
+{
+    reset_capture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+
+    /* Hyper's builder sets the TOP shape; the stub catalog supplies
+     * the vocab. (Ollama:local would send nothing by design.) */
+    struct NmProvider p = nm_hyper_provider;
+    p.models_cached = stub_catalog_read;
+    g_stub_catalog = stub_effort_models;
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(&p, "stub-reason", tools, NULL);
+    nm_agent_set_endpoint(agent, base, "test-key");
+    nm_agent_on_delta(agent, cap_delta);
+
+    ASSERT_EQ(nm_agent_set_effort(agent, "high"), 1);
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 1);
+    ASSERT_TRUE(strstr(g_requests[0], "\"reasoning_effort\":\"high\"") != NULL);
+
+    ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_effort") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
 }
 
 static void test_agent_context_limit_follows_a_warmed_catalog(void)
@@ -7689,6 +7824,10 @@ int main(void)
     RUN_TEST(test_agent_vision_clause_follows_a_warmed_catalog);
     RUN_TEST(test_agent_vision_clause_absent_for_a_text_only_warm_catalog);
     RUN_TEST(test_agent_vision_clause_follows_a_model_switch);
+    RUN_TEST(test_agent_effort_set_get_clear);
+    RUN_TEST(test_agent_effort_refused_without_levels);
+    RUN_TEST(test_agent_effort_resets_on_model_change);
+    RUN_TEST(test_agent_effort_rides_the_request);
     RUN_TEST(test_agent_model_reset_is_not_a_change);
     RUN_TEST(test_agent_vision_clause_drops_for_an_unknown_model);
     RUN_TEST(test_agent_read_file_image_fans_out);

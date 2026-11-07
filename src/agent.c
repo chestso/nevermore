@@ -101,6 +101,15 @@ struct NmAgent
     int clause_pending;
     NmAgentState state;
     char *last_error;
+    /* The reasoning-effort level to send (nm_agent_set_effort), in
+     * the current model's catalog spelling, or NULL = unset (send
+     * nothing; the provider's default rules). Agent-owned runtime
+     * state — never persisted (a durable key would survive exactly
+     * the model change that must clear it, and the store's scoped
+     * grammar cannot spell per-model keys). Reset in
+     * nm_agent_set_model. NOT frozen like reasoning_echo: the
+     * field rides top-level, outside the cached prefix. */
+    char *effort;
     const char *base_url;      /* borrowed; NULL = provider default */
     char *api_key;             /* copied; NULL = none */
     NmStreamCallback on_delta; /* text chunks */
@@ -529,6 +538,7 @@ void nm_agent_free(NmAgent *a)
     if (a->exec && a->exec_tool && a->exec_tool->end)
         a->exec_tool->end(a->exec); /* reap a live async tool */
     free(a->model);
+    free(a->effort);
     free(a->api_key);
     free(a->last_error);
     free(a->text); /* reused round buffer; released with the agent */
@@ -835,6 +845,13 @@ void nm_agent_set_model(NmAgent *a, const char *model)
         return;
     free(a->model);
     a->model = strdup(model);
+    /* Effort is a per-model fact: the new model's catalog may not
+     * even list the old level, so every model change resets to
+     * unset (the provider's default rules). Switching away and
+     * back does not restore it — reset on EVERY change, not
+     * memory per model. */
+    free(a->effort);
+    a->effort = NULL;
     /* The new model has never seen this conversation, so its prefix is
      * cold whatever we send — the switch has already re-billed the
      * transcript, and there is no cache left to protect. Resolve the
@@ -843,6 +860,106 @@ void nm_agent_set_model(NmAgent *a, const char *model)
      * begin_round closes the window. */
     a->clause_pending = 1;
     apply_vision_clause(a);
+}
+
+/* Case-insensitive ASCII equality, character-level (no strcasecmp,
+ * no locale — the transport / chat_app precedent). */
+static int effort_ieq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char ca = *a, cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca + 32);
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb + 32);
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
+}
+
+/*---- reasoning effort ----*/
+
+/* The current model's catalog row (model_entry), for the effort
+ * vocabulary. NULL when the catalog knows no row for it. */
+static const NmModel *effort_model(const NmAgent *a)
+{
+    return (a && a->provider) ? model_entry(a->provider, a->model) : NULL;
+}
+
+/* The effort level the next request will send, in the catalog's own
+ * spelling, or NULL when unset (the provider's default rules). The
+ * status row and /config read this; begin_round fills the request
+ * from it. Borrowed — valid while the agent lives. */
+const char *nm_agent_effort(const NmAgent *a)
+{
+    return a ? a->effort : NULL;
+}
+
+/* The current model's catalog effort vocab ("low|medium|high") and
+ * its catalog default, for the /effort listing and refusals.
+ * Borrowed from the catalog row; NULL when the model names no
+ * levels (no knob). */
+const char *nm_agent_effort_levels(const NmAgent *a)
+{
+    const NmModel *m = effort_model(a);
+    return (m && m->effort_levels && *m->effort_levels)
+               ? m->effort_levels
+               : NULL;
+}
+
+const char *nm_agent_effort_default(const NmAgent *a)
+{
+    const NmModel *m = effort_model(a);
+    return (m && m->effort_default && *m->effort_default)
+               ? m->effort_default
+               : NULL;
+}
+
+/* Set (or clear) the reasoning effort. `level` NULL/"" clears to
+ * unset. Otherwise the level is validated against the CURRENT
+ * model's catalog list — case-insensitive, stored/reported in
+ * catalog spelling — and refused (0, state unchanged) when the
+ * model names no levels or the level is not listed. Refuse, never
+ * clamp: the wire's own enum is wider than some catalogs and
+ * silently ignores an unlisted value (hyper), so the catalog is
+ * the only honest guard. A change applies to the very next round
+ * (top-level field, never frozen). */
+int nm_agent_set_effort(NmAgent *a, const char *level)
+{
+    if (!a)
+        return 0;
+    if (!level || !*level) {
+        free(a->effort);
+        a->effort = NULL;
+        return 1;
+    }
+    const char *levels = nm_agent_effort_levels(a);
+    if (!levels)
+        return 0;
+    /* Walk the "|"-joined list; the catalog spelling wins. */
+    const char *p = levels;
+    while (*p) {
+        const char *sep = strchr(p, '|');
+        size_t len = sep ? (size_t)(sep - p) : strlen(p);
+        char cand[64];
+        if (len >= sizeof(cand))
+            len = sizeof(cand) - 1;
+        memcpy(cand, p, len);
+        cand[len] = '\0';
+        if (effort_ieq(cand, level)) {
+            char *copy = strdup(cand);
+            if (!copy)
+                return 0;
+            free(a->effort);
+            a->effort = copy;
+            return 1;
+        }
+        if (!sep)
+            break;
+        p = sep + 1;
+    }
+    return 0;
 }
 
 /* The tool-round cap is the config store's `rounds` key, resolved at
@@ -1867,7 +1984,7 @@ static int begin_round(NmAgent *a)
         round_on_delta,
         round_on_usage,
         a,
-        NULL /* reasoning_effort: the agent's effort state (step 4) */
+        a->effort /* borrowed; the effort state */
     };
 
     NmChatResult err = { 0 };

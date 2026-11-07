@@ -63,8 +63,30 @@ void nm_agent_set_endpoint(NmAgent *a, const char *base_url,
  * capability clause, which FOLLOWS the model: the new model has never
  * seen this conversation, so its cached prefix is cold whatever we send,
  * and resolving the clause there costs nothing (agent.c's
- * apply_vision_clause). A re-set of the current id is not a change. */
+ * apply_vision_clause). A re-set of the current id is not a change.
+ * The reasoning effort resets with it (a per-model fact). */
 void nm_agent_set_model(NmAgent *a, const char *model);
+
+/* Reasoning effort (the /effort command's store):
+ *
+ *   nm_agent_effort          the level the next request will send,
+ *                            in catalog spelling, or NULL when unset
+ *   nm_agent_effort_levels   the current model's catalog vocab
+ *                            ("low|medium|high"), or NULL (no knob)
+ *   nm_agent_effort_default  the catalog's default level, or NULL
+ *   nm_agent_set_effort      set/clear: NULL/"" clears; a level is
+ *                            validated against the CURRENT model's
+ *                            catalog list (case-insensitive, stored
+ *                            in catalog spelling) and refused (0)
+ *                            when unlisted or when the model names
+ *                            no levels. Agent-owned runtime state —
+ *                            never persisted, reset on model change,
+ *                            and never frozen (top-level field).
+ * All borrowed strings are valid while the agent lives. */
+const char *nm_agent_effort(const NmAgent *a);
+const char *nm_agent_effort_levels(const NmAgent *a);
+const char *nm_agent_effort_default(const NmAgent *a);
+int nm_agent_set_effort(NmAgent *a, const char *level);
 
 /* Tool-call rounds allowed in one turn before the loop bails out with
  * "too many tool rounds without a final answer" (NM_AGENT_ERROR). The
