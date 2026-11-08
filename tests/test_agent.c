@@ -4081,6 +4081,90 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     close(sc.fd);
 }
 
+/* A tool call that streamed no argument deltas has a NULL args_json.
+ * The async begin() must still get a string (the empty object), as the
+ * synchronous execute does — run_command's begin ran strlen on it and
+ * the process died with SIGSEGV. */
+static const char *g_noargs_seen;
+static int g_noargs_begun;
+
+static NmToolExec *noargs_begin(const NmTool *tool, const char *args_json,
+                                const NmToolCtx *ctx)
+{
+    (void)tool;
+    (void)ctx;
+    g_noargs_begun++;
+    g_noargs_seen = args_json;
+    return NULL; /* decline: the synchronous execute answers */
+}
+
+static NmToolResult noargs_exec(const NmTool *tool, const char *args_json,
+                                const NmToolCtx *ctx)
+{
+    (void)tool;
+    (void)args_json;
+    (void)ctx;
+    return stub_text("noargs ok");
+}
+
+static const NmTool noargs_tool = {
+    .name = "stub_noargs",
+    .description = "test stub: begin records its args_json",
+    .emoji = "🧪",
+    .params_schema = stub_tool_schema,
+    .execute = noargs_exec,
+    .begin = noargs_begin,
+};
+
+static void test_agent_begin_gets_empty_object_for_missing_args(void)
+{
+    reset_capture();
+    g_noargs_seen = NULL;
+    g_noargs_begun = 0;
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_na\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"stub_noargs\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"na done\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    nm_toolset_add(tools, &noargs_tool);
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    ASSERT_EQ(nm_agent_start(agent, "call it", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_noargs_begun, 1);
+    ASSERT_NOT_NULL(g_noargs_seen);
+    ASSERT_STR_EQ(g_noargs_seen, "{}");
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 /* ---------------------------------------------------------------- */
 /* Images: attach -> parts on the wire, byte-stable                   */
 /* ---------------------------------------------------------------- */
@@ -7480,6 +7564,7 @@ int main(void)
     RUN_TEST(test_agent_turn_reaps_an_exited_background_job);
     RUN_TEST(test_agent_cancel_then_next_turn_works);
     RUN_TEST(test_agent_cancel_mid_tool_phase_closes_group);
+    RUN_TEST(test_agent_begin_gets_empty_object_for_missing_args);
     RUN_TEST(test_agent_error_message_is_informative);
     RUN_TEST(test_agent_error_message_hints_env_var);
     RUN_TEST(test_agent_reminder_nests_in_a_partial_read);

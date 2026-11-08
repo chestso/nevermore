@@ -2473,7 +2473,11 @@ static int tool_step(NmAgent *a)
 
         /* Start an async exec when the tool offers one. */
         if (t && t->begin) {
-            NmToolExec *e = t->begin(t, tc->args_json, &a->tool_ctx);
+            /* args_json is NULL when the model streamed no argument
+             * deltas; every tool entry point takes a string, so give it
+             * the empty object (the synchronous path below does too). */
+            NmToolExec *e = t->begin(t, tc->args_json ? tc->args_json : "{}",
+                                     &a->tool_ctx);
             if (e) {
                 a->exec = e;
                 a->exec_tool = t;
