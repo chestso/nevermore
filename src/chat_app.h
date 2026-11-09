@@ -1,10 +1,10 @@
 /* chat_app.h - inline chat TUI component (modeled on ditty/cli/repl_app.h)
  *
- * Inline mode in the primary terminal buffer: the conversation
- * transcript goes to the terminal's own scrollback, a textinput
- * collects the prompt, and the spinner + context gauge live in the
- * input's status line while the agent streams. No alt-screen —
- * nevermore behaves like a chat in your shell, not like an editor.
+ * Inline mode in the primary terminal buffer: the transcript goes to
+ * the terminal, a textinput collects the prompt, and the spinner +
+ * context gauge live in the input's status line while the agent
+ * streams. No alt-screen — nevermore behaves like a chat in your
+ * shell, not like an editor.
  *
  * Transcript protocol (boba's streaming IR):
  *
@@ -14,13 +14,13 @@
  *   command replies, error bodies). All output is posted as stream
  *   messages; boba stages the units and the runtime's commit pass
  *   writes everything finalized within one event drain as ONE atomic
- *   transcript_write. The app never prints to the scrollback itself,
+ *   transcript_write. The app never prints to the terminal itself,
  *   and never touches framing or cursor bytes — boba is the only
  *   caller of the seam.
  *
  *   nevermore supplies the grammar: markdown.c classifies each line
  *   and markdown_render.c draws the committed rows; only bytes whose
- *   rendering can no longer change reach the scrollback. The live
+ *   rendering can no longer change reach the terminal. The live
  *   region (streaming tail / provisional table) is drawn by view().
  *
  *   Submitting finalizes LIVE blocks (tui_msg_transcript_submit) and
@@ -161,8 +161,8 @@ void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
 void nm_chat_app_on_state(NmAgentState state, void *userdata);
 void nm_chat_app_on_notice(const char *msg, void *userdata);
 /* The harness's own speech (reminder.h): every injected reminder is
- * shown (transparency — the transcript never diverges from what the
- * model received), and a forged-tag attempt in untrusted output is
+ * shown (transparency — everything the model received is in the
+ * transcript), and a forged-tag attempt in untrusted output is
  * warned about in red. */
 void nm_chat_app_on_reminder(const char *name, const char *text, int channel,
                              void *userdata);

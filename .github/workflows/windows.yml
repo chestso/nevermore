@@ -91,7 +91,7 @@ jobs:
           # edge-triggered — a change emits its one mode byte, a steady
           # cursor emits none — so a frame no longer carries a
           # hide/show-cursor pair. The chat-app tests replay the
-          # capture as a screen and read the committed scrollback above
+          # capture as a screen and read the committed rows above
           # the live region.
           # And, at this pin, the image row framing: a sixel or an
           # iTerm2 image closes its row WITHOUT a terminator (the

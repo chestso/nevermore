@@ -485,7 +485,7 @@ static void test_tls_handshake_step_pends_on_a_held_reply(void)
  * write that had already put records on the wire; the transport retried
  * the whole buffer, the retry re-sent the records that had gone out,
  * and the peer answered HTTP 400 with an empty body — from then on
- * every round, because the transcript only grew. The property under
+ * every round, because the session only grew. The property under
  * test is the transport contract: a request bigger than the window
  * arrives BYTE-EXACT. The server half records until the peer closes;
  * the client half pins SO_SNDBUF so the window closes mid-body, which

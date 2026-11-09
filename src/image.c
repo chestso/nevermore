@@ -220,8 +220,8 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
 /* ---------------------------------------------------------------- */
 
 /* Display sizing (D9/D10): fit width, natural height, cell aspect
- * from the probe (1:1 when unknown), no height cap — the scrollback
- * is infinite by design, a tall screenshot scrolling is correct. */
+ * from the probe (1:1 when unknown), no height cap — the terminal
+ * keeps every row by design, a tall screenshot scrolling is correct. */
 static void compute_display(NmImageSlot *s, const NmMarkdownRenderState *rs,
                             const TuiTerminalProfile *p)
 {

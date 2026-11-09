@@ -9,7 +9,7 @@
  * The reader is strict about string content: raw (unescaped) bytes
  * must be well-formed UTF-8 and control characters must be escaped,
  * as RFC 8259 requires. Malformed UTF-8 is named and rejected rather
- * than copied through into files or the transcript. The number grammar
+ * than copied through into a file or the session. The number grammar
  * is enforced literally, an out-of-range literal is refused, and only
  * whitespace may follow the value.
  *
@@ -458,8 +458,8 @@ static char *parse_string_raw(Parser *p)
              * control character (U+0000-U+001F) must be escaped and
              * every other byte must be well-formed UTF-8. Validate
              * the whole sequence at once — never copy bytes on
-             * faith, or invalid UTF-8 rides out into files and the
-             * transcript. */
+             * faith, or invalid UTF-8 rides out into a file or the
+             * session. */
             if ((unsigned char)c < 0x20) {
                 if (p->err)
                     *p->err = "unescaped control character in string";

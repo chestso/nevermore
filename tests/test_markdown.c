@@ -743,7 +743,7 @@ static void test_blank_line_commits_an_empty_row(void)
 
 /* A run of blank lines collapses to that one row: the second blank is
  * a separator again (BLANK), so no stack of empty rows reaches the
- * scrollback. */
+ * transcript. */
 static void test_blank_line_run_collapses_to_one_row(void)
 {
     H *h = h_new();
@@ -901,7 +901,7 @@ static H *h_new_render(void)
     return h;
 }
 
-static void test_table_reaches_scrollback_aligned(void)
+static void test_table_reaches_transcript_aligned(void)
 {
     H *h = h_new_render();
     ASSERT_NOT_NULL(h);
@@ -1501,7 +1501,7 @@ static void test_quote_and_list_styling(void)
 }
 
 /* The gutter REPLACES the source's marker: the `>` and its one
- * separating space never reach the scrollback (they would otherwise
+ * separating space never reach the transcript (they would otherwise
  * double up as `│ > quoted`). One level comes off per line; a nested
  * marker, a marker with no space, an indented marker and a lazy
  * continuation line all keep their bytes except that one level. */
@@ -1767,7 +1767,7 @@ int main(void)
     RUN_TEST(test_fence_plain_streams_verbatim_bytes);
     RUN_TEST(test_once_lookahead_never_reparses_committed);
     RUN_TEST(test_reasoning_stream_is_independent);
-    RUN_TEST(test_table_reaches_scrollback_aligned);
+    RUN_TEST(test_table_reaches_transcript_aligned);
     RUN_TEST(test_render_block_emits_content_not_framing);
     RUN_TEST(test_image_marker_carries_its_blank_row);
     RUN_TEST(test_image_then_text_keeps_the_line);

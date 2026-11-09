@@ -3,8 +3,8 @@
  * The Elm component: a multiline textinput collects the prompt, agent
  * callbacks print the transcript, and the input's status line carries
  * the spinner + context gauge while the agent works. Inline mode in
- * the primary buffer — no alt screen, no mouse; the terminal
- * scrollback is the output history.
+ * the primary buffer — no alt screen, no mouse; the terminal keeps
+ * the output history.
  *
  * Transcript protocol (boba's streaming IR):
  *
@@ -15,13 +15,13 @@
  *   messages; the transcript stages units and the runtime's commit
  *   pass (at the top of tui_runtime_flush) writes every unit
  *   finalized within one event drain as ONE atomic
- *   transcript_write. This file never prints to the scrollback itself
+ *   transcript_write. This file never prints to the terminal itself
  *   and never touches cursor/framing bytes — boba is the only caller
  *   of the seam.
  *
  *   nevermore supplies the grammar: src/markdown.c classifies each
  *   line (fence / table / heading / list / quote) and
- *   src/markdown_render.c draws the committed rows. The scrollback
+ *   src/markdown_render.c draws the committed rows. The terminal
  *   receives only bytes whose rendering can no longer change; the
  *   live region (drawn by view()) holds the provisional tail.
  *
@@ -260,7 +260,7 @@ struct NmChatApp
     /* 1 for the ONE frame submit finalizes. The status line is live
      * chrome (spinner/gauge/rule), not history, so it is dropped before
      * the frame finish_inline persists — otherwise the chrome row lands
-     * in the scrollback above the echoed prompt. Held across the flush
+     * in the transcript above the echoed prompt. Held across the flush
      * whose view would otherwise re-install the line. */
     int submitting;
 
@@ -370,7 +370,7 @@ static void echo_and_clear(NmChatApp *app, const char *text);
 static int app_busy(const NmChatApp *app);
 
 /* ---------------------------------------------------------------- */
-/* Transcript writers (boba's streaming IR owns the scrollback)     */
+/* Transcript writers (boba's streaming IR owns the committed rows) */
 /* ---------------------------------------------------------------- */
 
 /* Build a message, send it to the runtime (which dispatches it to
@@ -602,7 +602,7 @@ static void stream_text(NmChatApp *app, int stream_id, const char *s,
 
 /* Close the reasoning stream at the content boundary (phase
  * transition; observed wire truth: reasoning then content, never
- * concurrent), so its order in the scrollback reflects when it was
+ * concurrent), so its order in the transcript reflects when it was
  * spoken. Idempotent: stream_end on an idle stream is a no-op, and the
  * explicit flag is the liveness signal (a raw-buffer length cannot be
  * one — boba's trim keeps the last completed line, so raw_len stays
@@ -2140,7 +2140,7 @@ void nm_chat_app_on_notice(const char *msg, void *userdata)
  * served-by line, printed on the SYSTEM stream — the same seam the
  * connect notice uses. Terminal-only by construction: it joins neither
  * the conversation (so it cannot shift the request prefix or the
- * provider's cached prefix) nor the saved transcript. `served_notice`
+ * provider's cached prefix) nor the saved session. `served_notice`
  * gates the LINE only, never the capture (`/context` still reports it
  * with the key off).
  *
@@ -2824,9 +2824,9 @@ static void print_help(NmChatApp *app)
                   "  /image save [n] [path]\n"
                   "                     write image n (default: the newest)\n"
                   "                     to a file (default: nevermore-image-<n>)\n"
-                  "  /session           the transcript: message counts, images\n"
+                  "  /session           the session: message counts, images\n"
                   "  /session list      every message, numbered\n"
-                  "  /session save [p]  write the transcript as markdown\n"
+                  "  /session save [p]  write the session as markdown\n"
                   "                     (default: nevermore-session.md)\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
@@ -4622,14 +4622,14 @@ static void kill_job_command(NmChatApp *app, const char *arg)
 }
 
 /* ---------------------------------------------------------------- */
-/* /session — the transcript itself: inspect it, or write it out     */
+/* /session — the session itself: inspect it, or write it out        */
 /* ---------------------------------------------------------------- */
 
 /* The session belongs to the agent, and this command only ever READS
  * it: through the const borrow, and on to session.c's markdown writer.
- * Nothing here mutates the transcript — the append-only rule has no
+ * Nothing here mutates the session — the append-only rule has no
  * door in the UI. A save mid-turn is fine (appends land at round
- * boundaries, on this same thread), so the file is the transcript as of
+ * boundaries, on this same thread), so the file is the session as of
  * the last completed round, never a torn one. */
 
 /* The deterministic save name, the shape /image save's default has
@@ -4680,7 +4680,7 @@ static void session_notes(const NmSessionMessage *m, char *buf, size_t cap)
 }
 
 /* Bare /session: the shape of the conversation at a glance. The counts
- * are the transcript's own (message 0 is the system prompt when the
+ * are the session's own (message 0 is the system prompt when the
  * session has one), and the images are named because they are the ONE
  * thing a markdown save does not carry. */
 static void session_summary(NmChatApp *app)
@@ -4728,7 +4728,7 @@ static void session_summary(NmChatApp *app)
              session_default_path);
 }
 
-/* /session list: one line per message, numbered in transcript order —
+/* /session list: one line per message, numbered in session order —
  * the order the save writes its `## <role>` sections in, so a file read
  * back lines up with the listing. */
 static void session_list(NmChatApp *app)
@@ -4764,7 +4764,7 @@ static void session_list(NmChatApp *app)
     }
 }
 
-/* /session save [path]: the markdown transcript (session.c's writer).
+/* /session save [path]: the markdown session (session.c's writer).
  * An explicit path is taken verbatim, spaces included, trailing blanks
  * trimmed (the one path rule); bare, the deterministic name above. */
 static void session_save(NmChatApp *app, const char *arg)
@@ -5693,7 +5693,7 @@ static void compose_status(NmChatApp *app)
     if (!app || !app->status || !app->agent)
         return;
     /* The submit frame carries no chrome: the status row is live, and
-     * finalizing it would strand it in the scrollback (see submit). An
+     * finalizing it would commit it (see submit). An
      * empty declaration IS no row — boba's height goes to 0 and its view
      * paints nothing — so the frame submit finalizes has no chrome row
      * to strand, and the composer's cursor offset follows from the same

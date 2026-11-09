@@ -435,7 +435,7 @@ static void emit_lines(const char *text, size_t len, TuiRowSink *sink,
 /* One heading line: the whole line under the heading attr, inline
  * spans allowed (their resets restore the heading attr). The marker
  * text stays — the source line is what the user typed, and the
- * scrollback should read as written. */
+ * transcript should read as written. */
 static void emit_heading_line(const char *s, size_t len, TuiRowSink *sink,
                               TuiAttr base, NmColorDepth depth)
 {
@@ -915,7 +915,7 @@ static void emit_empty_row(TuiRowSink *sink, TuiAttr base)
 /* Render the table, optionally emitting only the last `rows_cap` rows
  * (render_live). `rows_cap <= 0` means all rows. A block that carries
  * the blank line that ended it renders that blank as its own row, so
- * the separator the model wrote survives into the scrollback. */
+ * the separator the model wrote survives into the transcript. */
 static void table_render(const Table *t, int width, int rows_cap,
                          TuiRowSink *sink, TuiAttr base,
                          NmColorDepth depth)

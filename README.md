@@ -30,7 +30,7 @@ sixel image attach) and degrades gracefully elsewhere.
 - [Configuration](#configuration)
 - [Skills](#skills)
 - [Images](#images)
-- [Session transcript](#session-transcript)
+- [The session](#the-session)
 - [Long-running commands](#long-running-commands)
 - [Smoke testing without a provider](#smoke-testing-without-a-provider)
 - [License](#license)
@@ -184,7 +184,7 @@ conversation — and the switch is `shell_mode off`.
 - `/context`: the exact token breakdown (last round, session totals, cache read
   rate)
 - `/session`, `/session list`, `/session save [path]`: inspect or save the
-  transcript as markdown
+  session as markdown
 - `/image [<path>|-<n>|list|save [n] [path]]`: attach, drop, list or save images
 - `/ps`, `/kill <id>`: list or stop background jobs
 - `/skills`: list discovered skills and any validation findings
@@ -209,7 +209,7 @@ the provider's prompt cache:
   working directory, nearest last, capped at 32 KiB;
 - a `<skills>` menu (see Skills).
 
-The whole transcript rides every request. nevermore never trims it to a guessed
+The whole session rides every request. nevermore never trims it to a guessed
 token budget, so a context that is too large is the provider's error, reported
 verbatim.
 
@@ -435,7 +435,7 @@ with `/image save [n] [path]` (default `nevermore-image-<n>.<ext>` in the cwd).
 Ask mode saves it automatically and keeps stdout clean. The model cannot save
 images itself.
 
-## Session transcript
+## The session
 
 ```text
 /session              # shape: messages by role, size, images
@@ -446,7 +446,7 @@ images itself.
 Message 0 is the assembled system prompt. The saved file is markdown (prose as
 written, system prompt and tool results in fenced blocks) with a `<!-- meta -->`
 line per message carrying exact body byte counts. Images are not written; use
-`/image save`. Loading a saved transcript back is not implemented yet.
+`/image save`. Loading a saved session back is not implemented yet.
 
 ## Long-running commands
 

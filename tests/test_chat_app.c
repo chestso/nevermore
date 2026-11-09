@@ -10,7 +10,7 @@
  *     block on the name service, and the user must not watch their own
  *     line while it does)
  *   - line-buffered transcript: deltas split across batches continue
- *     on ONE scrollback line; the partial tail renders in the frame
+ *     on ONE transcript line; the partial tail renders in the frame
  *     (view) while streaming; complete lines reach the output
  *   - /quit /model /models /provider /help as character-level
  *     commands; the model popup selects and applies a model
@@ -1235,9 +1235,9 @@ static void test_submit_echoes_and_prints_answer(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
     const char *out = harness_read(h);
-    /* The user's message lands in the scrollback with the echo marker. */
+    /* The user's message lands in the transcript with the echo marker. */
     ASSERT_TRUE(strstr(out, "hi there") != NULL);
-    /* The streamed answer lands in the scrollback. */
+    /* The streamed answer lands in the transcript. */
     ASSERT_TRUE(strstr(out, "Hello world") != NULL);
     /* The answer is terminated as a whole line (line-buffered). */
     ASSERT_TRUE(strstr(out, "Hello world\r\n") != NULL);
@@ -1264,7 +1264,7 @@ static void test_separator_between_reasoning_and_answer(void);
 static void test_delta_line_continuation_is_preserved(void)
 {
     /* The regression test for the line-buffer protocol: two deltas
-     * split across readable events must continue on ONE scrollback
+     * split across readable events must continue on ONE transcript
      * line — no forced newline, no interleaved spinner row. The
      * server's rendezvous lets the app see exactly one delta per step
      * (a handshake, not a guessed delay). */
@@ -1509,7 +1509,7 @@ static void test_submit_paints_the_handoff_frame(void)
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     /* The composer is empty: the sent line left the live region — it is
-     * in the scrollback, echoed once by finish_inline. */
+     * in the transcript, echoed once by finish_inline. */
     ASSERT_TRUE(strstr(frame, "hello") == NULL);
     /* The status row already says thinking, in the pulse's own first
      * frame: the trough the dot fades in from. */
@@ -1741,7 +1741,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     free(dot);
 
     /* The tail is live-region content: nothing has committed to the
-     * scrollback since the turn began. This is a real state assertion
+     * transcript since the turn began. This is a real state assertion
      * (the transcript's own commit count), not a byte-scan proxy. */
     ASSERT_EQ(tui_transcript_commit_count(nm_chat_app_transcript(h->app)),
               committed0);
@@ -3852,7 +3852,7 @@ static void test_quit_command_quits(void)
     harness_enter(h);
 
     ASSERT_TRUE(tui_runtime_should_quit(h->rt));
-    /* The echoed command reached the scrollback. */
+    /* The echoed command reached the transcript. */
     ASSERT_TRUE(strstr(harness_read(h), "/quit") != NULL);
 
     harness_free(h);
@@ -4432,7 +4432,7 @@ static void test_connect_error_prints_and_returns_to_idle(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "anyone there") != NULL);
-    /* An error line reached the scrollback. */
+    /* An error line reached the transcript. */
     ASSERT_TRUE(strstr(out, "nevermore") != NULL);
 
     /* A fresh turn still works (ERROR does not wedge the app). */
@@ -4696,7 +4696,7 @@ static void test_error_line_endings_are_crnl(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_ERROR);
 
     const char *out = harness_read(h);
-    /* The whole error reached the scrollback. Long bodies wrap at the
+    /* The whole error reached the transcript. Long bodies wrap at the
      * terminal width (boba's explicit wrap), so assert the fragments,
      * not one contiguous run. */
     ASSERT_TRUE(strstr(out, "chat failed: auth rejected (HTTP 401)") != NULL);
@@ -4710,7 +4710,7 @@ static void test_error_line_endings_are_crnl(void)
     /* The hint follows the body in the error's own output block (both
      * come from the one sys_line), with no second error line between.
      * Searched FROM the body: the startup preflight note carries the
-     * same env-var name earlier in the scrollback. */
+     * same env-var name earlier in the transcript. */
     const char *msg = strstr(out, "chat failed:");
     ASSERT_NOT_NULL(msg);
     const char *hint = strstr(msg, "export OPENROUTER_API_KEY");
@@ -4842,7 +4842,7 @@ static void test_separator_blank_line_after_answer(void)
 
 /* A screen model for strip_frames: independent rows of bytes, no
  * bottom edge (a terminal would scroll rows off its screen; a
- * scrollback read keeps them). */
+ * transcript read keeps them). */
 typedef struct Screen
 {
     char **row;
@@ -4907,7 +4907,7 @@ static void screen_free(Screen *s)
  * edge-triggered: a change emits one mode byte, a steady cursor emits
  * none). Dropping the bytes between the old brackets therefore drops
  * nothing, and every repaint's rows would pile up as if they were new
- * scrollback. Replay the controls an inline paint actually
+ * committed rows. Replay the controls an inline paint actually
  * emits instead (CR, LF, cursor up/down/forward, erase-in-line, SGR);
  * the screen model then does the filtering by construction: a repaint
  * overwrites its own rows, and only the committed transcript stays
@@ -5034,7 +5034,7 @@ static int has_blank_row(const char *from, const char *to)
 }
 
 /* A blank line the MODEL wrote INSIDE a run is part of that run's
- * markdown: the paragraph break reaches the scrollback as an empty row.
+ * markdown: the paragraph break reaches the transcript as an empty row.
  * (boba draws no row for a separator, so the classifier continues the
  * block instead of reporting the break as BLANK.) Both agent streams are
  * covered: the reasoning trace's paragraphs and the answer's. */
@@ -5353,7 +5353,7 @@ static void test_tool_round_prints_panels(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    /* The tool plan and the result line are in the scrollback. The
+    /* The tool plan and the result line are in the transcript. The
      * plan shows the tool name + EVERY argument (not a one-line slug),
      * so the edit's old/new strings are visible before the result. */
     const char *out = harness_read(h);
@@ -5765,7 +5765,7 @@ static void test_parallel_tool_calls_pair_plan_with_result(void)
  * read (test_spinner), not the transcript.
  *
  * This test pins the transcript half of that story so the two cannot be
- * confused again: the pending fence body DOES reach the scrollback,
+ * confused again: the pending fence body DOES reach the transcript,
  * committed in order before the tool plan, and the transient live frame
  * carries it meanwhile. */
 static void test_open_json_fence_before_tool_call_commits(void)
@@ -5963,7 +5963,7 @@ static size_t count_transcript_line(const char *hay, const char *line)
  * a delta batch that completes a line while the partial tail spans
  * multiple wrapped rows. The transcript seam must print each
  * completed line exactly once — no stale partial prefixes stranded
- * in the scrollback. Two hard requirements from the review:
+ * in the transcript. Two hard requirements from the review:
  *   - the width is FORCED (a multi-row live tail is the trigger; the
  *     app's default 80 would not wrap this fixture). Committed lines
  *     are no longer width-wrapped — the terminal owns wrapping — but
@@ -6098,7 +6098,7 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
  * streams reasoning first (making the old guard true), then content
  * whose unlabeled fence body line is split across deltas, and asserts
  * the line survives as ONE row. */
-/* Does `frag` reach the scrollback as an APPEND to the row it
+/* Does `frag` reach the transcript as an APPEND to the row it
  * continues? boba's extend path writes
  *   ESC [ 1 A  CR  ESC [ <digits> C  <text>
  * with the text IMMEDIATELY after the cursor-forward. The bug inserted
@@ -6215,10 +6215,10 @@ static void test_submit_echoes_once(void)
 }
 
 /* The status line is live chrome (spinner + gauge + separator rule), not
- * history: it must never be finalized into the scrollback. The frame
+ * history: it must never be finalized into the transcript. The frame
  * finish_inline persists is the echoed prompt row ALONE — the chrome row
  * sits directly above it in the live frame, so finishing the whole frame
- * would strand a `--- -/- ---…` row in the scrollback above every
+ * would strand a `--- -/- ---…` row in the transcript above every
  * submitted line. The tell is the byte immediately before the echoed
  * row's prompt span: a CLEARED row (`\r\x1b[K`, the textinput's own
  * erase) with the fix, versus the status row's `\r\n\x1b[K` separator
@@ -6442,7 +6442,7 @@ static void test_reasoning_and_content_commit_in_order(void)
 }
 
 /* End-to-end: the blank line the model wrote after a table reaches the
- * scrollback as its own row — the block carries the line and the box
+ * transcript as its own row — the block carries the line and the box
  * renderer draws it (the separator is content, not a dropped verdict). */
 static void test_table_blank_line_renders(void)
 {
@@ -6553,7 +6553,7 @@ static void test_image_followed_by_a_blank_still_parses(void)
 
 /* End-to-end: a table row immediately followed by a fence line (no blank
  * between — legal markdown). The container's open verdict is a block
- * boundary, so the box commits BEFORE the fence's lines: the scrollback
+ * boundary, so the box commits BEFORE the fence's lines: the transcript
  * order is the wire's order. (This pins the boba revision too: an older
  * boba froze only the pending line there, and the fence landed first.) */
 static void test_table_then_fence_keeps_wire_order(void)
@@ -6603,9 +6603,9 @@ static void test_table_then_fence_keeps_wire_order(void)
 }
 
 /* End-to-end: a table streamed from a canned SSE round reaches the
- * scrollback aligned (the markdown classifier + renderer through the
+ * transcript aligned (the markdown classifier + renderer through the
  * full chat_app stack). */
-static void test_markdown_table_reaches_scrollback_aligned(void)
+static void test_markdown_table_reaches_transcript_aligned(void)
 {
     struct RawResponse rr = {
         0, 0,
@@ -6635,7 +6635,7 @@ static void test_markdown_table_reaches_scrollback_aligned(void)
     ASSERT_TRUE(strstr(out, "Region") != NULL);
     ASSERT_TRUE(strstr(out, "North") != NULL);
     ASSERT_TRUE(strstr(out, "South") != NULL);
-    /* Box borders (U+250C / U+2514) reached the scrollback. */
+    /* Box borders (U+250C / U+2514) reached the transcript. */
     ASSERT_TRUE(strstr(out, "\xe2\x94\x8c") != NULL);
     ASSERT_TRUE(strstr(out, "\xe2\x94\x94") != NULL);
     /* No bare LF. */
@@ -9092,7 +9092,7 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
  * explicit unit. Before the image-unit seam the image line was posted
  * as TEXT after a non-blank content line: the classifier saw a
  * paragraph in progress and committed ~the whole base64 payload into
- * the scrollback as literal text. */
+ * the transcript as literal text. */
 static void test_tool_image_after_streamed_text_never_commits_payload(void)
 {
     const char *png = chat_png_fixture("nm-chat-tool-img-after-text.png");
@@ -9531,10 +9531,10 @@ static void test_image_save_without_images(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* /session — the transcript itself                                  */
+/* /session — the session itself                                     */
 /* ---------------------------------------------------------------- */
 
-/* A chat that has run a turn: /session reports the transcript's shape,
+/* A chat that has run a turn: /session reports the session's shape,
  * /session list numbers every message, and /session save writes the
  * markdown the agent would replay (session.c's writer). */
 static void test_session_inspects_and_saves(void)
@@ -9578,7 +9578,7 @@ static void test_session_inspects_and_saves(void)
     ASSERT_TRUE(strstr(out, "/session save [path] writes markdown") != NULL);
     ASSERT_TRUE(strstr(out, "in the store") == NULL);
 
-    /* /session list: one numbered line per message, in transcript
+    /* /session list: one numbered line per message, in session
      * order, with the content size. */
     harness_type(h, "/session list");
     harness_enter(h);
@@ -9588,7 +9588,7 @@ static void test_session_inspects_and_saves(void)
     ASSERT_TRUE(strstr(out, "  #2   assistant") != NULL);
     ASSERT_TRUE(strstr(out, "11 B") != NULL); /* "hello agent" */
     /* The note the listing shows for a message the save now carries a
-     * trace for: the two halves agree about what is in the transcript. */
+     * trace for: the two halves agree about what is in the session. */
     ASSERT_TRUE(strstr(out, "reasoning") != NULL);
 
     /* The save: an explicit path is taken verbatim (spaces included). */
@@ -9608,7 +9608,7 @@ static void test_session_inspects_and_saves(void)
     got[n] = '\0';
     const char *md = (const char *)got;
     /* The metadata header, then one `## <role>` section per message —
-     * the transcript the agent replays, roles and text intact. Prose
+     * the session the agent replays, roles and text intact. Prose
      * (user/assistant) is live markdown, the trace included; the system
      * prompt is ours, so it rides a fence. Each message carries the meta
      * line the loader reads. */
@@ -9655,8 +9655,8 @@ static void test_session_inspects_and_saves(void)
 }
 
 /* Nothing has been said yet: the commands say so rather than invent a
- * transcript or write an empty file. */
-static void test_session_without_a_transcript(void)
+ * session or write an empty file. */
+static void test_session_commands_without_a_turn(void)
 {
     AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
@@ -10686,7 +10686,7 @@ static void test_knob_commands_refuse_a_provider_without_knobs(void)
 /* A round that reports its upstream and tier gets a system line, and the
  * `served_notice` key silences the LINE alone: /context still answers
  * with the last round's facts (the served contract). The line joins
- * neither the conversation nor the saved transcript, so the request
+ * neither the conversation nor the saved session, so the request
  * prefix is untouched. */
 static void test_served_notice_prints_and_the_key_gates_it(void)
 {
@@ -11589,7 +11589,7 @@ int main(void)
     RUN_TEST(test_provider_switch_resolves_new_provider_key);
     RUN_TEST(test_fence_body_tokens_highlighted_through_app);
     RUN_TEST(test_reasoning_and_content_commit_in_order);
-    RUN_TEST(test_markdown_table_reaches_scrollback_aligned);
+    RUN_TEST(test_markdown_table_reaches_transcript_aligned);
     RUN_TEST(test_image_data_uri_degrades_to_marker);
     RUN_TEST(test_image_followed_by_a_blank_still_parses);
     RUN_TEST(test_table_blank_line_renders);
@@ -11604,7 +11604,7 @@ int main(void)
     RUN_TEST(test_image_save_writes_the_received_image);
     RUN_TEST(test_image_save_without_images);
     RUN_TEST(test_session_inspects_and_saves);
-    RUN_TEST(test_session_without_a_transcript);
+    RUN_TEST(test_session_commands_without_a_turn);
     RUN_TEST(test_model_picker_shows_capability_metadata);
     RUN_TEST(test_model_picker_capability_query_image);
     RUN_TEST(test_model_picker_capability_query_tools);

@@ -68,7 +68,7 @@ typedef struct NmContext NmContext;
  * the active model's catalog flag (1 accepts image content parts, 0
  * is text-only, -1 unknown): 1 puts the image-capability clause in the
  * assembled prompt, so the model never has to infer its own vision
- * from the transcript. The reminder clause (reminder.h: how to read
+ * from the session. The reminder clause (reminder.h: how to read
  * a `&lt;system-reminder>` tag, and what an escaped one means) and the
  * image-transport clause (how an image arrives — pasted inside the
  * user's message, or attached by read_file — never a capability claim)

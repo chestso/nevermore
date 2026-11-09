@@ -275,7 +275,7 @@ Read at the round level the effect is not resolved (3 vs 0 in 490 vs 234
 rounds, Fisher p = 0.56); read at the SESSION level — the unit a person
 experiences, "did this chat need me to step in?" — it is 3/12 vs 0/12
 (p = 0.11 one-sided), and rounds are not independent trials: they share
-one transcript, and the arms did not even have the same shape (arm A
+one session, and the arms did not even have the same shape (arm A
 repaired one file per round and ran up to 102 rounds; arm B batched ten
 tool calls per round and ran ≤28, so arm B had 2.1x less exposure). The
 design was under-powered for the rate the workload actually produced
@@ -1082,7 +1082,7 @@ message."}}`, wrapped in OpenRouter's `Provider returned error`
   envelope. The request id prefix (`req_vrtx_…`) names Vertex — the
   `Google` upstream for Anthropic models is Vertex AI's Claude serving.
   nevermore never composes that shape (a round ends with the user's
-  text or a tool result), but a hand-edited transcript replay will
+  text or a tool result), but a hand-edited session replay will
   hit it.
 - **A refused round carries no usage at all.** `finish_reason:
 "content_filter"`, `native_finish_reason: "refusal"`, `content:

@@ -908,7 +908,7 @@ static const char *request_body(const char *req)
 }
 
 /* A round that came back with NOTHING in it ends the turn. There is no
- * retry: the round produced nothing, the transcript does not grow an
+ * retry: the round produced nothing, the session does not grow an
  * empty assistant message, the all-zero usage report never reaches the
  * gauge, and the human is told twice — a warning naming the wire's own
  * words, and the turn's own error carrying the same reason. */
@@ -946,7 +946,7 @@ static void test_agent_void_round_ends_the_turn(void)
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     ASSERT_EQ(g_n_requests, 1); /* one round, never asked again */
 
-    /* The transcript did not grow an empty assistant message: the system
+    /* The session did not grow an empty assistant message: the system
      * prompt and the user's message are the only entries. */
     const NmSession *sess = nm_agent_session(agent);
     ASSERT_NOT_NULL(sess);
@@ -3253,7 +3253,7 @@ static void test_agent_cancel_then_next_turn_works(void)
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_2\"") != NULL);
     /* The cancelled turn's user message still rode the turn-2
-     * transcript (session persists across cancel). */
+     * session (which persists across cancel). */
     ASSERT_TRUE(strstr(g_requests[0], "first, get cancelled") != NULL);
 
     nm_agent_free(agent);
@@ -3400,7 +3400,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
 /* One-shot oversize responder: accept once, capture the request,
  * answer 400 with a context-length error body (the provider's "too
- * large"), close. The whole transcript rides the request, so the
+ * large"), close. The whole session rides the request, so the
  * provider reports the overflow rather than nevermore silently
  * capping. */
 static void *context_400_server_thread(void *arg)
@@ -3688,7 +3688,7 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
 }
 
 /* A context overflow is the provider's HTTP error (400), surfaced
- * verbatim: the request carries the whole transcript (nevermore never
+ * verbatim: the request carries the whole session (nevermore never
  * trims) and the agent reports the provider's own words. */
 static void test_agent_context_overflow_reports_provider_error(void)
 {
@@ -4341,7 +4341,7 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
 
 /* The image-capability clause: a model the catalog says can see gets a
  * system prompt that says so. Without it the model has to infer its own
- * vision from the transcript — the live wire of 2026-10-04 shows
+ * vision from the session — the live wire of 2026-10-04 shows
  * exactly that ("I don't have vision capability described", with the
  * image sitting in the request), which reads to a user as "it doesn't
  * know which image I mean". The clause rides message 0, so it is frozen
@@ -4856,7 +4856,7 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
 
 /* A model change re-resolves the clause. The switch is the second
  * moment the active model's prefix is cold — the new model has never
- * seen this conversation, so the transcript is re-billed whatever we
+ * seen this conversation, so the session is re-billed whatever we
  * send — and it is the moment the fact matters most: the new model is
  * the one that must know whether IT can see. Switching away and back
  * restores the earlier prompt byte for byte (the clause is a pure
@@ -6302,7 +6302,7 @@ static void test_agent_output_cut_reminder(void)
     ASSERT_TRUE(strstr(g_requests[1], "resume directly") != NULL);
 
     /* Turn 3: the same cut, already reported — no second note (the note
-     * itself is carried verbatim in the transcript, so the prefix is
+     * itself is carried verbatim in the session, so the prefix is
      * untouched). */
     ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
     ASSERT_EQ(g_reminder_calls, 1);

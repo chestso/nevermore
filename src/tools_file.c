@@ -22,7 +22,7 @@
  * continued); the other tools' output is not resumable, so theirs
  * names what was cut instead. All of it flows through the shared
  * truncation seam in tools.c (nm_truncate_tail / nm_clamp_output), so
- * the rendered transcript and the session history see the same bytes.
+ * the rendered transcript and the session see the same bytes.
  *
  * read_file also consults the SESSION's file ledger (file_ledger.h,
  * reached through the call context): a read whose bytes this
@@ -752,7 +752,7 @@ static long line_at(const char *text, size_t pos)
 /* The last path component ("/a/b/foo.png" and "C:\a\foo.png" both give
  * "foo.png") — the image result's name and its alt/marker text. Both
  * separators are honoured whatever the host is: a Windows path can
- * appear in a transcript read on POSIX. */
+ * appear in a session read on POSIX. */
 static const char *file_base_name(const char *path)
 {
     const char *b = path;

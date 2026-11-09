@@ -19,7 +19,7 @@ int nm_spawn_capture_os(const char *const *argv, char **output, int *exit_code);
 
 /* tools.c: shared truncation, applied where a tool result is born so
  * the same bytes reach both the rendered transcript and the session
- * history (both consume NmToolResult.output). */
+ * (both consume NmToolResult.output). */
 
 /* Generic tool-output clamp: keep the head of `text` at
  * NM_TOOL_MAX_OUTPUT bytes and append a byte-count omission notice
@@ -68,7 +68,7 @@ size_t nm_utf8_clamp_len(const char *s, size_t n, size_t max);
  * "Output:" — or the structural "(empty)" marker when the call ran and
  * produced nothing (`body` NULL, never fake text a reader could
  * mistake for output). Assembled HERE, in one place, so the rendered
- * transcript and the session history see identical bytes for every one
+ * transcript and the session see identical bytes for every one
  * of the ten tools and the shape is the model's constant.
  *
  * Two families, one shape — the per-family clamp is the only

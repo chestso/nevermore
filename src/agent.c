@@ -10,7 +10,7 @@
  * execute->append->re-request — boba lifts each step into a
  * socket-readable callback without touching the seams.
  *
- * Memory model: the session owns the transcript; per-turn strings
+ * Memory model: the session owns the message store; per-turn strings
  * (tool-call arrays, tool results) are heap allocations with a single
  * owner at a time, freed at the point ownership ends (no leaks, no
  * steady-state churn: allocations happen per tool call, not per
@@ -394,7 +394,7 @@ static int model_vision(const NmProvider *p, const char *model)
  * the first round WAIT). Two moments qualify: the chat's first request
  * (nothing has been cached yet) and every model change (the new model
  * has never seen this conversation, so its prefix is cold whatever we
- * send — the switch has already re-billed the transcript).
+ * send — the switch has already re-billed the session).
  *
  * clause_pending is the gate, so this is per-model, never per-turn: a
  * catalog that warms mid-chat for the SAME model must not churn. The
@@ -851,7 +851,7 @@ void nm_agent_set_model(NmAgent *a, const char *model)
     a->effort = NULL;
     /* The new model has never seen this conversation, so its prefix is
      * cold whatever we send — the switch has already re-billed the
-     * transcript, and there is no cache left to protect. Resolve the
+     * session, and there is no cache left to protect. Resolve the
      * capability clause now (the prompt is right before the next turn)
      * and again at that turn's start, where the cached read is fresher;
      * begin_round closes the window. */
@@ -1484,7 +1484,7 @@ static char *calls_to_json(const NmToolCall *calls, size_t n)
 /* Ensure the session exists, seeded with the assembled system prompt
  * (base text + the <project_context> block from AGENTS.md discovery;
  * see context.h). The session keeps message 0 across turns, and the
- * whole transcript rides every request — the context files can never be
+ * whole session rides every request — the context files can never be
  * dropped. */
 static int ensure_session(NmAgent *a)
 {
@@ -1592,7 +1592,7 @@ static void chat_failure(NmAgent *a, const NmChatResult *r, char *out,
     }
 }
 
-/* Open the next round's stream from the session's transcript.
+/* Open the next round's stream from the session.
  * Returns 0 on success. */
 static int begin_round(NmAgent *a)
 {
@@ -1637,7 +1637,7 @@ static int begin_round(NmAgent *a)
      * are gathered, so the age rule sees this request's sequence. */
     nm_session_next_request(a->session);
 
-    /* Build the request from the WHOLE transcript: nevermore never
+    /* Build the request from the WHOLE session: nevermore never
      * caps it (no token-budget guessing), so the provider reports
      * "too large" and the request prefix stays byte-stable — which is
      * what keeps the provider's cached prefix paying off. The ONE
@@ -1927,7 +1927,7 @@ static int begin_round(NmAgent *a)
         req_model,
         msgs,
         n_msgs,
-        NULL, /* system prompt rides in the session transcript */
+        NULL, /* system prompt rides in the session */
         tools_json,
         temperature,
         max_tokens,
@@ -2051,7 +2051,7 @@ static int round_was_cut(const NmChatResult *r)
  * it streams — so the turn looked like the model announced an action
  * and then stopped. Nothing happened because nothing came back.
  *
- * A void round is not an answer: it must not ride the transcript (an
+ * A void round is not an answer: it must not ride the session (an
  * empty assistant message is not a message), must not move the usage
  * gauge (its zeros are the error envelope's, not a measurement), and
  * must not pass in silence. It ends the turn in a real error — see
@@ -2155,7 +2155,7 @@ static int finish_round(NmAgent *a, const NmChatResult *r)
                  "%s", r->meta.served_provider);
 
     /* A VOID round: nothing in it. It is not an answer and not a tool
-     * round — the transcript stays as it was, the usage report (the
+     * round — the session stays as it was, the usage report (the
      * error envelope's zeros) is dropped rather than published, and the
      * turn ends in a real error. */
     if (round_is_void(a))
@@ -2421,7 +2421,7 @@ static int append_tool_images(NmAgent *a)
 }
 
 /* Advance to the round's next pending call: the next one re-announces
- * (its own plan), so plan/result stay paired in the transcript. */
+ * (its own plan), so plan/result stay paired in the session. */
 static void next_tool(NmAgent *a)
 {
     a->tool_exec_idx++;
@@ -2797,7 +2797,7 @@ void nm_agent_cancel(NmAgent *a)
     /* Close the round's tool-call group before the reset drops its
      * bookkeeping: the assistant tool_calls message is already in the
      * session, and a call that never produced a reply leaves the
-     * transcript malformed — every later request then 400s ("an
+     * session malformed — every later request then 400s ("an
      * assistant message with 'tool_calls' must be followed by tool
      * messages responding to each 'tool_call_id'"). Results exist for
      * the calls before tool_exec_idx; the rest (including the one that

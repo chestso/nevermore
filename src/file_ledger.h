@@ -4,7 +4,7 @@
  *
  * The ledger exists because a session reads the same file many times.
  * A long conversation pays for every one of those copies — the whole
- * transcript rides every request — while the model already has the
+ * session rides every request — while the model already has the
  * bytes above it, and a file that changed on disk since the model read
  * it leaves the model reasoning from a view that no longer exists.
  * Both facts need the same memory: (path, what was read, what the file
@@ -28,7 +28,7 @@
  *     miss a change (a weaker nudge); it can never turn a read into a
  *     wrong skip, which only the hash can do.
  *
- * The whole transcript rides every request (nevermore never trims), so
+ * The whole session rides every request (nevermore never trims), so
  * a record stays good for as long as the session lives: what was read
  * is still in the conversation.
  */

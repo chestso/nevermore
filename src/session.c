@@ -1,7 +1,7 @@
-/* session.c - conversation transcript (see the header).
+/* session.c - the wire conversation (see the header).
  *
  * One growable message array per session (geometric growth,
- * memory-reuse principle); the whole transcript is what the agent
+ * memory-reuse principle); the whole session is what the agent
  * sends — nevermore never trims it.
  */
 
@@ -197,7 +197,7 @@ static void attach_reason(char *reason, size_t cap, const char *msg)
 /* The last path component ("/a/b/foo.png" and "C:\a\foo.png" both give
  * "foo.png") — the image's alt/marker text. Both separators are
  * honoured whatever the host is: a Windows path can appear in a
- * transcript read on POSIX. */
+ * session read on POSIX. */
 static const char *base_name(const char *path)
 {
     const char *b = path;
@@ -770,7 +770,7 @@ const NmSessionMessage *nm_session_get(const NmSession *s, size_t i)
 size_t nm_session_len(const NmSession *s) { return s ? s->n : 0; }
 
 /* ---------------------------------------------------------------- */
-/* Persistence (markdown transcript with a metadata header)          */
+/* Persistence (markdown session with a metadata header)            */
 /* ---------------------------------------------------------------- */
 
 static const char *role_tag(NmRole r)
@@ -788,8 +788,8 @@ static const char *role_tag(NmRole r)
     return "?";
 }
 
-/* The save is BOTH a transcript and a markdown document, and the two
- * jobs only coexist if the document's structure is the transcript's,
+/* The save is BOTH a session and a markdown document, and the two
+ * jobs only coexist if the document's structure is the session's,
  * never the content's. Which body is markdown is a question about its
  * PRODUCER, not about how it looks:
  *
@@ -812,9 +812,9 @@ static const char *role_tag(NmRole r)
  *
  * The fence is length-adaptive (a body can only close a fence as long
  * as its own longest backtick run), which is what makes the block
- * opaque without escaping a single byte of the transcript.
+ * opaque without escaping a single byte of the session.
  *
- * THE FILE IS ALSO A TRANSCRIPT THAT READS BACK, and that is the other
+ * THE FILE IS ALSO A SESSION THAT READS BACK, and that is the other
  * half of the design. Prose bodies cannot be fenced — a trace rendered
  * as a code block is not a trace — so they carry the other unforgeable
  * device instead: a DECLARED BYTE COUNT, in the `<!-- meta: ... -->`
@@ -950,7 +950,7 @@ static char *meta_json(const NmSession *s, const NmSessionMessage *m)
     if (m->n_images) {
         /* The alts, in the order the message holds them: enough for a
          * reader to see what the chat had, and enough for a loader to
-         * refuse the file rather than load a different transcript. */
+         * refuse the file rather than load a different session. */
         NmJson *imgs = nm_json_new_array();
         for (size_t k = 0; k < m->n_images; k++) {
             const NmImage *img = nm_session_image(s, m->images[k]);
@@ -1013,7 +1013,7 @@ int nm_session_save(const NmSession *s, const char *path)
 {
     if (!s || !path)
         return -1;
-    /* BINARY on purpose: the transcript is an artifact (diffed, shared,
+    /* BINARY on purpose: the file is an artifact (diffed, shared,
      * re-read by a test), so it is LF on every platform — text mode would
      * translate every newline to CRLF on Windows and make the same save
      * two different files. */

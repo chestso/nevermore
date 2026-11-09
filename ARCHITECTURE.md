@@ -49,16 +49,16 @@ at its root (refactor the types and seams), not by patching around it.
 - **No regex.** SSE parsing, tool search and command parsing are character-level
   scans and state machines (`strncmp` over literals), never POSIX regex.
 - **No libcurl.** Hand-rolled transport, OS-native TLS.
-- **Prefix-cache stability.** The whole transcript rides every request, because
+- **Prefix-cache stability.** The whole session rides every request, because
   a sliding window or a guessed token budget would change the request prefix the
   provider's prompt cache keys on. Anything that would alter earlier bytes
   mid-chat (the system prompt, the reasoning echo fields, an image's text
   marker, a reminder) is either frozen once, resolved while the prefix is cold,
-  appended at the end of the transcript, or edge-triggered. The cache is now
+  appended at the end of the session, or edge-triggered. The cache is now
   REQUESTED on the Anthropic family (docs/OPENROUTER-API.md §10), so the
   guarantee is load-bearing on the bill and not only on the wire: a byte that
   drifts is a paid-for cache miss.
-- **Transparency.** The transcript never diverges from what the model received.
+- **Transparency.** Everything the model received is in the transcript.
   Anything the harness injects (a `<system-reminder>`, the escaped form of a
   forged tag, a synthetic user message, an image the provider will strip) is
   shown at the point it was injected, in a role that says who is talking (the
@@ -409,7 +409,7 @@ provider, and it is set only when the wire actually reported something.
   tool panel never starts on the notice's heels on either carrier.
 - `served_notice` gates the **line**, not the capture:
   the hooks, the meta and `/context` ignore them. The notice is a system message
-  that joins neither the conversation nor the saved transcript. An unreported
+  that joins neither the conversation nor the saved session. An unreported
   tier reads "tier unknown" — a
   workspace default fills the field in server-side, so absent is not `default`.
 - **A trailer that lands after `[DONE]` is still captured, on a bounded wait**
@@ -549,7 +549,7 @@ stopped mid-sentence with nothing shown.
 - A void round ends the turn in a real error — it is never retried: the round
   produced nothing, and asking the same question again is what the human was
   reduced to in the 2026-10-27 session ("continue" after "continue").
-- It does not enter the transcript (an empty assistant message is not a
+- It does not enter the session (an empty assistant message is not a
   message) and does not move the usage gauge (its zeros are the error
   envelope's).
 - The human is told twice, in the same words: `nm_agent_on_warning` (red in the
@@ -561,7 +561,7 @@ stopped mid-sentence with nothing shown.
 
 ### Session (`src/session.c`)
 
-The transcript, owned by the agent. **The whole transcript rides every request**
+The session, owned by the agent. **The whole session rides every request**
 (see the prefix-cache principle); a context that is too large is the provider's
 error, reported verbatim. The agent iterates `nm_session_len` / `nm_session_get`
 to build a request.
@@ -580,12 +580,12 @@ drops the message-level `images` array (it takes image parts only) and puts the
 marker in `content`.
 
 **The UI reads the session through one const door**, `nm_agent_session(a)`,
-which backs `/session`, `/session list` and `/session save`. The transcript is
+which backs `/session`, `/session list` and `/session save`. The session is
 append-only and the agent is its only writer, so there is deliberately no
 non-const accessor. A mid-turn save is fine: appends land at round boundaries,
-so the file is the transcript as of the last completed round.
+so the file is the session as of the last completed round.
 
-**The saved file is markdown whose structure is the transcript's, and it is also
+**The saved file is markdown whose structure is the session's, and it is also
 loadable** (`nm_session_load` is still a post-1.0 stub; save is an inspection
 surface):
 
@@ -609,7 +609,7 @@ surface):
   (the same JSON value), and the format version does not move for an optional
   line.
 - Images are declared in meta but not written (a data URL is megabytes), so a
-  loader must refuse such a file rather than rebuild a transcript whose request
+  loader must refuse such a file rather than rebuild a session whose request
   prefix differs.
 
 ### Context (`src/context.c`)
@@ -739,7 +739,7 @@ the ledger answers. It lives and dies with the agent.
   conversation" is a **content hash** (FNV-1a-64 of what the tool just read;
   free and — at 64 bits — cannot lie in practice). "The file is not what the session read" is a **size + mtime
   heuristic**, where a coarse stamp costs a missed nudge, never a wrong skip. A
-  record lasts for the session, since the whole transcript rides every request.
+  record lasts for the session, since the whole session rides every request.
 - On a repeat read, `read_file` answers with a **pointer body** instead of the
   bytes. This is a hard rule (like `edit_file`'s exact-match refusal), not a
   nudge: the content is provably above, and re-sending bills it twice.
@@ -977,7 +977,7 @@ Two halves, one sniffer.
   row plus the slack the transcript budget keeps. boba requires an inline
   component's rows to fit the screen; capped, a paste taller than the terminal
   scrolls inside the prompt with the cursor on a row it actually painted, instead
-  of stranding the frame's top rows in the scrollback. The transcript budget
+  of stranding the frame's top rows in the terminal. The transcript budget
   reads `tui_textinput_visible_rows` — the number the component will paint,
   wrapped rows and cap included — so the two row counts cannot drift.
 - **Prompt history has one owner per side.** boba's ring is navigation (Up/Down
@@ -1186,7 +1186,7 @@ the row sink never downsamples.
 ## The chat transcript protocol
 
 Read before touching `chat_app`. The inline chat renders in the primary terminal
-buffer, and the terminal scrollback **is** the output history. chat_app does not
+buffer, and the terminal itself **is** the output history. chat_app does not
 own transcript mechanics: it owns a boba `TuiTranscript` and posts stream
 messages; boba is the only caller of `tui_runtime_transcript_write`.
 
@@ -1215,7 +1215,7 @@ messages; boba is the only caller of `tui_runtime_transcript_write`.
   completed line (fence, table, heading, list, quote) and `markdown_render.c`
   draws committed rows and owns all styling. A styled row always resets before
   `tui_row_end`, and base and span attrs compose by OR-ing into **one** SGR run,
-  never nested. Only bytes that can no longer change reach the scrollback; the
+  never nested. Only bytes that can no longer change reach the terminal; the
   live region renders in `view()`. Tables and standalone image lines are
   block-granular (table cells stay span-free, since the width math counts SGR
   bytes as glyphs).
@@ -1250,7 +1250,7 @@ messages; boba is the only caller of `tui_runtime_transcript_write`.
   the tool END event, and a block left open (cancel or fatal before END) is
   closed on the IDLE/ERROR transition.
 - **Committed bytes carry no width break; the live frame is the exception.** A
-  logical line reaches the scrollback as one byte run (`\r\n` only at its real
+  logical line reaches the terminal as one byte run (`\r\n` only at its real
   end), so the terminal owns soft-wrapping and history reflows on resize. The
   live region wraps explicitly (the row sink wraps at sink width for
   `SINK_FRAME`/`SINK_COUNT` only, with an EL before each row), because boba

@@ -160,7 +160,7 @@ static void test_session_reasoning_details_stored_and_saved(void)
     nm_session_free(s);
 }
 
-/* The save is the transcript, byte for byte: the header, one `## <role>`
+/* The save is the session, byte for byte: the header, one `## <role>`
  * section per message, a `<!-- meta: ... -->` line carrying the machine
  * truth (role, tool facts, and the COUNTED parts), and then the bodies —
  * prose live, relayed bytes fenced. Both halves are pinned here because
@@ -221,7 +221,7 @@ static void test_session_save(void)
     nm_session_free(s);
 }
 
-/* The document's structure is the transcript's, never the content's.
+/* The document's structure is the session's, never the content's.
  * A relayed body (the assembled system prompt, a tool result) cannot
  * join the outline, cannot become a bullet list, and cannot close its
  * own block early — the fence is longer than the body's longest run of
@@ -309,7 +309,7 @@ static void test_session_save_fences_relayed_bodies(void)
     nm_session_free(s);
 }
 
-/* The trace is part of the transcript, and it is PROSE from the same
+/* The trace is part of the session, and it is PROSE from the same
  * producer as the answer: a model's markdown, written live. The labels
  * are for the reader — what tells a human where the trace ended; the
  * authoritative boundary is the meta line's byte count. Shapes pinned:
@@ -776,8 +776,8 @@ static void rd_msgs_free(RdMsg *msgs, size_t n)
 
 /* The loadability claim, tested end to end: save a session covering every
  * shape, read the file back, rebuild an equivalent session, and re-save
- * byte-identically. That last equality is the point — the transcript that
- * comes back is the transcript that was saved, which is what keeps a
+ * byte-identically. That last equality is the point — the session that
+ * comes back is the session that was saved, which is what keeps a
  * reloaded chat's request prefix (the provider's cache key) stable. It
  * also covers the two body shapes format 2 could not tell apart: a body
  * ending with a newline and one that does not. And a heading whose
@@ -954,7 +954,7 @@ static void test_session_save_heading_is_one_line(void)
     /* What the writer emitted before the fix, hand-built: identical
      * except that the heading is raw, so its LF is the id's and the
      * forged comment starts a line. Refused (the counts desync), never
-     * loaded as a transcript with a role and a body that were never
+     * loaded as a session with a role and a body that were never
      * there. */
     static const char forged[] =
         "<!-- nevermore session: 2 messages -->\n"
@@ -1429,7 +1429,7 @@ static void test_session_append_assistant_images(void)
 /* An image is DECLARED, never carried: the meta names it (the alt), the
  * bytes stay out of the file (a data URL is megabytes), and a loader
  * that cannot rebuild the parts must refuse rather than hand back a
- * transcript whose request prefix differs from the chat's. */
+ * session whose request prefix differs from the chat's. */
 static void test_session_save_declares_images(void)
 {
     NmSession *s = nm_session_new(NULL);

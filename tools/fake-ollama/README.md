@@ -94,7 +94,7 @@ tmux send-keys -t smoke "show me the regions and a loader" Enter
 # mid-stream: the live region (tail + spinner)
 tmux capture-pane -t smoke -p
 sleep 6
-tmux capture-pane -t smoke -p -S -40        # the committed scrollback
+tmux capture-pane -t smoke -p -S -40        # the committed rows
 tmux send-keys -t smoke "/quit" Enter
 tmux kill-session -t smoke
 ```

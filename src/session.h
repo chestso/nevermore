@@ -1,6 +1,6 @@
-/* session.h - conversation transcript state
+/* session.h - the wire conversation's state
  *
- * The session is the persistent chat transcript. Messages are
+ * The session is the persistent chat conversation. Messages are
  * stored as plain-text role/content pairs with optional tool-call
  * annotations and optional image references, so the wire format stays a
  * provider concern. Images are captured ONCE at attach into the
@@ -9,7 +9,7 @@
  * Memory model: one growable message array per session, grown
  * geometrically; message strings are heap-owned copies made once at
  * append. nm_session_get returns a borrowed pointer into that array —
- * valid until the next session mutation or free. The WHOLE transcript
+ * valid until the next session mutation or free. The WHOLE session
  * rides every request (nevermore never trims it: no token-budget
  * guessing), which is what keeps the request prefix byte-stable — with
  * ONE exception: an image rides the request that introduced it and
@@ -134,7 +134,7 @@ typedef struct NmSessionMessage
 NmSession *nm_session_new(const char *system_prompt);
 void nm_session_free(NmSession *s);
 
-/* Replace the session's system prompt (message 0). The transcript is
+/* Replace the session's system prompt (message 0). The session is
  * otherwise append-only; this is the ONE mutation, and it exists for
  * the async <env> stage: the agent seeds the session before the git
  * section has landed and swaps the final prompt in when it does. Only
@@ -145,7 +145,7 @@ void nm_session_free(NmSession *s);
  * the session has none. Returns 0, or -1 on OOM. */
 int nm_session_set_system(NmSession *s, const char *prompt);
 
-/* Append-only transcript. */
+/* Append-only session. */
 const NmSessionMessage *nm_session_append(NmSession *s, NmRole role,
                                           const char *content);
 /* Append an assistant message carrying a reasoning trace (content
@@ -176,7 +176,7 @@ const NmSessionMessage *nm_session_append_tool_result(NmSession *s,
  * (a short, user-visible phrase: "source unreadable", "unknown
  * container", "too large", "no memory").
  *
- * Attaching does not touch the transcript: the returned id is the
+ * Attaching does not touch the session: the returned id is the
  * caller's handle until a message claims it (the app's pending set). */
 long nm_session_attach_image(NmSession *s, const char *path, char *reason,
                              size_t reason_cap);
@@ -276,24 +276,24 @@ const NmSessionMessage *nm_session_append_assistant_images(
     const char *content, const char *tool_calls_json, const size_t *image_ids,
     size_t n_images);
 
-/* The transcript, as the agent sends it: message 0 is the system
+/* The session, as the agent sends it: message 0 is the system
  * prompt when the session has one, and EVERY stored message rides the
- * next request. nevermore never trims the transcript (a guessed token
+ * next request. nevermore never trims the session (a guessed token
  * budget would silently cap the conversation and break the request
  * prefix the provider's cache keys on), so a too-large context is the
  * provider's error to report, verbatim. */
 size_t nm_session_len(const NmSession *s);
 const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
 
-/* Persistence: load/save as markdown transcript with a metadata header.
- * The saved document's structure is the transcript's: `user`/`assistant`
+/* Persistence: load/save as a markdown session with a metadata header.
+ * The saved document's structure is the session's: `user`/`assistant`
  * bodies — the answer AND the round's reasoning trace, a model's own
  * markdown either way — are prose and are emitted live, while the
  * assembled `system` prompt and every `tool` result are relayed bytes
  * and ride a length-adaptive fence, so a diff, a file dump or an
  * unbalanced code fence cannot become the document.
  *
- * The file is ALSO the loadable transcript, and one rule keeps the two
+ * The file is ALSO the loadable session, and one rule keeps the two
  * jobs compatible: no delimiter a BODY can contain may decide the
  * structure. So a `<!-- meta: ... -->` line per message carries the
  * machine truth — role, tool facts, and every body's exact byte count —
@@ -309,7 +309,7 @@ const NmSessionMessage *nm_session_get(const NmSession *s, size_t i);
  * surface); session persistence including image bytes is a post-1.0
  * item, where images are blobs in the save format and never re-read
  * paths, and until then a loader must refuse a save that declares them
- * rather than rebuild a different transcript. */
+ * rather than rebuild a different session. */
 int nm_session_save(const NmSession *s, const char *path);
 NmSession *nm_session_load(const char *path);
 

@@ -368,7 +368,7 @@ void nm_agent_last_usage(const NmAgent *a, NmUsage *out);
  * already shows it, since the result's bytes are the reminder's bytes)
  * or carried by its own synthetic user message
  * (NM_REMINDER_CHANNEL_USER — the UI must show it, or the transcript
- * would diverge from what the model received). TRANSPARENCY: this
+ * would not hold what the model received). TRANSPARENCY: this
  * callback is not optional decoration; it is how the human sees the
  * harness's own speech (the transparency principle). `name` is the rule,
  * `text` is exactly what went on the wire; both borrowed for the call. */
@@ -436,7 +436,7 @@ int nm_agent_step(NmAgent *a);
 
 /* Queue a note for the NEXT nm_agent_start, consumed by it: the files
  * and directories the user pointed at with `@` in this message. It is
- * NOT a byte paste and NOT a reminder-table rule — the transcript the
+ * NOT a byte paste and NOT a reminder-table rule — the session the
  * model reads is untouched, so a mention costs a few tokens and the
  * model fetches what it needs with read_file (where the file ledger
  * keeps de-duplicating and staleness-checking).
@@ -465,10 +465,10 @@ long nm_agent_attach_image(NmAgent *a, const char *path, char *reason,
  * that already carries images). */
 size_t nm_agent_image_count(const NmAgent *a);
 
-/* The conversation's transcript, BORROWED and read-only — the UI's
+/* The session, BORROWED and read-only — the UI's
  * inspection seam (/session): the counts, the per-message facts and the
  * markdown save all read it HERE rather than through an accessor per
- * fact. Const on purpose: the transcript is append-only and the agent
+ * fact. Const on purpose: the session is append-only and the agent
  * is its only writer, so the UI gets no door to grow or edit it (a
  * non-const accessor does not exist). NULL until the session does —
  * no turn has run and nothing is attached. */

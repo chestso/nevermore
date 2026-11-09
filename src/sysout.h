@@ -5,7 +5,7 @@
  * the same line. The chat TUI writes into boba's transcript — one
  * finalized RAW unit per line, roles from colors.h, a blank row that
  * closes a block. Ask mode writes lines to stderr — dim ANSI, LF, no
- * scrollback state at all. The TEXT of a notice is already one
+ * committed rows at all. The TEXT of a notice is already one
  * spelling for both entry paths (nm_agent_round_meta_text,
  * nm_config_no_model_hint); this module is the carrier BELOW that
  * text: the line's composition cap, its terminator, and the invariant
