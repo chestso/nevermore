@@ -149,15 +149,18 @@ jobs:
           # legacy tui_msg_stream_text keeps CR = row break. The app's
           # shell mode is what wants it; nothing here calls it yet.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. v0.10.0 is the boba release that carries all of the
-          # above — the prompt's `@` mention picker API (style spans, the
+          # mid-work. v0.10.1 is the boba release that carries all of the
+          # above — and the byte path the shell stream relies on (a
+          # character cut across two messages is completed, not mangled,
+          # and the transcript closes every committed write at default, so
+          # a colour a command leaves open cannot bleed into the prompt) — the prompt's `@` mention picker API (style spans, the
           # edit revision, the whole-token replace, the popup's
           # empty/footer/preselected rows) among it, which configure
           # PROBES for: a pin behind it fails every job there, with the
           # fix named. A tag and not a SHA, so `git describe` reads
-          # v0.10.0 off the checkout and the packaged binaries print
+          # v0.10.1 off the checkout and the packaged binaries print
           # exactly the version the mac/windows asserts compare against.
-          ref: v0.10.0
+          ref: v0.10.1
           path: boba
           fetch-depth: 0
 
@@ -274,7 +277,7 @@ jobs:
           # boba.pc is a hard error, so a tarball job cannot skip the
           # dependency it does not compile. The tag is the one the linux
           # build job's note explains.
-          ref: v0.10.0
+          ref: v0.10.1
           path: boba
           fetch-depth: 0
 
