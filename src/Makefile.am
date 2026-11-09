@@ -71,6 +71,7 @@ EXTRA_DIST = \
     mention_ui.h \
     proc.h \
     proc_internal.h \
+    shell_ui.h \
     size.h \
     catalog_data.h \
     openai_client.h \
@@ -198,6 +199,8 @@ nevermore_SOURCES = \
     $(MENTION_SOURCE_OS) \
     mention_ui.h \
     mention_ui.c \
+    shell_ui.h \
+    shell_ui.c \
     highlight.h \
     highlight.c \
     chat_app.h \

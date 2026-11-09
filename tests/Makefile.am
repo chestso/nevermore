@@ -35,6 +35,7 @@ check_PROGRAMS = \
     test_mention_source \
     test_sysout \
     test_credit \
+    test_shell_ui \
     test_chat_app
 
 AM_CPPFLAGS = \
@@ -440,6 +441,16 @@ test_credit_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_credit_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_credit_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
+# The prompt's `!` shell mode: the armed bit, the submit branch and the
+# run, over a real text input and the real proc layer. Its LINK SET is
+# the isolation guard (D9/R2): no session.c, no agent.c — a shell
+# exchange has no function it could call to reach the wire, so a later
+# dependency on one fails HERE, at link time. Never add them.
+test_shell_ui_SOURCES = test_shell_ui.c ../src/shell_ui.c ../src/proc.c \
+    $(PROCESS_SOURCE) ../src/clock.c
+test_shell_ui_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS)
+test_shell_ui_LDADD = $(BOBA_LIBS) -lpthread
+
 # Chat app: the inline TUI component, driven through boba without a
 # terminal (runtime over tmpfile output, hand-fed messages) against
 # canned SSE servers. The full source stack rides along: the app owns
@@ -456,6 +467,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     ../src/sysout.c ../src/history.c \
     ../src/mention.c ../src/mention_source.c $(MENTION_SOURCE_OS) \
     ../src/mention_ui.c \
+    ../src/shell_ui.c \
     $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
