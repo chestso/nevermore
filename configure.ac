@@ -135,12 +135,13 @@ AC_DEFINE_UNQUOTED([BOBA_VERSION], ["$BOBA_VERSION_STRING"], [boba library versi
 
 dnl The app calls the newest part of boba's API: styled byte ranges on the
 dnl text input, an edit revision, a whole-token replace, the list popup's
-dnl empty-state/footer/preselection rows, and the textinput's geometry
+dnl empty-state/footer/preselection rows, the textinput's geometry
 dnl reset (one TuiTextInputGeometry struct, an opaque model read through
-dnl accessors). An install older than those fails far from its cause — a
-dnl stale header is an implicit declaration, a stale archive an undefined
-dnl symbol among hundreds of objects. Probe the DECLARATIONS here, so the
-dnl failure names the fix.
+dnl accessors), the history ring's read access, and the system stream's
+dnl carriage-return reading (tui_msg_stream_text_ex). An install older
+dnl than those fails far from its cause — a stale header is an implicit
+dnl declaration, a stale archive an undefined symbol among hundreds of
+dnl objects. Probe the DECLARATIONS here, so the failure names the fix.
 dnl
 dnl Compile, not link: a cross tree (the macOS pre-flight) has no
 dnl macOS boba to link against — its dependency is this box's install,
@@ -153,7 +154,8 @@ ac_save_CFLAGS="$CFLAGS"
 CFLAGS="$CFLAGS $BOBA_CFLAGS"
 AC_COMPILE_IFELSE(
   [AC_LANG_PROGRAM([[#include <boba/components/textinput.h>
-                     #include <boba/components/list_popup.h>]],
+                     #include <boba/components/list_popup.h>
+                     #include <boba/stream.h>]],
                    [[TuiTextSpan span;
                      TuiTextInputGeometry geom = { 0 };
                      (void)tui_textinput_set_spans(0, &span, 0);
@@ -165,7 +167,8 @@ AC_COMPILE_IFELSE(
                      (void)tui_textinput_total_rows(0);
                      tui_list_popup_set_empty_text(0, "x");
                      tui_list_popup_set_footer(0, "x");
-                     (void)tui_list_popup_set_selected(0, 0);]])],
+                     (void)tui_list_popup_set_selected(0, 0);
+                     (void)tui_msg_stream_text_ex(-1, "x", 1, 0);]])],
   [AC_MSG_RESULT([yes])],
   [AC_MSG_RESULT([no])
    AC_MSG_ERROR([the installed boba is too old: this tree needs
@@ -173,8 +176,8 @@ AC_COMPILE_IFELSE(
   tui_textinput_replace_range, TuiTextInputGeometry with
   tui_textinput_set_geometry/tui_textinput_geometry and
   tui_textinput_visible_rows/tui_textinput_total_rows,
-  tui_list_popup_set_empty_text, tui_list_popup_set_footer and
-  tui_list_popup_set_selected.
+  tui_list_popup_set_empty_text, tui_list_popup_set_footer,
+  tui_list_popup_set_selected and tui_msg_stream_text_ex.
   Rebuild and install the boba checkout (`make install` in its build
   dir), then re-run configure here.])])
 CFLAGS="$ac_save_CFLAGS"
