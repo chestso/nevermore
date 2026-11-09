@@ -96,15 +96,31 @@ static int is_overridden_w(const wchar_t *entry)
 }
 
 /* The parent environment with our overrides applied, as the UTF-16
- * double-NUL-terminated block CreateProcessW takes.  Keys are
+ * double-NUL-terminated block CreateProcessW takes, or — when `user_env`
+ * is set — the parent's own block UNTOUCHED (a person's command keeps
+ * TERM/COLORTERM/pagers; the model's never sees a pager).  Keys are
  * case-insensitive on Windows, so a differently-cased original is
  * filtered too (getenv-style lookup must see one value per key).
  * Caller frees. */
-static wchar_t *build_env_block(void)
+static wchar_t *build_env_block(int user_env)
 {
     wchar_t *src = GetEnvironmentStringsW();
     if (!src)
         return NULL;
+    if (user_env) {
+        /* The block unchanged: CreateProcessW takes it as it is.  Copied
+         * out of the OS block so the caller's one `free()` stays the
+         * only release path (FreeEnvironmentStringsW is not `free`). */
+        size_t len = 0;
+        for (const wchar_t *e = src; *e; e += wcslen(e) + 1)
+            len += wcslen(e) + 1;
+        len++; /* the final terminator */
+        wchar_t *same = malloc(len * sizeof(*same));
+        if (same)
+            memcpy(same, src, len * sizeof(*same));
+        FreeEnvironmentStringsW(src);
+        return same;
+    }
 
     size_t kept = 0;
     for (const wchar_t *e = src; *e; e += wcslen(e) + 1) {
@@ -234,8 +250,8 @@ static wchar_t *build_shell_line(const char *cmd, const NmProcShell *sh)
 }
 
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     const NmProcShell *sh, NmProcOs **os_out, char *err,
-                     size_t errsz)
+                     const NmProcShell *sh, const NmProcOpts *opts,
+                     NmProcOs **os_out, char *err, size_t errsz)
 {
     *os_out = NULL;
 
@@ -316,7 +332,7 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         goto fail;
     }
     wchar_t *wdirc = (cwd && *cwd) ? utf8_to_wide(cwd) : NULL;
-    wchar_t *wenv = build_env_block();
+    wchar_t *wenv = build_env_block(opts ? opts->user_env : 0);
 
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
@@ -459,6 +475,15 @@ void nm_proc_os_kill(NmProcOs *os)
     if (os->job)
         TerminateJobObject(os->job, 1);
     TerminateProcess(os->process, 1);
+}
+
+void nm_proc_os_interrupt(NmProcOs *os)
+{
+    /* Pipes have no polite form: there is no line discipline to raise
+     * SIGINT, and a Windows console Ctrl+C event needs a console this
+     * child does not share.  So the interrupt IS the kill here, and the
+     * caller's grace deadline is moot. */
+    nm_proc_os_kill(os);
 }
 
 int nm_proc_os_reap(NmProcOs *os, int *code)

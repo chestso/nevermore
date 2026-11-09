@@ -799,6 +799,190 @@ static void test_interest_enumeration(void)
     ASSERT_EQ(nm_proc_interest(out, 4, -1), 0);
 }
 
+/* ---------------------------------------------------------------- */
+/* NmProcOpts: the prompt's job, not the model's                    */
+/* ---------------------------------------------------------------- */
+
+#ifndef _WIN32
+/* A command that PRINTS an environment variable: the difference
+ * between the sanitized env and the caller's own is the whole point of
+ * user_env, and it is only observable from inside the child. */
+#define TEST_TERM_IS "printf '%s' \"$TERM\""
+
+static void test_opts_user_env_keeps_term(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+
+    /* The model's default is the sanitized env: TERM=dumb, whatever the
+     * parent says. */
+    setenv("TERM", "nm-test-term", 1);
+    NmProc *dumb = nm_proc_start(TEST_TERM_IS, NULL, NULL, &id, err,
+                                 sizeof(err));
+    ASSERT_NOT_NULL(dumb);
+    ASSERT_EQ(pump_until(dumb, done_exited, 5000), 0);
+    ASSERT_STR_EQ(nm_proc_take_output(dumb), "dumb");
+    nm_proc_close(dumb);
+
+    /* A person's own line keeps the terminal they are looking at. */
+    NmProcOpts opts = { 0 };
+    opts.user_env = 1;
+    NmProc *own = nm_proc_start_ex(TEST_TERM_IS, NULL, NULL, &opts, &id, err,
+                                   sizeof(err));
+    ASSERT_NOT_NULL(own);
+    ASSERT_EQ(pump_until(own, done_exited, 5000), 0);
+    ASSERT_STR_EQ(nm_proc_take_output(own), "nm-test-term");
+    nm_proc_close(own);
+}
+
+/* Raw bytes: SGR and CR survive untouched, where take_output renders
+ * them away — and the two readers refuse each other's job. */
+#define TEST_RAW_BYTES "printf 'A\\033[31mred\\033[0m\\rB\\n'"
+
+static void test_raw_take_preserves_bytes(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+    NmProcOpts opts = { 0 };
+    opts.raw_output = 1;
+    NmProc *p = nm_proc_start_ex(TEST_RAW_BYTES, NULL, NULL, &opts, &id, err,
+                                 sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+
+    size_t n = 0;
+    const char *raw = nm_proc_take_raw(p, &n);
+    ASSERT_NOT_NULL(raw);
+    ASSERT_TRUE(n > 0u);
+    ASSERT_EQ(n, strlen(raw)); /* a NUL-terminated copy */
+    /* SGR survives (the rendered take drops it) and the CR is the
+     * child's own, not the PTY's line break.  The PTY's ONLCR turn the
+     * command's \n into \r\n, which is why this asserts on parts. */
+    ASSERT_NOT_NULL(strstr(raw, "\033[31mred\033[0m"));
+    ASSERT_NOT_NULL(strstr(raw, "\rB"));
+    /* A second take has nothing new. */
+    size_t n2 = 99;
+    ASSERT_STR_EQ(nm_proc_take_raw(p, &n2), "");
+    ASSERT_EQ(n2, 0u);
+    /* The rendered reader refuses a raw job (they share one report
+     * position), and the raw reader refuses a rendered one. */
+    ASSERT_STR_EQ(nm_proc_take_output(p), "");
+    nm_proc_close(p);
+
+    nm_proc_reset();
+    NmProc *r = nm_proc_start(TEST_ECHO, NULL, NULL, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(r);
+    ASSERT_EQ(pump_until(r, done_exited, 5000), 0);
+    size_t nr = 99;
+    ASSERT_STR_EQ(nm_proc_take_raw(r, &nr), "");
+    ASSERT_EQ(nr, 0u);
+    ASSERT_NOT_NULL(strstr(nm_proc_take_output(r), "hello"));
+    nm_proc_close(r);
+}
+
+/* The omission counter is the raw reader's notice: the evicted bytes
+ * are counted, not folded into the bytes. */
+static void test_take_dropped_counter(void)
+{
+    nm_proc_reset();
+    nm_proc_set_buffer_max(64);
+    char err[128];
+    int id = -1;
+    NmProcOpts opts = { 0 };
+    opts.raw_output = 1;
+    /* TEST_NOISY prints 1000 bytes: far past the 64-byte cap. */
+    NmProc *p = nm_proc_start_ex(TEST_NOISY, NULL, NULL, &opts, &id, err,
+                                 sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+
+    size_t n = 0;
+    (void)nm_proc_take_raw(p, &n);
+    size_t dropped = nm_proc_take_dropped(p);
+    ASSERT_TRUE(dropped > 0u);
+    /* Taken, not accumulated: a second read sees only what came after. */
+    ASSERT_EQ(nm_proc_take_dropped(p), 0u);
+    ASSERT_TRUE(nm_proc_total_output(p) >= 64u);
+
+    nm_proc_close(p);
+    nm_proc_reset();
+}
+
+/* The child's terminal is the app's terminal: `stty size` prints
+ * "rows cols". */
+static void test_opts_winsize_at_spawn(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+    NmProcOpts opts = { 0 };
+    opts.raw_output = 1;
+    opts.cols = 123;
+    opts.rows = 45;
+    NmProc *p = nm_proc_start_ex("stty size", NULL, NULL, &opts, &id, err,
+                                 sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    size_t n = 0;
+    const char *raw = nm_proc_take_raw(p, &n);
+    ASSERT_NOT_NULL(strstr(raw, "45 123"));
+    nm_proc_close(p);
+}
+
+/* The interrupt is a terminal's ^C: SIGINT to the foreground group, so
+ * a plain child dies of 130 and a child that ignores INT survives (the
+ * caller's grace deadline then owns the kill). */
+static void test_interrupt_is_a_polite_sigint(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+    NmProc *p = nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err));
+    ASSERT_NOT_NULL(p);
+    tsleep(100); /* let the shell exec the sleep */
+    nm_proc_interrupt(p);
+    ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
+    ASSERT_EQ(nm_proc_exit(p), 128 + 2); /* SIGINT */
+    nm_proc_close(p);
+
+    /* The shell ignores INT and keeps looping; its `sleep` children die,
+     * which is exactly what a person sees when a script traps INT. */
+    nm_proc_reset();
+    NmProc *stubborn = nm_proc_start(
+        "trap '' INT; while :; do sleep 0.2; done", NULL, NULL, &id, err,
+        sizeof(err));
+    ASSERT_NOT_NULL(stubborn);
+    tsleep(100); /* let the trap install before the signal lands */
+    nm_proc_interrupt(stubborn);
+    tsleep(400);
+    nm_proc_drain(stubborn);
+    ASSERT_EQ(nm_proc_live(stubborn), 1);
+    nm_proc_close(stubborn);
+    nm_proc_reset();
+}
+#endif /* !_WIN32 */
+
+/* Hidden at birth: invisible to /ps, still a job. */
+static void test_opts_hidden_at_birth(void)
+{
+    nm_proc_reset();
+    char err[128];
+    int id = -1;
+    NmProcOpts opts = { 0 };
+    opts.hidden = 1;
+    NmProc *p = nm_proc_start_ex(TEST_LONG, NULL, NULL, &opts, &id, err,
+                                 sizeof(err));
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(nm_proc_hidden(p), 1);
+    ASSERT_EQ(nm_proc_count(), 1);
+    NmSource out[4];
+    ASSERT_EQ(nm_proc_interest(out, 4, -1), 1);
+    nm_proc_close(p);
+    nm_proc_reset();
+}
+
 int main(void)
 {
     nm_proc_reset();
@@ -826,6 +1010,14 @@ int main(void)
     RUN_TEST(test_unexecutable_shell_names_the_reason);
 #endif
     RUN_TEST(test_workdir_is_honored);
+#ifndef _WIN32
+    RUN_TEST(test_opts_user_env_keeps_term);
+    RUN_TEST(test_raw_take_preserves_bytes);
+    RUN_TEST(test_take_dropped_counter);
+    RUN_TEST(test_opts_winsize_at_spawn);
+    RUN_TEST(test_interrupt_is_a_polite_sigint);
+#endif
+    RUN_TEST(test_opts_hidden_at_birth);
 #ifdef _WIN32
     RUN_TEST(test_handle_is_a_signaled_event);
 #endif

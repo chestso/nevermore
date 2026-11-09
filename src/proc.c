@@ -52,6 +52,7 @@ struct NmProc
      * work (the context <env> git stage) is not a process the user
      * started or can usefully kill. */
     int hidden;
+    int raw_output;  /* nm_proc_take_raw is this job's reader */
     char *cmd;       /* for /ps */
     NmProcLock lock; /* guards buf/len/report_pos/dropped (see above) */
     /* Raw accumulation: bytes [report_pos, len) are unreported. */
@@ -208,6 +209,13 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd,
                       const NmProcShell *sh, int *job_id, char *err,
                       size_t errsz)
 {
+    return nm_proc_start_ex(cmd, cwd, sh, NULL, job_id, err, errsz);
+}
+
+NmProc *nm_proc_start_ex(const char *cmd, const char *cwd,
+                         const NmProcShell *sh, const NmProcOpts *opts,
+                         int *job_id, char *err, size_t errsz)
+{
     if (job_id)
         *job_id = -1;
     if (err && errsz)
@@ -233,7 +241,7 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd,
     PROC_LOCK_INIT(&p->lock);
 
     NmProcOs *os = NULL;
-    if (nm_proc_os_spawn(p, cmd, cwd, sh, &os, err, errsz) != 0) {
+    if (nm_proc_os_spawn(p, cmd, cwd, sh, opts, &os, err, errsz) != 0) {
         PROC_LOCK_FREE(&p->lock);
         free(p);
         return NULL;
@@ -243,6 +251,8 @@ NmProc *nm_proc_start(const char *cmd, const char *cwd,
     p->os = os;
     p->handle = nm_proc_os_handle(os);
     p->live = 1;
+    p->hidden = opts ? opts->hidden : 0;
+    p->raw_output = opts ? opts->raw_output : 0;
     p->cmd = strdup(cmd);
     if (registry_add(p) != 0) {
         /* Only reachable if the cap changed under us; be safe.  The job
@@ -874,7 +884,7 @@ char *nm_proc_render(const char *text)
 
 const char *nm_proc_take_output(NmProc *p)
 {
-    if (!p)
+    if (!p || p->raw_output)
         return "";
     /* The report buffer is reused in place (memory-reuse); it is handed
      * out borrowed and rewritten on the next take.  The lock covers the
@@ -909,6 +919,64 @@ const char *nm_proc_take_output(NmProc *p)
     PROC_UNLOCK(&p->lock);
 
     return out.p ? out.p : "";
+}
+
+const char *nm_proc_take_raw(NmProc *p, size_t *len)
+{
+    if (len)
+        *len = 0;
+    if (!p || !p->raw_output)
+        return "";
+    /* Same reused report buffer as the rendered path, WITHOUT the
+     * renderer and without the omission notice: the bytes are the
+     * child's, exactly as written (SGR, CR, tabs), because the
+     * transcript's system stream is a terminal's reader, not the
+     * model's.  The lock covers the copy; the borrowed pointer stays
+     * valid after it is dropped for the same reason take_output's
+     * does. */
+    PROC_LOCK(&p->lock);
+    size_t n = p->len > p->report_pos ? p->len - p->report_pos : 0;
+    if (n + 1 > p->report_cap) {
+        size_t cap = p->report_cap ? p->report_cap : PROC_REPORT_SEED;
+        while (cap < n + 1)
+            cap *= 2;
+        char *np = realloc(p->report, cap);
+        if (!np) { /* OOM: report nothing and keep the bytes for a retry */
+            PROC_UNLOCK(&p->lock);
+            return "";
+        }
+        p->report = np;
+        p->report_cap = cap;
+    }
+    if (n)
+        memcpy(p->report, p->buf + p->report_pos, n);
+    if (p->report)
+        p->report[n] = '\0';
+    /* Delivered: reclaim the raw buffer (its allocation is kept). */
+    p->len = 0;
+    p->report_pos = 0;
+    PROC_UNLOCK(&p->lock);
+    if (len)
+        *len = n;
+    return p->report ? p->report : "";
+}
+
+size_t nm_proc_take_dropped(NmProc *p)
+{
+    if (!p)
+        return 0;
+    PROC_LOCK(&p->lock);
+    size_t n = p->dropped;
+    p->dropped = 0;
+    PROC_UNLOCK(&p->lock);
+    return n;
+}
+
+void nm_proc_interrupt(NmProc *p)
+{
+    if (!p || !p->os)
+        return;
+    nm_proc_os_interrupt(p->os);
 }
 
 /* ---------------------------------------------------------------- */

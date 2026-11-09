@@ -24,13 +24,15 @@ typedef struct NmProcOs NmProcOs;
 
 /* Spawn `cmd` under a shell with merged stdout+stderr and a sanitized
  * environment, in `cwd` (NULL = inherit the process working directory),
- * using the shell `sh` names (NULL = the platform default).  `owner` is
- * the job the child's output belongs to (the Windows reader thread
- * feeds it).  On success fills *os and returns 0; on failure returns -1
- * and writes a message into err. */
+ * using the shell `sh` names (NULL = the platform default).  `opts`
+ * (NULL = the model's defaults) selects the environment, the PTY
+ * window size and nothing else — raw output is the neutral layer's
+ * business.  `owner` is the job the child's output belongs to (the
+ * Windows reader thread feeds it).  On success fills *os and returns 0;
+ * on failure returns -1 and writes a message into err. */
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     const NmProcShell *sh, NmProcOs **os, char *err,
-                     size_t errsz);
+                     const NmProcShell *sh, const NmProcOpts *opts,
+                     NmProcOs **os, char *err, size_t errsz);
 
 /* Release every OS resource: stop the output reader, close pipes,
  * process and group handles.  Does not kill the child (nm_proc_os_kill
@@ -41,6 +43,14 @@ void nm_proc_os_free(NmProcOs *os);
  * led by the child; Windows: the Job Object, with the process itself as
  * the fallback).  A no-op when the group/process is already gone. */
 void nm_proc_os_kill(NmProcOs *os);
+
+/* Deliver a polite interrupt.  POSIX: ^C (0x03) to the PTY master, so
+ * the line discipline raises SIGINT to the foreground group — the
+ * signal a person's own Ctrl+C sends, which a child may catch and
+ * clean up after.  Windows: pipes have no polite form, so this IS
+ * nm_proc_os_kill.  Best-effort; the caller's grace deadline owns the
+ * escalation. */
+void nm_proc_os_interrupt(NmProcOs *os);
 
 /* Reap `os`'s child: 1 = exited (*code filled), 0 = still exiting,
  * -1 = no such child (already reaped / never ours).  Non-blocking by

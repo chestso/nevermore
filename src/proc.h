@@ -63,6 +63,32 @@ typedef struct NmProcShell
     int login;        /* 1 = login semantics where the shell has one */
 } NmProcShell;
 
+/* What a caller wants from a job beyond "run this command".  All-zero
+ * is exactly the model's behaviour, so `nm_proc_start` is this struct
+ * with nothing set.  The prompt's `!` shell mode is the first caller
+ * that is not the model: a person's own command, drawn on their own
+ * terminal, sounding like the shell they typed it into. */
+typedef struct NmProcOpts
+{
+    /* 1 = hand the child the parent's environment UNTOUCHED (TERM,
+     * COLORTERM, the pagers — what a person's own command expects and
+     * what lets a tool pick a colour depth for the real terminal);
+     * 0 = the sanitized environment the model's commands get. */
+    int user_env;
+    /* 1 = nm_proc_take_raw() is this job's reader: the bytes as the
+     * child wrote them, no dumb-terminal rendering.  0 = the model's
+     * nm_proc_take_output().  ONE reader per job, enforced by both
+     * takes: they share the buffer's single report position. */
+    int raw_output;
+    /* 1 = hidden from /ps at birth (nm_proc_set_hidden).  A hidden job
+     * is still an ordinary job: registered, counted against the cap,
+     * and subscribed to the loop (or its child blocks on a full pipe). */
+    int hidden;
+    /* The PTY window size at spawn (POSIX); 0 = the default.  A child
+     * that asks how wide the terminal is gets the app's answer. */
+    unsigned short cols, rows;
+} NmProcOpts;
+
 /* Spawn `cmd` under a shell (the default — `/bin/sh -c` on POSIX,
  * `cmd.exe /d /c` on Windows — unless `sh` names another) in `cwd`
  * (NULL = inherit the process working directory), with a sanitized
@@ -72,6 +98,12 @@ typedef struct NmProcShell
 NmProc *nm_proc_start(const char *cmd, const char *cwd,
                       const NmProcShell *sh, int *job_id, char *err,
                       size_t errsz);
+
+/* nm_proc_start with the caller's choices (`opts` NULL = the model's).
+ * One spawn path: nm_proc_start is this call with nothing set. */
+NmProc *nm_proc_start_ex(const char *cmd, const char *cwd,
+                         const NmProcShell *sh, const NmProcOpts *opts,
+                         int *job_id, char *err, size_t errsz);
 
 /* The shell vocabulary behind NmProcShell: one classification, so the
  * flag vector and the "does this shell have a login mode" question
@@ -154,8 +186,31 @@ void nm_proc_write_eof(NmProc *p);
  * (spinner CR frames collapse, SGR/OSC dropped) with an "N bytes
  * omitted" notice when the bounded buffer evicted unreported bytes.
  * BORROWED: valid until the next nm_proc_take_output/close on this
- * job.  Never NULL ("" when nothing new). */
+ * job.  Never NULL ("" when nothing new).  Empty for a raw_output job:
+ * a rendered take and a raw take would share the buffer's one report
+ * position. */
 const char *nm_proc_take_output(NmProc *p);
+
+/* The RAW bytes produced since the last take — no dumb-terminal
+ * rendering, SGR and CR included exactly as the child wrote them — and
+ * their count through `len`.  BORROWED like nm_proc_take_output, and
+ * never NULL ("" when nothing new).  Empty for a job that is not
+ * raw_output.  The omitted-bytes notice does NOT ride these bytes: it
+ * is nm_proc_take_dropped(). */
+const char *nm_proc_take_raw(NmProc *p, size_t *len);
+
+/* Unreported bytes the bounded buffer evicted since the last call
+ * (0 when none).  Read it rather than the notice text: the raw reader
+ * draws its own line, and the counter is the same one the rendered
+ * path folds into its notice. */
+size_t nm_proc_take_dropped(NmProc *p);
+
+/* Deliver a polite interrupt, then (if the child ignores it) the OS
+ * seam's kill.  POSIX: write ^C to the PTY master — the line
+ * discipline raises SIGINT to the foreground group, exactly what a
+ * terminal does.  Windows: pipes have no polite form, so this IS the
+ * kill. */
+void nm_proc_interrupt(NmProc *p);
 
 /* Bytes currently held in the job's buffer (for `/ps`). */
 size_t nm_proc_buffered(const NmProc *p);

@@ -67,9 +67,16 @@ static int is_overridden(const char *entry)
 }
 
 /* environ with our overrides applied (the originals filtered out, so
- * getenv sees exactly one value per key).  Caller frees the array. */
-static char **build_env(void)
+ * getenv sees exactly one value per key), or the caller's own environment
+ * UNTOUCHED when `user_env` is set — a person's command must sound like
+ * the shell they typed it into (TERM, colours, pagers), while the model's
+ * must never block on a pager or read animation.  Caller frees only what
+ * this function allocated: *owned says which. */
+static char **build_env(int user_env, int *owned)
 {
+    *owned = 0;
+    if (user_env)
+        return environ;
     size_t base = 0;
     while (environ && environ[base])
         base++;
@@ -87,6 +94,7 @@ static char **build_env(void)
     for (size_t i = 0; i < extra; i++)
         env[k++] = (char *)k_env_overrides[i];
     env[k] = NULL;
+    *owned = 1;
     return env;
 }
 
@@ -129,8 +137,8 @@ static void child_exec_diag(const char *path, int err)
 }
 
 int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
-                     const NmProcShell *sh, NmProcOs **os_out, char *err,
-                     size_t errsz)
+                     const NmProcShell *sh, const NmProcOpts *opts,
+                     NmProcOs **os_out, char *err, size_t errsz)
 {
     (void)owner; /* POSIX reads on the loop thread: nothing to hand over */
     *os_out = NULL;
@@ -170,7 +178,21 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         return -1;
     }
 
-    char **env = build_env();
+    /* The window size: the app's own terminal, so a command that asks
+     * how wide the screen is gets the answer a person would see.  Set on
+     * the SLAVE before the fork, so the child can never query the size
+     * before it is the right one; 0 leaves the kernel default alone. */
+    if (opts && opts->cols && opts->rows) {
+        struct winsize ws;
+        memset(&ws, 0, sizeof(ws));
+        ws.ws_col = opts->cols;
+        ws.ws_row = opts->rows;
+        int ws_rc = ioctl(slave, TIOCSWINSZ, &ws);
+        (void)ws_rc; /* cosmetic: a size the kernel refuses is not a failure */
+    }
+
+    int env_owned = 0;
+    char **env = build_env(opts ? opts->user_env : 0, &env_owned);
     if (!env) {
         nm_proc_set_err(err, errsz, "out of memory");
         close(master);
@@ -196,7 +218,8 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
     pid_t pid = fork();
     if (pid < 0) {
         nm_proc_set_err(err, errsz, "fork failed");
-        free(env);
+        if (env_owned)
+            free(env);
         close(master);
         close(slave);
         free(os);
@@ -229,7 +252,8 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
         _exit(127);
     }
 
-    free(env);
+    if (env_owned)
+        free(env); /* the user's own environ is not ours to free */
     close(slave);
 
     int fl = fcntl(master, F_GETFL, 0);
@@ -316,6 +340,21 @@ void nm_proc_os_kill(NmProcOs *os)
      * when the group is already gone. */
     if (kill(-(pid_t)os->pid, SIGKILL) != 0)
         kill((pid_t)os->pid, SIGKILL);
+}
+
+void nm_proc_os_interrupt(NmProcOs *os)
+{
+    if (!os || os->fd < 0)
+        return;
+    /* ^C into the PTY master: the line discipline turns it into SIGINT
+     * for the foreground group, which is precisely what a person's
+     * Ctrl+C does — a child that traps INT gets to clean up, and one
+     * that ignores it leaves the escalation to the caller's deadline.
+     * (A non-blocking master may refuse when the output queue is full;
+     * best-effort is the contract.) */
+    static const char intr = 0x03;
+    ssize_t w = write(os->fd, &intr, 1);
+    (void)w;
 }
 
 int nm_proc_os_reap(NmProcOs *os, int *code)
