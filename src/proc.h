@@ -205,11 +205,11 @@ const char *nm_proc_take_raw(NmProc *p, size_t *len);
  * path folds into its notice. */
 size_t nm_proc_take_dropped(NmProc *p);
 
-/* Deliver a polite interrupt, then (if the child ignores it) the OS
- * seam's kill.  POSIX: write ^C to the PTY master — the line
- * discipline raises SIGINT to the foreground group, exactly what a
- * terminal does.  Windows: pipes have no polite form, so this IS the
- * kill. */
+/* Deliver a polite interrupt: SIGINT to the child's process group on
+ * POSIX (the signal a person's Ctrl+C sends, which a child may catch and
+ * clean up after), the Job Object kill on Windows, where pipes have no
+ * polite form.  Best-effort; the caller's grace deadline owns the
+ * escalation. */
 void nm_proc_interrupt(NmProc *p);
 
 /* Bytes currently held in the job's buffer (for `/ps`). */

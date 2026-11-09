@@ -44,12 +44,12 @@ void nm_proc_os_free(NmProcOs *os);
  * the fallback).  A no-op when the group/process is already gone. */
 void nm_proc_os_kill(NmProcOs *os);
 
-/* Deliver a polite interrupt.  POSIX: ^C (0x03) to the PTY master, so
- * the line discipline raises SIGINT to the foreground group — the
- * signal a person's own Ctrl+C sends, which a child may catch and
- * clean up after.  Windows: pipes have no polite form, so this IS
- * nm_proc_os_kill.  Best-effort; the caller's grace deadline owns the
- * escalation. */
+/* Deliver a polite interrupt: SIGINT to the child's process group (the
+ * signal a person's Ctrl+C sends), which a child may catch and clean up
+ * after — and which cannot be lost to a raw-mode or not-yet-owned tty
+ * the way a ^C byte written to the PTY master can.  Windows: pipes have
+ * no polite form, so this IS nm_proc_os_kill.  Best-effort; the
+ * caller's grace deadline owns the escalation. */
 void nm_proc_os_interrupt(NmProcOs *os);
 
 /* Reap `os`'s child: 1 = exited (*code filled), 0 = still exiting,

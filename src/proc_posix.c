@@ -247,6 +247,13 @@ int nm_proc_os_spawn(NmProc *owner, const char *cmd, const char *cwd,
             (void)cwd_rc;
         }
         signal(SIGPIPE, SIG_DFL); /* do not inherit a SIG_IGN */
+        /* Same trap, same reason: a program started as a BACKGROUND job
+         * of a non-interactive shell inherits SIGINT ignored, and an
+         * ignored disposition survives execve — so a `!` command a user
+         * starts in such a session would ignore the polite interrupt
+         * entirely.  A terminal's child starts with the default
+         * disposition, and that is what this child is. */
+        signal(SIGINT, SIG_DFL);
         execve(sh_path, (char *const *)argv_sh, env);
         child_exec_diag(sh_path, errno); /* why, on the job's own output */
         _exit(127);
@@ -344,17 +351,19 @@ void nm_proc_os_kill(NmProcOs *os)
 
 void nm_proc_os_interrupt(NmProcOs *os)
 {
-    if (!os || os->fd < 0)
+    if (!os || os->pid <= 0)
         return;
-    /* ^C into the PTY master: the line discipline turns it into SIGINT
-     * for the foreground group, which is precisely what a person's
-     * Ctrl+C does — a child that traps INT gets to clean up, and one
-     * that ignores it leaves the escalation to the caller's deadline.
-     * (A non-blocking master may refuse when the output queue is full;
-     * best-effort is the contract.) */
-    static const char intr = 0x03;
-    ssize_t w = write(os->fd, &intr, 1);
-    (void)w;
+    /* SIGINT to the group — the signal a person's Ctrl+C sends.  Written
+     * this way rather than as a ^C byte on the PTY master for one
+     * reason: the byte is only a signal while the child's terminal has
+     * ISIG on and a foreground group, so an interrupt that lands in the
+     * window between fork and the child's TIOCSCTTY — or after a program
+     * put the tty in raw mode — is silently dropped.  The destination
+     * here is the same process group the line discipline would have
+     * signalled; only the transport differs, and this one cannot be
+     * lost.  Escalation stays the caller's (the grace deadline). */
+    if (kill(-(pid_t)os->pid, SIGINT) != 0)
+        kill((pid_t)os->pid, SIGINT);
 }
 
 int nm_proc_os_reap(NmProcOs *os, int *code)
