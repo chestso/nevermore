@@ -825,8 +825,9 @@ registry is global because `NmToolCtx` carries no manager.
   machinery (the `<env>` git stage, Windows's async `run_command`): still
   registered and drained, but skipped by `/ps`, which keeps `/ps` identical
   across platforms.
-- **The spawn takes a shell request** (`NmProcShell`: path + login), and
-  `nm_proc_start` stays the one entry point. NULL means the deterministic
+- **The spawn takes a shell request** (`NmProcShell`: path + login) and an
+  opts struct (`NmProcOpts`), and `nm_proc_start_ex` is the entry point
+  (`nm_proc_start` is it with nothing set). NULL means the deterministic
   platform default (`/bin/sh`, `cmd.exe`) that nevermore's own commands assume,
   so naming a shell is opt-in. One table in `proc.c` (`nm_proc_shell_kind` /
   `_has_login` / `_flags`) holds the flag vector (`-c` / `-lc`, PowerShell's
@@ -837,6 +838,21 @@ registry is global because `NmToolCtx` carries no manager.
   silent. A login shell cannot keep the sanitized env, which is why it is
   opt-in. An exec failure says why on the job's output (written with
   async-signal-safe `write(2)` only).
+- **The opts are for the one caller that is not the model** (the prompt's `!`
+  mode): `user_env` hands the child the parent's environment untouched (TERM,
+  colours, pagers — a person's own command), `raw_output` makes
+  `nm_proc_take_raw` the reader (bytes as written: SGR, CR, no rendering, with
+  `nm_proc_take_dropped` as the omission count, and each take refusing a job
+  that belongs to the other reader — they share one report position), `hidden`
+  marks it out of `/ps` at birth, and `cols`/`rows` set the PTY window before
+  the fork so a child that asks how wide the screen is gets the app's answer.
+  `nm_proc_interrupt` is the polite stop: SIGINT to the child's process group
+  (the signal a person's Ctrl+C sends), the Job Object kill on Windows, with
+  the escalation left to the caller's grace deadline. A child also resets
+  SIGINT to default before exec, the way it resets SIGPIPE: a binary started as
+  a background job of a non-interactive shell inherits SIGINT ignored, and an
+  ignored disposition survives `execve`, so without it every polite interrupt
+  was a no-op under exactly that wrapper.
 - **`run_command` and `exec_command` are complements.** `run_command` waits for
   the exit and returns one result; `exec_command` returns a job id the model
   must poll and kill, and only it gets a PTY on POSIX. Merging them was
@@ -1094,6 +1110,55 @@ directory, and a completed mention is plain text the user can backspace into.
   `mentions` key turns the whole feature off. `/model`'s capability claim moved
   from `@vision` to `cap:vision` when `@` became the prompt's sigil; the old
   spelling is refused with the replacement rather than reinterpreted.
+
+### `!` shell mode
+
+`shell_ui.{h,c}` (prompt + proc glue) over `proc`'s opts. Typing `!` as the
+first character of an empty prompt turns the line into a command line that runs
+through the user's shell; its output streams into the transcript, and Esc/Ctrl+C
+stop it.
+
+- **One armed bit, a decision not a spelling.** `armed` implies `text[0] == '!'`,
+  it is set only by a keystroke (a paste of `!foo` stays a chat line; an Up/Down
+  recall of a `!cmd` entry arms, because the user asked for it), and
+  `nm_shell_ui_sync` re-derives it after every input event — so backspace,
+  select-all-delete, Ctrl+C-clear and undo-past-the-`!` all leave the mode
+  through that one rule. The `!` stays in the buffer and the command is
+  `text + 1`, which is what keeps history, undo and paste honest. While armed,
+  the other prompt grammars stand down: the mention picker answers `enabled()`
+  false and the command/`!`-line rules do the rest.
+- **Submit** branches before the no-model refusal (a person's command needs no
+  model) and shares the app's factored echo — one history record (with the `!`),
+  one echo, one clear, which also disarms through the invariant.
+- **The run is a small state machine** (`IDLE → RUNNING → STOPPING → IDLE`) over
+  a `proc` job id, never a pointer (a close frees the job). `app_busy` is the
+  agent's ladder plus this one: Enter during either is the silent type-ahead
+  no-op, Esc stops whichever is busy (the shell first), Ctrl+C never quits while
+  a command runs.
+- **The output path is the prompt's own.** `NmProcOpts` gives the child the
+  user's environment, raw bytes (`nm_proc_take_raw`, no dumb-terminal rendering),
+  a hidden job (`/ps` lists what the user started, and the prompt owns this one)
+  and a PTY the size of the terminal. The bytes go to boba's system stream with
+  `TUI_STREAM_TEXT_CR_REPLACES`: a child's bytes are a terminal's bytes, so a
+  bare CR is a carriage return and a progress meter animates on one row. boba
+  owns framing, tabs, UTF-8 completeness and SGR containment; the only thing the
+  module owes it is the trailing row (one LF if the last post ended mid-row) and
+  the footer.
+- **Interrupt is two-step.** `nm_proc_interrupt` sends SIGINT to the child's
+  process group (the signal a person's Ctrl+C sends; on Windows the Job Object
+  kill, where pipes have no polite form); `STOPPING` arms a 2 s grace and the
+  app's timer kills the group when it passes, so a child that traps or ignores
+  INT cannot hang the prompt. A second press means "now".
+- **Transcript, never the wire (D9/R2).** Every event is written through the one
+  transcript seam — the echo, each output row, the exit status, the omitted-bytes
+  count, the interrupt marker, the refusal, the closing blank row — and nothing
+  derived from a command reaches the session: no note, no reminder, no file
+  ledger entry, no gauge change, so the next request is byte-identical to the one
+  the same turns would have made without it. That is enforced structurally, not
+  by discipline: the module's link set has no session or agent in it
+  (`tests/test_shell_ui` is the guard binary, and it links `shell_ui.c` and
+  `proc.c` alone), and the host interface hands it a post, a note, an echo, the
+  shell request and a clock — never a conversation.
 
 ### Color tier
 

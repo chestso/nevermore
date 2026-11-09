@@ -468,6 +468,15 @@ AGENTS.md has the rest of the release rules.
   helper.
 - **A closed stdin reports POLLHUP, not POLLIN:** wait on `POLLIN|POLLHUP` or
   poll forever.
+- **An inherited `SIG_IGN` survives `execve`,** so a child started by a wrapper
+  that backgrounds its program (`sh -c 'prog &'`, and every automake test
+  through `scripts/test-watchdog.sh`) has SIGINT ignored before its own code
+  runs. `proc_posix.c` resets `SIGPIPE` and `SIGINT` to `SIG_DFL` in the child
+  for that reason; a signal disposition is inherited state, not a constant.
+- **A `^C` written to a PTY master is only a signal while the terminal has
+  ISIG on and a foreground group** — an interrupt landing between `fork` and
+  the child's `TIOCSCTTY`, or inside a raw-mode program, is silently dropped.
+  `kill(-pgid, SIGINT)` reaches the same processes and cannot be lost.
 - **`nm_json_at` is array-only:** on an object use `nm_json_key` +
   `nm_json_get`.
 - **`nm_source_items()` sets `*n = 0` / NULL before the first fetch:** call

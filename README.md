@@ -151,6 +151,20 @@ gets one short note naming the files and directories you pointed at, and reads
 them with `read_file` if they matter. `mentions off` turns the whole feature
 off.
 
+#### `!` shell mode
+
+Typing `!` as the first character of an empty prompt turns the line into a real
+command line: submitting it runs the text through your shell, in the session's
+working directory, and streams the output into the transcript — colours,
+progress meters and all. Esc or Ctrl+C stops it (a polite interrupt first, the
+whole process group killed if the command ignores it). `exit N` is reported, and
+`... N bytes omitted ...` when a burst outran the output buffer.
+
+The `!` stays in the line, so history keeps it and Up/Down recalls the command
+you typed. Only a keystroke arms the mode: a pasted `!foo` is still a chat line.
+A command's output never reaches the model — it is your terminal, not the
+conversation — and the switch is `shell_mode off`.
+
 #### Slash commands
 
 - `/model`, `/provider`: switch model or provider (the model picker filters, see
@@ -282,6 +296,9 @@ variable says so with an `_MS` suffix.
   never switchable
 - `mentions` (default on): the prompt's `@path` picker, the underline on a
   mention that resolves, and the note a submitted mention adds
+- `shell_mode` (default on): typing `!` at the start of an empty prompt runs the
+  line as a shell command (see `!` shell mode above); off makes `!` an ordinary
+  character
 - `kbd` (default `auto`): kitty keyboard protocol: `auto` (after the terminal
   proves it), `on`, `off`
 - `color` (default `auto`): `auto`, `16` (ANSI palette) or `rgb` (24-bit);

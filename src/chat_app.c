@@ -2830,7 +2830,13 @@ static void print_help(NmChatApp *app)
                   "                     (default: nevermore-session.md)\n"
                   "  /ps                process jobs run by exec_command\n"
                   "  /kill <id>         stop one (group-kill)\n"
-                  "  /quit              leave (Ctrl+C twice works too)");
+                  "  /quit              leave (Ctrl+C twice works too)\n"
+                  "\n"
+                  "prompt:\n"
+                  "  !<command>         run a shell command here (Esc stops it);\n"
+                  "                     needs no model, and never reaches the chat\n"
+                  "  @<path>            mention a file for the model to read\n"
+                  "  /...               a command, never a chat line");
 }
 
 /* /context: the authoritative window breakdown. Every number is
