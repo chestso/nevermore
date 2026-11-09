@@ -312,6 +312,14 @@ extern "C" {
  * than no picker. Env spelling: NEVERMORE_MENTIONS. */
 #define NM_CFG_KEY_MENTIONS "mentions"
 
+/* Whether typing `!` as the first character of an empty prompt arms the
+ * shell mode (a real command line: it runs through the system shell and
+ * its output streams into the terminal). A bool, default on. Off, `!` is
+ * an ordinary character again and submitting runs nothing — the whole
+ * feature is one switch, because a mode that cannot be trusted to stay
+ * shut is worse than no mode. Env spelling: NEVERMORE_SHELL_MODE. */
+#define NM_CFG_KEY_SHELL_MODE "shell_mode"
+
 /* Whether a completed round prints the SERVED-by line: which upstream
  * answered and at which service tier (`openrouter: served by Azure (flex
  * tier)`). A bool, default on.

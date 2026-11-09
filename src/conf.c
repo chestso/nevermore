@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 26
+#define NM_CFG_NKEYS 27
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -182,6 +182,7 @@ static const struct
     /* Appended, never inserted: the vocabulary is a stable list
      * (test_config pins every index), so a new key joins the end. */
     { NM_CFG_KEY_MENTIONS, "NEVERMORE_MENTIONS", "on" },
+    { NM_CFG_KEY_SHELL_MODE, "NEVERMORE_SHELL_MODE", "on" },
 };
 
 static void init_keys(NmConfig *c)
@@ -1073,6 +1074,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
                strcmp(key, NM_CFG_KEY_SPINNER_RAMP) == 0 ||
                strcmp(key, NM_CFG_KEY_MENTIONS) == 0 ||
+               strcmp(key, NM_CFG_KEY_SHELL_MODE) == 0 ||
                strcmp(key, NM_CFG_KEY_SERVED_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SKILLS) == 0 ||
                strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {

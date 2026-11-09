@@ -865,7 +865,8 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(23), NM_CFG_KEY_IMAGE_LIVE);
     ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_CREDITS_TTL);
     ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_MENTIONS);
-    ASSERT_NULL(nm_config_key_at(26));
+    ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_SHELL_MODE);
+    ASSERT_NULL(nm_config_key_at(27));
     /* The model is not a key: no plain spelling, no env name of its own
      * (the run-level override's spelling is NM_ENV_MODEL). */
     ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));
@@ -1543,6 +1544,40 @@ static void test_mentions_key(void)
     nm_config_free(c);
 }
 
+/* The `!` shell mode's switch: a bool, default on, in the same shape as
+ * `mentions` (the two prompt sigils are two switches). */
+static void test_shell_mode_key(void)
+{
+    pin_paths("shell_mode");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SHELL_MODE, 1));
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_SHELL_MODE), "on");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_SHELL_MODE),
+                  "NEVERMORE_SHELL_MODE");
+
+    write_file_at(g_user, "shell_mode = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_SHELL_MODE, 1));
+    nm_config_free(c2);
+
+    /* Off is a real opinion, not an unset: the env spelling wins over
+     * it the way it does for every other bool. */
+    test_setenv("NEVERMORE_SHELL_MODE", "true");
+    nm_config_set_env(c2 = nm_config_load());
+    ASSERT_TRUE(nm_config_get_bool(c2, NM_CFG_KEY_SHELL_MODE, 0));
+    nm_config_free(c2);
+    test_unsetenv("NEVERMORE_SHELL_MODE");
+
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SHELL_MODE, "off"), 0);
+    ASSERT_STR_EQ(read_file_at(g_shadow), "shell_mode = off\n");
+    ASSERT_EQ(nm_config_shadow_set(c, NM_CFG_KEY_SHELL_MODE, "maybe"), -1);
+    ASSERT_EQ(nm_config_shadow_reset(c, NM_CFG_KEY_SHELL_MODE), 0);
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_SHELL_MODE, 1));
+    nm_config_free(c);
+}
+
 /* The sampling knobs. Neither key has a built-in default: unset means
  * the field never rides the request and the provider's own default
  * rules — the shape every shipped build has used all along.
@@ -2037,6 +2072,7 @@ int main(void)
     RUN_TEST(test_login_shell_key);
     RUN_TEST(test_spinner_ramp_key);
     RUN_TEST(test_mentions_key);
+    RUN_TEST(test_shell_mode_key);
     RUN_TEST(test_sampling_knobs);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);

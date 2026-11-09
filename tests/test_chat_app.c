@@ -11155,6 +11155,248 @@ static void test_mention_submit_sends_a_note(void)
     close(sc.fd);
 }
 
+/* ---------------------------------------------------------------- */
+/* The prompt's `!` shell mode (D1-D9), through the boba model      */
+/* ---------------------------------------------------------------- */
+
+/* Drive the prompt's own command to its end the way the event loop
+ * does: dispatch whatever the app declares ready, tick on a timeout.
+ * Bounded by wall clock. */
+static int shell_drive(AppHarness *h, int budget_ms)
+{
+    long long t0 = wall_ms();
+    while (nm_chat_app_shell_running(h->app)) {
+        if (wall_ms() - t0 > (long long)budget_ms)
+            return -1;
+        harness_event_once(h, 10);
+    }
+    tui_runtime_flush(h->rt);
+    return 0;
+}
+
+static int shell_count_substr(const char *hay, const char *needle)
+{
+    int n = 0;
+    size_t len = strlen(needle);
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += len)
+        n++;
+    return n;
+}
+
+/* A `!` line runs with NO model set: it needs none (D2's branch is
+ * before the refusal), the echo is the user's line, and the output
+ * lands in the transcript. */
+static void test_shell_line_runs_with_no_model(void)
+{
+    AppHarness *h = harness_new("ollama:local", NULL, NULL);
+    ASSERT_NOT_NULL(h);
+    const char *before = harness_read(h);
+    int notices = shell_count_substr(before, "no model for provider");
+
+    harness_type(h, "!printf 'shell-ok\\n'");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 1);
+    ASSERT_EQ(shell_drive(h, 5000), 0);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
+
+    const char *out = harness_read(h);
+    /* The line itself, echoed once (the `!` carries its own style span,
+     * so these are its bytes and not a contiguous "!printf"). */
+    ASSERT_NOT_NULL(strstr(out, "printf 'shell-ok\\n'"));
+    /* Its output. */
+    ASSERT_NOT_NULL(strstr(out, "shell-ok"));
+    /* And no "no model" refusal: a shell line is not a chat line. */
+    ASSERT_EQ(shell_count_substr(out, "no model for provider"), notices);
+    /* Nothing is left in the prompt (the echo cleared it). */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "");
+
+    harness_free(h);
+}
+
+/* A shell line submitted while a turn streams is the type-ahead no-op
+ * (D6): the line stays in the prompt and nothing runs. */
+static void test_shell_line_waits_for_a_running_turn(void)
+{
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 1;
+    sc.delay_us = 1000;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\" two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "hi");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
+
+    /* Type ahead: the line is kept and nothing is started. */
+    harness_type(h, "!echo typed-ahead");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "!echo typed-ahead");
+
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
+    /* The turn's end did not eat the typed-ahead line either. */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "!echo typed-ahead");
+
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+/* Esc stops a running command and nothing else (D7): the interrupt
+ * marker lands, the prompt keeps what it had, and the app is alive. */
+static void test_shell_escape_stops_the_command(void)
+{
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    harness_type(h, "!sleep 30");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 1);
+    usleep(100 * 1000); /* let the shell exec the sleep */
+
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
+    tui_runtime_flush(h->rt);
+    ASSERT_EQ(shell_drive(h, 5000), 0);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
+
+    const char *out = harness_read(h);
+    ASSERT_NOT_NULL(strstr(out, "interrupted"));
+    /* Esc never quits and never clears a line: a prompt is still here. */
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "");
+
+    harness_free(h);
+}
+
+/* `shell_mode off` makes `!` an ordinary character: the line is a CHAT
+ * line, and with no model it is refused the way any other chat line is. */
+static void test_shell_mode_off_makes_bang_a_chat_line(void)
+{
+    AppHarness *h = harness_new("ollama:local", NULL, NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+    ASSERT_EQ(nm_config_runtime_set(cfg, NM_CFG_KEY_SHELL_MODE, "off"), 0);
+    const char *before = harness_read(h);
+    int notices = shell_count_substr(before, "no model for provider");
+
+    harness_type(h, "!printf 'shell-ok\\n'");
+    harness_enter(h);
+    ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
+
+    /* Refused as a chat line (the no-model notice), the line left in the
+     * prompt for /model + re-submit. */
+    const char *out = harness_read(h);
+    ASSERT_EQ(shell_count_substr(out, "no model for provider"), notices + 1);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
+                  "!printf 'shell-ok\\n'");
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
+/* R2, on the real stack: a shell exchange never reaches the wire. Two
+ * turns with a shell run between them produce a request BYTE-IDENTICAL
+ * to the same two turns without one, and the command's output appears
+ * nowhere in it. */
+static void test_shell_exchange_never_reaches_the_wire(void)
+{
+    /* The control: two ordinary turns, no shell line. */
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, chat_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    AppHarness *h = harness_new("ollama:local", "test-model", base);
+    ASSERT_NOT_NULL(h);
+    harness_type(h, "one");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    harness_type(h, "two");
+    harness_enter(h);
+    ASSERT_EQ(harness_drive(h, 500), 0);
+    char *control = strdup(g_request);
+    ASSERT_NOT_NULL(control);
+    harness_free(h);
+    pthread_join(th, NULL);
+    close(sc.fd);
+
+    /* The same two turns with a shell run in between. */
+    struct ServerScript sc2;
+    memset(&sc2, 0, sizeof(sc2));
+    sc2.n_rounds = 2;
+    sc2.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"first answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc2.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc2.fd = server_bind(&sc2.port);
+    ASSERT_TRUE(sc2.fd >= 0);
+    pthread_t th2;
+    pthread_create(&th2, NULL, chat_server_thread, &sc2);
+
+    char base2[64];
+    snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc2.port);
+    AppHarness *h2 = harness_new("ollama:local", "test-model", base2);
+    ASSERT_NOT_NULL(h2);
+    harness_type(h2, "one");
+    harness_enter(h2);
+    ASSERT_EQ(harness_drive(h2, 500), 0);
+
+    harness_type(h2, "!printf SENTINEL");
+    harness_enter(h2);
+    ASSERT_EQ(shell_drive(h2, 5000), 0);
+    ASSERT_NOT_NULL(strstr(harness_read(h2), "SENTINEL"));
+
+    harness_type(h2, "two");
+    harness_enter(h2);
+    ASSERT_EQ(harness_drive(h2, 500), 0);
+
+    /* The request is the same one the control made, byte for byte: the
+     * prefix cache and the session see nothing (D9/R2). */
+    {
+        /* The two runs bind different ephemeral ports, so the Host header
+         * differs by construction; the BODY is what the session produced
+         * and it must be identical byte for byte. */
+        const char *sep_a = strstr(control, "\r\n\r\n");
+        const char *sep_b = strstr(g_request, "\r\n\r\n");
+        ASSERT_NOT_NULL(sep_a);
+        ASSERT_NOT_NULL(sep_b);
+        ASSERT_TRUE(strcmp(sep_a + 4, sep_b + 4) == 0);
+    }
+    ASSERT_TRUE(strstr(g_request, "SENTINEL") == NULL);
+    free(control);
+
+    harness_free(h2);
+    pthread_join(th2, NULL);
+    close(sc2.fd);
+}
+
 int main(void)
 {
 #ifndef _WIN32
@@ -11378,6 +11620,11 @@ int main(void)
     RUN_TEST(test_mention_slash_line_never_opens);
     RUN_TEST(test_mention_key_disables_the_feature);
     RUN_TEST(test_mention_submit_sends_a_note);
+    RUN_TEST(test_shell_line_runs_with_no_model);
+    RUN_TEST(test_shell_line_waits_for_a_running_turn);
+    RUN_TEST(test_shell_escape_stops_the_command);
+    RUN_TEST(test_shell_mode_off_makes_bang_a_chat_line);
+    RUN_TEST(test_shell_exchange_never_reaches_the_wire);
 #ifdef _WIN32
     RUN_TEST(test_windows_job_source_kind);
 #else

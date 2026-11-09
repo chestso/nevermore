@@ -175,6 +175,13 @@ void nm_chat_app_on_round_meta(const NmRoundMeta *meta, void *userdata);
 
 /* Introspection / test seams. */
 NmAgentState nm_chat_app_state(const NmChatApp *app);
+
+/* Is the prompt's own `!` command running? The agent state says nothing
+ * about it — a shell line runs beside the conversation, never inside it —
+ * so this is the second half of the app's busy state (Enter is a no-op
+ * while either is true, and Esc/Ctrl+C stop whichever is). */
+int nm_chat_app_shell_running(const NmChatApp *app);
+
 const char *nm_chat_app_model(const NmChatApp *app);
 const char *nm_chat_app_provider(const NmChatApp *app);
 NmAgent *nm_chat_app_agent(const NmChatApp *app);

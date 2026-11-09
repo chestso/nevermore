@@ -62,6 +62,7 @@
 #include "markdown_render.h"
 #include "image.h"
 #include "mention_ui.h"
+#include "shell_ui.h"
 #include "size.h"
 #include "source.h"
 #include "sysout.h"
@@ -163,6 +164,12 @@ struct NmChatApp
      * filesystem; this file gives it the workdir seam, the config
      * switch and the popup-kind latch, and nothing else. */
     NmMentionUi *mention;
+
+    /* The prompt's `!` shell mode (shell_ui.h): the armed bit, the run
+     * state machine and the interrupt ladder. It knows boba and proc;
+     * this file gives it the post, the echo, the shell request and the
+     * clock, and nothing that reaches the session (D9/R2). */
+    NmShellUi *shell;
 
     /* The status row (spinner glyph + context gauge + separator rule +
      * the right-aligned identity block): boba's statusline component,
@@ -356,6 +363,12 @@ static const char *endpoint_key(const NmChatApp *app, const NmProvider *p);
 static void show_models_popup(NmChatApp *app, NmListSource *s,
                               const ModelQuery *q);
 
+/* The submit sequence and the busy predicate: the shell mode's host
+ * (shell_ui.h) needs both, and both are defined further down with the
+ * submit path and the agent's state ladder. */
+static void echo_and_clear(NmChatApp *app, const char *text);
+static int app_busy(const NmChatApp *app);
+
 /* ---------------------------------------------------------------- */
 /* Transcript writers (boba's streaming IR owns the scrollback)     */
 /* ---------------------------------------------------------------- */
@@ -456,15 +469,21 @@ static void sys_text(NmChatApp *app, const char *s)
  * and the /model refusal are the long ones, and both interpolate a
  * provider's own text); vsnprintf truncates rather than overruns, and a
  * system line cut short is visible, not silent. */
-static void sys_role(NmChatApp *app, NmSgrRole role, const char *fmt, ...)
+static void sys_role_v(NmChatApp *app, NmSgrRole role, const char *fmt,
+                       va_list ap)
 {
     char body[4096];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(body, sizeof(body), fmt, ap);
-    va_end(ap);
     sys_line(app, "%s%s%s", nm_sgr(role, color_depth(app)), body,
              NM_SGR_RESET);
+}
+
+static void sys_role(NmChatApp *app, NmSgrRole role, const char *fmt, ...)
+{
+    va_list ap;
+    va_start(ap, fmt);
+    sys_role_v(app, role, fmt, ap);
+    va_end(ap);
 }
 
 /* One blank transcript row: the separator that follows content/reasoning
@@ -1565,12 +1584,17 @@ static const char *mention_workdir(void *ud)
 }
 
 /* Is the feature on? The store's `mentions` key, resolved at the point
- * of use — so /config takes effect on the next keystroke. */
+ * of use — so /config takes effect on the next keystroke. A `!` line
+ * owns its grammar while it is armed, so the picker stands down for it
+ * through this one answer (the scan, the popup and Tab re-entry all read
+ * it). */
 static int mention_enabled(void *ud)
 {
     NmChatApp *app = ud;
     if (!app || !app->cfg)
         return 1;
+    if (nm_shell_ui_armed(app->shell))
+        return 0;
     return nm_config_resolve_bool(app->cfg, NM_CFG_KEY_MENTIONS, 1);
 }
 
@@ -1590,6 +1614,155 @@ static void mention_notify(void *ud, int open)
     if (!app)
         return;
     app->popup_kind = open ? POPUP_MENTION : POPUP_NONE;
+}
+
+/* ---- the prompt's `!` shell mode (shell_ui.h) -------------------- */
+
+/* The `shell_mode` key, resolved at the point of use (offs makes `!` an
+ * ordinary character again). */
+static int shell_enabled(void *ud)
+{
+    NmChatApp *app = ud;
+    if (!app || !app->cfg)
+        return 1;
+    return nm_config_resolve_bool(app->cfg, NM_CFG_KEY_SHELL_MODE, 1);
+}
+
+/* The same base the tools and the mentions use: the process working
+ * directory (their NmToolCtx.workdir is NULL for the same reason). */
+static const char *shell_workdir(void *ud)
+{
+    (void)ud;
+    return NULL;
+}
+
+/* Which shell a person's line runs under: their own ($SHELL) when the
+ * environment names one, the platform default otherwise — and the same
+ * `login_shell` policy the model's commands obey. The model's
+ * determinism argument (a fixed /bin/sh) does not apply to a line the
+ * user typed, and their aliases live in their own shell. */
+static void shell_request(void *ud, NmProcShell *out)
+{
+    NmChatApp *app = ud;
+    if (!out)
+        return;
+    const char *user = getenv("SHELL");
+    out->path = (user && *user) ? user : NULL; /* NULL = the default */
+    out->login = 0;
+    if (app && app->cfg)
+        out->login =
+            nm_config_resolve_bool(app->cfg, NM_CFG_KEY_LOGIN_SHELL, 0);
+}
+
+/* Is a MODEL turn in flight? The shell run is not this predicate's
+ * business (the module knows its own state; app_busy adds it). */
+static int shell_host_busy(void *ud)
+{
+    NmChatApp *app = ud;
+    if (!app || !app->agent)
+        return 0;
+    NmAgentState st = nm_agent_state(app->agent);
+    return st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL;
+}
+
+/* The output path (D5): the child's bytes go to the system stream with
+ * the CR reading, because they are a terminal's bytes. No rendering, no
+ * holding, no second stream: boba drops framing, expands tabs, keeps
+ * SGR contained and commits the partial row at once, and the sink's one
+ * remaining duty (ending the last row) is shell_ui's. */
+static void shell_post(void *ud, const char *bytes, size_t n)
+{
+    NmChatApp *app = ud;
+    if (!app || !bytes || n == 0)
+        return;
+    send_msg(app,
+             tui_msg_stream_text_ex(-1, bytes, n, TUI_STREAM_TEXT_CR_REPLACES));
+}
+
+/* A shell note line, in the role its kind means: a refused start is an
+ * error, an interrupt is the cancel marker's own role, a status line is
+ * muted chrome. */
+static void shell_note(void *ud, int kind, const char *fmt, ...)
+{
+    NmChatApp *app = ud;
+    if (!app)
+        return;
+    NmSgrRole role = NM_SGR_TOOL;
+    if (kind == NM_SHELL_NOTE_ERROR)
+        role = NM_SGR_ERROR;
+    va_list ap;
+    va_start(ap, fmt);
+    sys_role_v(app, role, fmt, ap);
+    va_end(ap);
+}
+
+static void shell_blank(void *ud)
+{
+    NmChatApp *app = ud;
+    if (app)
+        sys_blank(app);
+}
+
+/* The user's line: recorded (with its `!`, so history round-trips),
+ * echoed once, and the prompt cleared — which disarms through the
+ * armed-bit invariant. Shared with the app's own submit path (one
+ * echo, one order). */
+static void shell_echo_line(void *ud, const char *text)
+{
+    NmChatApp *app = ud;
+    if (app)
+        echo_and_clear(app, text);
+}
+
+/* The run's spinner: the stars, like any other long-running job of the
+ * app's (a tool call uses them too). Stopping restores the idle frame;
+ * the agent's own next state change re-chooses its style. */
+static void shell_spinner(void *ud, int running)
+{
+    NmChatApp *app = ud;
+    if (!app || !app->spinner)
+        return;
+    if (running) {
+        nm_spinner_set_style(app->spinner, NM_SPINNER_STARS);
+        nm_spinner_set_running(app->spinner, 1);
+        app->spinner_frame = nm_spinner_frame(app->spinner, color_depth(app));
+    } else {
+        nm_spinner_set_running(app->spinner, 0);
+        app->spinner_frame = (NmSpinnerFrame){ 0 };
+    }
+}
+
+/* The shell's posts land inside the event they were read in, so a frame
+ * must be painted for them to be committed and drawn. */
+static void shell_request_frame(void *ud)
+{
+    NmChatApp *app = ud;
+    if (app && app->rt)
+        tui_runtime_wakeup(app->rt);
+}
+
+/* The child's PTY is the size of the app's terminal, so a command that
+ * asks how wide the screen is gets the answer a person would see. */
+static void shell_term_size(void *ud, unsigned short *cols,
+                            unsigned short *rows)
+{
+    NmChatApp *app = ud;
+    if (!app || !cols || !rows)
+        return;
+    int w = app->term_w > 0 ? app->term_w : 80;
+    int h = app->term_h > 0 ? app->term_h : 24;
+    *cols = (unsigned short)(w > 65535 ? 65535 : w);
+    *rows = (unsigned short)(h > 65535 ? 65535 : h);
+}
+
+/* The `!` mark in the prompt: Cyan, the same role the status row uses
+ * for a marker (nm_color_gauge_output), tier-resolved here like every
+ * other colour. */
+static TuiStyle shell_mark_style(void *ud)
+{
+    NmChatApp *app = ud;
+    TuiColor c = nm_color_gauge_output(app ? color_depth(app) : NM_COLOR_16);
+    return tui_style_foreground(tui_style_new(), c);
 }
 
 /* The input's geometry: soft-wrapped at the terminal width, INLINE
@@ -1739,6 +1912,30 @@ NmChatApp *nm_chat_app_new(const char *provider_name, const char *model)
     app->mention = nm_mention_ui_new(app->input, app->popup, &mention_host);
     if (!app->mention)
         goto oom;
+
+    /* The prompt's `!` shell mode, over the same input (the armed bit is
+     * a property of the line being typed). The host gives it the app's
+     * one transcript seam, the factored echo, the shell request and the
+     * clock — no session handle, by construction (D8, D9/R2). */
+    NmShellUiHost shell_host = {
+        .input = app->input,
+        .enabled = shell_enabled,
+        .workdir = shell_workdir,
+        .shell_request = shell_request,
+        .busy = shell_host_busy,
+        .post = shell_post,
+        .note = shell_note,
+        .blank = shell_blank,
+        .echo_line = shell_echo_line,
+        .spinner = shell_spinner,
+        .request_frame = shell_request_frame,
+        .term_size = shell_term_size,
+        .mark_style = shell_mark_style,
+        .ud = app,
+    };
+    app->shell = nm_shell_ui_new(&shell_host);
+    if (!app->shell)
+        goto oom;
     /* The tier-dependent colors: applied here for the first paint and
      * RE-applied by apply_chrome_colors once the probe answers. The
      * runtime does not exist yet at construction, so color_depth() reads
@@ -1778,6 +1975,10 @@ void nm_chat_app_free(NmChatApp *app)
         nm_config_set_store(NULL);
     /* The mention UI goes first: it borrows the input and the popup. */
     nm_mention_ui_free(app->mention);
+    /* The shell mode borrows the input too, and owns a process group: it
+     * dies here, before the input it reads (and before nm_proc_close_all
+     * below, which would free the job under it). */
+    nm_shell_ui_free(app->shell);
     tui_textinput_free(app->input);
     tui_list_popup_free(app->popup);
     tui_statusline_free(app->status);
@@ -2106,6 +2307,13 @@ void nm_chat_app_external_ready(NmChatApp *app, intptr_t handle,
         nm_chat_app_step(app);
         return;
     }
+    /* The prompt's own command: it has a private state machine and a
+     * reader that is not the model's (raw bytes, no rendered take), so
+     * it is answered before the background-job drain below. */
+    if (nm_shell_ui_owns_handle(app->shell, handle)) {
+        nm_shell_ui_ready(app->shell);
+        return;
+    }
     NmProc *p = nm_proc_by_handle(handle);
     if (p)
         nm_proc_drain(p);
@@ -2263,11 +2471,30 @@ static void timer_credits_refresh_fire(NmChatApp *app)
     nm_credits_fetch_begin(app->provider->id, app->base_url, key);
 }
 
+/* The shell's stop grace (D7): the tick that kills a child which ignored
+ * the polite interrupt. The deadline is the module's (it owns the run);
+ * this is only the clock arithmetic. */
+static int timer_shell_ms(NmChatApp *app)
+{
+    uint64_t deadline = nm_shell_ui_deadline(app->shell);
+    if (!deadline)
+        return -1;
+    double now = nm_monotonic_seconds() * 1000.0;
+    int ms = (int)((double)deadline - now);
+    return ms > 0 ? ms : 0;
+}
+
+static void timer_shell_fire(NmChatApp *app)
+{
+    nm_shell_ui_tick(app->shell);
+}
+
 static const NmAppTimer k_app_timers[] = {
     { timer_agent_ms, timer_agent_fire },
     { timer_catalog_ms, timer_catalog_fire },
     { timer_credits_fetch_ms, timer_credits_fetch_fire },
     { timer_credits_refresh_ms, timer_credits_refresh_fire },
+    { timer_shell_ms, timer_shell_fire },
 };
 
 void nm_chat_app_tick(NmChatApp *app)
@@ -2312,6 +2539,11 @@ int nm_chat_app_tick_ms(NmChatApp *app)
 NmAgentState nm_chat_app_state(const NmChatApp *app)
 {
     return app ? nm_agent_state(app->agent) : NM_AGENT_IDLE;
+}
+
+int nm_chat_app_shell_running(const NmChatApp *app)
+{
+    return app ? nm_shell_ui_running(app->shell) : 0;
 }
 
 const char *nm_chat_app_model(const NmChatApp *app)
@@ -4804,6 +5036,39 @@ static void run_command(NmChatApp *app, const char *text, TuiCmd **cmd_out)
 /* Submit                                                           */
 /* ---------------------------------------------------------------- */
 
+/* The echo contract (D10), factored out because a `!` line uses it too:
+ * FINALIZE every LIVE block across all streams (submit does not echo); a
+ * flush commits those blocks above the prompt; finish_inline is the ONE
+ * echo of the user's line (ditty's pattern — the rendered input line
+ * persists into the terminal's committed rows). The input must still be
+ * rendered when finish_inline runs, so clearing happens after. Splitting
+ * the echo would double-print the user's line.
+ *
+ * Chrome is live, not history: the status row (spinner/gauge/rule/
+ * identity) sits ABOVE the prompt in the frame, so finishing the frame
+ * would strand that row above the echoed line. The flag is the whole
+ * mechanism: the composer declares no row for the frames it covers, so
+ * there is nothing to strand — and the next frame declares the row
+ * again.
+ *
+ * The line is recorded in prompt history FIRST, with whatever it is
+ * (a `!cmd` keeps its sigil, so Up/Down recalls the same line the user
+ * typed). */
+static void echo_and_clear(NmChatApp *app, const char *text)
+{
+    if (text && *text)
+        nm_history_record(app->input, text);
+
+    app->submitting = 1;
+
+    send_msg(app, tui_msg_transcript_submit(text ? text : "",
+                                            text ? strlen(text) : 0));
+    tui_runtime_flush(app->rt);
+    tui_runtime_finish_inline(app->rt);
+    app->submitting = 0;
+    tui_textinput_clear(app->input);
+}
+
 static void submit(NmChatApp *app, TuiCmd **cmd_out)
 {
     const char *text = tui_textinput_text(app->input);
@@ -4818,6 +5083,12 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
      * was completing. */
     nm_mention_ui_close(app->mention);
 
+    /* The `!` shell line (D2), BEFORE the no-model refusal: a person's
+     * own command needs no model. The mode owns the branch entirely —
+     * its own echo, its own process, no session, no agent (D9/R2). */
+    if (nm_shell_ui_submit(app->shell, text))
+        return;
+
     /* A send with no model is refused BEFORE anything is echoed: the
      * line would otherwise look delivered. The input is left intact so
      * the user can /model and re-submit. Slash commands still run —
@@ -4830,30 +5101,7 @@ static void submit(NmChatApp *app, TuiCmd **cmd_out)
     char *saved = strdup(text);
     if (!saved)
         return;
-    if (*saved)
-        nm_history_record(app->input, saved);
-
-    /* The echo contract (D10): submit FINALIZES every LIVE block across
-     * all streams and does not echo; a flush commits those blocks above
-     * the prompt; finish_inline is the ONE echo of the user's line
-     * (ditty's pattern — the rendered input line persists into the
-     * scrollback). The input must still be rendered when finish_inline
-     * runs, so clearing happens after. Splitting the echo would
-     * double-print the user's line.
-     *
-     * Chrome is live, not history: the status row (spinner/gauge/rule/
-     * identity) sits ABOVE the prompt in the frame, so finishing the
-     * frame would strand that row in the scrollback above the echoed
-     * line. The flag is the whole mechanism: the composer declares no
-     * row for the frames it covers, so there is nothing to strand — and
-     * the next frame declares the row again. */
-    app->submitting = 1;
-
-    send_msg(app, tui_msg_transcript_submit(saved, strlen(saved)));
-    tui_runtime_flush(app->rt);
-    tui_runtime_finish_inline(app->rt);
-    app->submitting = 0;
-    tui_textinput_clear(app->input);
+    echo_and_clear(app, saved);
 
     /* The handoff frame. Everything between here and the turn's first
      * tick can block for as long as the machine's name service takes —
@@ -5072,10 +5320,29 @@ static void popup_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         *cmd_out = r.cmd;
 }
 
-/* Interrupt (Ctrl+C): busy -> cancel the turn; idle with text ->
- * abort the edit; idle empty -> quit. */
+/* The ONE busy predicate: a model turn in flight, or a shell command
+ * running. Enter during either is the silent type-ahead no-op (D6), and
+ * Escape / Ctrl+C route by which one it is (D7). */
+static int app_busy(const NmChatApp *app)
+{
+    if (!app)
+        return 0;
+    if (nm_shell_ui_running(app->shell))
+        return 1;
+    NmAgentState st = nm_agent_state(app->agent);
+    return st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL;
+}
+
+/* Interrupt (Ctrl+C): a shell command, then busy -> cancel the turn;
+ * idle with text -> abort the edit; idle empty -> quit. */
 static TuiCmd *chat_interrupt(NmChatApp *app)
 {
+    /* The shell comes FIRST (D7): it is the thing the user is looking
+     * at, and Ctrl+C while a command runs must never quit. */
+    if (nm_shell_ui_running(app->shell)) {
+        nm_shell_ui_interrupt(app->shell);
+        return NULL;
+    }
     NmAgentState st = nm_agent_state(app->agent);
     if (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL) {
         nm_agent_cancel(app->agent); /* on_state(IDLE) prints the marker */
@@ -5101,27 +5368,31 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         return;
     }
 
-    NmAgentState st = nm_agent_state(app->agent);
-    int busy = (st == NM_AGENT_STREAMING || st == NM_AGENT_RUNNING_TOOL);
+    int busy = app_busy(app);
 
-    /* Escape interrupts the turn — the second interrupt key, next to
-     * Ctrl+C — and NOTHING else: it cancels the round (the stream, or
-     * the running tool, so the agent walks back to IDLE and the next
-     * prompt can be typed) but never aborts the edit and never quits.
+    /* Escape interrupts — the second interrupt key, next to Ctrl+C — and
+     * NOTHING else: it stops the shell command (D7), or cancels the round
+     * (the stream, or the running tool, so the agent walks back to IDLE
+     * and the next prompt can be typed), but never aborts the edit and
+     * never quits. At an idle armed prompt it is inert: the line stays.
      * The popup above keeps its own Escape (close the popup), and a
-     * release is not a press: a kitty terminal that reports event
-     * types would otherwise cancel on the key's release. */
+     * release is not a press: a kitty terminal that reports event types
+     * would otherwise cancel on the key's release. */
     if (key->key == TUI_KEY_ESCAPE && key->action == TUI_KEY_ACTION_PRESS &&
         busy) {
-        nm_agent_cancel(app->agent); /* on_state(IDLE) prints the marker */
+        if (nm_shell_ui_running(app->shell))
+            nm_shell_ui_interrupt(app->shell);
+        else
+            nm_agent_cancel(app->agent); /* on_state(IDLE) prints the marker */
         return;
     }
 
     if (key->key == TUI_KEY_ENTER && !(key->mods & TUI_MOD_SHIFT)) {
-        /* Enter submits when idle; while a turn is in flight it is a
-         * silent no-op — type ahead and the send happens when the turn
-         * ends (Q3). Every OTHER key still edits the buffer while busy,
-         * so the input row is a live prompt, not a dead one. */
+        /* Enter submits when idle; while a turn or a shell command is in
+         * flight it is a silent no-op — type ahead and the send happens
+         * when the work ends (Q3, D6). Every OTHER key still edits the
+         * buffer while busy, so the input row is a live prompt, not a
+         * dead one. */
         if (busy)
             return;
         submit(app, cmd_out);
@@ -5137,6 +5408,12 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         if (nm_mention_ui_reenter(app->mention))
             return;
     }
+
+    /* The shell mode's one keystroke reading (`!` on an empty buffer, an
+     * Up/Down recall): recorded BEFORE the input sees the key, applied by
+     * the sync at the end of this update. It never consumes the key — the
+     * input inserts and navigates exactly as it always does. */
+    nm_shell_ui_key(app->shell, key);
 
     TuiUpdateResult r = tui_textinput_update(app->input, input_key_msg(key));
     if (r.cmd) {
@@ -5255,6 +5532,10 @@ static TuiUpdateResult chat_app_update(TuiModel *model, TuiMsg msg)
     /* Flush so the batch staged by this update commits now (the commit
      * pass runs at the top of flush; coalesces into one write). */
     nm_mention_ui_sync(app->mention);
+    /* AFTER the mention sync: both declare the prompt's style spans, a
+     * span set is replaced whole, and while a `!` line is armed the
+     * mention UI has already stood down and cleared its own. */
+    nm_shell_ui_sync(app->shell);
     tui_runtime_flush(app->rt);
     return cmd ? tui_update_result(cmd) : tui_update_result_none();
 }
@@ -5435,12 +5716,14 @@ static void compose_status(NmChatApp *app)
      * would dangle by the time the row is declared. */
     NmCreditCell cells[NM_CREDIT_CELLS_MAX];
 
-    /* glyph + 3 gauge fields + effort + 3 credit cells + rule +
+    /* glyph + shell + 3 gauge fields + effort + 3 credit cells + rule +
      * identity */
-    TuiSegment segs[11];
+    TuiSegment segs[12];
     size_t n = 0;
     char glyph_text[16];
+    char shell_text[8];
     char effort_text[32];
+    shell_text[0] = '\0';
     if (frame->glyph) {
         /* The dark phase of a blink keeps the column: the segment is
          * declared as spaces rather than dropped, or the gauge behind it
@@ -5454,6 +5737,17 @@ static void compose_status(NmChatApp *app)
                              ? tui_color_rgb(frame->r, frame->g, frame->b)
                              : tui_color_ansi(frame->ansi16);
         segs[n++] = status_segment(glyph_text, TUI_SEGMENT_LEFT, 0, 0, 0, color);
+    }
+
+    /* The `!` mode's declaration: while a line is armed, or a command
+     * runs, the prompt is a shell — the spinner beside this segment says
+     * whether it is running, and the glyph's ABSENCE with `shell` still
+     * shown is "armed, waiting for Enter". Fixed chrome (priority 0),
+     * cyan like the `!` mark itself. */
+    if (nm_shell_ui_armed(app->shell) || nm_shell_ui_running(app->shell)) {
+        snprintf(shell_text, sizeof(shell_text), "shell ");
+        segs[n++] = status_segment(shell_text, TUI_SEGMENT_LEFT, 0, 0, 0,
+                                   nm_color_gauge_output(color_depth(app)));
     }
     /* One segment per gauge field, so the output count can carry a color
      * of its own: the counts and the rate are the TIER's color (how full
@@ -5511,6 +5805,8 @@ static void compose_status(NmChatApp *app)
         int fixed = 3;
         if (frame->glyph)
             fixed += tui_utf8_display_width(glyph_text);
+        if (shell_text[0])
+            fixed += tui_utf8_display_width(shell_text);
         fixed += tui_utf8_display_width(g.counts);
         if (g.out[0])
             fixed += tui_utf8_display_width(g.out);
