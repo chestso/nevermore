@@ -23,9 +23,15 @@
 #ifdef _WIN32
 #include <windows.h>
 #define tsleep(ms) Sleep(ms)
+/* A two-line command and a long one, in the shell each platform's
+ * default really is (cmd.exe here, /bin/sh there). */
+#define CMD_TWO_LINES "echo one & echo two"
+#define CMD_EXIT7     "exit 7"
 #else
 #include <unistd.h>
-#define tsleep(ms) usleep((ms) * 1000)
+#define tsleep(ms)    usleep((ms) * 1000)
+#define CMD_TWO_LINES "printf 'one\\ntwo\\n'"
+#define CMD_EXIT7     "exit 7"
 #endif
 
 #include "shell_ui.h"
@@ -314,11 +320,11 @@ static void test_run_streams_and_finishes(void)
     Host h;
     NmShellUi *s = make_shell(&h);
     press_bang(s);
-    tui_textinput_set_text(h.input, "!printf 'one\\ntwo\\n'");
+    tui_textinput_set_text(h.input, "!" CMD_TWO_LINES);
     nm_shell_ui_sync(s);
-    ASSERT_EQ(nm_shell_ui_submit(s, "!printf 'one\\ntwo\\n'"), 1);
+    ASSERT_EQ(nm_shell_ui_submit(s, "!" CMD_TWO_LINES), 1);
     ASSERT_EQ(h.n_echoed, 1);
-    ASSERT_EQ(strcmp(h.echoed, "!printf 'one\\ntwo\\n'"), 0);
+    ASSERT_EQ(strcmp(h.echoed, "!" CMD_TWO_LINES), 0);
     ASSERT_EQ(nm_shell_ui_running(s), 1);
     ASSERT_EQ(h.spinner_running, 1);
     ASSERT_EQ(h.n_shell_requests, 1);
@@ -348,9 +354,9 @@ static void test_nonzero_exit_prints_a_footer(void)
     Host h;
     NmShellUi *s = make_shell(&h);
     press_bang(s);
-    tui_textinput_set_text(h.input, "!exit 7");
+    tui_textinput_set_text(h.input, "!" CMD_EXIT7);
     nm_shell_ui_sync(s);
-    ASSERT_EQ(nm_shell_ui_submit(s, "!exit 7"), 1);
+    ASSERT_EQ(nm_shell_ui_submit(s, "!" CMD_EXIT7), 1);
     for (int i = 0; i < 500 && nm_shell_ui_running(s); i++) {
         nm_shell_ui_ready(s);
         if (nm_shell_ui_running(s))

@@ -862,8 +862,20 @@ static void harness_event_once(AppHarness *h, int wait_ms)
     int ready = 0;
     if (n > 0 && nm_source_wait_any(set, n, wait_ms) == 0) {
         for (size_t i = 0; i < n; i++) {
-            if (set[i].handle >= 0 && set[i].flags &&
-                app_wait_ready(&set[i], 0)) {
+            if (set[i].handle < 0 || !set[i].flags)
+                continue;
+            /* A waitable HANDLE's event is AUTO-RESET: the wait that just
+             * returned consumed it, so re-probing would report "not ready"
+             * and lose the wakeup entirely (a background job would then
+             * never be drained). boba's own loop dispatches the slot the
+             * wait named; this one does the same, and re-probes only a
+             * socket, where select() is level-triggered and the re-probe
+             * merely picks which of several sockets fired. */
+            int handle_kind = 0;
+#ifdef _WIN32
+            handle_kind = (set[i].kind == NM_SRC_HANDLE);
+#endif
+            if (handle_kind || app_wait_ready(&set[i], 0)) {
                 nm_chat_app_external_ready(h->app, set[i].handle,
                                            set[i].flags);
                 ready = 1;
@@ -11159,6 +11171,17 @@ static void test_mention_submit_sends_a_note(void)
 /* The prompt's `!` shell mode (D1-D9), through the boba model      */
 /* ---------------------------------------------------------------- */
 
+/* A shell command that says one word, in the shell each platform's
+ * default really is (cmd.exe on Windows, /bin/sh elsewhere), and one that
+ * outlives any test. */
+#ifdef _WIN32
+#define SHELL_SAY(word) "echo " word
+#define SHELL_LONG_CMD  "ping -n 31 127.0.0.1 >nul"
+#else
+#define SHELL_SAY(word) "printf '" word "\\n'"
+#define SHELL_LONG_CMD  "sleep 30"
+#endif
+
 /* Drive the prompt's own command to its end the way the event loop
  * does: dispatch whatever the app declares ready, tick on a timeout.
  * Bounded by wall clock. */
@@ -11193,17 +11216,16 @@ static void test_shell_line_runs_with_no_model(void)
     const char *before = harness_read(h);
     int notices = shell_count_substr(before, "no model for provider");
 
-    harness_type(h, "!printf 'shell-ok\\n'");
+    harness_type(h, "!" SHELL_SAY("shell-ok"));
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_shell_running(h->app), 1);
     ASSERT_EQ(shell_drive(h, 5000), 0);
     ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
 
     const char *out = harness_read(h);
-    /* The line itself, echoed once (the `!` carries its own style span,
-     * so these are its bytes and not a contiguous "!printf"). */
-    ASSERT_NOT_NULL(strstr(out, "printf 'shell-ok\\n'"));
-    /* Its output. */
+    /* Its output (the echo of the line is asserted byte-exactly in
+     * test_shell_ui, where the `!`'s style span does not sit between the
+     * bytes this string search would need). */
     ASSERT_NOT_NULL(strstr(out, "shell-ok"));
     /* And no "no model" refusal: a shell line is not a chat line. */
     ASSERT_EQ(shell_count_substr(out, "no model for provider"), notices);
@@ -11264,7 +11286,7 @@ static void test_shell_escape_stops_the_command(void)
     AppHarness *h = harness_new("ollama:local", "test-model", NULL);
     ASSERT_NOT_NULL(h);
 
-    harness_type(h, "!sleep 30");
+    harness_type(h, "!" SHELL_LONG_CMD);
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_shell_running(h->app), 1);
     usleep(100 * 1000); /* let the shell exec the sleep */
@@ -11293,7 +11315,7 @@ static void test_shell_mode_off_makes_bang_a_chat_line(void)
     const char *before = harness_read(h);
     int notices = shell_count_substr(before, "no model for provider");
 
-    harness_type(h, "!printf 'shell-ok\\n'");
+    harness_type(h, "!" SHELL_SAY("shell-ok"));
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_shell_running(h->app), 0);
 
@@ -11302,7 +11324,7 @@ static void test_shell_mode_off_makes_bang_a_chat_line(void)
     const char *out = harness_read(h);
     ASSERT_EQ(shell_count_substr(out, "no model for provider"), notices + 1);
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)),
-                  "!printf 'shell-ok\\n'");
+                  "!" SHELL_SAY("shell-ok"));
 
     nm_config_free(cfg);
     harness_free(h);
@@ -11368,7 +11390,7 @@ static void test_shell_exchange_never_reaches_the_wire(void)
     harness_enter(h2);
     ASSERT_EQ(harness_drive(h2, 500), 0);
 
-    harness_type(h2, "!printf SENTINEL");
+    harness_type(h2, "!" SHELL_SAY("SENTINEL"));
     harness_enter(h2);
     ASSERT_EQ(shell_drive(h2, 5000), 0);
     ASSERT_NOT_NULL(strstr(harness_read(h2), "SENTINEL"));

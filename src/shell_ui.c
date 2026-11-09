@@ -33,11 +33,16 @@ typedef enum
 struct NmShellUi
 {
     NmShellUiHost host;
-    int armed;          /* D1: implies text[0] == '!' */
-    int arm_intent;     /* this event was a `!` keystroke on an empty buffer */
-    int recall_intent;  /* this event was an Up/Down recall */
-    int state;          /* NmShellState */
-    int job_id;         /* an id, never an NmProc* (close frees it) */
+    int armed;         /* D1: implies text[0] == '!' */
+    int arm_intent;    /* this event was a `!` keystroke on an empty buffer */
+    int recall_intent; /* this event was an Up/Down recall */
+    int state;         /* NmShellState */
+    int job_id;        /* an id, never an NmProc* (close frees it) */
+    /* The job's loop handle, kept by VALUE: on Windows a job's readiness
+     * event is retired the moment its output hits EOF, so by the time the
+     * ready branch runs, the job may no longer report this handle — the
+     * value recorded at spawn is what still identifies the run. */
+    intptr_t handle;
     int user_stopped;   /* the footer says "interrupted", not "exit N" */
     unsigned char last; /* the last byte posted (0 = nothing yet) */
     size_t dropped;     /* bytes the bounded buffer evicted, for the note */
@@ -110,6 +115,7 @@ static void shell_start(NmShellUi *s, const char *cmd)
 
     s->state = NM_SHELL_RUNNING;
     s->job_id = id;
+    s->handle = nm_proc_handle(p);
     s->user_stopped = 0;
     s->last = 0;
     s->dropped = 0;
@@ -163,6 +169,7 @@ static void shell_finish(NmShellUi *s)
 
     s->state = NM_SHELL_IDLE;
     s->job_id = 0;
+    s->handle = -1;
     s->user_stopped = 0;
     s->last = 0;
     s->stop_deadline_ms = 0;
@@ -329,10 +336,9 @@ void nm_shell_ui_interrupt(NmShellUi *s)
 
 int nm_shell_ui_owns_handle(const NmShellUi *s, intptr_t handle)
 {
-    if (!s || handle < 0 || s->job_id <= 0)
+    if (!s || handle < 0 || s->state == NM_SHELL_IDLE)
         return 0;
-    NmProc *p = nm_proc_find(s->job_id);
-    return p && nm_proc_handle(p) == handle;
+    return handle == s->handle;
 }
 
 void nm_shell_ui_ready(NmShellUi *s)
@@ -357,15 +363,39 @@ void nm_shell_ui_ready(NmShellUi *s)
 
 uint64_t nm_shell_ui_deadline(const NmShellUi *s)
 {
-    if (!s || s->state != NM_SHELL_STOPPING)
+    if (!s || s->state == NM_SHELL_IDLE)
         return 0;
-    return s->stop_deadline_ms;
+    /* A job whose OUTPUT has ended but whose process has not been reaped
+     * yet leaves the loop's wait set (Windows retires the readiness event
+     * at EOF, and POSIX closes the master with it), so the wait itself
+     * would never look again. That is what this poll is for: while the
+     * job reports no handle and is not finished, the tick re-checks it. */
+    uint64_t poll = 0;
+    NmProc *p = nm_proc_find(s->job_id);
+    if (!p || nm_proc_handle(p) < 0)
+        poll = shell_now(s) + NM_SHELL_REAP_POLL_MS;
+    if (s->state != NM_SHELL_STOPPING)
+        return poll; /* RUNNING: no cadence unless the job left the set */
+    if (!poll)
+        return s->stop_deadline_ms;
+    return poll < s->stop_deadline_ms ? poll : s->stop_deadline_ms;
 }
 
 void nm_shell_ui_tick(NmShellUi *s)
 {
-    if (!s || s->state != NM_SHELL_STOPPING)
+    if (!s || s->state == NM_SHELL_IDLE)
         return;
-    if (s->stop_deadline_ms && shell_now(s) >= s->stop_deadline_ms)
+    if (s->state == NM_SHELL_STOPPING && s->stop_deadline_ms &&
+        shell_now(s) >= s->stop_deadline_ms) {
         shell_escalate(s); /* the polite form did not land: kill the group */
+        return;
+    }
+    /* The reap check the wait set can no longer provide (see deadline). */
+    NmProc *p = nm_proc_find(s->job_id);
+    if (!p) {
+        shell_finish(s);
+        return;
+    }
+    if (nm_proc_handle(p) < 0)
+        nm_shell_ui_ready(s);
 }

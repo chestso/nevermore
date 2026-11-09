@@ -93,6 +93,11 @@ typedef struct
 /* The grace a polite interrupt gets before the group is killed (D7). */
 #define NM_SHELL_STOP_GRACE_MS 2000
 
+/* How often the tick re-checks a run whose output has ended but whose
+ * process has not been reaped yet: such a job has left the event loop's
+ * wait set, so nothing else would look again. */
+#define NM_SHELL_REAP_POLL_MS 100
+
 /* Attach to the app's prompt. NULL only on OOM. */
 NmShellUi *nm_shell_ui_new(const NmShellUiHost *host);
 /* Detach. A command still running is closed (its process group killed),
