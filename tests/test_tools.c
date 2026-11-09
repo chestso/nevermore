@@ -468,6 +468,101 @@ static void test_schema_json(void)
     nm_toolset_free(ts);
 }
 
+/* The wire description of tool `name` in a serialized toolset, heap
+ * copy ("" when absent) — the model's view, parsed back. */
+static char *wire_field(const char *json, const char *name, const char *field)
+{
+    const char *err = NULL;
+    NmJson *arr = nm_json_parse(json, strlen(json), &err);
+    char *out = NULL;
+    for (int i = 0; arr && i < (int)nm_json_len(arr); i++) {
+        NmJson *fn = nm_json_get(nm_json_at(arr, i), "function");
+        if (strcmp(nm_json_str(nm_json_get(fn, "name")), name) != 0)
+            continue;
+        if (strcmp(field, "parameters") == 0) {
+            out = nm_json_dump(nm_json_get(fn, "parameters"));
+        } else {
+            out = strdup(nm_json_str(nm_json_get(fn, field)));
+        }
+    }
+    nm_json_free(arr);
+    return out ? out : strdup("");
+}
+
+/* A tool whose text quotes a timeout tells the model the value the tool
+ * enforces NOW: the description is rendered from the config store, a
+ * /config edit reaches the next serialization, and an unchanged config
+ * returns the same bytes (a stable prefix). */
+static void test_schema_json_renders_timeouts(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    const char *j0 = nm_toolset_to_json(ts);
+    char *base = strdup(j0);
+
+    char *rc = wire_field(j0, "run_command", "description");
+    char *ws = wire_field(j0, "web_search", "description");
+    char *wsd = wire_field(j0, "write_stdin", "description");
+    char *wss = wire_field(j0, "write_stdin", "parameters");
+    char *ex = wire_field(j0, "exec_command", "description");
+    ASSERT_NOT_NULL(strstr(rc, "Inactivity timeout: 300000 ms (300 s)"));
+    ASSERT_NOT_NULL(strstr(rc, "cannot be set per call"));
+    ASSERT_NOT_NULL(strstr(ws, "Per-request timeout: 10000 ms (10 s)"));
+    ASSERT_NOT_NULL(strstr(wsd, "up to 300000 ms (300 s)"));
+    ASSERT_NOT_NULL(strstr(wss, "caps at 300000 ms"));
+    ASSERT_NOT_NULL(strstr(ex, "default 10000 ms"));
+    ASSERT_NOT_NULL(strstr(ex, "set per call"));
+    free(rc);
+    free(ws);
+    free(wsd);
+    free(wss);
+    free(ex);
+
+    /* Unchanged config: same pointer, same bytes. */
+    ASSERT_TRUE(j0 == nm_toolset_to_json(ts));
+
+    /* Edit all three keys: the next serialization quotes them, and
+     * nothing keeps the old numbers. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_RUN_COMMAND_TIMEOUT,
+                                    "45000"),
+              0);
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_POLL_TIMEOUT, "60000"),
+              0);
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SEARXNG_TIMEOUT, "2500"),
+              0);
+    const char *j1 = nm_toolset_to_json(ts);
+    ASSERT_TRUE(strcmp(j1, base) != 0);
+    ASSERT_NULL(strstr(j1, "300000"));
+    rc = wire_field(j1, "run_command", "description");
+    ws = wire_field(j1, "web_search", "description");
+    wsd = wire_field(j1, "write_stdin", "description");
+    wss = wire_field(j1, "write_stdin", "parameters");
+    ASSERT_NOT_NULL(strstr(rc, "Inactivity timeout: 45000 ms (45 s)"));
+    ASSERT_NOT_NULL(strstr(ws, "Per-request timeout: 2500 ms,"));
+    ASSERT_NOT_NULL(strstr(wsd, "up to 60000 ms (60 s)"));
+    ASSERT_NOT_NULL(strstr(wss, "caps at 60000 ms"));
+    free(rc);
+    free(ws);
+    free(wsd);
+    free(wss);
+    ASSERT_TRUE(j1 == nm_toolset_to_json(ts));
+
+    /* `off` says so plainly instead of quoting a number. */
+    rc_set_budget("off");
+    rc = wire_field(nm_toolset_to_json(ts), "run_command", "description");
+    ASSERT_NOT_NULL(strstr(rc, "No timeout is configured"));
+    ASSERT_NULL(strstr(rc, "Inactivity timeout"));
+    free(rc);
+
+    /* Back to defaults: byte-identical to the first serialization. */
+    rc_set_budget(NULL);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_POLL_TIMEOUT);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SEARXNG_TIMEOUT);
+    ASSERT_STR_EQ(nm_toolset_to_json(ts), base);
+
+    free(base);
+    nm_toolset_free(ts);
+}
+
 /* Every default tool defines a presentation emoji, and that emoji is
  * NOT part of the wire definition: the serialized "tools" array must
  * never carry it (the model sees name/description/parameters only). */
@@ -5094,6 +5189,58 @@ static void test_toolset_skills_gate(void)
     nm_toolset_free(ts);
 }
 
+/* The serialized order is a stable partition: tools without a render
+ * hook first, hooked tools last — whatever order they were registered
+ * in, load_skill (added after the defaults) included. */
+static void test_schema_json_hooked_tools_last(void)
+{
+    NmToolset *ts = nm_toolset_new_defaults();
+    skills_pin_user_tier();
+    NmSkills *reg = skill_fixture("order");
+    nm_toolset_add_skills(ts, reg);
+    ASSERT_NOT_NULL(nm_toolset_find(ts, "load_skill"));
+
+    const char *err = NULL;
+    const char *json = nm_toolset_to_json(ts);
+    NmJson *arr = nm_json_parse(json, strlen(json), &err);
+    ASSERT_NOT_NULL(arr);
+    ASSERT_EQ(nm_json_len(arr), nm_toolset_len(ts));
+
+    /* Expected: registration order within each group, statics first. */
+    int pos = 0;
+    int hooked = 0;
+    for (int pass = 0; pass < 2; pass++) {
+        for (size_t i = 0; i < nm_toolset_len(ts); i++) {
+            const NmTool *t = nm_toolset_get(ts, i);
+            if ((t->render != NULL) != (pass == 1))
+                continue;
+            hooked += pass;
+            NmJson *fn = nm_json_get(nm_json_at(arr, pos), "function");
+            ASSERT_STR_EQ(nm_json_str(nm_json_get(fn, "name")), t->name);
+            pos++;
+        }
+    }
+    ASSERT_EQ(pos, (int)nm_json_len(arr));
+    ASSERT_TRUE(hooked >= 3); /* run_command, write_stdin, web_search */
+
+    /* load_skill is static, so it precedes run_command despite being
+     * registered after it. */
+    int skill_at = -1, run_at = -1;
+    for (int i = 0; i < pos; i++) {
+        NmJson *fn = nm_json_get(nm_json_at(arr, i), "function");
+        const char *nm = nm_json_str(nm_json_get(fn, "name"));
+        if (strcmp(nm, "load_skill") == 0)
+            skill_at = i;
+        if (strcmp(nm, "run_command") == 0)
+            run_at = i;
+    }
+    ASSERT_TRUE(skill_at >= 0 && run_at >= 0 && skill_at < run_at);
+
+    nm_json_free(arr);
+    nm_skills_free(reg);
+    nm_toolset_free(ts);
+}
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -5110,6 +5257,8 @@ int main(void)
     RUN_TEST(test_toolset_skills_gate);
     RUN_TEST(test_unknown_tool_error);
     RUN_TEST(test_schema_json);
+    RUN_TEST(test_schema_json_renders_timeouts);
+    RUN_TEST(test_schema_json_hooked_tools_last);
     RUN_TEST(test_tool_emoji_presentation_only);
     RUN_TEST(test_read_file_byte_exact);
     RUN_TEST(test_read_file_line_numbers_and_window);

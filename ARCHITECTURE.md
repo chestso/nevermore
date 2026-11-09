@@ -764,6 +764,22 @@ the ledger answers. It lives and dies with the agent.
   the child's wait status would report the tool's kill as the command's exit). A
   refusal (a call that never ran) is `nm_tool_result_error()`: status line only,
   with no empty section to mistake for a result.
+- **A tool tells the model the timeout it enforces.** `NmTool.render` fills the
+  wire description (and the parameter schema when it embeds a number) from the
+  config store at serialization: `run_command` quotes its inactivity budget (or
+  that none is set) and that it is not settable per call; `exec_command`
+  quotes its fixed yield window (a per-call `yield_time_ms`, no kill);
+  `write_stdin` quotes the `poll_timeout` ceiling; `web_search` quotes
+  `searxng_timeout`, a total deadline. `nm_toolset_to_json` rebuilds only when
+  the rendered text changed, so an unchanged config keeps the request bytes
+  stable. The tools lead the provider's cache order, so a `/config` edit of one
+  of these keys is one prefix miss (probed on a live session: an implicit cache
+  keeps the tools before the edited one and drops the rest; Anthropic's rewrites
+  the whole prompt once). That is the accepted price of telling the model the
+  truth; hook text depends on config values only, never on runtime state like
+  the `web_search` latch. To keep that miss small, `nm_toolset_to_json`
+  serializes tools without a `render` hook first and hooked ones last (a stable
+  partition, so `load_skill`, registered later, still precedes them).
 - **Output clamps are per family.** One-shot tools (file tools, web_search,
   `run_command`) use `nm_clamp_output` (head-only; `read_file`'s carries a
   resumable offset). Job tools use `nm_clamp_job_output` (70/30 head/tail, since

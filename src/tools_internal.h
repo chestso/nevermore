@@ -108,6 +108,14 @@ NmToolResult nm_tool_result_run(int code, const char *note, const char *body);
  * structural "(empty)" marker. */
 NmToolResult nm_tool_format_result(const char *body, int exit_code);
 
+/* "300000 ms (300 s)" (the seconds reading only when whole): the one
+ * spelling a rendered timeout uses (tools.c). */
+void nm_tool_fmt_ms(char *out, size_t cap, int ms);
+
+/* run_command's NmTool.render hook (tools.c, shared by both spawn
+ * files): the static base plus the live inactivity budget. */
+void nm_tool_render_run_command(const NmTool *tool, NmToolWire *out);
+
 /* tools_file.c: built-in file tools (read/write/edit/list/search). */
 extern const NmTool nm_tool_read_file;
 extern const NmTool nm_tool_write_file;

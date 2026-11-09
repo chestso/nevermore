@@ -174,6 +174,19 @@ typedef struct NmToolExec NmToolExec;
  * built-in sets one). Presentation-only, like the field itself. */
 #define NM_TOOL_EMOJI_FALLBACK "🔧"
 
+/* The wire text of one tool, rendered from live config. A tool whose
+ * description (or parameter text) quotes a configurable number — a
+ * timeout, a ceiling — sets NmTool.render, so the model is told the
+ * value the tool actually enforces. The caps are generous for the
+ * built-ins; snprintf truncates at them. */
+#define NM_TOOL_WIRE_DESC_MAX   1024
+#define NM_TOOL_WIRE_SCHEMA_MAX 2048
+typedef struct NmToolWire
+{
+    char description[NM_TOOL_WIRE_DESC_MAX];
+    char params_schema[NM_TOOL_WIRE_SCHEMA_MAX]; /* "" = the static one */
+} NmToolWire;
+
 /* One tool: name, JSON schema for the provider, an executor, and an
  * optional async executor (see above). */
 typedef struct NmTool
@@ -217,6 +230,17 @@ typedef struct NmTool
      * runtime's tick can drive the step; NULL means -1. */
     int (*deadline_ms)(const NmToolExec *e);
     void (*end)(NmToolExec *e);
+    /* Optional: fill the wire description (and the parameter schema,
+     * when it embeds a live number; leave it "" to keep the static
+     * params_schema) from the config store, resolved at the point of
+     * use. NULL = the static name/description/params_schema as they
+     * stand. nm_toolset_to_json calls it on every serialization and
+     * rebuilds its cache only when the rendered text changed, so a
+     * /config edit reaches the next request and an unchanged config
+     * keeps the request prefix byte-stable. The text must depend on
+     * config values only — never on runtime state (a latch, a clock),
+     * which would change the prompt-cache prefix for nothing. */
+    void (*render)(const NmTool *tool, NmToolWire *out);
 } NmTool;
 
 NmToolset *nm_toolset_new(void);
@@ -233,9 +257,13 @@ NmToolResult nm_toolset_execute(const NmToolset *ts, const char *name,
                                 const char *args_json, const NmToolCtx *ctx);
 
 /* Serialize the full toolset as the provider "tools" JSON array.
- * Cached in the toolset (serialized once per registered set);
- * returned pointer is borrowed from the toolset, valid until the
- * next nm_toolset_add or nm_toolset_free. */
+ * Cached in the toolset: rebuilt when a tool is added or when a
+ * render hook's text changed (a timeout edited through /config),
+ * otherwise the same pointer comes back. The pointer is borrowed from
+ * the toolset, valid until the next nm_toolset_add, nm_toolset_to_json
+ * or nm_toolset_free. A rebuild changes the request prefix once (the
+ * tools come first in the provider's cache order), so hook text is
+ * config-derived only. */
 const char *nm_toolset_to_json(const NmToolset *ts);
 
 /* The refusal constructor (heap-owned output): the message IS the

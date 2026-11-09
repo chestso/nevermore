@@ -22,6 +22,11 @@ struct NmToolset
     size_t n;
     size_t cap;
     char *schema_json; /* serialized once per toolset; reused */
+    /* The render hooks' text the cache was built from (see
+     * nm_toolset_to_json): a changed key is a config edit that
+     * reached a tool description, and rebuilds the cache. */
+    char *render_key;
+    size_t render_key_len;
 };
 
 NmToolset *nm_toolset_new(void)
@@ -35,6 +40,7 @@ void nm_toolset_free(NmToolset *ts)
         return;
     free(ts->tools);
     free(ts->schema_json);
+    free(ts->render_key);
     free(ts);
 }
 
@@ -357,28 +363,135 @@ NmToolResult nm_tool_format_result(const char *body, int exit_code)
     return nm_tool_result_head(status, exit_code == 0, body);
 }
 
+/* "300000 ms (300 s)": the one spelling every rendered timeout uses —
+ * the wire unit first (the config's own, ms everywhere), the seconds
+ * reading in parentheses when it is whole. */
+void nm_tool_fmt_ms(char *out, size_t cap, int ms)
+{
+    if (ms > 0 && ms % 1000 == 0)
+        snprintf(out, cap, "%d ms (%d s)", ms, ms / 1000);
+    else
+        snprintf(out, cap, "%d ms", ms);
+}
+
+/* run_command's wire description: the static base plus the budget the
+ * tool will actually enforce (the `run_command_timeout` key). The
+ * timeout is an INACTIVITY one and has no per-call override, which is
+ * exactly what the model needs to plan around. */
+void nm_tool_render_run_command(const NmTool *tool, NmToolWire *out)
+{
+    int ms = nm_tool_run_command_timeout_ms();
+    if (ms > 0) {
+        char dur[48];
+        nm_tool_fmt_ms(dur, sizeof(dur), ms);
+        snprintf(out->description, sizeof(out->description),
+                 "%s. Inactivity timeout: %s: a command that prints nothing "
+                 "for that long is killed and its partial output returned, "
+                 "while a command that keeps printing is never cut off. The "
+                 "timeout cannot be set per call.",
+                 tool->description, dur);
+    } else {
+        snprintf(out->description, sizeof(out->description),
+                 "%s. No timeout is configured: a command that never exits "
+                 "blocks the turn. A timeout cannot be set per call.",
+                 tool->description);
+    }
+}
+
 const char *nm_toolset_to_json(const NmToolset *ts)
 {
     if (!ts)
         return NULL;
-    if (ts->schema_json)
+    NmToolset *mut = (NmToolset *)ts; /* schema cache is scratch */
+
+    /* Render the hooked tools from live config (the timeouts a
+     * description quotes) and fold their text into a key. Same key as
+     * the cache was built from = the same bytes, so the same pointer
+     * and a byte-stable request prefix; a different key is a config
+     * edit and rebuilds once. A toolset with no hooked tool takes the
+     * old path: serialized once. */
+    size_t nhook = 0;
+    for (size_t i = 0; i < ts->n; i++)
+        if (ts->tools[i]->render)
+            nhook++;
+    if (nhook == 0 && ts->schema_json)
         return ts->schema_json; /* borrowed; serialized once */
 
-    NmToolset *mut = (NmToolset *)ts; /* schema cache is scratch */
+    NmToolWire *wire = nhook ? calloc(ts->n, sizeof(*wire)) : NULL;
+    if (wire) {
+        size_t klen = 0;
+        for (size_t i = 0; i < ts->n; i++) {
+            if (!ts->tools[i]->render)
+                continue;
+            ts->tools[i]->render(ts->tools[i], &wire[i]);
+            klen += strlen(wire[i].description) +
+                    strlen(wire[i].params_schema) + 2;
+        }
+        char *key = malloc(klen + 1);
+        if (key) {
+            size_t k = 0;
+            for (size_t i = 0; i < ts->n; i++) {
+                if (!ts->tools[i]->render)
+                    continue;
+                k += (size_t)sprintf(key + k, "%s\x01%s\x02",
+                                     wire[i].description,
+                                     wire[i].params_schema);
+            }
+            if (ts->schema_json && ts->render_key_len == k &&
+                memcmp(ts->render_key, key, k) == 0) {
+                free(key);
+                free(wire);
+                return ts->schema_json; /* unchanged: the cache stands */
+            }
+            free(mut->render_key);
+            mut->render_key = key;
+            mut->render_key_len = k;
+            free(mut->schema_json);
+            mut->schema_json = NULL;
+        }
+    } else if (ts->schema_json) {
+        return ts->schema_json; /* OOM rendering: keep what we have */
+    }
 
     /* Each tool schema is parsed from its params_schema JSON (or an
      * empty object) and embedded in the OpenAI "tools" shape:
      *   [{"type":"function","function":{name,description,parameters}}] */
+    /* Serialization order: tools without a render hook first, hooked
+     * ones last, each group in registration order (a stable partition).
+     * The tools lead the provider's cache order, so an edit that moves
+     * a hooked tool's text keeps every static tool's tokens before it
+     * on an implicit cache. A rule here, not a registration order,
+     * because load_skill joins after the defaults and a future hooked
+     * tool must land last without anyone remembering. */
+    size_t *order = malloc((ts->n ? ts->n : 1) * sizeof(*order));
+    if (order) {
+        size_t k = 0;
+        for (size_t i = 0; i < ts->n; i++)
+            if (!ts->tools[i]->render)
+                order[k++] = i;
+        for (size_t i = 0; i < ts->n; i++)
+            if (ts->tools[i]->render)
+                order[k++] = i;
+    }
+
     NmJson *arr = nm_json_new_array();
-    for (size_t i = 0; i < ts->n; i++) {
+    for (size_t pos = 0; pos < ts->n; pos++) {
+        size_t i = order ? order[pos] : pos; /* OOM: registration order */
         const NmTool *t = ts->tools[i];
+        const char *desc = t->description;
+        const char *schema = t->params_schema;
+        if (wire && t->render) {
+            if (wire[i].description[0])
+                desc = wire[i].description;
+            if (wire[i].params_schema[0])
+                schema = wire[i].params_schema;
+        }
         NmJson *fn = nm_json_new_object();
         nm_json_set(fn, "name", nm_json_new_string(t->name));
-        nm_json_set(fn, "description", nm_json_new_string(t->description));
-        if (t->params_schema && *t->params_schema) {
+        nm_json_set(fn, "description", nm_json_new_string(desc));
+        if (schema && *schema) {
             const char *err = NULL;
-            NmJson *params = nm_json_parse(t->params_schema,
-                                           strlen(t->params_schema), &err);
+            NmJson *params = nm_json_parse(schema, strlen(schema), &err);
             nm_json_set(fn, "parameters",
                         params ? params : nm_json_new_object());
             /* set() deep-copies parsed (arena) nodes into the built
@@ -392,6 +505,8 @@ const char *nm_toolset_to_json(const NmToolset *ts)
         nm_json_set(entry, "function", fn);
         nm_json_push(arr, entry);
     }
+    free(order);
+    free(wire);
     mut->schema_json = nm_json_dump(arr);
     nm_json_free(arr);
     return ts->schema_json;

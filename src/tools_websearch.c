@@ -867,12 +867,29 @@ static const char web_search_schema[] =
     "default.\"}},"
     "\"required\":[\"query\"]}";
 
+/* The wire description from live config: the request budget the tool
+ * enforces (`searxng_timeout`). Only the configured value is quoted —
+ * never the self-disable latch (`searxng_enabled`), which flips at
+ * runtime and would move the request prefix for no reason. */
+static void ws_render(const NmTool *tool, NmToolWire *out)
+{
+    char dur[48];
+    nm_tool_fmt_ms(dur, sizeof(dur), nm_tool_web_search_timeout_ms());
+    snprintf(out->description, sizeof(out->description),
+             "%s. Per-request timeout: %s, a total deadline for the whole "
+             "request that cannot be set per call. A timeout or an "
+             "unreachable instance disables the tool for the rest of the "
+             "session.",
+             tool->description, dur);
+}
+
 const NmTool nm_tool_web_search = {
     .name = "web_search",
     .description = "Search the web through a local SearXNG instance and "
                    "return ranked result titles, URLs and snippets",
     .emoji = "🌐",
     .params_schema = web_search_schema,
+    .render = ws_render,
     .execute = ws_execute,
     .begin = ws_begin,
     .step = ws_step,

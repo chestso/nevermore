@@ -815,18 +815,34 @@ static NmToolResult kill_job_exec(const NmTool *tool,
  * stopwatch (the Codex #22541 ask). The Windows variant names its 10 s
  * floor, as Codex's does. */
 #ifdef _WIN32
-#define NM_EXEC_YIELD_DESC                                          \
-    "Wait before yielding output. Defaults to 10000 ms; effective " \
-    "range on Windows is 10000-30000 ms."
+#define NM_EXEC_YIELD_RANGE "10000-30000 ms on Windows"
 #else
-#define NM_EXEC_YIELD_DESC                                          \
-    "Wait before yielding output. Defaults to 10000 ms; effective " \
-    "range is 250-30000 ms."
+#define NM_EXEC_YIELD_RANGE "250-30000 ms"
 #endif
 
-#define NM_WRITE_YIELD_DESC                                             \
-    "Wait before yielding output. Non-empty writes default to 1000 ms " \
-    "and cap at 30000 ms; empty polls wait 5000-300000 ms by default."
+#define NM_EXEC_YIELD_DESC                                          \
+    "Wait before yielding output. Defaults to 10000 ms; effective " \
+    "range is " NM_EXEC_YIELD_RANGE "."
+
+/* Stringize a macro's VALUE, so the static fallback schema quotes the
+ * same default the resolver falls back to. */
+#define NM_STR_(x) #x
+#define NM_STR(x)  NM_STR_(x)
+
+/* write_stdin's schema, with the empty-poll ceiling as the one live
+ * number: CEIL is "%d" for the render hook's snprintf and the default's
+ * digits for the static fallback, so there is one spelling. */
+#define NM_WRITE_STDIN_SCHEMA(CEIL)                                             \
+    "{\"type\":\"object\",\"properties\":{"                                     \
+    "\"job_id\":{\"type\":\"integer\",\"description\":\"Job ID "                \
+    "returned by exec_command.\"},"                                             \
+    "\"input\":{\"type\":\"string\",\"description\":\"Text for the job's "      \
+    "stdin. A trailing \\\\x04 closes stdin; an interior \\\\x04 is an "        \
+    "error. Omit to just read output.\"},"                                      \
+    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"Wait before "    \
+    "yielding output. Non-empty writes default to 1000 ms and cap at "          \
+    "30000 ms; an empty poll defaults to 5000 ms and caps at " CEIL " ms.\"}}," \
+    "\"required\":[\"job_id\"]}"
 
 static const char exec_command_schema[] =
     "{\"type\":\"object\",\"properties\":{"
@@ -849,7 +865,10 @@ const NmTool nm_tool_exec_command = {
                    "(a dev server, REPL, ssh, test watcher) and "
                    "return its output; if it is still running when the yield "
                    "window closes, return a job ID to poll with "
-                   "write_stdin",
+                   "write_stdin. The yield window is yield_time_ms (default "
+                   "10000 ms, " NM_EXEC_YIELD_RANGE "; set per call); the "
+                   "job is not killed when it closes and has no run-time "
+                   "limit",
     .emoji = "▶️",
     .params_schema = exec_command_schema,
     .execute = exec_command_exec,
@@ -861,14 +880,25 @@ const NmTool nm_tool_exec_command = {
 };
 
 static const char write_stdin_schema[] =
-    "{\"type\":\"object\",\"properties\":{"
-    "\"job_id\":{\"type\":\"integer\",\"description\":\"Job ID "
-    "returned by exec_command.\"},"
-    "\"input\":{\"type\":\"string\",\"description\":\"Text for the job's "
-    "stdin. A trailing \\\\x04 closes stdin; an interior \\\\x04 is an "
-    "error. Omit to just read output.\"},"
-    "\"yield_time_ms\":{\"type\":\"integer\",\"description\":\"" NM_WRITE_YIELD_DESC "\"}},"
-    "\"required\":[\"job_id\"]}";
+    NM_WRITE_STDIN_SCHEMA(NM_STR(NM_POLL_TIMEOUT_MS_DEFAULT));
+
+/* write_stdin's wire text from live config: the empty-poll ceiling is
+ * the `poll_timeout` key (what the clamp in write_stdin_begin applies),
+ * so both the description and the yield_time_ms parameter quote it. */
+static void write_stdin_render(const NmTool *tool, NmToolWire *out)
+{
+    int ceiling = poll_timeout_ms();
+    char dur[48];
+    nm_tool_fmt_ms(dur, sizeof(dur), ceiling);
+    snprintf(out->description, sizeof(out->description),
+             "%s. Waits yield_time_ms for output, then returns; the job "
+             "keeps running (no kill timeout). Non-empty writes: default "
+             "1000 ms, cap 30000 ms. Empty polls: default 5000 ms, up to "
+             "%s.",
+             tool->description, dur);
+    snprintf(out->params_schema, sizeof(out->params_schema),
+             NM_WRITE_STDIN_SCHEMA("%d"), ceiling);
+}
 
 const NmTool nm_tool_write_stdin = {
     .name = "write_stdin",
@@ -877,6 +907,7 @@ const NmTool nm_tool_write_stdin = {
                    "input closes stdin",
     .emoji = "⌨️",
     .params_schema = write_stdin_schema,
+    .render = write_stdin_render,
     .execute = write_stdin_exec,
     .begin = write_stdin_begin,
     .step = write_stdin_step,

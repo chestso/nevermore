@@ -634,9 +634,9 @@ const NmTool nm_tool_run_command = {
     .name = "run_command",
     .description = "Run a short, non-interactive shell command and capture "
                    "its combined output and exit status (no terminal, no "
-                   "stdin). A command that produces no output for a while is "
-                   "stopped and its partial output returned; use "
-                   "exec_command for anything long-lived or interactive",
+                   "stdin); use exec_command for anything long-lived or "
+                   "interactive",
+    .render = nm_tool_render_run_command,
     .emoji = "🚀",
     .params_schema = run_command_schema,
     .execute = run_command_exec,
