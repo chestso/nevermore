@@ -206,23 +206,65 @@ static void append_ascii(wchar_t *dst, size_t cap, const char *s)
     dst[n] = L'\0';
 }
 
+/* Append ONE wide argument, quoted the way CommandLineToArgvW (and every
+ * CRT that follows it, MSYS2's runtime included) splits a command line
+ * back into argv: surrounding quotes, `\\\"` for an embedded quote, and
+ * doubled backslashes wherever they would otherwise escape the closing
+ * quote.  Without this a `bash.exe -c echo hi` line hands bash `-c echo`
+ * — the command's first word only. */
+static void append_quoted_arg(wchar_t *dst, size_t cap, const wchar_t *arg)
+{
+    size_t n = wcslen(dst);
+    if (n + 1 < cap)
+        dst[n++] = L'"';
+    for (const wchar_t *p = arg; *p && n + 1 < cap; p++) {
+        if (*p == L'\\') {
+            size_t backslashes = 0;
+            for (const wchar_t *q = p; *q == L'\\'; q++)
+                backslashes++;
+            int before_quote = (p[backslashes] == L'"');
+            /* A run before a quote doubles; a run at the end doubles so
+             * the closing quote stays a quote. */
+            size_t emit = backslashes * (before_quote || !p[backslashes] ? 2 : 1);
+            while (emit-- && n + 1 < cap)
+                dst[n++] = L'\\';
+            p += backslashes - 1;
+        } else if (*p == L'"') {
+            if (n + 2 < cap) {
+                dst[n++] = L'\\';
+                dst[n++] = L'"';
+            }
+        } else {
+            dst[n++] = *p;
+        }
+    }
+    if (n + 1 < cap)
+        dst[n++] = L'"';
+    dst[n] = L'\0';
+}
+
 /* The CreateProcessW command line for `cmd` under `sh`: `shell flags…
  * cmd`.  The shell path is quoted only when it has a space (a
- * `C:\Program Files\Git\bin\bash.exe`); the command tail is NEVER
- * quoted — quoting the whole line makes CreateProcessW look for an
- * executable literally named "cmd.exe /d /c …" (the trap both spawn
- * halves document).  NULL = the platform default, cmd.exe. */
+ * `C:\Program Files\Git\bin\bash.exe`), and the line as a whole is
+ * never quoted — quoting it makes CreateProcessW look for an executable
+ * literally named "cmd.exe /d /c …" (the trap both spawn halves
+ * document).  The COMMAND, however, is one argv element for every shell
+ * but cmd.exe (which parses the rest of its line itself): `-c`/`-lc` and
+ * PowerShell's `-Command` take the command as a SINGLE argument, so a
+ * bare `echo shell-ok` would otherwise reach them as `echo` and a script
+ * name.  NULL = the platform default, cmd.exe. */
 static wchar_t *build_shell_line(const char *cmd, const NmProcShell *sh)
 {
     const char *path = (sh && sh->path && *sh->path) ? sh->path : "cmd.exe";
+    NmShellKind kind = nm_proc_shell_kind(sh ? sh->path : NULL);
     const char *flags[4];
-    int nf = nm_proc_shell_flags(nm_proc_shell_kind(sh ? sh->path : NULL),
-                                 sh ? sh->login : 0, cmd, flags);
+    int nf = nm_proc_shell_flags(kind, sh ? sh->login : 0, cmd, flags);
     if (nf > 0)
         nf--; /* the last entry is `cmd` itself (appended wide below) */
     wchar_t *wpath = utf8_to_wide(path);
     wchar_t *wcmd = utf8_to_wide(cmd);
-    size_t cap = strlen(cmd) + strlen(path) + 64;
+    /* Quoting can double the command's backslashes. */
+    size_t cap = 2 * strlen(cmd) + strlen(path) + 64;
     wchar_t *line = malloc(cap * sizeof(*line));
     if (!wpath || !wcmd || !line) {
         free(wpath);
@@ -243,7 +285,10 @@ static wchar_t *build_shell_line(const char *cmd, const NmProcShell *sh)
         append_ascii(line, cap, flags[i]);
     }
     append_ascii(line, cap, " ");
-    wcsncat(line, wcmd, cap - wcslen(line) - 1);
+    if (kind == NM_SHELL_CMD)
+        wcsncat(line, wcmd, cap - wcslen(line) - 1);
+    else
+        append_quoted_arg(line, cap, wcmd);
     free(wpath);
     free(wcmd);
     return line;

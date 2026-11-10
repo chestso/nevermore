@@ -11184,7 +11184,14 @@ static void test_mention_submit_sends_a_note(void)
 
 /* Drive the prompt's own command to its end the way the event loop
  * does: dispatch whatever the app declares ready, tick on a timeout.
- * Bounded by wall clock. */
+ * Bounded by wall clock.
+ *
+ * The wait's 10 ms are also spent on the FAKE clock (this binary links
+ * fake_clock.c): a run whose output has ended but whose process has not
+ * been reaped yet is finished by the module's REAP POLL — a timer, and a
+ * frozen clock never makes one due.  On POSIX the readable master hides
+ * that (the last read dispatches); on Windows there is nothing left in
+ * the wait set to dispatch, so a clock that never moves hangs the run. */
 static int shell_drive(AppHarness *h, int budget_ms)
 {
     long long t0 = wall_ms();
@@ -11192,6 +11199,7 @@ static int shell_drive(AppHarness *h, int budget_ms)
         if (wall_ms() - t0 > (long long)budget_ms)
             return -1;
         harness_event_once(h, 10);
+        nm_test_clock_advance_ms(10);
     }
     tui_runtime_flush(h->rt);
     return 0;
