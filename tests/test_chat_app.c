@@ -11196,8 +11196,25 @@ static int shell_drive(AppHarness *h, int budget_ms)
 {
     long long t0 = wall_ms();
     while (nm_chat_app_shell_running(h->app)) {
-        if (wall_ms() - t0 > (long long)budget_ms)
+        if (wall_ms() - t0 > (long long)budget_ms) {
+            NmSource dset[TUI_IO_SOURCE_MAX];
+            size_t dn = nm_chat_app_interest(h->app, dset, TUI_IO_SOURCE_MAX);
+            fprintf(stderr, "DIAG timeout tick_ms=%d interest=%zu clock=%.3f\n",
+                    nm_chat_app_tick_ms(h->app), dn, nm_monotonic_seconds());
+            for (size_t i = 0; i < dn; i++)
+                fprintf(stderr, "DIAG slot %zu handle=%lld kind=%d\n", i,
+                        (long long)dset[i].handle, dset[i].kind);
+            for (int i = 0; i < nm_proc_count(); i++) {
+                NmProc *p = nm_proc_at(i);
+                intptr_t ph = nm_proc_handle(p);
+                int pl = nm_proc_live(p);
+                fprintf(stderr, "DIAG job %d cached_handle=%lld live=%d buf=%zu cmd=%s\n",
+                        nm_proc_id(p), (long long)ph, pl, nm_proc_buffered(p),
+                        nm_proc_command(p) ? nm_proc_command(p) : "?");
+            }
+            fprintf(stderr, "DIAG transcript=[%s]\n", harness_read(h));
             return -1;
+        }
         harness_event_once(h, 10);
         nm_test_clock_advance_ms(10);
     }

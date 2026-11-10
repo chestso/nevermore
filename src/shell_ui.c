@@ -85,6 +85,7 @@ static void shell_take(NmShellUi *s, NmProc *p)
 
 static void shell_start(NmShellUi *s, const char *cmd)
 {
+    fprintf(stderr, "DIAG start cmd=[%s]\n", cmd);
     NmProcShell sh = { NULL, 0 };
     if (s->host.shell_request)
         s->host.shell_request(s->host.ud, &sh);
@@ -116,6 +117,8 @@ static void shell_start(NmShellUi *s, const char *cmd)
     s->state = NM_SHELL_RUNNING;
     s->job_id = id;
     s->handle = nm_proc_handle(p);
+    fprintf(stderr, "DIAG started job=%d handle=%lld\n", id,
+            (long long)s->handle);
     s->user_stopped = 0;
     s->last = 0;
     s->dropped = 0;
@@ -167,6 +170,7 @@ static void shell_finish(NmShellUi *s)
     }
     s->host.blank(s->host.ud); /* a block ends with a blank row */
 
+    fprintf(stderr, "DIAG finish state was %d\n", (int)s->state);
     s->state = NM_SHELL_IDLE;
     s->job_id = 0;
     s->handle = -1;
@@ -345,6 +349,7 @@ void nm_shell_ui_ready(NmShellUi *s)
 {
     if (!s || s->state == NM_SHELL_IDLE)
         return;
+    fprintf(stderr, "DIAG ready enter handle=%lld\n", (long long)s->handle);
     NmProc *p = nm_proc_find(s->job_id);
     if (!p) {
         shell_finish(s); /* the job vanished (a cap change, a teardown) */
@@ -355,6 +360,9 @@ void nm_shell_ui_ready(NmShellUi *s)
      * finished until the handle is exhausted (D4). */
     nm_proc_drain(p);
     shell_take(s, p);
+    fprintf(stderr, "DIAG ready exit handle=%lld live=%d buf=%zu\n",
+            (long long)nm_proc_handle(p), nm_proc_live(p),
+            nm_proc_buffered(p));
     if (nm_proc_handle(p) < 0 && !nm_proc_live(p))
         shell_finish(s);
     else
@@ -363,6 +371,14 @@ void nm_shell_ui_ready(NmShellUi *s)
 
 uint64_t nm_shell_ui_deadline(const NmShellUi *s)
 {
+    static int calls = 0;
+    if (calls++ % 40 == 0) {
+        NmProc *q = s && s->state != NM_SHELL_IDLE
+                        ? nm_proc_find(s->job_id) : NULL;
+        fprintf(stderr, "DIAG deadline #%d state=%d cached=%lld\n", calls,
+                s ? (int)s->state : -1,
+                (long long)nm_proc_handle(q));
+    }
     if (!s || s->state == NM_SHELL_IDLE)
         return 0;
     /* A job whose OUTPUT has ended but whose process has not been reaped
@@ -385,6 +401,8 @@ void nm_shell_ui_tick(NmShellUi *s)
 {
     if (!s || s->state == NM_SHELL_IDLE)
         return;
+    { NmProc *q = nm_proc_find(s->job_id);
+      fprintf(stderr, "DIAG tick handle=%lld\n", (long long)nm_proc_handle(q)); }
     if (s->state == NM_SHELL_STOPPING && s->stop_deadline_ms &&
         shell_now(s) >= s->stop_deadline_ms) {
         shell_escalate(s); /* the polite form did not land: kill the group */
