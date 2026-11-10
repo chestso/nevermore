@@ -3,7 +3,7 @@
  * The armed bit and its invariant (D1), the submit branch (D2), the run
  * state machine (D4), the byte path (D5) and the interrupt ladder (D7).
  * The output goes to the transcript's system stream through the app's
- * one post, with TUI_STREAM_TEXT_CR_REPLACES: a child's bytes are a
+ * one post, with TUI_STREAM_TERMINAL: a child's bytes are a
  * TERMINAL's bytes, so a bare CR is a carriage return and a progress
  * meter animates on one row (boba's reading, D5b).
  *

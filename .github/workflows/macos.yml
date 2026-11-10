@@ -132,26 +132,30 @@ jobs:
           # durable copy (history.c), and the file and the escaping stay
           # the app's. The pin moves to a boba that can answer.
           # And, at this pin, the system stream's carriage return:
-          # tui_msg_stream_text_ex() takes TUI_STREAM_TEXT_CR_REPLACES, so
-          # a bare CR in a child process's output marks the open
-          # transcript row and the next glyph replaces it — a progress
-          # meter animates on ONE row, at the speed it writes, instead of
-          # printing one row per frame. `CR LF` stays a line break and the
-          # legacy tui_msg_stream_text keeps CR = row break. The app's
-          # shell mode is what wants it; nothing here calls it yet.
+          # TUI_STREAM_TERMINAL says a bare CR in a child process's output
+          # marks the open transcript row and the next glyph replaces it —
+          # a progress meter animates on ONE row, at the speed it writes,
+          # instead of printing one row per frame. `CR LF` stays a line
+          # break; TUI_STREAM_LINES keeps CR = row break, and the app
+          # posts its own prose that way. The app's shell mode is what
+          # wants the terminal reading.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. v0.10.1 is the boba release that carries all of the
-          # above — and the byte path the shell stream relies on (a
-          # character cut across two messages is completed, not mangled,
-          # and the transcript closes every committed write at default, so
-          # a colour a command leaves open cannot bleed into the prompt) — the prompt's `@` mention picker API (style spans, the
-          # edit revision, the whole-token replace, the popup's
-          # empty/footer/preselected rows) among it, which configure
-          # PROBES for: a pin behind it fails every job there, with the
-          # fix named. A tag and not a SHA, so `git describe` reads
-          # v0.10.1 off the checkout and the packaged binaries print
-          # exactly the version the mac/windows asserts compare against.
-          ref: v0.10.1
+          # mid-work. v0.11.0 is the boba release that carries all of the
+          # above, the byte path the shell stream relies on (a character
+          # cut across two messages is completed, not mangled, and the
+          # transcript closes every committed write at default, so a
+          # colour a command leaves open cannot bleed into the prompt),
+          # and the prompt's `@` mention picker API (style spans, the edit
+          # revision, the whole-token replace, the popup's
+          # empty/footer/preselected rows). It also folds the reading into
+          # the call itself: tui_msg_stream_text() takes the reading
+          # argument and the `_ex` twins are gone. configure PROBES for
+          # all of it — a pin behind this fails every job there, with the
+          # fix named — and `TUI_STREAM_TERMINAL` is the name it asks
+          # for. A tag and not a SHA, so `git describe` reads v0.11.0 off
+          # the checkout and the packaged binaries print exactly the
+          # version the mac/windows asserts compare against.
+          ref: v0.11.0
           path: boba
           fetch-depth: 0
 

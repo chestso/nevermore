@@ -420,11 +420,11 @@ static void sysout_transcript_emit(void *userdata, const char *bytes,
         buf[len] = '\r';
         buf[len + 1] = '\n';
         buf[len + 2] = '\0';
-        send_msg(app, tui_msg_stream_text(-1, buf, len + 2));
+        send_msg(app, tui_msg_stream_text(-1, buf, len + 2, TUI_STREAM_LINES));
         return;
     }
-    send_msg(app, tui_msg_stream_text(-1, bytes, len));
-    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2));
+    send_msg(app, tui_msg_stream_text(-1, bytes, len, TUI_STREAM_LINES));
+    send_msg(app, tui_msg_stream_text(-1, "\r\n", 2, TUI_STREAM_LINES));
 }
 
 /* A notice must not post into a live region (it would land in the middle
@@ -786,7 +786,8 @@ static void sys_tool_result(NmChatApp *app, const char *output,
     }
     if (dynamic_buffer_len(b))
         send_msg(app, tui_msg_stream_text(-1, dynamic_buffer_data(b),
-                                          dynamic_buffer_len(b)));
+                                          dynamic_buffer_len(b),
+                                          TUI_STREAM_LINES));
 }
 
 void nm_chat_app_on_tool(const NmTool *tool, const char *args_json,
@@ -1676,7 +1677,7 @@ static void shell_post(void *ud, const char *bytes, size_t n)
     if (!app || !bytes || n == 0)
         return;
     send_msg(app,
-             tui_msg_stream_text_ex(-1, bytes, n, TUI_STREAM_TEXT_CR_REPLACES));
+             tui_msg_stream_text(-1, bytes, n, TUI_STREAM_TERMINAL));
 }
 
 /* A shell note line, in the role its kind means: a refused start is an

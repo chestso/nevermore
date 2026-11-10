@@ -1139,7 +1139,7 @@ stop it.
   user's environment, raw bytes (`nm_proc_take_raw`, no dumb-terminal rendering),
   a hidden job (`/ps` lists what the user started, and the prompt owns this one)
   and a PTY the size of the terminal. The bytes go to boba's system stream with
-  `TUI_STREAM_TEXT_CR_REPLACES`: a child's bytes are a terminal's bytes, so a
+  `TUI_STREAM_TERMINAL`: a child's bytes are a terminal's bytes, so a
   bare CR is a carriage return and a progress meter animates on one row. boba
   owns framing, tabs, UTF-8 completeness and SGR containment; the only thing the
   module owes it is the trailing row (one LF if the last post ended mid-row) and

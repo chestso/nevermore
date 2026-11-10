@@ -138,7 +138,8 @@ dnl text input, an edit revision, a whole-token replace, the list popup's
 dnl empty-state/footer/preselection rows, the textinput's geometry
 dnl reset (one TuiTextInputGeometry struct, an opaque model read through
 dnl accessors), the history ring's read access, and the system stream's
-dnl carriage-return reading (tui_msg_stream_text_ex). An install older
+dnl carriage-return reading (TUI_STREAM_TERMINAL on
+dnl tui_msg_stream_text). An install older
 dnl than those fails far from its cause — a stale header is an implicit
 dnl declaration, a stale archive an undefined symbol among hundreds of
 dnl objects. Probe the DECLARATIONS here, so the failure names the fix.
@@ -168,7 +169,7 @@ AC_COMPILE_IFELSE(
                      tui_list_popup_set_empty_text(0, "x");
                      tui_list_popup_set_footer(0, "x");
                      (void)tui_list_popup_set_selected(0, 0);
-                     (void)tui_msg_stream_text_ex(-1, "x", 1, 0);]])],
+                     (void)tui_msg_stream_text(-1, "x", 1, TUI_STREAM_TERMINAL);]])],
   [AC_MSG_RESULT([yes])],
   [AC_MSG_RESULT([no])
    AC_MSG_ERROR([the installed boba is too old: this tree needs
@@ -177,7 +178,8 @@ AC_COMPILE_IFELSE(
   tui_textinput_set_geometry/tui_textinput_geometry and
   tui_textinput_visible_rows/tui_textinput_total_rows,
   tui_list_popup_set_empty_text, tui_list_popup_set_footer,
-  tui_list_popup_set_selected and tui_msg_stream_text_ex.
+  tui_list_popup_set_selected and tui_msg_stream_text with
+  TUI_STREAM_TERMINAL.
   Rebuild and install the boba checkout (`make install` in its build
   dir), then re-run configure here.])])
 CFLAGS="$ac_save_CFLAGS"
