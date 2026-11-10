@@ -11189,8 +11189,31 @@ static int shell_drive(AppHarness *h, int budget_ms)
 {
     long long t0 = wall_ms();
     while (nm_chat_app_shell_running(h->app)) {
-        if (wall_ms() - t0 > (long long)budget_ms)
+        if (wall_ms() - t0 > (long long)budget_ms) {
+            /* DIAGNOSE (temporary): what the loop still waits on. */
+            fprintf(stderr, "shell_drive timeout after %lld ms\n",
+                    wall_ms() - t0);
+            fprintf(stderr, "  SHELL=%s\n",
+                    getenv("SHELL") ? getenv("SHELL") : "(unset)");
+            fprintf(stderr, "  jobs=%d\n", nm_proc_count());
+            for (int i = 0; i < nm_proc_count(); i++) {
+                NmProc *p = nm_proc_at(i);
+                fprintf(stderr,
+                        "  job %d handle=%lld live=%d buffered=%zu cmd=%s\n",
+                        nm_proc_id(p), (long long)nm_proc_handle(p),
+                        nm_proc_live(p), nm_proc_buffered(p),
+                        nm_proc_command(p) ? nm_proc_command(p) : "?");
+            }
+            NmSource set[TUI_IO_SOURCE_MAX];
+            size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
+            fprintf(stderr, "  interest=%zu\n", n);
+            for (size_t i = 0; i < n; i++)
+                fprintf(stderr, "    slot %zu handle=%lld kind=%d flags=%u\n",
+                        i, (long long)set[i].handle, set[i].kind,
+                        set[i].flags);
+            fprintf(stderr, "  transcript=[%s]\n", harness_read(h));
             return -1;
+        }
         harness_event_once(h, 10);
     }
     tui_runtime_flush(h->rt);
