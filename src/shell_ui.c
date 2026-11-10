@@ -47,6 +47,11 @@ struct NmShellUi
     unsigned char last; /* the last byte posted (0 = nothing yet) */
     size_t dropped;     /* bytes the bounded buffer evicted, for the note */
     uint64_t stop_deadline_ms;
+    /* The reap poll's own anchored instant (0 = not armed).  ANCHORED,
+     * never `now + N` recomputed when asked: a deadline that slides with
+     * every question never comes due, which is exactly how a Windows run
+     * whose output ended could hang with nothing left in the wait set. */
+    uint64_t poll_deadline_ms;
 };
 
 static uint64_t shell_now(const NmShellUi *s)
@@ -55,6 +60,25 @@ static uint64_t shell_now(const NmShellUi *s)
     /* The house clock: fake_clock.c replaces it at link time in the
      * tests, so the grace deadline is advanced, never slept through. */
     return (uint64_t)(nm_monotonic_seconds() * 1000.0);
+}
+
+/* A job whose OUTPUT has ended but whose process has not been reaped
+ * yet leaves the loop's wait set (on Windows the readiness event retires
+ * at EOF, and nothing replaces it), so the wait itself would never look
+ * again.  This poll is the clock that does: armed when the run is seen
+ * to leave the set, and re-armed by every look that still finds it
+ * running. */
+static void shell_arm_poll(NmShellUi *s)
+{
+    s->poll_deadline_ms = shell_now(s) + NM_SHELL_REAP_POLL_MS;
+}
+
+/* Arm the poll only when the job has actually left the wait set. */
+static void shell_poll_if_out_of_set(NmShellUi *s)
+{
+    NmProc *p = nm_proc_find(s->job_id);
+    if (!p || nm_proc_handle(p) < 0)
+        shell_arm_poll(s);
 }
 
 /* One post to the transcript's system stream, remembering the last byte
@@ -120,6 +144,7 @@ static void shell_start(NmShellUi *s, const char *cmd)
     s->last = 0;
     s->dropped = 0;
     s->stop_deadline_ms = 0;
+    s->poll_deadline_ms = 0;
     s->host.spinner(s->host.ud, 1);
     s->host.request_frame(s->host.ud);
 }
@@ -173,6 +198,7 @@ static void shell_finish(NmShellUi *s)
     s->user_stopped = 0;
     s->last = 0;
     s->stop_deadline_ms = 0;
+    s->poll_deadline_ms = 0;
     s->host.spinner(s->host.ud, 0);
     s->host.request_frame(s->host.ud);
 }
@@ -323,7 +349,8 @@ void nm_shell_ui_interrupt(NmShellUi *s)
         s->stop_deadline_ms = shell_now(s) + NM_SHELL_STOP_GRACE_MS;
         NmProc *p = nm_proc_find(s->job_id);
         if (p)
-            nm_proc_interrupt(p); /* POSIX: ^C through the PTY */
+            nm_proc_interrupt(p);    /* POSIX: ^C through the PTY */
+        shell_poll_if_out_of_set(s); /* no wait seam may be left either */
         s->host.request_frame(s->host.ud);
         return;
     }
@@ -355,30 +382,26 @@ void nm_shell_ui_ready(NmShellUi *s)
      * finished until the handle is exhausted (D4). */
     nm_proc_drain(p);
     shell_take(s, p);
-    if (nm_proc_handle(p) < 0 && !nm_proc_live(p))
+    if (nm_proc_handle(p) < 0 && !nm_proc_live(p)) {
         shell_finish(s);
-    else
+    } else {
+        /* Still exiting: the wait set may be empty now, so the poll is
+         * the only thing that will look again. */
+        shell_poll_if_out_of_set(s);
         s->host.request_frame(s->host.ud);
+    }
 }
 
 uint64_t nm_shell_ui_deadline(const NmShellUi *s)
 {
     if (!s || s->state == NM_SHELL_IDLE)
         return 0;
-    /* A job whose OUTPUT has ended but whose process has not been reaped
-     * yet leaves the loop's wait set (Windows retires the readiness event
-     * at EOF, and POSIX closes the master with it), so the wait itself
-     * would never look again. That is what this poll is for: while the
-     * job reports no handle and is not finished, the tick re-checks it. */
-    uint64_t poll = 0;
-    NmProc *p = nm_proc_find(s->job_id);
-    if (!p || nm_proc_handle(p) < 0)
-        poll = shell_now(s) + NM_SHELL_REAP_POLL_MS;
     if (s->state != NM_SHELL_STOPPING)
-        return poll; /* RUNNING: no cadence unless the job left the set */
-    if (!poll)
+        return s->poll_deadline_ms; /* RUNNING: no cadence unless out of set */
+    if (!s->poll_deadline_ms)
         return s->stop_deadline_ms;
-    return poll < s->stop_deadline_ms ? poll : s->stop_deadline_ms;
+    return s->poll_deadline_ms < s->stop_deadline_ms ? s->poll_deadline_ms
+                                                     : s->stop_deadline_ms;
 }
 
 void nm_shell_ui_tick(NmShellUi *s)
@@ -396,6 +419,9 @@ void nm_shell_ui_tick(NmShellUi *s)
         shell_finish(s);
         return;
     }
-    if (nm_proc_handle(p) < 0)
+    if (nm_proc_handle(p) < 0) {
         nm_shell_ui_ready(s);
+        if (s->state != NM_SHELL_IDLE)
+            shell_poll_if_out_of_set(s);
+    }
 }
