@@ -433,6 +433,12 @@ AGENTS.md has the rest of the release rules.
     `_mkdir`; `_getpid`; no `sh -c` (`run_command` uses `cmd.exe /d /c`).
   - `CreateProcessW`: never quote the whole command line; pass cmd flags as
     separate argv tokens.
+  - **A shell's command is ONE argv element, so it needs its own quotes.**
+    `$SHELL` under MSYS2 and Git Bash is `bash.exe`, and `bash -c echo hi`
+    hands bash `-c echo` with `hi` as the script name — it printed nothing and
+    looked like a hung run. The line stays unquoted as a whole (above); the
+    command tail is quoted as one argument whenever the shell is not cmd.exe,
+    which parses the rest of its own line.
   - No `/tmp`; tests use `C:/Users/Public/...`.
   - **`/nonexistent` is not a portable refusal** (an MSYS2 process can create
     it). Block a directory by putting a regular file where it must go, and
@@ -453,6 +459,11 @@ AGENTS.md has the rest of the release rules.
   - **Compile in the build step, run in the run step:**
     `config.status --recheck` never descends into `tests/`, so in-step test
     builds are serial minutes.
+  - **The test binaries link `fake_clock.c`, so a timer-driven path needs the
+    drive to advance it.** A loop that waits on a real handle hides a frozen
+    clock (the I/O dispatches); a run whose last look is a POLL does not, and
+    hangs for the whole budget. `shell_drive` spends each wait on the fake
+    clock for exactly this reason.
 
 ## C gotchas
 
@@ -466,6 +477,13 @@ AGENTS.md has the rest of the release rules.
   bytes arrive hands the report uninitialized heap.
 - **`va_list` into a variadic function is UB:** route through a `vsnprintf`
   helper.
+- **A deadline is an INSTANT, never `now + N` recomputed when asked.** A
+  "deadline" that slides with every question never comes due, so the timer that
+  reads it never fires: the shell's reap poll answered `now + 100 ms` on every
+  ask and a Windows run whose output had ended hung with nothing left in the
+  wait set (POSIX hid it — a readable master dispatches one last time). Anchor
+  the instant in the state when the poll is armed, re-arm on a look that still
+  finds work, clear it on finish.
 - **A closed stdin reports POLLHUP, not POLLIN:** wait on `POLLIN|POLLHUP` or
   poll forever.
 - **An inherited `SIG_IGN` survives `execve`,** so a child started by a wrapper
