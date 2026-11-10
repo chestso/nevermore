@@ -19,21 +19,21 @@ extern "C" {
 #endif
 
 typedef enum
-{                     /* what the number is denominated in */
-  NM_CREDIT_USD,      /* dollars */
-  NM_CREDIT_ZEN,      /* Zen credits (no readable purse) */
-  NM_CREDIT_REQUESTS, /* request counts in a window */
-  NM_CREDIT_PERCENT   /* a percent of an unpublished cap */
+{                       /* what the number is denominated in */
+    NM_CREDIT_USD,      /* dollars */
+    NM_CREDIT_ZEN,      /* Zen credits (no readable purse) */
+    NM_CREDIT_REQUESTS, /* request counts in a window */
+    NM_CREDIT_PERCENT   /* a percent of an unpublished cap */
 } NmCreditUnit;
 
 typedef enum
 { /* what the window is; PURSE never resets */
-  NM_CREDIT_PURSE,
-  NM_CREDIT_ROLLING_5H, /* Go: starts at first use */
-  NM_CREDIT_HOUR,
-  NM_CREDIT_DAY,
-  NM_CREDIT_WEEK,
-  NM_CREDIT_PERIOD /* a paid/included period; formats as "mo" */
+    NM_CREDIT_PURSE,
+    NM_CREDIT_ROLLING_5H, /* Go: starts at first use */
+    NM_CREDIT_HOUR,
+    NM_CREDIT_DAY,
+    NM_CREDIT_WEEK,
+    NM_CREDIT_PERIOD /* a paid/included period; formats as "mo" */
 } NmCreditWindow;
 
 typedef enum
@@ -43,11 +43,11 @@ typedef enum
 } NmCreditKind;
 
 typedef enum
-{                              /* where the fact came from */
-  NM_CREDIT_FROM_ROUND_BODY,   /* usage.cost / usage.remaining / usage.opencode */
-  NM_CREDIT_FROM_ROUND_HEADER, /* x-ratelimit-* */
-  NM_CREDIT_FROM_ENDPOINT,     /* a dedicated GET */
-  NM_CREDIT_FROM_REFUSAL       /* a 402 "insufficient funds" */
+{                                /* where the fact came from */
+    NM_CREDIT_FROM_ROUND_BODY,   /* usage.cost / usage.remaining / usage.opencode */
+    NM_CREDIT_FROM_ROUND_HEADER, /* x-ratelimit-* */
+    NM_CREDIT_FROM_ENDPOINT,     /* a dedicated GET */
+    NM_CREDIT_FROM_REFUSAL       /* a 402 "insufficient funds" */
 } NmCreditOrigin;
 
 typedef enum
