@@ -76,7 +76,7 @@ make install
 
 Dependencies:
 
-- **[boba](https://chest.so/boba)** (required): TUI runtime, text input, styles.
+- **[boba](https://chest.so/boba/)** (required): TUI runtime, text input, styles.
   A separate project, not vendored. Build and install it first; `configure`
   finds it through pkg-config.
 - **TLS** (optional, per OS, never libcurl): Schannel on Windows, Secure
