@@ -144,6 +144,14 @@ dnl than those fails far from its cause — a stale header is an implicit
 dnl declaration, a stale archive an undefined symbol among hundreds of
 dnl objects. Probe the DECLARATIONS here, so the failure names the fix.
 dnl
+dnl The lone-Esc timeout is the same dependency with nothing of its own to
+dnl call: tui_runtime_run() arms and fires it, and the app never asks for
+dnl it — but without it a parked ESC byte settles into no key at all, so
+dnl both Esc ladders (a `!` run and the round cancel) quietly stop
+dnl existing on a terminal without the kitty keyboard protocol. Probe its
+dnl declaration too, so a stale install fails here by name instead of
+dnl misbehaving in silence.
+dnl
 dnl Compile, not link: a cross tree (the macOS pre-flight) has no
 dnl macOS boba to link against — its dependency is this box's install,
 dnl by the script's own design — and a probe that cannot pass there
@@ -156,7 +164,8 @@ CFLAGS="$CFLAGS $BOBA_CFLAGS"
 AC_COMPILE_IFELSE(
   [AC_LANG_PROGRAM([[#include <boba/components/textinput.h>
                      #include <boba/components/list_popup.h>
-                     #include <boba/stream.h>]],
+                     #include <boba/stream.h>
+                     #include <boba/runtime.h>]],
                    [[TuiTextSpan span;
                      TuiTextInputGeometry geom = { 0 };
                      (void)tui_textinput_set_spans(0, &span, 0);
@@ -169,7 +178,9 @@ AC_COMPILE_IFELSE(
                      tui_list_popup_set_empty_text(0, "x");
                      tui_list_popup_set_footer(0, "x");
                      (void)tui_list_popup_set_selected(0, 0);
-                     (void)tui_msg_stream_text(-1, "x", 1, TUI_STREAM_TERMINAL);]])],
+                     (void)tui_msg_stream_text(-1, "x", 1, TUI_STREAM_TERMINAL);
+                     (void)tui_runtime_input_timeout_ms(0);
+                     (void)TUI_ESC_TIMEOUT_MS;]])],
   [AC_MSG_RESULT([yes])],
   [AC_MSG_RESULT([no])
    AC_MSG_ERROR([the installed boba is too old: this tree needs
@@ -178,8 +189,9 @@ AC_COMPILE_IFELSE(
   tui_textinput_set_geometry/tui_textinput_geometry and
   tui_textinput_visible_rows/tui_textinput_total_rows,
   tui_list_popup_set_empty_text, tui_list_popup_set_footer,
-  tui_list_popup_set_selected and tui_msg_stream_text with
-  TUI_STREAM_TERMINAL.
+  tui_list_popup_set_selected, tui_msg_stream_text with
+  TUI_STREAM_TERMINAL, and the lone-Esc timeout
+  (tui_runtime_input_timeout_ms, TUI_ESC_TIMEOUT_MS).
   Rebuild and install the boba checkout (`make install` in its build
   dir), then re-run configure here.])])
 CFLAGS="$ac_save_CFLAGS"

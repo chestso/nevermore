@@ -495,11 +495,16 @@ AGENTS.md has the rest of the release rules.
   ISIG on and a foreground group** — an interrupt landing between `fork` and
   the child's `TIOCSCTTY`, or inside a raw-mode program, is silently dropped.
   `kill(-pgid, SIGINT)` reaches the same processes and cannot be lost.
-- **A lone Esc byte never becomes a key event** (boba's parser waits for the
-  next byte; the following key then reads as Alt+key). Test the Esc ladders
-  through `tui_msg_key(TUI_KEY_ESCAPE, …)`, and do not conclude from a green
-  unit test that Esc works on a real terminal — it does not, for the shell
-  mode or for the round cancel, until boba flushes a pending ESC on idle.
+- **A lone Esc is a timing question, and boba owns the clock** (boba
+  `v0.11.1`): the parser parks an `ESC` byte until the next byte decides
+  whether it was the Escape key or the start of a sequence, and the runtime
+  flushes a parked one as `TUI_KEY_ESCAPE` after `TUI_ESC_TIMEOUT_MS` (50 ms)
+  of quiet. Before that release a lone Esc produced no key at all and the
+  NEXT key read as Alt+key, so a stale `libboba` still loses both ladders —
+  the shell's stop and the round cancel — while every unit test passes,
+  because those drive Esc through `tui_msg_key(TUI_KEY_ESCAPE, …)`.
+  `configure` probes `tui_runtime_input_timeout_ms`; a green `make check` is
+  not the proof of this half, a tmux `!sleep 30` + Esc is.
 - **`nm_json_at` is array-only:** on an object use `nm_json_key` +
   `nm_json_get`.
 - **`nm_source_items()` sets `*n = 0` / NULL before the first fetch:** call

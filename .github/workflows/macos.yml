@@ -140,7 +140,7 @@ jobs:
           # posts its own prose that way. The app's shell mode is what
           # wants the terminal reading.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. v0.11.0 is the boba release that carries all of the
+          # mid-work. v0.11.1 is the boba release that carries all of the
           # above, the byte path the shell stream relies on (a character
           # cut across two messages is completed, not mangled, and the
           # transcript closes every committed write at default, so a
@@ -149,13 +149,20 @@ jobs:
           # revision, the whole-token replace, the popup's
           # empty/footer/preselected rows). It also folds the reading into
           # the call itself: tui_msg_stream_text() takes the reading
-          # argument and the `_ex` twins are gone. configure PROBES for
-          # all of it — a pin behind this fails every job there, with the
-          # fix named — and `TUI_STREAM_TERMINAL` is the name it asks
-          # for. A tag and not a SHA, so `git describe` reads v0.11.0 off
-          # the checkout and the packaged binaries print exactly the
-          # version the mac/windows asserts compare against.
-          ref: v0.11.0
+          # argument and the `_ex` twins are gone. v0.11.1 adds the input
+          # timeout: an ESC byte parked while the parser waits to see
+          # whether it opens a sequence is delivered as the Escape key once
+          # the terminal has been quiet for TUI_ESC_TIMEOUT_MS, so Esc
+          # stops a `!` run and cancels a round on a terminal that does not
+          # speak the kitty keyboard protocol (without it a lone Esc
+          # reached nothing and the next key read as Alt+key). configure
+          # PROBES for the API — a pin behind this fails every job there,
+          # with the fix named — and `TUI_STREAM_TERMINAL` and
+          # `tui_runtime_input_timeout_ms` are the names it asks for. A tag
+          # and not a SHA, so `git describe` reads v0.11.1 off the
+          # checkout and the packaged binaries print exactly the version
+          # the mac/windows asserts compare against.
+          ref: v0.11.1
           path: boba
           fetch-depth: 0
 
