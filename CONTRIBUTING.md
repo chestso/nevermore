@@ -511,6 +511,13 @@ AGENTS.md has the rest of the release rules.
   because those drive Esc through `tui_msg_key(TUI_KEY_ESCAPE, …)`.
   `configure` probes `tui_runtime_input_timeout_ms`; a green `make check` is
   not the proof of this half, a tmux `!sleep 30` + Esc is.
+- **A tick ETA is a deadline, and 0 means due now** (boba `v0.11.2`): the
+  runtime re-asks `get_tick_timeout_ms` after every wake and dispatches
+  `on_tick` once the named time has passed, so a timer reports the time LEFT,
+  rounded up by `nm_until_ms` (0 only when the deadline has passed). An early
+  wake — a key, an fd, the Esc deadline — can neither fire nor postpone it. A
+  flat period would be pushed out by every wake; a 0 read as a default
+  interval would delay the event and spin the loop in `poll(0)`.
 - **`nm_json_at` is array-only:** on an object use `nm_json_key` +
   `nm_json_get`.
 - **`nm_source_items()` sets `*n = 0` / NULL before the first fetch:** call

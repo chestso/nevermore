@@ -140,7 +140,7 @@ jobs:
           # posts its own prose that way. The app's shell mode is what
           # wants the terminal reading.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. v0.11.1 is the boba release that carries all of the
+          # mid-work. v0.11.2 is the boba release that carries all of the
           # above, the byte path the shell stream relies on (a character
           # cut across two messages is completed, not mangled, and the
           # transcript closes every committed write at default, so a
@@ -155,14 +155,21 @@ jobs:
           # the terminal has been quiet for TUI_ESC_TIMEOUT_MS, so Esc
           # stops a `!` run and cancels a round on a terminal that does not
           # speak the kitty keyboard protocol (without it a lone Esc
-          # reached nothing and the next key read as Alt+key). configure
+          # reached nothing and the next key read as Alt+key). It also
+          # makes the tick a deadline: get_tick_timeout_ms names the time
+          # to the next timed event (0 = due now, never a default
+          # interval), and on_tick fires when that time has passed — an
+          # early wake for a key, an fd or the Esc deadline can neither
+          # fire nor postpone it, which is what the spinner's frame clock
+          # and every app timer rest on. The Windows stdin reader thread
+          # is also stopped deterministically at teardown. configure
           # PROBES for the API — a pin behind this fails every job there,
           # with the fix named — and `TUI_STREAM_TERMINAL` and
           # `tui_runtime_input_timeout_ms` are the names it asks for. A tag
-          # and not a SHA, so `git describe` reads v0.11.1 off the
+          # and not a SHA, so `git describe` reads v0.11.2 off the
           # checkout and the packaged binaries print exactly the version
           # the mac/windows asserts compare against.
-          ref: v0.11.1
+          ref: v0.11.2
           path: boba
           fetch-depth: 0
 
