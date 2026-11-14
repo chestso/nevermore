@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 380 models.
+/* openrouter: 384 models.
  * Source: GET https://openrouter.ai/api/v1/models?limit=1000
  */
 static const NmModel nm_catalog_openrouter[] = {
@@ -46,10 +46,9 @@ static const NmModel nm_catalog_openrouter[] = {
     { "anthropic/claude-sonnet-4.6", "Anthropic: Claude Sonnet 4.6", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "anthropic/claude-sonnet-5", "Anthropic: Claude Sonnet 5", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "anthropic/claude-sonnet-5.5", "Anthropic: Claude Sonnet 5.5", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "bytedance-seed/seed-1.6", "ByteDance Seed: Seed 1.6", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "bytedance-seed/seed-1.6-flash", "ByteDance Seed: Seed 1.6 Flash", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "baidu/ernie-5.5-flash-preview:free", "Baidu: ERNIE-5.5-Flash-Preview (free)", 0, 0, 1024000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "baidu/ernie-light-dt-1.0-intl", "Baidu: ERNIE-Light-DT-1.0", 0, 0, 1024000, 1, "none|minimal|low|medium|high|xhigh|max", "max" },
     { "bytedance-seed/seed-2-1-turbo", "ByteDance Seed: Seed 2.1 Turbo", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "bytedance-seed/seed-2.0-code", "ByteDance Seed: Seed-2.0-Code", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "bytedance-seed/seed-2.0-lite", "ByteDance Seed: Seed-2.0-Lite", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "bytedance-seed/seed-2.0-mini", "ByteDance Seed: Seed-2.0-Mini", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "bytedance/ui-tars-1.5-7b", "ByteDance: UI-TARS 7B ", 1, 0, 128000, -1, NULL, NULL },
@@ -98,6 +97,8 @@ static const NmModel nm_catalog_openrouter[] = {
     { "google/gemini-3.7-flash", "Google: Gemini 3.7 Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-3.8-flash", "Google: Gemini 3.8 Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-4-argon", "Google: Gemini 4 Argon", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
+    { "google/gemini-4-carbon", "Google: Gemini 4 Carbon", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
+    { "google/gemini-4-hydrogen", "Google: Gemini 4 Hydrogen", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-nano-banana-2.1", "Google: Nano Banana 2.1", 1, 1, 65536, 1, "none|minimal|low|medium|high|xhigh|max", "minimal" },
     { "google/gemini-omni-1.1-flash", "Google: Gemini Omni 1.1 Flash", 1, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", "low" },
     { "google/gemini-omni-1.2-flash", "Google: Gemini Omni 1.2 Flash", 1, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", "low" },
@@ -117,16 +118,16 @@ static const NmModel nm_catalog_openrouter[] = {
     { "inclusionai/ling-3.0-flash-vl", "inclusionAI: Ling 3.0 Flash VL", 1, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "inclusionai/ling-3.0-tiny", "inclusionAI: Ling 3.0 Tiny", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "inclusionai/ling-3.1-flash", "inclusionAI: Ling 3.1 Flash", 0, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "inclusionai/ling-3.2-flash:free", "inclusionAI: Ling 3.2 Flash (free)", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "inference-net/schematron-v2-small", "Inference.net: Schematron V2 Small", 0, 0, 128000, -1, NULL, NULL },
     { "inference-net/schematron-v2-turbo", "Inference.net: Schematron V2 Turbo", 0, 0, 128000, -1, NULL, NULL },
-    { "liquid/lfm-2.5-2.6b", "LiquidAI: LFM2.5-2.6B", 0, 0, 128000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "liquid/lfm-2.5-2.6b:free", "LiquidAI: LFM2.5-2.6B (free)", 0, 0, 65536, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "kt/midm-k-3.0-pro", "KT: Mi:dm K 3.0 Pro", 0, 0, 261795, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "liquid/lfm-2.5-24b-a2b", "LiquidAI: LFM2.5-24B-A2B", 0, 0, 128000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "liquid/lfm-3-1.7b", "LiquidAI: LFM3-1.7B", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "liquid/lfm-3-1.7b:free", "LiquidAI: LFM3-1.7B (free)", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "mancer/weaver", "Mancer: Weaver (alpha)", 0, 0, 8000, -1, NULL, NULL },
     { "meituan/longcat-2.0", "Meituan: LongCat 2.0", 0, 0, 1048756, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "meta-llama/llama-3.1-70b-instruct", "Meta: Llama 3.1 70B Instruct", 0, 0, 131072, -1, NULL, NULL },
+    { "meta-llama/llama-3.1-70b-instruct", "Meta: Llama 3.1 70B Instruct", 0, 0, 131072, 1, NULL, NULL },
     { "meta-llama/llama-3.1-8b-instruct", "Meta: Llama 3.1 8B Instruct", 0, 0, 131072, 1, NULL, NULL },
     { "meta-llama/llama-3.2-1b-instruct", "Meta: Llama 3.2 1B Instruct", 0, 0, 60000, -1, NULL, NULL },
     { "meta-llama/llama-3.2-3b-instruct", "Meta: Llama 3.2 3B Instruct", 0, 0, 131072, -1, NULL, NULL },
@@ -144,7 +145,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "meta/muse-spark-open", "Meta: Muse Spark Open", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "meta/muse-wonder", "Meta: Muse Wonder", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "microsoft/phi-4", "Microsoft: Phi 4", 0, 0, 16384, -1, NULL, NULL },
-    { "minimax/minimax-m2.5", "MiniMax: MiniMax M2.5", 0, 0, 200000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "minimax/minimax-m2.5", "MiniMax: MiniMax M2.5", 0, 0, 198000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "minimax/minimax-m2.7", "MiniMax: MiniMax M2.7", 0, 0, 196608, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "minimax/minimax-m3", "MiniMax: MiniMax M3", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "minimax/minimax-m3.1-flash", "MiniMax: MiniMax M3.1 Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "max" },
@@ -180,12 +181,14 @@ static const NmModel nm_catalog_openrouter[] = {
     { "moonshotai/kimi-k3.1-pro", "MoonshotAI: Kimi K3.1 Pro", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "max" },
     { "morph/morph-v3-fast", "Morph: Morph V3 Fast", 0, 0, 262144, -1, NULL, NULL },
     { "morph/morph-v3-large", "Morph: Morph V3 Large", 0, 0, 262144, -1, NULL, NULL },
+    { "motif-technologies/motif-3", "Motif Technologies: Motif 3", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "nex-agi/nex-n2.5-mini", "Nex AGI: Nex-N2.5-Mini", 1, 0, 262144, -1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "nex-agi/nex-n2.5-pro", "Nex AGI: Nex-N2.5-Pro", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "nex-agi/nex-n2.6", "Nex AGI: Nex-N2.6", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "nousresearch/hermes-4-405b", "Nous: Hermes 4 405B", 0, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "nvidia/nemotron-3-nano-30b-a3b", "NVIDIA: Nemotron 3 Nano 30B A3B", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free", "NVIDIA: Nemotron 3 Nano Omni (free)", 1, 0, 256000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "nvidia/nemotron-3-super-120b-a12b", "NVIDIA: Nemotron 3 Super", 0, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
+    { "nvidia/nemotron-3-super-120b-a12b", "NVIDIA: Nemotron 3 Super", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "nvidia/nemotron-3-ultra-550b-a55b", "NVIDIA: Nemotron 3 Ultra", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "nvidia/nemotron-3-ultra-550b-a55b:free", "NVIDIA: Nemotron 3 Ultra (free)", 0, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "nvidia/nemotron-3.5-content-safety", "NVIDIA: Nemotron 3.5 Content Safety", 1, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -260,6 +263,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "openrouter/fusion", "OpenRouter: Fusion", 0, 0, 1000000, -1, NULL, NULL },
     { "openrouter/pareto-code", "Pareto Code Router", 0, 0, 2000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "particle-ai/particle-1", "Particle AI: Particle-1", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "particle-ai/particle-1:free", "Particle AI: Particle-1 (free)", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "perceptron/perceptron-mk1", "Perceptron: Perceptron Mk1", 1, 0, 32768, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "perceptron/perceptron-mk1.5", "Perceptron: Perceptron Mk1.5", 1, 0, 36864, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "perplexity/sonar", "Perplexity: Sonar", 1, 0, 127072, -1, NULL, NULL },
@@ -270,7 +274,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "prism-ml/ternary-bonsai-2-27b", "PrismML: Ternary Bonsai 2 27B", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "xhigh" },
     { "prism-ml/ternary-bonsai-2-9b", "PrismML: Ternary Bonsai 2 9B", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "qwen/qwen-2.5-72b-instruct", "Qwen2.5 72B Instruct", 0, 0, 32768, 1, NULL, NULL },
-    { "qwen/qwen-2.5-7b-instruct", "Qwen: Qwen2.5 7B Instruct", 0, 0, 32768, 1, NULL, NULL },
     { "qwen/qwen-2.5-coder-32b-instruct", "Qwen2.5 Coder 32B Instruct", 0, 0, 32768, -1, NULL, NULL },
     { "qwen/qwen-plus", "Qwen: Qwen-Plus", 0, 0, 1000000, 1, NULL, NULL },
     { "qwen/qwen2.5-vl-72b-instruct", "Qwen: Qwen2.5 VL 72B Instruct", 1, 0, 128000, -1, NULL, NULL },
@@ -340,10 +343,12 @@ static const NmModel nm_catalog_openrouter[] = {
     { "thedrummer/skyfall-36b-v2", "TheDrummer: Skyfall 36B V2", 0, 0, 32768, -1, NULL, NULL },
     { "thedrummer/unslopnemo-12b", "TheDrummer: UnslopNemo 12B", 0, 0, 1024000, -1, NULL, NULL },
     { "thinkingmachines/inkling", "Thinking Machines: Inkling", 1, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "thinkingmachines/inkling-2-small", "Thinking Machines: Inkling 2 Small", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "thinkingmachines/inkling-2-small:free", "Thinking Machines: Inkling 2 Small (free)", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "thinkingmachines/inkling-small", "Thinking Machines: Inkling Small", 1, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "typesafe/jev-router", "TypeSafe: Jev Router", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "unbiased/pareto-26.10", "Pareto 26.10", 1, 0, 1048576, 1, NULL, NULL },
+    { "unbiased/pareto-26.10-preview", "Pareto 26.10 Preview", 1, 0, 1048576, 1, NULL, NULL },
     { "unbiased/pareto-26.9", "Pareto 26.9", 1, 0, 262144, 1, NULL, NULL },
     { "undi95/remm-slerp-l2-13b", "ReMM SLERP 13B", 0, 0, 6144, -1, NULL, NULL },
     { "upstage/solar-mini4", "Upstage: Solar Mini 4", 0, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
@@ -361,7 +366,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "xiaomi/mimo-v2.6-flash", "Xiaomi: MiMo-V2.6-Flash", 1, 0, 1050000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "xiaomi/mimo-v2.6-pro", "Xiaomi: MiMo-V2.6-Pro", 1, 0, 1050000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "xiaomi/mimo-v2.6-pro-ultraspeed", "Xiaomi: MiMo-V2.6-Pro-UltraSpeed", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "xingchen-agi/xing4.0-29b-a4b:free", "XingChen: Xing4.0 29B A4B (free)", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5", "Z.ai: GLM 4.5", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5-air", "Z.ai: GLM 4.5 Air", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5v", "Z.ai: GLM 4.5V", 1, 0, 65536, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -401,7 +405,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { 0 }
 };
 
-/* ollama: 23 models.
+/* ollama: 24 models.
  * Source: GET https://ollama.com/v1/models?verbose=true
  */
 static const NmModel nm_catalog_ollama[] = {
@@ -416,6 +420,7 @@ static const NmModel nm_catalog_ollama[] = {
     { "glm-5.3-flash", "glm-5.3-flash", 1, 0, 1048576, 0, "low|high|max", "max" },
     { "gpt-oss:120b", "gpt-oss:120b", 0, 0, 131072, 0, "low|medium|high", "medium" },
     { "gpt-oss:20b", "gpt-oss:20b", 0, 0, 131072, 0, "low|medium|high", "medium" },
+    { "inkling-2-small", "inkling-2-small", 1, 0, 1048576, 0, "none|low|medium|high|max", "high" },
     { "kimi-k2.6", "kimi-k2.6", 1, 0, 262144, 0, "none|medium", "medium" },
     { "kimi-k2.7-code", "kimi-k2.7-code", 1, 0, 262144, 0, "none|medium", "medium" },
     { "kimi-k3", "kimi-k3", 1, 0, 1048576, 0, "none|low|high|max", "max" },
@@ -438,7 +443,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { "beam-free", "Beam Free", 0, 0, 1048576, 1, "low|medium|high|xhigh|max", NULL },
     { "claude-haiku-5-5", "Claude Haiku 5.5", 1, 0, 1000000, 1, "low|medium|high|xhigh|max", NULL },
     { "deepseek-v4-pro", "DeepSeek V4 Pro", 0, 0, 1000000, 1, "high|max", NULL },
-    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 0, 1000000, 1, "low|high|max", NULL },
+    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash 1017", 1, 0, 1000000, 1, "low|high|max", NULL },
     { "gemini-4-argon", "Gemini 4 Argon", 1, 0, 1048576, 1, "low|medium|high", NULL },
     { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1, "high|max", NULL },
     { "glm-5.3", "GLM-5.3", 0, 0, 1000000, 1, "low|high|max", NULL },
@@ -468,7 +473,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { 0 }
 };
 
-/* opencode-zen: 84 models.
+/* opencode-zen: 86 models.
  * Source: https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models
  */
 static const NmModel nm_catalog_opencode_zen[] = {
@@ -490,7 +495,7 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "claude-sonnet-5", "Claude Sonnet 5", 1, 0, 1000000, 1, "low|medium|high|xhigh|max", NULL },
     { "claude-sonnet-5-5", "Claude Sonnet 5.5", 1, 0, 1000000, 1, "low|medium|high|xhigh|max", NULL },
     { "deepseek-v4-pro", "DeepSeek V4 Pro", 0, 0, 1000000, 1, "high|max", NULL },
-    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", 1, 0, 1000000, 1, "low|high|max", NULL },
+    { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash 1017", 1, 0, 1000000, 1, "low|high|max", NULL },
     { "deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash Free", 1, 0, 200000, 1, "low|high|max", NULL },
     { "flint-40b-free", "Flint 40B Free", 0, 0, 262144, 1, "low|medium|high|xhigh|max", NULL },
     { "gemini-3.5-flash", "Gemini 3.5 Flash", 1, 0, 1048576, 1, "minimal|low|medium|high", NULL },
@@ -499,6 +504,8 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "gemini-3.7-flash", "Gemini 3.7 Flash", 1, 0, 1048576, 1, "low|medium|high", NULL },
     { "gemini-3.8-flash", "Gemini 3.8 Flash", 1, 0, 1048576, 1, "low|medium|high", NULL },
     { "gemini-4-argon", "Gemini 4 Argon", 1, 0, 1048576, 1, "low|medium|high", NULL },
+    { "gemini-4-carbon", "Gemini 4 Carbon", 1, 0, 1048576, 1, "low|medium|high", NULL },
+    { "gemini-4-hydrogen", "Gemini 4 Hydrogen", 1, 0, 1048576, 1, "low|medium|high|xhigh", NULL },
     { "glm-5", "GLM-5", 0, 0, 204800, 1, NULL, NULL },
     { "glm-5.1", "GLM-5.1", 0, 0, 204800, 1, NULL, NULL },
     { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1, "high|max", NULL },
