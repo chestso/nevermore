@@ -10815,10 +10815,16 @@ static const char *mfx_build(void)
     write_file_at(p, "abcdef\n"); /* 7 bytes: the note's size column */
     snprintf(p, sizeof(p), "%s/beta.txt", g_mfx);
     write_file_at(p, "xyz\n");
+    snprintf(p, sizeof(p), "%s/.hidden", g_mfx);
+    write_file_at(p, "h\n");
     snprintf(p, sizeof(p), "%s/my dir", g_mfx);
     chat_mkdir(p);
     snprintf(p, sizeof(p), "%s/my dir/a b.txt", g_mfx);
     write_file_at(p, "hi\n");
+    /* A directory with nothing in it: the "no matches" state, and the
+     * tail that closes quietly. */
+    snprintf(p, sizeof(p), "%s/dots", g_mfx);
+    chat_mkdir(p);
     return g_mfx;
 }
 
@@ -10827,6 +10833,26 @@ static const char *mention_frame(AppHarness *h, const char *text)
 {
     harness_type(h, text);
     return tui_runtime_render(h->rt);
+}
+
+/* The bytes the prompt painted with the underline style: the run after
+ * the first underline SGR that starts at the '@', up to the next SGR.
+ * Returns 0 when no mention is underlined. */
+static int mention_underline_run(const char *frame, char *out, size_t cap)
+{
+    const char *at = strstr(frame, "\x1b[4m@");
+    if (!at)
+        return 0;
+    at += 4;
+    const char *end = strstr(at, "\x1b[");
+    if (!end)
+        return 0;
+    size_t n = (size_t)(end - at);
+    if (n >= cap)
+        n = cap - 1;
+    memcpy(out, at, n);
+    out[n] = '\0';
+    return 1;
 }
 
 /* Typing `@` at a token boundary opens the picker on the workdir, and
@@ -11029,6 +11055,182 @@ static void test_mention_edit_reopens_the_picker(void)
     harness_free(h);
 }
 
+/* A full stop after a path is prose: the underline stops before it, the
+ * exact-file close has already shut the picker, and the tail offers
+ * nothing more — so it closes quietly rather than flashing "no
+ * matches". */
+static void test_mention_tail_dot_is_prose(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800];
+    snprintf(text, sizeof(text), "see @%s/alpha.c.", dir);
+    const char *frame = mention_frame(h, text);
+    char run[800], want[800];
+    snprintf(want, sizeof(want), "@%s/alpha.c", dir);
+    ASSERT_TRUE(mention_underline_run(frame, run, sizeof(run)));
+    ASSERT_STR_EQ(run, want);
+    ASSERT_TRUE(strstr(frame, "pick") == NULL);
+    ASSERT_TRUE(strstr(frame, "no matches") == NULL);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+
+    harness_free(h);
+}
+
+/* The dot is still a completion byte while the cursor sits in it: `@.`
+ * lists the hidden names, and `.h` completes one. */
+static void test_mention_tail_keeps_the_dotfile_listing(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800];
+    snprintf(text, sizeof(text), "see @%s/.", dir);
+    const char *frame = mention_frame(h, text);
+    ASSERT_TRUE(strstr(frame, ".hidden") != NULL);
+    char run[800], want[800];
+    snprintf(want, sizeof(want), "@%s/", dir);
+    ASSERT_TRUE(mention_underline_run(frame, run, sizeof(run)));
+    ASSERT_STR_EQ(run, want);
+
+    harness_type(h, "h");
+    harness_enter(h);
+    snprintf(want, sizeof(want), "see @%s/.hidden ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_free(h);
+}
+
+/* A tail with no candidate is prose, not a failed path: no "no matches"
+ * row, no picker — Enter submits. An empty tail keeps the row. */
+static void test_mention_tail_with_no_match_closes_quietly(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800];
+    snprintf(text, sizeof(text), "see @%s/dots/", dir);
+    const char *frame = mention_frame(h, text);
+    ASSERT_TRUE(strstr(frame, "no matches") != NULL);
+
+    harness_type(h, ".");
+    frame = tui_runtime_render(h->rt);
+    ASSERT_TRUE(strstr(frame, "no matches") == NULL);
+    ASSERT_TRUE(strstr(frame, "pick") == NULL);
+    char run[800], want[800];
+    snprintf(want, sizeof(want), "@%s/dots/", dir);
+    ASSERT_TRUE(mention_underline_run(frame, run, sizeof(run)));
+    ASSERT_STR_EQ(run, want);
+    snprintf(want, sizeof(want), "see @%s/dots/.", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    harness_free(h);
+}
+
+/* Accepting from a tail replaces the path only: the prose punctuation
+ * the user typed survives, and no space is added before it. */
+static void test_mention_accept_keeps_the_tail(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800], want[800];
+    snprintf(text, sizeof(text), "see @%s/.", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), ".hidden") != NULL);
+    harness_enter(h);
+    snprintf(want, sizeof(want), "see @%s/.hidden.", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
+
+    harness_free(h);
+}
+
+/* The space a file pick adds is a removable suffix: punctuation typed
+ * right after it eats it, in ONE edit, so one Undo puts the space back. */
+static void test_mention_auto_space_is_eaten(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800], want[800];
+    snprintf(text, sizeof(text), "read @%s/al", dir);
+    harness_type(h, text);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "alpha.c") != NULL);
+    harness_enter(h);
+    snprintf(want, sizeof(want), "read @%s/alpha.c ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    harness_type(h, ",");
+    snprintf(want, sizeof(want), "read @%s/alpha.c,", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    /* One undo restores the space (and removes the comma). */
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_NONE, '_', TUI_MOD_CTRL));
+    tui_runtime_flush(h->rt);
+    snprintf(want, sizeof(want), "read @%s/alpha.c ", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    harness_free(h);
+}
+
+/* Any other key, or a cursor move, keeps the space. */
+static void test_mention_auto_space_survives(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800], want[800];
+    snprintf(text, sizeof(text), "read @%s/al", dir);
+
+    harness_type(h, text);
+    harness_enter(h);
+    harness_type(h, "x");
+    snprintf(want, sizeof(want), "read @%s/alpha.c x", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    tui_runtime_send(h->rt, tui_msg_interrupt()); /* clear the buffer */
+    tui_runtime_flush(h->rt);
+    harness_type(h, text);
+    harness_enter(h);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_HOME, 0, 0));
+    tui_runtime_flush(h->rt);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_END, 0, 0));
+    tui_runtime_flush(h->rt);
+    harness_type(h, ",");
+    snprintf(want, sizeof(want), "read @%s/alpha.c ,", dir);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), want);
+
+    harness_free(h);
+}
+
+/* Accepting a file is one edit: one Undo takes the label back to the
+ * token the user typed. */
+static void test_mention_accept_is_one_undo(void)
+{
+    const char *dir = mfx_build();
+    AppHarness *h = harness_new("ollama:local", "test-model", NULL);
+    ASSERT_NOT_NULL(h);
+
+    char text[800];
+    snprintf(text, sizeof(text), "read @%s/al", dir);
+    harness_type(h, text);
+    harness_enter(h);
+    tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_NONE, '_', TUI_MOD_CTRL));
+    tui_runtime_flush(h->rt);
+    ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), text);
+
+    harness_free(h);
+}
+
 /* A resolved mention is underlined in the prompt; one that does not
  * resolve is not, and the picker says so instead of vanishing. */
 static void test_mention_underline_marks_only_resolved_tokens(void)
@@ -11124,12 +11326,18 @@ static void test_mention_submit_sends_a_note(void)
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
-    char text[800];
-    snprintf(text, sizeof(text), "compare @%s/alpha.c with @\"%s/my dir\"",
-             dir, dir);
-    harness_type(h, text);
-    /* The picker is open on the last token; a send retires it. */
+    char text[1600], head[800], tail[800];
+    snprintf(head, sizeof(head),
+             "compare @%s/alpha.c with @\"%s/my dir\"", dir, dir);
+    snprintf(tail, sizeof(tail), " and @%s/.", dir);
+    snprintf(text, sizeof(text), "%s%s", head, tail);
+    harness_type(h, head);
+    /* The picker is open on the last token so far. */
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
+    /* The tail dot keeps the dotfile listing; its path is the fixture
+     * directory, which the note names. */
+    harness_type(h, tail);
+    ASSERT_TRUE(strstr(tui_runtime_render(h->rt), ".hidden") != NULL);
     /* A user finishing a path dismisses the picker before sending. */
     tui_runtime_send(h->rt, tui_msg_key(TUI_KEY_ESCAPE, 0, 0));
     tui_runtime_flush(h->rt);
@@ -11140,11 +11348,14 @@ static void test_mention_submit_sends_a_note(void)
 
     /* The user's own line rode the wire verbatim. */
     ASSERT_TRUE(strstr(g_request, "compare @") != NULL);
-    /* The note names both: a file with its size, a directory as one. */
+    /* The note names all three: a file with its size, a directory as
+     * one, and the tail-trimmed directory. */
     char want[800];
     snprintf(want, sizeof(want), "%s/alpha.c (file, 7 B)", dir);
     ASSERT_TRUE(strstr(g_request, want) != NULL);
     snprintf(want, sizeof(want), "%s/my dir (directory)", dir);
+    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    snprintf(want, sizeof(want), "%s/ (directory)", dir);
     ASSERT_TRUE(strstr(g_request, want) != NULL);
     /* It is harness speech, framed and reported (not silent). */
     ASSERT_TRUE(strstr(g_request, "The user referenced: ") != NULL);
@@ -11646,6 +11857,13 @@ int main(void)
     RUN_TEST(test_mention_footer_does_not_leak_into_other_popups);
     RUN_TEST(test_mention_reentry_reconfirms_the_token);
     RUN_TEST(test_mention_edit_reopens_the_picker);
+    RUN_TEST(test_mention_tail_dot_is_prose);
+    RUN_TEST(test_mention_tail_keeps_the_dotfile_listing);
+    RUN_TEST(test_mention_tail_with_no_match_closes_quietly);
+    RUN_TEST(test_mention_accept_keeps_the_tail);
+    RUN_TEST(test_mention_auto_space_is_eaten);
+    RUN_TEST(test_mention_auto_space_survives);
+    RUN_TEST(test_mention_accept_is_one_undo);
     RUN_TEST(test_mention_underline_marks_only_resolved_tokens);
     RUN_TEST(test_mention_slash_line_never_opens);
     RUN_TEST(test_mention_key_disables_the_feature);

@@ -2837,6 +2837,8 @@ static void print_help(NmChatApp *app)
                   "  !<command>         run a shell command here (Esc stops it);\n"
                   "                     needs no model, and never reaches the chat\n"
                   "  @<path>            mention a file for the model to read\n"
+                  "                     punctuation after a path is prose; quote\n"
+                  "                     the path to keep a name that ends in it\n"
                   "  /...               a command, never a chat line");
 }
 
@@ -5374,6 +5376,14 @@ static void handle_key(NmChatApp *app, const TuiKeyMsg *key, TuiCmd **cmd_out)
         popup_key(app, key, cmd_out);
         return;
     }
+
+    /* The space an accepted file left behind is a one-shot suffix: a
+     * punctuation key typed right after it eats it (one edit, one
+     * undo). It runs before the ladder below because the key is
+     * consumed here, and before boba because boba would insert it as a
+     * second edit. */
+    if (nm_mention_ui_pre_key(app->mention, key))
+        return;
 
     int busy = app_busy(app);
 

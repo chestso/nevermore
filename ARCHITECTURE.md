@@ -1090,7 +1090,14 @@ directory, and a completed mention is plain text the user can backspace into.
 - **The grammar** is `@bare` (to whitespace) or `@"quoted"`, bounded at buffer
   start or after whitespace or `( [ { , ;`. An open quote is a valid in-progress
   state and runs only to the end of the line. Paths are stored with `/`; a typed
-  `\` is normalised, so one prompt means one path on every platform.
+  `\` is normalised, so one prompt means one path on every platform. A bare
+  token's trailing sentence punctuation is prose, not path (`@a.c.` mentions
+  `a.c`; `@bugs/.` mentions `bugs/`), remembered as the span's tail: a cursor in
+  the tail still filters for dotfiles, while the underline and the submit note
+  stop at the path. A whole-path `.`/`..` survives, a balanced closer stays, and
+  the quoted form keeps a name that really ends in punctuation. A file pick
+  writes its label and trailing space as one edit, and that space is a removable
+  suffix — a punctuation key typed next replaces it, in the same one Undo step.
 - **Listing** is one bounded directory read (2000 entries) — no index, no
   recursion — ranked prefix-first then subsequence, directories first, deduped by
   case-folded name. `pinned_browse` (re-entry) lists the whole directory and

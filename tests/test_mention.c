@@ -221,6 +221,150 @@ static void test_format_is_reparseable(void)
     }
 }
 
+/* Assert the one span in `text` decodes to `path` and cuts `tail` as
+ * prose. */
+static void assert_span(const char *text, const char *path, const char *tail)
+{
+    NmMentionSpan s = only_span(text);
+    ASSERT_EQ(s.path_start, s.quoted ? (size_t)2 : (size_t)1);
+    size_t quote = (s.quoted && s.closed) ? 1 : 0;
+    ASSERT_EQ(s.end, s.path_start + strlen(path) + quote);
+    ASSERT_EQ(s.tail_end, s.end + strlen(tail));
+    char *got = nm_mention_path(text, &s, SIZE_MAX);
+    ASSERT_NOT_NULL(got);
+    ASSERT_STR_EQ(got, path);
+    free(got);
+}
+
+/* The trailing rule: sentence punctuation is not part of a bare path;
+ * balanced brackets, a drive colon, a whole-path dot segment and the
+ * quoted form keep theirs. */
+static void test_trailing_punctuation(void)
+{
+    assert_span("@a.c.", "a.c", ".");
+    assert_span("@a.c,", "a.c", ",");
+    assert_span("@a.c)", "a.c", ")");
+    assert_span("@f(1)", "f(1)", "");
+    assert_span("@f(1).", "f(1)", ".");
+    assert_span("@f(1))", "f(1)", ")");
+    assert_span("@(@a)", "(@a)", "");
+    assert_span("@a/..", "a/", "..");
+    assert_span("@a/.", "a/", ".");
+    assert_span("@..", "..", "");
+    assert_span("@.", ".", "");
+    assert_span("@..,", "..", ",");
+    assert_span("@a.c?!", "a.c", "?!");
+    /* ':' is prose only when it is the trailing byte; an interior one
+     * (a line suffix, a drive colon) stays path. */
+    assert_span("@a.c:12", "a.c:12", "");
+    assert_span("@a.c:", "a.c", ":");
+    assert_span("@C:.", "C:", ".");
+    /* Brackets are balanced per pair. */
+    assert_span("@[a]", "[a]", "");
+    assert_span("@a]b]", "a]b", "]");
+    assert_span("@,", "", ",");
+    assert_span("@", "", "");
+    /* A quoted token is never trimmed; the final dot is outside it. */
+    assert_span("@\"a.\".", "a.", "");
+    /* A typed backslash is still a slash, in the path and in the tail. */
+    assert_span("@C:\\x.", "C:/x", ".");
+    /* A drive prefix is not a sentence colon. */
+    assert_span("@C:", "C:", "");
+    /* An unbalanced closer inside the path is cut, a balanced one is
+     * not. */
+    assert_span("@a)b", "a)b", "");
+    assert_span("@a)b)", "a)b", ")");
+
+    /* Two tokens: the first's tail does not swallow the second. */
+    NmMentionSpan spans[4];
+    ASSERT_EQ(nm_mention_scan("@a., @b", spans, 4), 2);
+    ASSERT_EQ(spans[0].start, 0);
+    ASSERT_EQ(spans[0].end, 2);
+    ASSERT_EQ(spans[0].tail_end, 4);
+    ASSERT_EQ(spans[1].start, 5);
+    ASSERT_EQ(spans[1].end, 7);
+
+    ASSERT_TRUE(nm_mention_trailing_punct('.'));
+    ASSERT_TRUE(nm_mention_trailing_punct(';'));
+    ASSERT_TRUE(nm_mention_trailing_punct('}'));
+    ASSERT_FALSE(nm_mention_trailing_punct('a'));
+    ASSERT_FALSE(nm_mention_trailing_punct('/'));
+    ASSERT_FALSE(nm_mention_trailing_punct('"'));
+}
+
+/* A cursor in the tail still belongs to the token; the query follows it
+ * into the punctuation, while SIZE_MAX stays on the path. */
+static void test_trailing_cursor_and_query(void)
+{
+    const char *text = "@a.c."; /* end 4, tail_end 5 */
+    NmMentionSpan s;
+    ASSERT_FALSE(nm_mention_at(text, 0, &s)); /* before the sigil */
+    ASSERT_TRUE(nm_mention_at(text, 4, &s));  /* at the path's end */
+    ASSERT_TRUE(nm_mention_at(text, 5, &s));  /* inside the dot */
+    ASSERT_EQ(s.end, 4);
+    ASSERT_EQ(s.tail_end, 5);
+
+    char *path = nm_mention_path(text, &s, 4);
+    ASSERT_STR_EQ(path, "a.c");
+    free(path);
+    path = nm_mention_path(text, &s, 5);
+    ASSERT_STR_EQ(path, "a.c.");
+    free(path);
+    path = nm_mention_path(text, &s, SIZE_MAX);
+    ASSERT_STR_EQ(path, "a.c");
+    free(path);
+
+    /* One byte past the tail is outside. */
+    ASSERT_FALSE(nm_mention_at(text, 6, &s));
+
+    /* A closed quote is punctuation for the query: a cursor on it (the
+     * usual end-of-token position) does not include it. */
+    const char *q = "@\"a b\"";
+    NmMentionSpan qs = only_span(q);
+    char *qp = nm_mention_path(q, &qs, strlen(q));
+    ASSERT_STR_EQ(qp, "a b");
+    free(qp);
+    qp = nm_mention_path(q, &qs, strlen(q) - 1);
+    ASSERT_STR_EQ(qp, "a b");
+    free(qp);
+    ASSERT_TRUE(nm_mention_at(q, strlen(q), &qs));
+}
+
+/* The format → scan contract with a tail: a path the rule would trim is
+ * quoted, so the decoded path survives the round trip. */
+static void test_format_trailing_is_quoted(void)
+{
+    struct
+    {
+        const char *path;
+        const char *want;
+    } cases[] = {
+        { "a.c.", "@\"a.c.\"" },
+        { "a/.", "@\"a/.\"" },
+        { "a)", "@\"a)\"" },
+        { "a/..", "@\"a/..\"" },
+        { "f(1)", "@f(1)" },
+        { ".", "@." },
+        { "..", "@.." },
+        { "C:", "@C:" },
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char *tok = nm_mention_format(cases[i].path, 0);
+        ASSERT_STR_EQ(tok, cases[i].want);
+        NmMentionSpan s = only_span(tok);
+        ASSERT_EQ(s.end, strlen(tok));
+        char *back = nm_mention_path(tok, &s, SIZE_MAX);
+        ASSERT_STR_EQ(back, cases[i].path);
+        free(back);
+        free(tok);
+    }
+    /* A directory's separator is a safe final byte, so a dotted name
+     * rides bare. */
+    char *tok = nm_mention_format("a.c.", 1);
+    ASSERT_STR_EQ(tok, "@a.c./");
+    free(tok);
+}
+
 static void test_split_query(void)
 {
     size_t dir_len = 0;
@@ -263,8 +407,11 @@ int main(void)
     RUN_TEST(test_cursor_membership);
     RUN_TEST(test_path_cut_at_the_cursor);
     RUN_TEST(test_backslash_is_a_slash);
+    RUN_TEST(test_trailing_punctuation);
+    RUN_TEST(test_trailing_cursor_and_query);
     RUN_TEST(test_format_bare_and_quoted);
     RUN_TEST(test_format_directory_leaves_the_quote_open);
+    RUN_TEST(test_format_trailing_is_quoted);
     RUN_TEST(test_format_is_reparseable);
     RUN_TEST(test_split_query);
     RUN_TEST(test_scan_reports_spill);

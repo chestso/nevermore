@@ -30,6 +30,9 @@
 #define MENTION_EMPTY_TEXT "no matches"
 #define MENTION_FOOTER     "\xe2\x86\xb5 pick  \xe2\x86\x92 open  esc keep as typed"
 
+/* "no removable space" in auto_space_pos. */
+#define MENTION_NO_SPACE ((size_t)-1)
+
 struct NmMentionUi
 {
     TuiTextInput *input; /* borrowed: the app's prompt */
@@ -47,6 +50,13 @@ struct NmMentionUi
     uint64_t revision;    /* the input's revision at the last sync */
     size_t synced_cursor; /* ... and the cursor, to notice movement */
     int reentry;          /* Tab asked to open even without an edit */
+
+    /* The one space an accepted FILE added, when nothing followed it
+     * yet: a punctuation key typed next eats it (the shell/readline
+     * removable suffix). Positioned at the space; cleared by any other
+     * key, edit or move. */
+    size_t auto_space_pos;
+    uint64_t auto_space_rev;
 };
 
 /* ---------------------------------------------------------------- */
@@ -150,6 +160,7 @@ NmMentionUi *nm_mention_ui_new(TuiTextInput *input, TuiListPopup *popup,
     ui->revision = tui_textinput_revision(input);
     ui->synced_cursor = tui_textinput_cursor(input);
     ui->suppressed_start = (size_t)-1;
+    ui->auto_space_pos = MENTION_NO_SPACE;
     return ui;
 }
 
@@ -312,8 +323,17 @@ static void populate(NmMentionUi *ui, const char *preselect)
 
 static void sync_impl(NmMentionUi *ui, int may_open);
 
+/* Whitespace that ends a bare token, same set as the input's line. */
+static int is_space_byte(char c)
+{
+    return c == ' ' || c == '\t' || c == '\n';
+}
+
 /* Accept candidate `idx`: replace the WHOLE token (its start through
- * its end, quote included) with the path, as one undoable edit. */
+ * its end, quote included) with the path, as one undoable edit. A file
+ * also gets its trailing space in that same edit, so one Undo takes the
+ * label back; the space is remembered for the punctuation that may eat
+ * it. */
 static void commit(NmMentionUi *ui, size_t idx)
 {
     if (!ui->active || idx >= ui->list.n) {
@@ -332,8 +352,38 @@ static void commit(NmMentionUi *ui, size_t idx)
         nm_mention_ui_close(ui);
         return;
     }
-    tui_textinput_replace_range(ui->input, ui->span.start, ui->span.end, tok);
-    free(tok);
+
+    /* The token's tail (sentence punctuation the user typed) is prose
+     * after the path and never part of the replacement; it already ends
+     * the token, so no space is added before it. */
+    int has_tail = ui->span.tail_end > ui->span.end;
+    int add_space = 0;
+    const char *text = tui_textinput_text(ui->input);
+    if (!is_dir && !has_tail) {
+        size_t after = ui->span.end;
+        if (!text || after >= strlen(text) || !is_space_byte(text[after]))
+            add_space = 1;
+    }
+    size_t tok_len = strlen(tok);
+    size_t tok_start = ui->span.start;
+    char *rep = tok;
+    if (add_space) {
+        rep = malloc(tok_len + 2);
+        if (!rep) {
+            free(tok);
+            nm_mention_ui_close(ui);
+            return;
+        }
+        memcpy(rep, tok, tok_len);
+        rep[tok_len] = ' ';
+        rep[tok_len + 1] = '\0';
+    }
+    ui->auto_space_pos = MENTION_NO_SPACE;
+    tui_textinput_replace_range(ui->input, tok_start, ui->span.end, rep);
+    uint64_t rev_after = tui_textinput_revision(ui->input);
+    if (rep != tok)
+        free(tok);
+    free(rep);
 
     if (is_dir) {
         /* Drill down: the token now ends with '/', so the re-list (and
@@ -343,17 +393,14 @@ static void commit(NmMentionUi *ui, size_t idx)
         sync_impl(ui, 1);
         return;
     }
-    /* A file ends the mode: one space follows unless one already does,
-     * so the user is typing the next word, not more path. */
-    const char *text = tui_textinput_text(ui->input);
-    size_t cur = tui_textinput_cursor(ui->input);
-    if (text && text[cur] != ' ' && text[cur] != '\t' && text[cur] != '\n') {
-        tui_textinput_replace_range(ui->input, cur, cur, " ");
-    }
     /* Declare the spans for the new text, then drop the popup: the
      * cursor can still sit at the token's end (a space already
      * followed), and the mode would otherwise reopen on it. */
     sync_impl(ui, 0);
+    if (add_space) {
+        ui->auto_space_pos = tok_start + tok_len;
+        ui->auto_space_rev = rev_after;
+    }
 }
 
 /* ---------------------------------------------------------------- */
@@ -371,6 +418,16 @@ static void sync_impl(NmMentionUi *ui, int may_open)
     ui->revision = rev;
     ui->synced_cursor = cur;
     ui->reentry = 0;
+
+    /* The removable space is one-shot: any key that is not the eating
+     * punctuation (pre_key) fails the same revision/cursor/byte test
+     * here, and an edit or a move invalidates it by definition. */
+    if (ui->auto_space_pos != MENTION_NO_SPACE) {
+        size_t pos = ui->auto_space_pos;
+        if (edited || moved || rev != ui->auto_space_rev || !text ||
+            pos >= strlen(text) || text[pos] != ' ')
+            ui->auto_space_pos = MENTION_NO_SPACE;
+    }
 
     /* A slash line is a command, never a prompt: no mentions on it at
      * all, so `/session save @a` keeps its own grammar. */
@@ -423,6 +480,16 @@ static void sync_impl(NmMentionUi *ui, int may_open)
     }
     nm_mention_list_free(&ui->list);
     ui->list = next;
+
+    /* A cursor in the tail is typing prose after a real path: if the
+     * punctuation offers nothing to complete, close QUIETLY. The "no
+     * matches" row is right when the path up to the cursor itself is
+     * not there, but a sentence full stop is not a failed path. */
+    if (cur > span.end && ui->list.n == 0) {
+        free(query);
+        nm_mention_ui_close(ui);
+        return;
+    }
 
     /* The typed path is already the one file it matches: there is
      * nothing left to offer, so the popup closes and Enter submits.
@@ -482,6 +549,64 @@ int nm_mention_ui_reenter(NmMentionUi *ui)
     ui->reentry = 1;
     sync_impl(ui, 1);
     return ui->active;
+}
+
+/* ---------------------------------------------------------------- */
+/* The removable auto-space                                         */
+/* ---------------------------------------------------------------- */
+
+int nm_mention_ui_pre_key(NmMentionUi *ui, const TuiKeyMsg *key)
+{
+    if (!ui || !key)
+        return 0;
+    if (key->action == TUI_KEY_ACTION_RELEASE)
+        return 0;
+    if (ui->auto_space_pos == MENTION_NO_SPACE)
+        return 0;
+
+    const char *text = tui_textinput_text(ui->input);
+    size_t pos = ui->auto_space_pos;
+    size_t cur = tui_textinput_cursor(ui->input);
+    uint64_t rev = tui_textinput_revision(ui->input);
+    int valid = !ui->active && text && rev == ui->auto_space_rev &&
+                cur == pos + 1 && pos < strlen(text) && text[pos] == ' ' &&
+                !tui_textinput_has_mark(ui->input);
+    if (!valid) {
+        ui->auto_space_pos = MENTION_NO_SPACE;
+        return 0;
+    }
+
+    /* What byte would this key produce? A terminal that reports the
+     * text (kitty's associated-text flag) is authoritative — `!` and
+     * `:` are shifted keys, and the layout is the terminal's to know.
+     * Without reported text, only an unshifted ASCII rune is safe. */
+    char punct;
+    if (key->key != TUI_KEY_NONE ||
+        (key->mods & (TUI_MOD_CTRL | TUI_MOD_ALT | TUI_MOD_META))) {
+        ui->auto_space_pos = MENTION_NO_SPACE;
+        return 0;
+    }
+    if (key->text_len == 1) {
+        punct = key->text[0];
+    } else if (key->text_len == 0 && key->rune < 0x80 &&
+               !(key->mods & TUI_MOD_SHIFT)) {
+        punct = (char)key->rune;
+    } else {
+        ui->auto_space_pos = MENTION_NO_SPACE;
+        return 0;
+    }
+    if (!nm_mention_trailing_punct(punct)) {
+        ui->auto_space_pos = MENTION_NO_SPACE;
+        return 0;
+    }
+
+    /* Removing the space and inserting the punctuation is ONE edit, so
+     * a single Undo puts the accepted mention back. The key is
+     * consumed: the input must not add a second entry for it. */
+    char one[2] = { punct, '\0' };
+    tui_textinput_replace_range(ui->input, pos, pos + 1, one);
+    ui->auto_space_pos = MENTION_NO_SPACE;
+    return 1;
 }
 
 /* ---------------------------------------------------------------- */

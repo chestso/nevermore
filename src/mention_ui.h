@@ -80,6 +80,16 @@ void nm_mention_ui_sync(NmMentionUi *ui);
  * `cmd_out`. */
 int nm_mention_ui_key(NmMentionUi *ui, const TuiKeyMsg *key, TuiCmd **cmd_out);
 
+/* Before the input sees a key, with the popup CLOSED: the one space an
+ * accepted FILE added is a removable suffix (shell/readline habit). If
+ * this key is the punctuation that eats it — `. , ; : ! ? ) ] }` with
+ * no Ctrl/Alt/Meta — the space is replaced by the key's own byte as ONE
+ * edit (one Undo restores the mention) and 1 is returned; the caller
+ * must NOT forward the key. Any other key clears the record and returns
+ * 0. The record also dies on an edit or a cursor move (sync sees
+ * either). */
+int nm_mention_ui_pre_key(NmMentionUi *ui, const TuiKeyMsg *key);
+
 /* Tab with the popup closed: cursor in (or at the end of) a token opens
  * the popup pinned on that token's directory. 1 = opened. Called by the
  * app BEFORE boba's own completion request, because boba only asks when

@@ -24,10 +24,22 @@
  * after whitespace or one of `( [ { , ;`. So `me@host.com` is prose,
  * not a mention, and no popup flashes when an email address is typed.
  *
- * A span is [start, end): '@' through the last byte, closing quote
- * included. The cursor is IN the token for start < cursor <= end — so
- * right after the `@` counts (that is the moment the popup opens) and
- * right before it does not.
+ * A BARE token's trailing sentence punctuation is prose, not path: a
+ * run of `. , ; : ! ?` or of an unbalanced `) ] }` is cut from the
+ * decoded path and remembered as the span's TAIL. `@src/a.c.` mentions
+ * `src/a.c`; `@bugs/.` mentions `bugs/`. A path that really ends in
+ * punctuation is written quoted (`@"a.c."`), where nothing is trimmed.
+ * The two dot segments that are whole paths (`.`, `..`) survive, so
+ * `@..` still names the parent; a dotted final segment after a
+ * directory is cut (`@a/..` mentions `a/`), which is why the quoted
+ * form exists.
+ *
+ * A span is [start, end): '@' through the last path byte, closing quote
+ * included; [end, tail_end) is the trailing prose. The cursor is IN the
+ * token for start < cursor <= tail_end — right after the `@` counts
+ * (that is the moment the popup opens), a cursor inside the punctuation
+ * still counts (it is what keeps `.` on `@bugs/.` filtering for
+ * dotfiles), and right before the `@` does not.
  *
  * Byte offsets only: the token is ASCII-delimited, so no display-width
  * arithmetic is needed here. Paths are stored with '/', always — a
@@ -54,10 +66,18 @@ typedef struct
 {
     size_t start;        /* offset of the '@' */
     size_t path_start;   /* first byte after '@' (and after an opening quote) */
-    size_t end;          /* one past the token (a closing quote included) */
+    size_t end;          /* one past the PATH (a closing quote included) */
+    size_t tail_end;     /* one past the trailing prose [end, tail_end) */
     unsigned quoted : 1; /* the token was written @"..." */
     unsigned closed : 1; /* bare, or the quote was closed; 0 = quote open */
 } NmMentionSpan;
+
+/* Is `c` one of the bytes the trailing rule may read as prose after a
+ * bare path? The scanner still decides whether a given byte IS trimmed
+ * (a balanced closer and a drive-letter ':' stay path); this is the
+ * one-byte list a caller needs to recognise the gesture — the removable
+ * space after an accepted file uses it. */
+int nm_mention_trailing_punct(char c);
 
 /* Every mention in `text`, in order. Up to `cap` spans are written to
  * `out` (`out` may be NULL with cap 0); the return is the TOTAL number
@@ -66,16 +86,22 @@ typedef struct
  * submit (which annotates them for the model). */
 size_t nm_mention_scan(const char *text, NmMentionSpan *out, size_t cap);
 
-/* The token the cursor is inside (start < cursor <= end): 1 and *out
- * set, else 0. This is the WHOLE "am I in mention mode" question — the
- * mode is derived from the buffer on every event, never stored. */
+/* The token the cursor is inside (start < cursor <= tail_end): 1 and
+ * *out set, else 0. This is the WHOLE "am I in mention mode" question —
+ * the mode is derived from the buffer on every event, never stored. A
+ * cursor in the trailing prose still counts, so the `.` of `@bugs/.`
+ * keeps filtering for dotfiles; the query (nm_mention_path) decides
+ * which bytes it includes. */
 int nm_mention_at(const char *text, size_t cursor, NmMentionSpan *out);
 
 /* The decoded path of `s`, cut at byte offset `upto` of the buffer
- * (SIZE_MAX = the whole token). "Decoded" means: no sigil, no quotes,
- * and `\` written as '/' — a token's text is the path. Ownership passes
- * to the caller (NULL only on OOM). `upto` is what makes the completion
- * query follow the cursor inside a token being edited. */
+ * (SIZE_MAX = the whole trimmed path). "Decoded" means: no sigil, no
+ * quotes, and `\` written as '/' — a token's text is the path. With a
+ * finite `upto` in the tail, the tail bytes up to the cursor are
+ * included (that is the completion query while the punctuation is
+ * being typed); SIZE_MAX always stops at `end`, so the underline, the
+ * note and the replace range never claim the prose. Ownership passes to
+ * the caller (NULL only on OOM). */
 char *nm_mention_path(const char *text, const NmMentionSpan *s, size_t upto);
 
 /* The token for a path: `@path`, or `@"path with spaces"`. `is_dir`

@@ -146,10 +146,13 @@ current file selected — the "swap it for its neighbour" gesture. Any edit
 inside a mention re-opens the picker filtered up to the cursor.
 
 A mention that resolves is underlined; one that does not (`@property`, a path
-that is not there) is just text. The line you send is verbatim — the model also
-gets one short note naming the files and directories you pointed at, and reads
-them with `read_file` if they matter. `mentions off` turns the whole feature
-off.
+that is not there) is just text. Punctuation typed right after a path is prose,
+not part of it: `@a.c.` mentions `a.c`, and the space a pick adds after a file
+is eaten by a following `. , ; : ! ? ) ] }`. Quote the path (`@"a.c."`) to keep
+a name that really ends in punctuation. The line you send is verbatim — the
+model also gets one short note naming the files and directories you pointed at,
+and reads them with `read_file` if they matter. `mentions off` turns the whole
+feature off.
 
 #### `!` shell mode
 
