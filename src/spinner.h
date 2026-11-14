@@ -85,8 +85,21 @@ NmSpinnerFrame nm_spinner_tick(NmSpinner *s, NmColorDepth depth);
  * A stopped animation hands back a NULL glyph, exactly as a tick does. */
 NmSpinnerFrame nm_spinner_frame(const NmSpinner *s, NmColorDepth depth);
 
-/* The active style's tick cadence in ms (the app bounds it by its own
- * deadlines), or -1 for a NULL or stopped spinner. */
-int nm_spinner_tick_ms(const NmSpinner *s);
+/* The ETA to this animation's next frame, in ms: -1 for a NULL or
+ * stopped spinner, 0 when the next frame is due NOW (never stepped
+ * since a start or a style switch, or its period has elapsed), else the
+ * remaining time rounded up, so a positive remainder never reads as 0 —
+ * the event loop treats 0 as "fire now".
+ *
+ * `now` is the caller's monotonic clock. The model owns the cadence and
+ * the phase; the caller owns the time, which is what keeps this binary
+ * boba-free and lets a test drive the animation on virtual seconds. */
+int nm_spinner_next_ms(const NmSpinner *s, double now);
+
+/* Record that the frame just stepped was painted at `now`: the next
+ * period is measured from this instant, so a late tick cannot drift the
+ * cadence and an early wake (a key, an fd, another timer's deadline)
+ * cannot move a frame. */
+void nm_spinner_note_frame(NmSpinner *s, double now);
 
 #endif // NM_SPINNER_H

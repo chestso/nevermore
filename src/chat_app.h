@@ -123,7 +123,7 @@ void nm_chat_app_set_config(NmChatApp *app, NmConfig *cfg);
  *   fill_io_sources     -> nm_chat_app_interest (translated in main.c)
  *   on_io_ready         -> nm_chat_app_external_ready
  *   on_tick             -> nm_chat_app_tick
- *   get_tick_timeout_ms -> nm_chat_app_tick_ms
+ *   get_tick_timeout_ms -> nm_chat_app_tick_ms (an ETA: -1 none, 0 due now)
  */
 
 /* The app's whole wait set, filled in priority order: the agent's live

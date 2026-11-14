@@ -264,31 +264,63 @@ static void test_two_objects_do_not_share_state(void)
     nm_spinner_set_running(dot, 0);
     ASSERT_NULL(nm_spinner_tick(dot, NM_COLOR_RGB).glyph);
     ASSERT_NOT_NULL(nm_spinner_tick(stars, NM_COLOR_RGB).glyph);
-    ASSERT_EQ(nm_spinner_tick_ms(dot), -1);
-    ASSERT_EQ(nm_spinner_tick_ms(stars), 100);
+    ASSERT_EQ(nm_spinner_next_ms(dot, 0.0), -1);
+    ASSERT_EQ(nm_spinner_next_ms(stars, 0.0), 0); /* fresh: due now */
 
     nm_spinner_free(dot);
     nm_spinner_free(stars);
 }
 
 /* The cadence is the style's data (100 ms for the dot — its breath — and
- * for the stars), and the clock runs only while the animation does: a
- * stopped spinner reports -1. */
+ * for the stars), and it is the ANIMATION's clock: the next frame is one
+ * period after the frame that was actually shown, so a wake that was not
+ * the frame's deadline can neither advance it nor delay it. A stopped
+ * spinner reports -1. */
 static void test_tick_cadence_follows_the_style(void)
 {
     NmSpinner *s = nm_spinner_new(NM_SPINNER_PULSE_DOT);
     ASSERT_NOT_NULL(s);
-    ASSERT_EQ(nm_spinner_tick_ms(s), -1);
-    ASSERT_EQ(nm_spinner_tick_ms(NULL), -1);
+    ASSERT_EQ(nm_spinner_next_ms(s, 0.0), -1);
+    ASSERT_EQ(nm_spinner_next_ms(NULL, 0.0), -1);
 
+    /* A start makes the first frame due now. */
     nm_spinner_set_running(s, 1);
-    ASSERT_EQ(nm_spinner_tick_ms(s), 100);
-    nm_spinner_set_style(s, NM_SPINNER_PULSE_DOT_FIXED);
-    ASSERT_EQ(nm_spinner_tick_ms(s), 100);
+    ASSERT_EQ(nm_spinner_next_ms(s, 10.0), 0);
+
+    /* One period from the frame that was shown; a positive remainder is
+     * rounded up, so only the deadline itself reads as 0. */
+    nm_spinner_note_frame(s, 1.0);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.0), 100);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.05), 50);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.0994), 1); /* sub-ms: still ahead */
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.1), 0);    /* due */
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.25), 0);   /* overdue */
+
+    /* Anchored to the SHOWN frame, not to the ask: none of the wakes
+     * above moved the next deadline. */
+    nm_spinner_note_frame(s, 1.1);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.125), 75);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.16), 40);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.2), 0);
+    nm_spinner_note_frame(s, 1.115); /* a late paint starts its own period */
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.115), 100);
+
+    /* A style switch restarts the phase AND the clock. */
     nm_spinner_set_style(s, NM_SPINNER_STARS);
-    ASSERT_EQ(nm_spinner_tick_ms(s), 100);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.6), 0);
+    nm_spinner_note_frame(s, 1.6);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.63), 70);
+
+    /* Re-asserting the running state (the app does this on every step)
+     * must not restart the period. */
+    nm_spinner_set_running(s, 1);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.63), 70);
+
+    /* A stop answers -1; the next start is due now again. */
     nm_spinner_set_running(s, 0);
-    ASSERT_EQ(nm_spinner_tick_ms(s), -1);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.63), -1);
+    nm_spinner_set_running(s, 1);
+    ASSERT_EQ(nm_spinner_next_ms(s, 1.63), 0);
     nm_spinner_free(s);
 }
 

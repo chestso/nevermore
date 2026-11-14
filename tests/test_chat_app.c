@@ -1449,10 +1449,14 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     ASSERT_TRUE(strstr(frame, low) != NULL);
     free(low);
 
-    /* Eight ticks on: the peak — the palette's Green #50FA7B, on the
-     * ramp's big dot (step 2 of the ping-pong). */
-    for (int i = 0; i < 8; i++)
+    /* Eight FRAMES on: the peak — the palette's Green #50FA7B, on the
+     * ramp's big dot (step 2 of the ping-pong). A frame is one style
+     * period: the tick steps the animation only when its own clock (the
+     * frame that was shown, not the ask) says the period has elapsed. */
+    for (int i = 0; i < 8; i++) {
+        nm_test_clock_advance_ms(100);
         nm_chat_app_tick(h->app);
+    }
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
@@ -1569,11 +1573,14 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_TRUE(strstr(frame, lit) != NULL);
     free(lit);
 
-    /* Ten ticks on: the dark phase — the glyph's two columns are spaces
+    /* Ten frames on: the dark phase — the glyph's two columns are spaces
      * in the same color, and the row's LAYOUT is byte-identical to the
-     * lit one (same left chrome width, so the same rule). */
-    for (int i = 0; i < 10; i++)
+     * lit one (same left chrome width, so the same rule). The tick steps
+     * the blink only at the style's cadence. */
+    for (int i = 0; i < 10; i++) {
+        nm_test_clock_advance_ms(100);
         nm_chat_app_tick(h->app);
+    }
     tui_runtime_flush(h->rt);
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
@@ -4382,8 +4389,10 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
 
-    /* The tick interval is the spinner cadence, bounded by the
-     * remaining deadline (never longer than 100 ms while busy). */
+    /* A start's first frame is due immediately; the cadence then bounds
+     * the tick at 100 ms while busy. */
+    ASSERT_EQ(nm_chat_app_tick_ms(h->app), 0);
+    nm_chat_app_tick(h->app);
     int ms = nm_chat_app_tick_ms(h->app);
     ASSERT_TRUE(ms > 0 && ms <= 100);
 

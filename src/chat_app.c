@@ -2395,16 +2395,20 @@ static int credits_due(const NmChatApp *app, double *due)
 
 /* The app's timer events. The event loop is single-threaded and owns
  * ONE wait; everything that wants the loop to wake without an fd — a
- * silent peer's deadline, a fetch's deadline, the balance refresh — is an
- * entry here, and none of them looks at the agent's state: whether a
- * turn is streaming, running a tool or idle decides nothing about when
- * the purse refreshes or a catalog fetch is stepped. next_ms is the
- * time until the entry wants to run (-1 never, 0 now); an entry runs
- * when its next_ms reaches 0 and re-arms itself in fire. Nothing is
- * polled: a fetch is woken by its socket (nm_chat_app_interest) or by
- * its own deadline here, never by a fixed cadence.
- * nm_chat_app_tick_ms is the minimum over the table, nm_chat_app_tick
- * runs what is due: one source of truth for both. */
+ * silent peer's deadline, a fetch's deadline, the balance refresh, the
+ * spinner's next frame — is an entry here. The five app timers never
+ * look at the agent's state: whether a turn is streaming, running a
+ * tool or idle decides nothing about when the purse refreshes or a
+ * catalog fetch is stepped. The spinner's entry is presentation only,
+ * and it is the animation's OWN clock: a frame is due one style period
+ * after the previous frame, so another timer's deadline — or a key, an
+ * fd, the ESC deadline — can never step it or delay it.
+ * next_ms is the time until the entry wants to run (-1 never, 0 now);
+ * an entry runs when its next_ms reaches 0 and re-arms itself in fire.
+ * Nothing is polled: a fetch is woken by its socket
+ * (nm_chat_app_interest) or by its own deadline here, never by a fixed
+ * cadence. nm_chat_app_tick_ms is the minimum over the table,
+ * nm_chat_app_tick runs what is due: one source of truth for both. */
 typedef struct
 {
     int (*next_ms)(NmChatApp *app);
@@ -2461,8 +2465,7 @@ static int timer_credits_refresh_ms(NmChatApp *app)
     double due;
     if (!credits_due(app, &due) || nm_credits_fetch_in_flight(app->provider->id))
         return -1;
-    int ms = (int)((due - nm_monotonic_seconds()) * 1000.0);
-    return ms > 0 ? ms : 0;
+    return nm_until_ms(due);
 }
 
 static void timer_credits_refresh_fire(NmChatApp *app)
@@ -2474,20 +2477,35 @@ static void timer_credits_refresh_fire(NmChatApp *app)
 
 /* The shell's stop grace (D7): the tick that kills a child which ignored
  * the polite interrupt. The deadline is the module's (it owns the run);
- * this is only the clock arithmetic. */
+ * this is only the clock arithmetic — the module counts milliseconds on
+ * the same monotonic origin, so the ETA is its remainder in seconds. */
 static int timer_shell_ms(NmChatApp *app)
 {
     uint64_t deadline = nm_shell_ui_deadline(app->shell);
     if (!deadline)
         return -1;
-    double now = nm_monotonic_seconds() * 1000.0;
-    int ms = (int)((double)deadline - now);
-    return ms > 0 ? ms : 0;
+    return nm_until_ms((double)deadline / 1000.0);
 }
 
 static void timer_shell_fire(NmChatApp *app)
 {
     nm_shell_ui_tick(app->shell);
+}
+
+/* The spinner's own frame clock: one frame per style period, measured
+ * from the frame that was actually shown. A tick fired for another
+ * entry (or an early wake) leaves it alone. */
+static int timer_spinner_ms(NmChatApp *app)
+{
+    return nm_spinner_next_ms(app->spinner, nm_monotonic_seconds());
+}
+
+static void timer_spinner_fire(NmChatApp *app)
+{
+    app->spinner_frame = nm_spinner_tick(app->spinner, color_depth(app));
+    nm_spinner_note_frame(app->spinner, nm_monotonic_seconds());
+    if (app->spinner_frame.glyph)
+        tui_runtime_wakeup(app->rt);
 }
 
 static const NmAppTimer k_app_timers[] = {
@@ -2496,6 +2514,7 @@ static const NmAppTimer k_app_timers[] = {
     { timer_credits_fetch_ms, timer_credits_fetch_fire },
     { timer_credits_refresh_ms, timer_credits_refresh_fire },
     { timer_shell_ms, timer_shell_fire },
+    { timer_spinner_ms, timer_spinner_fire },
 };
 
 void nm_chat_app_tick(NmChatApp *app)
@@ -2509,11 +2528,6 @@ void nm_chat_app_tick(NmChatApp *app)
         if (ms == 0)
             t->fire(app);
     }
-
-    NmSpinnerFrame frame = nm_spinner_tick(app->spinner, color_depth(app));
-    app->spinner_frame = frame;
-    if (frame.glyph)
-        tui_runtime_wakeup(app->rt);
 }
 
 int nm_chat_app_tick_ms(NmChatApp *app)
@@ -2527,13 +2541,6 @@ int nm_chat_app_tick_ms(NmChatApp *app)
         if (ms >= 0 && (best < 0 || ms < best))
             best = ms;
     }
-    /* The spinner's own frame clock (the dot's breath, the stars'
-     * rotation): the animation is a timer of its own, armed only while
-     * the style animates. Presentation only — the timers above never
-     * read the agent's state. */
-    int ms = nm_spinner_tick_ms(app->spinner);
-    if (ms > 0 && (best < 0 || ms < best))
-        best = ms;
     return best;
 }
 

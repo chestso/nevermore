@@ -1138,23 +1138,6 @@ unsigned long nm_agent_image_live(const NmAgent *a)
     return n > 0 ? (unsigned long)n : 0;
 }
 
-/* Millis left on a monotonic deadline, clamped to int range; a deadline
- * already in the past is 0.  Truncated, so the value never exceeds the
- * budget that was set — which also means a sub-millisecond remainder
- * reads as 0, so a caller that treats 0 as "due" must pair it with
- * budget_spent (the stream-inactivity path does). */
-static int ms_until(double deadline)
-{
-    double left = (deadline - nm_monotonic_seconds()) * 1000.0;
-    if (left <= 0.0)
-        return 0;
-    /* > ~24 days would overflow int; clamp (the wire deadlines are all
-     * far below this, but the arithmetic must be total). */
-    if (left >= 2147483000.0)
-        return 2147483000;
-    return (int)left;
-}
-
 /* Has a millisecond budget that started at `since` elapsed?  The ONE
  * due-ness test for the stream-inactivity deadline: both the reported
  * wait (nm_agent_next_timeout_ms's 0) and the step's enforcement call
@@ -1187,7 +1170,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
         NmProc *p = a->env_job > 0 ? nm_proc_find(a->env_job) : NULL;
         if (!p || nm_proc_handle(p) < 0)
             return 0; /* resolved / exhausted: step now to finish */
-        return ms_until(a->env_deadline);
+        return nm_until_ms(a->env_deadline);
     }
 
     int best = -1;
@@ -1219,7 +1202,7 @@ int nm_agent_next_timeout_ms(const NmAgent *a)
         if (budget_spent(a->last_activity, to)) {
             t = 0; /* due now: the step enforces the same test */
         } else {
-            t = ms_until(a->last_activity + (double)to / 1000.0);
+            t = nm_until_ms(a->last_activity + (double)to / 1000.0);
             if (t == 0)
                 t = 1; /* under a millisecond left: not due, wake again */
         }

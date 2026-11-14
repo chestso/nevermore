@@ -165,10 +165,16 @@ prerequisite (skip).
   - the child's cadence is the property (`run_command`'s deadline reset): real
     time and a small budget knob. A frozen clock spins the blocking `nm_connect`
     walk, so `test_wire` links the real clock.
-  - `nm_chat_app_tick` steps only when a deadline is due now; `nm_chat_app_step`
-    drives unconditionally. Ticking a deadlineless walk leaves the turn silently
-    STREAMING (a Windows-only red). A drive that can end inside a step must
-    flush before reading output.
+  - `nm_chat_app_tick` steps only when a deadline is due now (`next_ms == 0`);
+    `nm_chat_app_step` drives unconditionally. Ticking a deadlineless walk
+    leaves the turn silently STREAMING (a Windows-only red). A drive that can
+    end inside a step must flush before reading output.
+  - **A spinner frame is one style period, not one tick call.** The spinner's
+    frame clock is anchored to the frame that was actually painted, so a tick
+    fired for another timer's deadline (or an early fd/keystroke wake) must not
+    advance it. A test that wants N frames advances the fake clock N periods
+    first (`nm_test_clock_advance_ms`), and a freshly started animation is due
+    immediately (its `tick_ms` is 0 once, then the cadence).
   - **A drive that steps on every iteration hides a stall.** The tool phase has
     no deadline, so a step is the only thing that moves it, and the real loop
     steps on an fd event or a due deadline. To prove a turn makes progress,

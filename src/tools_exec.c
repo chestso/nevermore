@@ -313,18 +313,6 @@ struct NmToolExec
     NmToolResult result; /* terminal result, handed out once */
 };
 
-/* Millis left on a monotonic deadline, clamped to int range; an expired
- * deadline reads as 0 ("step now"). */
-static int ms_until(double deadline)
-{
-    double left = (deadline - nm_monotonic_seconds()) * 1000.0;
-    if (left <= 0.0)
-        return 0;
-    if (left >= 2147483000.0)
-        return 2147483000;
-    return (int)left;
-}
-
 /* Hand the terminal result to the caller exactly once. The step is
  * finished, so its return value IS the result's outcome (a terminal
  * result is never NM_TOOL_RUNNING). */
@@ -393,7 +381,7 @@ static int exec_deadline_ms(const NmToolExec *e)
         return -1;
     if (e->done)
         return 0; /* wanted now, to hand out the terminal result */
-    return ms_until(e->deadline);
+    return nm_until_ms(e->deadline);
 }
 
 /* A job's readiness source: its handle (a PTY master on POSIX, a
@@ -540,7 +528,7 @@ static NmToolStatus exec_command_step(NmToolExec *e, NmToolResult *out)
     }
 
     /* Still running at the deadline: hand the model the job id. */
-    if (ms_until(e->deadline) == 0) {
+    if (nm_until_ms(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
         e->result = running_result(e, body);
         e->done = 1;
@@ -686,7 +674,7 @@ static NmToolStatus write_stdin_step(NmToolExec *e, NmToolResult *out)
         e->done = 1;
         return take(e, out);
     }
-    if (ms_until(e->deadline) == 0) {
+    if (nm_until_ms(e->deadline) == 0) {
         const char *body = nm_proc_take_output(p);
         e->result = running_result(e, body);
         e->done = 1;

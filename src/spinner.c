@@ -122,6 +122,7 @@ struct NmSpinner
     NmSpinnerStyleId style;
     unsigned ticks; /* since the style was selected */
     int running;
+    double frame_at; /* when the last frame was shown; 0 = due now */
 };
 
 NmSpinner *nm_spinner_new(NmSpinnerStyleId style)
@@ -141,13 +142,17 @@ void nm_spinner_set_style(NmSpinner *s, NmSpinnerStyleId style)
         return; /* not a switch: the phase stands */
     s->style = style;
     s->ticks = 0;
+    s->frame_at = 0; /* a new animation's first frame is due now */
 }
 
 void nm_spinner_set_running(NmSpinner *s, int running)
 {
     if (!s)
         return;
-    s->running = running ? 1 : 0;
+    int on = running ? 1 : 0;
+    if (on && !s->running)
+        s->frame_at = 0; /* a fresh start: the first frame is due now */
+    s->running = on;
 }
 
 /* Blend two channel values by the pulse's 0..255 factor. */
@@ -226,9 +231,25 @@ NmSpinnerFrame nm_spinner_frame(const NmSpinner *s, NmColorDepth depth)
     return spinner_frame_at(s, s->ticks, depth);
 }
 
-int nm_spinner_tick_ms(const NmSpinner *s)
+int nm_spinner_next_ms(const NmSpinner *s, double now)
 {
     if (!s || !s->running)
         return -1;
-    return styles[s->style].tick_ms;
+    if (s->frame_at == 0.0)
+        return 0; /* started: the first frame is due now */
+    int period = styles[s->style].tick_ms;
+    double left = (s->frame_at - now) * 1000.0 + (double)period;
+    /* A nanosecond of slack: two doubles naming the same instant in
+     * seconds subtract to a few hundred-thousandths of a millisecond
+     * apart, and that is the deadline, not time left. */
+    if (!(left > 1e-6))
+        return 0; /* the period has elapsed */
+    int ms = (int)(left + 1e-6);
+    return ms > 0 ? ms : 1; /* a positive ETA never reads as 0 */
+}
+
+void nm_spinner_note_frame(NmSpinner *s, double now)
+{
+    if (s)
+        s->frame_at = now;
 }

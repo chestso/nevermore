@@ -1068,6 +1068,15 @@ Two halves, one sniffer.
   with the dark phase declared as spaces so the row never shifts. The tier is
   passed into the tick, since the model knows nothing of boba, and the frame
   comes back by value, so no consumer can lean on pointer identity.
+- **The spinner is a timer with its own clock.** It is one entry in the app's
+  timer table: `nm_spinner_next_ms` reports the ETA to the next frame, one
+  style period after the frame that was actually painted, and
+  `nm_chat_app_tick` steps it only when that ETA is 0. A tick fired for another
+  deadline (a fetch, the shell's stop grace, the agent's silence budget) — or a
+  keystroke, an fd, the ESC deadline — can neither step the animation nor move
+  its period, and a late frame is measured from the frame that was shown, so
+  the cadence cannot drift. A start or a style switch makes the first frame due
+  now; re-asserting the running state does not restart the period.
 
 ### `@` file mentions
 

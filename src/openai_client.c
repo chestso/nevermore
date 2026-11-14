@@ -2009,9 +2009,7 @@ int nm_fetch_wait_ms(const NmFetchStream *f)
         return -1;
     int ms = nm_connection_wait_ms(f->conn);
     if (f->deadline > 0) {
-        int left = (int)((f->deadline - nm_monotonic_seconds()) * 1000.0);
-        if (left < 0)
-            left = 0;
+        int left = nm_until_ms(f->deadline);
         if (ms < 0 || left < ms)
             ms = left;
     }
