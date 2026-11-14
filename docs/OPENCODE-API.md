@@ -145,7 +145,7 @@ Delta shape (Go, `glm-5.3-flash`, probed):
   - GLM/Go: `delta.reasoning_content` (string).
   - Zen free models (mimo): `delta.reasoning` (string) **plus**
     `delta.reasoning_details:[{type:"reasoning.text",text,
-format,index}]`. The non-streaming body also carries a
+    format,index}]`. The non-streaming body also carries a
     top-level `reasoning`.
   - **`minimax-m3` (Go): no reasoning channel at all** (re-probed
     2026-09-16, alongside a live nevermore smoke). Its CoT arrives
@@ -664,7 +664,7 @@ accounting alongside the OpenAI fields:
 ### 7.3 The Zen purse is not over the wire
 
 - `/zen/v1/{balance,credits,usage,me,key,account,billing,
-subscription,profile,limits}` all answer `404` (the marketing
+  subscription,profile,limits}` all answer `404` (the marketing
   site's HTML). The balance exists only in the web Console, and
   the upstream request for an endpoint is open (opencode issue
   #10448). Treat Zen's balance as unreadable — an unknown, never
@@ -674,7 +674,7 @@ subscription,profile,limits}` all answer `404` (the marketing
   balance figure: it proves "cannot pay", not "the purse is 0".
 - The free-model trough is its own, separate cap:
   `429 {"type":"error","error":{"type":"FreeUsageLimitError",
-"message":"Free usage limit reached. …"}}` with a `Retry-After`
+  "message":"Free usage limit reached. …"}}` with a `Retry-After`
   in seconds (55501 observed, i.e. the next daily reset). It is a
   rate fact, not a credit fact.
 - What a client can therefore know for Zen: the per-round `cost`
@@ -720,13 +720,13 @@ subscription,profile,limits}` all answer `404` (the marketing
   `deepseek` is ever the _only_ upstream, the echo stops being a
   coin-flip workaround and becomes mandatory.
 - **The cache is per-UPSTREAM** (probed 2026-10-21, `deepseek-v4.1-
-flash`): the gateway load-balances one model id across several
+  flash`): the gateway load-balances one model id across several
   upstreams (`x-opencode-endpoint-id`: `deepseek`, `novita-deepseek`,
   `deepinfra-dsv4.1flash`, `orcarouter`), and each upstream has its
   OWN cache. So a byte-identical body can miss (the same body sent
   twice landed on two upstreams), and a fresh upstream can answer
   `429 {"type":"server_error","message":"Upstream request failed:
-Endpoint is rate limited"}`. A cache measurement on this stack is a
+  Endpoint is rate limited"}`. A cache measurement on this stack is a
   SHAPE confirmation, not a benchmark.
 
 ## 9. Corrections to the pre-work notes

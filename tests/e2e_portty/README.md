@@ -33,7 +33,7 @@ Under `make check` the Makefile exports both variables
 2. **A hermetic sandbox**: `mktemp -d` becomes `HOME`, `XDG_CONFIG_HOME`
    and `XDG_STATE_HOME`; `NEVERMORE_AUTHINFO=/dev/null`. The user's
    config, history and keys are never touched.
-3. **The canned provider** on an *ephemeral* port
+3. **The canned provider** on an _ephemeral_ port
    (`fake_ollama.py --host 127.0.0.1 --port 0`, whose startup line
    reports the real port), with `NEVERMORE_BASE_URL` pointing at the IP
    literal — no `localhost` resolution order to get wrong, and no
@@ -44,7 +44,7 @@ Under `make check` the Makefile exports both variables
    scenario's first `wait-for` is the startup gate.
 5. **One wire-level pin**: the raw PTY capture must contain the focused
    prompt's pink (`38;2;255;121;198`). Everything else asserts on
-   coffer's parse of the grid; this one proves the transcript's *bytes*
+   coffer's parse of the grid; this one proves the transcript's _bytes_
    end to end.
 
 ## The skip matrix (exit 77)
@@ -52,12 +52,12 @@ Under `make check` the Makefile exports both variables
 `make check` must never go red because a tool is missing from the box
 or the runner. The driver skips, naming the reason, when:
 
-| Missing | Message |
-| --- | --- |
-| `python3` | `python3 not found (fake-ollama is the canned provider)` |
-| `coffer` on `PATH` | `coffer not installed (coffer's PTY inspector CLI)` |
-| `--help-spec` lacks a command | `coffer has no 'wait-for' command (rebuild coffer)` |
-| the built binary | `nevermore binary not built at <path> (run make)` |
+| Missing                       | Message                                                  |
+| ----------------------------- | -------------------------------------------------------- |
+| `python3`                     | `python3 not found (fake-ollama is the canned provider)` |
+| `coffer` on `PATH`            | `coffer not installed (coffer's PTY inspector CLI)`      |
+| `--help-spec` lacks a command | `coffer has no 'wait-for' command (rebuild coffer)`      |
+| the built binary              | `nevermore binary not built at <path> (run make)`        |
 
 The inspector is a coffer tool, not a nevermore one: `linux.yml` and
 `macos.yml` check out and build a pinned coffer, so the e2e runs there.
@@ -91,8 +91,8 @@ Two rules that come from the app, not from the inspector:
 
 ## Files
 
-| File | Purpose |
-| --- | --- |
+| File            | Purpose                                        |
+| --------------- | ---------------------------------------------- |
 | `e2e-driver.sh` | the shared driver (not a `TESTS` entry itself) |
-| `e2e_turn.sh` | scenario 1's `TESTS` entry |
-| `turn.script` | scenario 1: boot, one `table-fence` turn, quit |
+| `e2e_turn.sh`   | scenario 1's `TESTS` entry                     |
+| `turn.script`   | scenario 1: boot, one `table-fence` turn, quit |

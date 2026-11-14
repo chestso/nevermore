@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """Flag a line break inside an inline code span inside a Markdown blockquote.
 
-Prettier (3.x, proseWrap: preserve — the default) prints an inline node
-whose contents contain a hard line break WITHOUT re-emitting the
-blockquote's `>` prefix. A quoted line that ends inside an open code span
-therefore comes back with the `>` gone:
-
-    > a 400 `invalid tool call
-    > arguments`.          ->   > a 400 `invalid tool call
-                                arguments`.
-
-The two render the same today only by CommonMark's lazy continuation
-(the quote takes the unmarked line as a paragraph continuation), so the
-loss is invisible until something inserts a blank line, a list or a
-nested block — then the text quietly leaves the quote. The construct is
-also indistinguishable from a hand-made mistake afterwards, so the only
-cheap moment to catch it is before prettier runs.
+dprint is configured with `wrapCodeSpans: false`, so it keeps an inline
+code span on one line and preserves the blockquote prefix. A hand-edited
+span that still crosses a line break is fragile: CommonMark's lazy
+continuation hides the problem until something inserts a blank line, a
+list or a nested block, and then the text quietly leaves the quote. This
+check catches the invariant before a formatter runs.
 
 The invariant: inside a blockquote, every line has an EVEN number of
 backticks — no code span is left open at a line end. Fenced code blocks

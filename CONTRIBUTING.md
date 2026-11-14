@@ -37,11 +37,11 @@ Commit style is `scope: lowercase summary`, one behavior per commit (see
 
 - `make check`: the full suite. `make check-wire` runs just the wire tests
   (dummy localhost servers, one scripted round per connection).
-- `make format`: clang-format (C), shfmt (scripts), black (Python), prettier
+- `make format`: clang-format (C), shfmt (scripts), black (Python), dprint
   (Markdown). `make format-check` is the dry run plus
   `scripts/check-md-quotes.py`, which catches an inline code span broken across
-  lines inside a blockquote (prettier drops the `>` there). Fix the prose rather
-  than accept that output. From a build dir use `make -C build format`.
+  lines inside a blockquote. dprint keeps code spans on one line; the check
+  guards the invariant for hand edits. From a build dir use `make -C build format`.
 - `make catalogs`: regenerate the model catalogs (`tools/generate-catalogs.py`
   writes `src/catalog_data.h`). A **release-time** step, since the shipped
   binary must not depend on a third-party document and the suite never hits the

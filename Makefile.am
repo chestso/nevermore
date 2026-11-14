@@ -26,7 +26,7 @@ dist-hook:
 	find $(distdir) -name '__pycache__' -type d -prune -exec rm -rf {} +
 
 # Format target — clang-format on C, shfmt on shell, black on Python,
-# prettier on Markdown.
+# dprint on Markdown.
 .PHONY: format
 format:
 	@if command -v clang-format >/dev/null 2>&1; then \
@@ -54,21 +54,21 @@ format:
     else \
         echo "black not found - skipping Python formatting." >&2; \
     fi
-	@if command -v prettier >/dev/null 2>&1; then \
-        echo "Formatting Markdown with prettier..."; \
-        find $(top_srcdir) -maxdepth 2 -name '*.md' -print0 \
-            | xargs -0 -r prettier --write; \
+	@if command -v dprint >/dev/null 2>&1; then \
+        echo "Formatting Markdown with dprint..."; \
+        find $(top_srcdir) -maxdepth 2 -name '*.md' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -r dprint fmt; \
     else \
-        echo "prettier not found - skipping Markdown formatting." >&2; \
+        echo "dprint not found - skipping Markdown formatting." >&2; \
     fi
 
 # Format CHECK — the same four formatters in dry-run mode, so drift is a
 # red line instead of a silent rewrite of files the change never touched,
-# plus the one construct prettier cannot round-trip: an inline code span
-# that crosses a line break inside a blockquote (check-md-quotes.py; the
-# `>` prefix is dropped, and lazy continuation hides it until a later
-# edit lets the text fall out of the quote). `make format` stays what you
-# run before a commit; this is what a gate runs.
+# plus the one construct a formatter must not round-trip badly: an inline
+# code span that crosses a line break inside a blockquote
+# (check-md-quotes.py; dprint keeps it on one line, but a hand edit can still
+# break the quote). `make format` stays what you run before a commit; this is
+# what a gate runs.
 .PHONY: format-check
 format-check:
 	@status=0; \
@@ -97,16 +97,16 @@ format-check:
     else \
         echo "black not found - skipping Python check." >&2; \
     fi; \
-    if command -v prettier >/dev/null 2>&1; then \
-        echo "Checking Markdown with prettier..."; \
-        find $(top_srcdir) -maxdepth 2 -name '*.md' -print0 \
-            | xargs -0 -r prettier --check || status=1; \
+    if command -v dprint >/dev/null 2>&1; then \
+        echo "Checking Markdown with dprint..."; \
+        find $(top_srcdir) -maxdepth 2 -name '*.md' -not -path '*/node_modules/*' -print0 \
+            | xargs -0 -r dprint check || status=1; \
     else \
-        echo "prettier not found - skipping Markdown check." >&2; \
+        echo "dprint not found - skipping Markdown check." >&2; \
     fi; \
     echo "Checking quoted inline code spans..."; \
     python3 "$(top_srcdir)/scripts/check-md-quotes.py" $$( \
-        find $(top_srcdir) -maxdepth 2 -name '*.md' -print0 \
+        find $(top_srcdir) -maxdepth 2 -name '*.md' -not -path '*/node_modules/*' -print0 \
             | xargs -0 -r printf '%s\n') || status=1; \
     exit $$status
 

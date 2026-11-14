@@ -304,7 +304,7 @@ bounded to those conversations, and none has been seen.
   (+ `user_id` on authenticated-but-bad requests). Same `error`
   envelope as OpenAI's, with an extra top-level `user_id`.
 - 400 (bad model id): `{"error":{"message":"no-such/model is not a
-valid model ID","code":400},"user_id":"..."}`.
+  valid model ID","code":400},"user_id":"..."}`.
 - Errors arrive as a plain JSON body (HTTP status set), not SSE.
 - A refusal that comes from the UPSTREAM rather than the router adds a
   `metadata` object — `raw` (the upstream's own body, as an escaped
@@ -355,7 +355,7 @@ Sep 2026 — auto-beta included).
 - **Multi-turn editing works by replaying the assistant `images`
   array verbatim**: history
   `[user, {role:"assistant","content":"","images":[<the received
-part>]}, user]` is accepted (no 400) and the model edits the image
+  part>]}, user]` is accepted (no 400) and the model edits the image
   ("make it blue" → blue image). The assistant message carries
   `images` at MESSAGE level with a plain string `content` — the
   response's own shape, NOT content-parts on an assistant message
@@ -373,7 +373,7 @@ part>]}, user]` is accepted (no 400) and the model edits the image
   2026-10-21, `google/gemini-3.1-flash-lite-image`): a **text** part
   in that array is a **400** —
   `image_url content parts must carry an object "image_url" with a
-string "url" (got undefined)`. So an aged-out assistant image
+  string "url" (got undefined)`. So an aged-out assistant image
   cannot be replaced by a text marker IN the array: the array is
   dropped for that message and the marker rides the message's
   `content` string instead (the model then re-draws from the text
@@ -435,7 +435,7 @@ sync endpoint normally and stay in the catalog.
   model with no batch variant is a **400**: "Model 'X' does not have a
   :batch endpoint."
 - Turnaround: minutes usually, 24 h promised (`completion_window:
-"24h"` is the only accepted value; Google Vertex may take 96 h).
+  "24h"` is the only accepted value; Google Vertex may take 96 h).
   Retention: 30 days, then `GET` is `410`.
 - Half price; the completed batch reports `usage.cost` (a 23-token
   Haiku round: `3.75e-06`).
@@ -782,7 +782,7 @@ vocabulary, never a target.
   picker's 🖼 marker).
   The `:batch` variants are dropped on the way in (§6.3).
 - Keys live in `~/.authinfo` (`machine openrouter.ai user apikey
-password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
+  password <KEY>`); env `OPENROUTER_API_KEY` is the nevermore side.
 - The app's identity rides the chat round (§9): `HTTP-Referer`,
   `X-OpenRouter-Title` and `X-OpenRouter-Categories`, with the URL
   and the name from `src/identity.h` and `$NEVERMORE_APP_URL`.
@@ -1076,17 +1076,17 @@ relying on the implicit hit.
 
 - **A request whose last message is an assistant message is a 400.**
   The upstream answers `{"type":"error","error":{"type":
-"invalid_request_error","message":"This model does not support
-assistant message prefill. The conversation must end with a user
-message."}}`, wrapped in OpenRouter's `Provider returned error`
+  "invalid_request_error","message":"This model does not support
+  assistant message prefill. The conversation must end with a user
+  message."}}`, wrapped in OpenRouter's `Provider returned error`
   envelope. The request id prefix (`req_vrtx_…`) names Vertex — the
   `Google` upstream for Anthropic models is Vertex AI's Claude serving.
   nevermore never composes that shape (a round ends with the user's
   text or a tool result), but a hand-edited session replay will
   hit it.
 - **A refused round carries no usage at all.** `finish_reason:
-"content_filter"`, `native_finish_reason: "refusal"`, `content:
-null`, and NO usage object anywhere in the response (observed when
+  "content_filter"`, `native_finish_reason: "refusal"`, `content:
+  null`, and NO usage object anywhere in the response (observed when
   an upstream disliked probe filler text). The context gauge blanks
   for that round. §3.1's empty-round family does not cover a refusal
   — a distinct finish_reason nevermore does not name anywhere today;

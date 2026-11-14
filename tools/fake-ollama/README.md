@@ -28,13 +28,13 @@ tools/fake-ollama/fake_ollama.py --both --pace 0.6
 tools/fake-ollama/fake_ollama.py --scenario prose --port 11434
 ```
 
-| Flag          | Meaning                                                      |
-| ------------- | ------------------------------------------------------------ |
-| `--pace S`    | delay before each SSE event after the first (0 = full speed) |
+| Flag          | Meaning                                                                                                                             |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `--pace S`    | delay before each SSE event after the first (0 = full speed)                                                                        |
 | `--port PORT` | bind port; default 11434 (nevermore's local-Ollama default). `0` binds an ephemeral port — the startup line reports the real one(s) |
-| `--host HOST` | bind address; default 127.0.0.1                              |
-| `--both`      | bind 127.0.0.1 **and** ::1 in one process                    |
-| `--scenario`  | `table-fence` (default), `prose`, `image`, or `imagegen`         |
+| `--host HOST` | bind address; default 127.0.0.1                                                                                                     |
+| `--both`      | bind 127.0.0.1 **and** ::1 in one process                                                                                           |
+| `--scenario`  | `table-fence` (default), `prose`, `image`, or `imagegen`                                                                            |
 
 **Bind both stacks.** `localhost` resolves to `::1` first on some
 boxes; an IPv4-only bind then shows a "connection refused" that looks
@@ -140,14 +140,14 @@ NEVERMORE_AUTHINFO=/dev/null ./build/src/nevermore \
 What each step must show (the step note is streamed as the assistant's
 first content delta, so the transcript says which is which):
 
-| Step | Call           | Expected                                                          |
-| ---- | -------------- | ----------------------------------------------------------------- |
-| 1    | `read_file`    | the fixture's content, no reminder                                 |
-| 2    | `read_file`    | the POINTER body + `file-already-read`                             |
-| 3    | `read_file`    | the CURRENT content + `file-changed` (the server rewrote it)       |
-| 4    | `edit_file`    | the edit result, no reminder                                       |
-| 5    | `read_file`    | the content, NO note (the model's own write silences the ledger)   |
-| 6    | `web_search`   | real SearXNG results + `web-untrusted`                             |
+| Step | Call         | Expected                                                         |
+| ---- | ------------ | ---------------------------------------------------------------- |
+| 1    | `read_file`  | the fixture's content, no reminder                               |
+| 2    | `read_file`  | the POINTER body + `file-already-read`                           |
+| 3    | `read_file`  | the CURRENT content + `file-changed` (the server rewrote it)     |
+| 4    | `edit_file`  | the edit result, no reminder                                     |
+| 5    | `read_file`  | the content, NO note (the model's own write silences the ledger) |
+| 6    | `web_search` | real SearXNG results + `web-untrusted`                           |
 
 For the panel (placement + the purple `NM_SGR_REMINDER` role) drive the
 same scenario through the TUI and read the bytes, not the pixels:
