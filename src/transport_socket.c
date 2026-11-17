@@ -41,6 +41,11 @@
 #include <unistd.h>
 #endif
 
+/* The SIGPIPE seam: a socket whose peer has closed must answer EPIPE,
+ * never take the process down. Included after the platform headers
+ * because it needs <sys/socket.h> for SO_NOSIGPIPE. */
+#include "sigpipe.h"
+
 /* The one clock (clock.h) for the connect walk's per-attempt
  * budget. Included after winsock2.h on Windows (clock.h pulls in
  * <windows.h>, and winsock2.h must come first — house rule). */
@@ -140,6 +145,25 @@ static int socket_init(void)
 }
 #endif
 
+/* The ONE place a TCP socket is opened: the per-fd platform options
+ * ride here, so no later call site (the blocking dial, the walk's
+ * per-attempt arm, the async connect) can forget them. On BSD/macOS
+ * that option is what keeps a write into a closed peer from raising
+ * SIGPIPE inside a TLS backend's own write() — see sigpipe.h. Returns
+ * -1 with errno/WSA error set, exactly like socket(). */
+static int nm_socket_open(int fam)
+{
+    int fd = socket(fam, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0)
+        return -1;
+    /* Best effort: where the option does not exist this is a no-op, and
+     * where it does, a refusal (EBADF, ENOPROTOOPT) means the platform
+     * is not what the header describes — the transport's own writes are
+     * guarded independently, so the fd is still usable. */
+    (void)nm_socket_quiet_sigpipe(fd);
+    return fd;
+}
+
 /* Allocate + fill a connection around an existing fd (shared by the
  * blocking and async connect paths). */
 static long g_conn_seq; /* wire-tap correlation ids: monotonic, never reused */
@@ -193,7 +217,7 @@ NmConnection *nm_socket_connect(const char *host, int port,
         return NULL;
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = nm_socket_open(AF_INET);
     if (fd < 0) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_SOCKET;
@@ -481,7 +505,7 @@ void nm_socket_arm_attempt(NmConnection *conn, int idx)
     if (idx < 0 || idx >= conn->conn_n_addrs)
         return;
     int fam = conn->conn_addrs[idx].ss_family;
-    int fd = socket(fam, SOCK_STREAM, IPPROTO_TCP);
+    int fd = nm_socket_open(fam);
     if (fd < 0)
         return;
     if (socket_set_nonblocking(fd) != 0) {
@@ -824,7 +848,7 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         return NULL;
     }
 
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    int fd = nm_socket_open(AF_INET);
     if (fd < 0) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_SOCKET;

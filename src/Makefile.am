@@ -72,6 +72,7 @@ EXTRA_DIST = \
     proc.h \
     proc_internal.h \
     shell_ui.h \
+    sigpipe.h \
     size.h \
     catalog_data.h \
     openai_client.h \
