@@ -1794,9 +1794,16 @@ void nm_socket_shutdown(int fd)
 
 long nm_conn_write(NmConnection *conn, const char *buf, size_t len)
 {
+    NmSigpipeGuard sp;
     if (conn->tls_ctx) {
         const char *err = NULL;
+        /* The backend writes into the socket itself (SSL_write, the
+         * mbedTLS record layer), where no per-call flag can be passed:
+         * the guard is what keeps a closed peer from killing the
+         * process before the error reaches us. */
+        nm_sigpipe_guard_enter(&sp);
         long n = conn->tls->write(conn->tls_ctx, buf, len, &err);
+        nm_sigpipe_guard_leave(&sp, n < 0);
         /* A TLS write that fails without an error string is a
          * would-block (non-blocking fd, full send window): hand the
          * caller a distinct sentinel so it can wait for writability
@@ -1808,9 +1815,16 @@ long nm_conn_write(NmConnection *conn, const char *buf, size_t len)
     if (conn->fd < 0)
         return -1;
     long n;
+#ifdef MSG_NOSIGNAL
+    const int flags = MSG_NOSIGNAL; /* Linux and friends: same effect, per call */
+#else
+    const int flags = 0; /* BSD/macOS: nm_socket_open set SO_NOSIGPIPE */
+#endif
+    nm_sigpipe_guard_enter(&sp);
     do {
-        n = send(conn->fd, buf, (int)len, 0);
+        n = send(conn->fd, buf, (int)len, flags);
     } while (n < 0 && errno == EINTR);
+    nm_sigpipe_guard_leave(&sp, n < 0);
     return n;
 }
 

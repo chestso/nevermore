@@ -83,22 +83,28 @@ static inline void nm_sigpipe_guard_enter(NmSigpipeGuard *g)
     g->active = 1;
 }
 
-/* Restore the mask, draining the SIGPIPE the write earned first. Pass
- * `saw_epipe` = the write failed with EPIPE; any other outcome leaves
- * nothing pending and only the mask moves back. */
-static inline void nm_sigpipe_guard_leave(NmSigpipeGuard *g, int saw_epipe)
+/* Restore the mask, draining the SIGPIPE the failed call earned first.
+ * Pass `failed` = the guarded call did not succeed. A failure is the
+ * only thing that can have posted the signal while the mask was on, and
+ * the drain is silent when nothing is pending (`sigtimedwait` answers
+ * EAGAIN) — which is why the caller does not have to decide "was this
+ * EPIPE": after SSL_write / mbedtls_ssl_write the caller holds a
+ * negative return and the library's error string, and `errno` belongs
+ * to the write inside the library, not to the call we made. */
+static inline void nm_sigpipe_guard_leave(NmSigpipeGuard *g, int failed)
 {
     if (!g->active)
         return;
-    if (saw_epipe) {
+    if (failed) {
         sigset_t set;
         struct timespec zero;
         int saved_errno = errno;
         zero.tv_sec = 0;
         zero.tv_nsec = 0;
         if (sigemptyset(&set) == 0 && sigaddset(&set, SIGPIPE) == 0) {
-            /* The kernel posted the signal when write() returned EPIPE.
-             * Take it out of the pending set, or it fires on unblock. */
+            /* The kernel posted the signal when the write answered
+             * EPIPE. Take it out of the pending set, or it fires on
+             * unblock and the death merely moves here. */
             while (sigtimedwait(&set, NULL, &zero) < 0 && errno == EINTR)
                 ;
         }
@@ -115,10 +121,10 @@ static inline void nm_sigpipe_guard_enter(NmSigpipeGuard *g)
     g->active = 0;
 }
 
-static inline void nm_sigpipe_guard_leave(NmSigpipeGuard *g, int saw_epipe)
+static inline void nm_sigpipe_guard_leave(NmSigpipeGuard *g, int failed)
 {
     (void)g;
-    (void)saw_epipe;
+    (void)failed;
 }
 
 #endif

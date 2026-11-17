@@ -31,6 +31,11 @@
 #include <sys/types.h>
 #endif
 
+/* The SIGPIPE seam (see sigpipe.h): the handshake step and the TLS
+ * close write into the socket too, so a peer that dies there must
+ * answer EPIPE like any other failed write. */
+#include "sigpipe.h"
+
 /* Full definition lives in transport.c — this file needs field access,
  * so pull it in via the shared connection layout. */
 #define NM_TRANSPORT_LAYOUT_HERE
@@ -369,7 +374,10 @@ static NmTransportStatus conn_handshake_step(NmConnection *conn)
     }
 
     int want = 0; /* zeroed every attempt: see NmTlsBackend.handshake_step */
+    NmSigpipeGuard sp;
+    nm_sigpipe_guard_enter(&sp);
     NmTlsStep st = conn->tls->handshake_step(conn->tls_ctx, &want, &err);
+    nm_sigpipe_guard_leave(&sp, st == NM_TLS_STEP_ERR);
     if (st == NM_TLS_STEP_WANT) {
         conn->hs_want_write = want;
         return NM_TRANSPORT_PENDING;
@@ -687,8 +695,17 @@ void nm_connection_close(NmConnection *conn)
 {
     if (!conn)
         return;
-    if (conn->tls_ctx && conn->tls && conn->tls->close)
+    if (conn->tls_ctx && conn->tls && conn->tls->close) {
+        /* The close is a write (a close_notify record), and the peer
+         * may be gone: guarded with `failed` = 1 because the vtable's
+         * close returns void. Nothing else can have posted SIGPIPE
+         * while the mask is on, so the drain is exactly what keeps a
+         * dead peer from killing us on the way out. */
+        NmSigpipeGuard sp;
+        nm_sigpipe_guard_enter(&sp);
         conn->tls->close(conn->tls_ctx);
+        nm_sigpipe_guard_leave(&sp, 1);
+    }
     nm_socket_shutdown(conn->fd);
     free(conn->resp.content_type);
     free(conn->req_buf);
