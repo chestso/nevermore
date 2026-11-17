@@ -198,7 +198,19 @@ prerequisite (skip).
   macOS 26 answers a re-connect on a refused socket with 0/`EISCONN`
   ("connected"), where the older kernels answered the refusal itself. A probe
   that trusts the re-connect turns a refusal into a live socket, and the first
-  write into the dead peer takes SIGPIPE on macOS — the process dies on it.
+  write into the dead peer raises `SIGPIPE` — the process dies on it.
+- **`SIGPIPE` is every POSIX platform's answer to a write into a closed peer,
+  Linux included.** `EPIPE` is what the write RETURNS when the signal is
+  ignored or blocked; the two are not alternatives. The transport keeps the
+  signal from killing it (`sigpipe.h`: `SO_NOSIGPIPE` on the fd, a
+  block/drain/restore guard where that option does not exist), so a test that
+  proves it must set `SIG_DFL` **itself** in a forked child: the test binaries
+  ignore `SIGPIPE` in `main`, and an ignored disposition survives `fork` — an
+  inherited ignore makes the test pass whatever the code does.
+  `tests/test_tls.c`'s closed-peer cases are the shape. Note also that a close
+  over UNREAD data is an RST, which answers `ECONNRESET` and never raises the
+  signal at all: the peer half must drain what it was sent before it closes,
+  or the test proves nothing.
 - **`select()`:** pass NULL for unset directions, never an empty non-NULL
   `fd_set` (Windows).
 - **PENDING is part of the contract:** continue on OK/PENDING, break only on a
@@ -435,6 +447,11 @@ AGENTS.md has the rest of the release rules.
 - **Windows (MinGW/MSYS2):**
   - `winsock2.h` first (before `windows.h`); `closesocket`; no SIGPIPE;
     `WSAStartup` before any socket call, raw test servers too.
+  - **A blocking send into a closed peer parks** (measured under wine): the
+    blocking `nm_request_send` with a 1 MiB body into a peer that has closed
+    never returns, where POSIX answers `EPIPE`/`ECONNRESET`. Windows has no
+    signal to die of, so the transport's closed-peer test is POSIX-only and
+    says why in the skip line.
   - `FindFirstFileW` / `FindNextFileW` are UTF-16 (`MultiByteToWideChar`);
     `_mkdir`; `_getpid`; no `sh -c` (`run_command` uses `cmd.exe /d /c`).
   - `CreateProcessW`: never quote the whole command line; pass cmd flags as
@@ -520,6 +537,10 @@ AGENTS.md has the rest of the release rules.
   interval would delay the event and spin the loop in `poll(0)`.
 - **`nm_json_at` is array-only:** on an object use `nm_json_key` +
   `nm_json_get`.
+- **`sigtimedwait` needs the POSIX.1b declarations:** no `-std=` is set in this
+  tree, so the compiler's default `_DEFAULT_SOURCE` exposes it. A future
+  `-std=c99` (strict) would make `sigpipe.h`'s Linux guard fail to compile —
+  which is at least loud, and better than losing the protection silently.
 - **`nm_source_items()` sets `*n = 0` / NULL before the first fetch:** call
   `fetch_begin` first. Borrowed boba payloads (a tab-completion prefix, a
   popup's `selected_text`, textinput text) must be copied before the next call.

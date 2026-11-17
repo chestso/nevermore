@@ -476,6 +476,20 @@ are guarded stubs (`#ifdef NM_TLS_*`), one file per OS.
   makes `nm_socket_step_send` re-send records already on the wire (a corrupt
   body, a 400). mbedTLS holds the record it could not flush, so its adapter must
   hand back the offset it reached.
+- **A write into a peer that has closed answers `EPIPE`, never a death.** POSIX
+  raises `SIGPIPE` on such a write, and its default action kills the process
+  before the write's error reaches the caller — Linux exactly as much as the
+  BSDs; `EPIPE` is what the write returns when the signal is ignored or
+  blocked. `sigpipe.h` owns the per-platform mechanism. Where `SO_NOSIGPIPE`
+  exists it is set on the fd, and that is the only thing that also covers a TLS
+  backend's own `write()` inside `SSL_write` / `mbedtls_ssl_write` / the
+  handshake, where no per-call flag can be passed; on Linux a guard blocks the
+  signal for one write and drains the one the kernel parked before restoring
+  the mask. `nm_conn_write` wires both branches, the handshake step and the
+  TLS close in `transport.c` wrap theirs, and `nm_socket_open` is the single
+  place a socket is created, so the option cannot be forgotten at a new call
+  site. A process-wide `SIG_IGN` is rejected on purpose: a disposition survives
+  `execve`, so every tool child would inherit the ignore.
 - `nm_socket_wait_ready_ms` retries EINTR (SIGWINCH can land mid-handshake).
 
 ## Agent loop
