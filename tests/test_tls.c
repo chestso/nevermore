@@ -84,6 +84,13 @@ static size_t tls_server_recv_cap;
 static volatile size_t tls_server_recv_len;
 static int tls_server_defer_ms;
 
+/* The closed-peer test's knob: after the handshake, read the client's
+ * FIRST request and then hang up. Draining first is the point — a close
+ * over unread data is an RST, and an RST answers ECONNRESET on the next
+ * write, which is a different (and signal-free) failure than the EPIPE
+ * this test is about. 0 = the normal server. */
+static int tls_server_hang_up;
+
 /* The committed fixture lives in the SOURCE tests/ tree: `make check`
  * exports $srcdir (../../tests from the build dir) and a direct run from
  * the source dir has none at all. Resolve it once, in main, so the
@@ -157,7 +164,12 @@ static void *tls_server_thread(void *arg)
     SSL *ssl = SSL_new(ctx);
     SSL_set_fd(ssl, cfd);
     if (SSL_accept(ssl) == 1) {
-        if (tls_server_recv) {
+        if (tls_server_hang_up) {
+            /* The peer a write must fail against: drain the first
+             * request so the close is graceful, then hang up. */
+            char d[4096];
+            SSL_read(ssl, d, sizeof(d));
+        } else if (tls_server_recv) {
             if (tls_server_defer_ms > 0)
                 usleep((unsigned)tls_server_defer_ms * 1000);
             size_t total = 0;
@@ -300,7 +312,12 @@ static void *tls_server_thread(void *arg)
                     break;
             }
             if (ret == 0) {
-                if (tls_server_recv) {
+                if (tls_server_hang_up) {
+                    /* See the OpenSSL half: drain the first request so
+                     * the close is graceful, then hang up. */
+                    unsigned char d[4096];
+                    mbedtls_ssl_read(&ssl, d, sizeof(d));
+                } else if (tls_server_recv) {
                     if (tls_server_defer_ms > 0)
                         usleep((unsigned)tls_server_defer_ms * 1000);
                     size_t total = 0;
@@ -393,6 +410,204 @@ static void test_tls_no_backend_fails_fast(void)
 }
 
 #endif
+
+/* ---------------------------------------------------------------- */
+/* A write into a peer that has closed is an error, not a signal      */
+/* ---------------------------------------------------------------- */
+
+/* The peer half: a loopback listener that accepts exactly one
+ * connection and closes it. That FIN is what makes a later write fail —
+ * and on POSIX a write into a closed peer raises SIGPIPE, whose default
+ * action kills the process before the write's EPIPE ever reaches the
+ * caller (sigpipe.h is why that cannot happen here; this is the proof).
+ *
+ * POSIX only: Windows has no SIGPIPE to survive, and (measured under
+ * wine) the blocking drive into a closed peer parks in send() there
+ * instead of answering — a separate question about that drive, not one
+ * this change can answer. */
+#ifndef _WIN32
+static int closed_peer_listen_fd = -1;
+static int closed_peer_port;
+
+static int closed_peer_start(void)
+{
+    closed_peer_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (closed_peer_listen_fd < 0)
+        return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(closed_peer_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+        return -1;
+    socklen_t l = sizeof(a);
+    if (getsockname(closed_peer_listen_fd, (struct sockaddr *)&a, &l) < 0)
+        return -1;
+    closed_peer_port = ntohs(a.sin_port);
+    /* backlog 8: macOS/BSD drop a second SYN while one is unaccepted
+     * (CONTRIBUTING's listen trap). */
+    if (listen(closed_peer_listen_fd, 8) < 0)
+        return -1;
+    return 0;
+}
+
+static void closed_peer_stop(void)
+{
+    if (closed_peer_listen_fd >= 0)
+        close(closed_peer_listen_fd);
+    closed_peer_listen_fd = -1;
+}
+
+static void *closed_peer_thread(void *arg)
+{
+    (void)arg;
+    int cfd = accept(closed_peer_listen_fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    /* Drain what the client sends FIRST, then close. A close over unread
+     * data is an RST, and an RST answers ECONNRESET on the next write —
+     * the test would pass without ever reaching the EPIPE (and hence
+     * the SIGPIPE) it exists to catch. Quiet after 200 ms is the end of
+     * the request. */
+    char b[4096];
+    for (;;) {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(cfd, &r);
+        struct timeval tv = { 0, 200 * 1000 };
+        if (select((int)cfd + 1, &r, NULL, NULL, &tv) <= 0)
+            break;
+        if (recv(cfd, b, sizeof(b), 0) <= 0)
+            break;
+    }
+    close(cfd); /* a GRACEFUL FIN: every byte read, no reader again */
+    return NULL;
+}
+
+/* One megabyte, so the failure cannot hide in the buffers: the first
+ * write into a FIN-closed peer is accepted by the kernel, and only the
+ * one after the RST comes back fails (that is the measured shape: 32768
+ * bytes sent, then EPIPE/SIGPIPE). */
+#define CLOSED_PEER_BODY (1024 * 1024)
+static char closed_peer_body[CLOSED_PEER_BODY];
+
+/* Returns 0 when the transport reported the peer's death as a send
+ * error, or a stage code. The code IS the diagnosis in a CI log, so a
+ * red run does not need another push to say what happened.
+ *
+ * The first request is what gets the peer to read and hang up; the
+ * second is the crash path, and it is a second request on the same
+ * connection because that is exactly what a provider's 413 leaves the
+ * client holding: a request body still to go into a connection the peer
+ * has closed. */
+static int closed_peer_write_must_fail(void)
+{
+    NmConnectInfo ci;
+    memset(&ci, 0, sizeof(ci));
+    NmConnection *c = nm_connect("127.0.0.1", closed_peer_port,
+                                 NM_TRANSPORT_PLAIN, &ci);
+    if (!c) {
+        fprintf(stderr, "  closed peer: connect failed: %s\n",
+                ci.detail[0] ? ci.detail : "(no detail)");
+        return 2;
+    }
+    int fd = nm_connection_fd(c);
+    /* A small send window makes the error arrive on the second or third
+     * send instead of after the kernel has taken a whole megabyte. */
+    {
+        int small = 16384;
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *)&small,
+                   sizeof(small));
+    }
+    NmTransportStatus s = nm_request_send(c, "POST", "/one", NULL, 0, "hi", 2);
+    if (s != NM_TRANSPORT_OK) {
+        fprintf(stderr, "  closed peer: the first request failed (%d: %s)\n",
+                (int)s, nm_connection_last_error(c));
+        nm_connection_close(c);
+        return 3;
+    }
+    /* Wait for the peer's close. select, not a sleep: the close is what
+     * is waited for, and the plain path has no TLS layer between us and
+     * the fd's EOF. */
+    {
+        fd_set r;
+        FD_ZERO(&r);
+        FD_SET(fd, &r);
+        struct timeval tv = { 2, 0 };
+        if (select(fd + 1, &r, NULL, NULL, &tv) > 0) {
+            char b[8];
+            recv(fd, b, sizeof(b), 0); /* 0 = the FIN */
+        }
+    }
+    memset(closed_peer_body, 'x', sizeof(closed_peer_body));
+    s = nm_request_send(c, "POST", "/two", NULL, 0, closed_peer_body,
+                        sizeof(closed_peer_body));
+    int code = 0;
+    if (s == NM_TRANSPORT_OK) {
+        fprintf(stderr, "  closed peer: the request was reported sent\n");
+        code = 4;
+    } else if (s != NM_TRANSPORT_ERR_SEND) {
+        fprintf(stderr,
+                "  closed peer: status %d (%s), expected a send error\n",
+                (int)s, nm_connection_last_error(c));
+        code = 5;
+    }
+    nm_connection_close(c);
+    return code;
+}
+
+static void test_transport_survives_a_closed_peer(void)
+{
+    if (closed_peer_start() != 0) {
+        printf("  FAIL: loopback bind/listen failed\n");
+        return;
+    }
+    pthread_t th;
+    if (pthread_create(&th, NULL, closed_peer_thread, NULL) != 0) {
+        printf("  FAIL: server thread failed\n");
+        closed_peer_stop();
+        return;
+    }
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("  FAIL: fork failed\n");
+        pthread_join(th, NULL);
+        closed_peer_stop();
+        return;
+    }
+    if (pid == 0) {
+        /* The test binaries ignore SIGPIPE in main, and an ignored
+         * disposition SURVIVES execve — an inherited SIG_IGN would make
+         * this child pass no matter what the transport does. This child
+         * is the app, so it starts from the app's disposition. */
+        signal(SIGPIPE, SIG_DFL);
+        _exit(closed_peer_write_must_fail());
+    }
+    int st = 0;
+    int rc = waitpid(pid, &st, 0);
+    pthread_join(th, NULL);
+    closed_peer_stop();
+    ASSERT_EQ(rc, pid);
+    /* A SIGPIPE death is WIFSIGNALED, and the stage code names where a
+     * failure WITH the guard stops. This is the assertion the item
+     * exists for. */
+    ASSERT_TRUE(WIFEXITED(st));
+    ASSERT_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+}
+
+#else /* _WIN32 */
+
+/* Windows has no SIGPIPE to survive, so the failure this item fixes
+ * cannot happen there — but the drive that WOULD exercise it is the one
+ * that parks in send() under wine (see the comment above), so the case
+ * is not run here rather than run and hang. */
+static void test_transport_survives_a_closed_peer(void)
+{
+    printf("  (POSIX loopback only — skipped)\n");
+}
+
+#endif /* _WIN32 */
 
 /* ---------------------------------------------------------------- */
 /* The gap the step machine exists for: a peer that holds its reply    */
@@ -628,6 +843,120 @@ static void test_tls_large_write_arrives_intact(void)
 static void test_tls_large_write_arrives_intact(void)
 {
     printf("  (no Linux TLS backend compiled — large-write test n/a)\n");
+}
+
+#endif
+
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
+
+/* ---------------------------------------------------------------- */
+/* The same proof through the TLS backend's OWN write                  */
+/* ---------------------------------------------------------------- */
+
+/* The plain case proves our send(); a real provider's bytes go through
+ * SSL_write / mbedtls_ssl_write instead, and the write() inside those
+ * takes no flag we can pass — that is the half the guard in
+ * nm_conn_write exists for. Two requests: the server drains the first
+ * and hangs up (gracefully — a close over unread data is an RST, which
+ * answers ECONNRESET, not EPIPE), and the second is the crash path.
+ *
+ * Must run BEFORE test_tls_rejects_untrusted_cert, like the large-write
+ * test: this child needs the committed cert TRUSTED, and the trust
+ * store is process-global and built once — the child sets the extra
+ * anchor before its own first TLS use, so it needs a cold parent. */
+static int tls_closed_peer_child(void)
+{
+    if (tls_server_start() != 0) {
+        fprintf(stderr, "  child: loopback bind failed\n");
+        return 2;
+    }
+    tls_server_hang_up = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, tls_server_thread, NULL) != 0) {
+        fprintf(stderr, "  child: server thread failed\n");
+        tls_server_stop();
+        return 3;
+    }
+    NmConnectInfo ci;
+    memset(&ci, 0, sizeof(ci));
+    NmConnection *c = nm_connect("localhost", tls_port, NM_TRANSPORT_TLS, &ci);
+    if (!c) {
+        fprintf(stderr, "  child: connect: %s\n",
+                ci.detail[0] ? ci.detail : "(no detail)");
+        pthread_join(th, NULL);
+        tls_server_stop();
+        return 4;
+    }
+    {
+        int small = 16384;
+        setsockopt(nm_connection_fd(c), SOL_SOCKET, SO_SNDBUF,
+                   (const char *)&small, sizeof(small));
+    }
+    NmTransportStatus s = nm_request_send(c, "POST", "/one", NULL, 0, "hi", 2);
+    if (s != NM_TRANSPORT_OK) {
+        fprintf(stderr, "  child: the first request failed (%d: %s)\n", (int)s,
+                nm_connection_last_error(c));
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        tls_server_stop();
+        return 5;
+    }
+    /* The server drains that request and hangs up. There is no plain fd
+     * EOF to watch here (the close_notify is inside the TLS layer the
+     * transport owns), so this waits for the peer's own action, bounded:
+     * the server closes within microseconds of reading. */
+    usleep(200 * 1000);
+    s = nm_request_send(c, "POST", "/two", NULL, 0, closed_peer_body,
+                        sizeof(closed_peer_body));
+    int code = 0;
+    if (s == NM_TRANSPORT_OK) {
+        fprintf(stderr, "  child: the request was reported sent\n");
+        code = 6;
+    } else if (s != NM_TRANSPORT_ERR_SEND) {
+        fprintf(stderr, "  child: status %d (%s), expected a send error\n",
+                (int)s, nm_connection_last_error(c));
+        code = 7;
+    }
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    tls_server_stop();
+    return code;
+}
+
+static void test_tls_survives_a_closed_peer(void)
+{
+    if (!nm_tls_backend()) {
+        printf("  (no TLS backend — skipped by contract)\n");
+        return;
+    }
+#ifdef _WIN32
+    printf("  (POSIX loopback only — skipped)\n");
+#else
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("  FAIL: fork failed\n");
+        return;
+    }
+    if (pid == 0) {
+        signal(SIGPIPE, SIG_DFL); /* see the plain case's comment */
+        setenv(NM_TLS_CA_FILE_ENV, CERT, 1);
+        _exit(tls_closed_peer_child());
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("  FAIL: waitpid failed\n");
+        return;
+    }
+    ASSERT_TRUE(WIFEXITED(st));
+    ASSERT_EQ(WIFEXITED(st) ? WEXITSTATUS(st) : -1, 0);
+#endif
+}
+
+#else /* no Linux TLS backend in this build */
+
+static void test_tls_survives_a_closed_peer(void)
+{
+    printf("  (no Linux TLS backend compiled — closed-peer TLS test n/a)\n");
 }
 
 #endif
@@ -1160,6 +1489,7 @@ int main(int argc, char *argv[])
     tls_resolve_fixtures();
     printf("test_tls:\n");
     RUN_TEST(test_tls_large_write_arrives_intact);
+    RUN_TEST(test_tls_survives_a_closed_peer); /* cold trust store: before the refusal */
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_step_pends_on_a_held_reply);
@@ -1167,6 +1497,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_schannel_record_view_consumed);
     RUN_TEST(test_schannel_flight_view_keeps_leftover);
     RUN_TEST(test_tls_handshake_budget_bounds_a_silent_peer);
+    RUN_TEST(test_transport_survives_a_closed_peer);
     live_tls_probe();
     TEST_SUMMARY();
 }
