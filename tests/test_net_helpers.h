@@ -210,4 +210,62 @@ static int test_offline_catalog_pinned(void)
         test_fail_count++;                                    \
     }
 
+/* ---------------------------------------------------------------- */
+/* The canned-reply helper (the one-exchange contract)               */
+/* ---------------------------------------------------------------- */
+
+/* A canned server that serves one request and closes MUST say
+ * `Connection: close` (CONTRIBUTING's rule): under a keep-alive pool
+ * a reply without the header is an invitation to reuse, and the next
+ * exchange on that socket races the server's FIN. Send a canned
+ * reply through HERE, not raw send(): the header is spliced in
+ * before the blank line when the reply lacks it, so a new canned
+ * server cannot forget; a reply that already says so passes through
+ * untouched, and a reply with no blank line at all is sent verbatim
+ * (a malformed-head fixture on purpose). Returns the bytes sent, or
+ * -1 like send(). */
+static long test_send_reply(int cfd, const char *reply)
+    TEST_NET_HELPERS_UNUSED;
+static long test_send_reply(int cfd, const char *reply)
+{
+    size_t len = strlen(reply);
+    const char *blank = strstr(reply, "\r\n\r\n");
+    if (!blank)
+        return (long)send(cfd, reply, (int)len, 0); /* malformed fixture */
+    /* Any header line already named Connection? (case-insensitive,
+     * line starts within the head only). */
+    const char *p = reply;
+    while (p < blank) {
+        const char *eol = memchr(p, '\n', (size_t)(blank - p) + 2);
+        if (!eol || eol > blank)
+            eol = blank + 1; /* the last header line's end */
+        size_t llen = (size_t)(eol - p);
+        if (llen > 12) {
+            const char *c = p;
+            while (c < p + llen && (*c == ' ' || *c == '\t'))
+                c++;
+            size_t off = (size_t)(c - p);
+            if (off + 11 <= llen &&
+                strncasecmp(c, "connection:", 11) == 0)
+                return (long)send(cfd, reply, (int)len, 0); /* says so */
+        }
+        p = eol + 1;
+    }
+    /* Splice "Connection: close\r\n" AFTER the last header line's own
+     * CRLF (the first CRLF of the blank line) and before the empty
+     * line. */
+    size_t at = (size_t)(blank - reply) + 2;
+    static const char hdr[] = "Connection: close\r\n";
+    size_t hlen = sizeof(hdr) - 1;
+    char *buf = malloc(len + hlen);
+    if (!buf)
+        return -1;
+    memcpy(buf, reply, at);
+    memcpy(buf + at, hdr, hlen);
+    memcpy(buf + at + hlen, reply + at, len - at);
+    long r = (long)send(cfd, buf, (int)(len + hlen), 0);
+    free(buf);
+    return r;
+}
+
 #endif /* TEST_NET_HELPERS_H */

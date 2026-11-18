@@ -26,6 +26,11 @@
 #include "provider.h"
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
+
+/* The store main installs first (the keepalive pin's home); the tests
+ * that need their own scratch store swap it in and out. */
+static NmConfig *g_cfg;
 
 /* MinGW has no setenv (POSIX); the tests only ever set/replace. */
 static void test_setenv(const char *name, const char *value)
@@ -174,6 +179,7 @@ static void test_openrouter_request_model_composition(void)
     NmConfig *cfg = nm_config_new();
     ASSERT_NOT_NULL(cfg);
     nm_config_set_store(cfg);
+    test_net_pin_keepalive_off(cfg);
 
     char buf[NM_MODEL_ID_MAX];
     ASSERT_STR_EQ(p->request_model(p, "openai/gpt-5.2", buf, sizeof(buf)),
@@ -1686,6 +1692,7 @@ static void test_openrouter_body_carries_the_pricing_knobs(void)
     NmConfig *cfg = nm_config_new();
     ASSERT_NOT_NULL(cfg);
     nm_config_set_store(cfg);
+    test_net_pin_keepalive_off(cfg);
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
@@ -1733,6 +1740,7 @@ static void test_cloud_round_carries_no_pricing_knobs(void)
     NmConfig *cfg = nm_config_new();
     ASSERT_NOT_NULL(cfg);
     nm_config_set_store(cfg);
+    test_net_pin_keepalive_off(cfg);
     nm_config_shadow_set(cfg, "tier.openrouter", "flex");
     nm_config_shadow_set(cfg, "max_price.openrouter", "1,2");
 
@@ -1888,6 +1896,9 @@ static void test_openrouter_round_reports_the_served_meta(void)
     ASSERT_STR_EQ(r.meta.source, "");
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1908,6 +1919,16 @@ int main(int argc, char *argv[])
      * then carry the canonical spelling (`fast` -> `priority`). */
     nm_config_set_scoped_validator(nm_provider_knob_canon);
     printf("test_provider:\n");
+    /* The tests swap stores in and out; main installs the first one so
+     * the pin exists before the first test (the tripwire's question). */
+    g_cfg = nm_config_new();
+    if (!g_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_provider_registry_complete);
     RUN_TEST(test_provider_knob_vocabulary);

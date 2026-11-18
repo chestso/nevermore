@@ -35,6 +35,7 @@
 #include "clock.h"              /* nm_monotonic_seconds: the per-step tripwire below */
 #include "conf.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
 #include "test_helpers.h"
 
 #ifdef NM_TLS_OPENSSL
@@ -1466,6 +1467,9 @@ static void live_tls_probe(void)
     nm_connection_close(c);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -1486,8 +1490,10 @@ int main(int argc, char *argv[])
         return 1;
     }
     nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
     tls_resolve_fixtures();
     printf("test_tls:\n");
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_tls_large_write_arrives_intact);
     RUN_TEST(test_tls_survives_a_closed_peer); /* cold trust store: before the refusal */
     RUN_TEST(test_tls_rejects_untrusted_cert);

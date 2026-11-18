@@ -35,6 +35,7 @@
 #include "provider_internal.h"
 #include "reminder.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
 #include "test_helpers.h"
 
 /* The process config store the agent resolves `rounds` /
@@ -7475,6 +7476,9 @@ static void test_agent_served_notice_fire_rule(void)
     close(sc.fd);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(void)
 {
 #ifndef _WIN32
@@ -7521,6 +7525,8 @@ int main(void)
         return 1;
     }
     nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_agent_tool_round_then_answer);
     RUN_TEST(test_agent_image_turn_parts_and_prefix_stability);
     RUN_TEST(test_agent_image_live_window);

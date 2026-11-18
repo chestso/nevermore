@@ -24,6 +24,7 @@
 #include "openai_client.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
+#include "test_keepalive_pin.h"
 #include "wire_recorder.h"
 
 /* MinGW has no setenv (POSIX). */
@@ -3445,6 +3446,9 @@ static void test_split_base_url_accepts_bracketed_ipv6(void)
                                          sizeof(host), &port, &mode) != 0);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -3457,6 +3461,18 @@ int main(int argc, char *argv[])
         return 1;
     }
     printf("test_openai_client:\n");
+    /* No store existed in this binary before the keepalive work: the
+     * pin needs one to write to, and the scratch store (pure memory,
+     * no paths) resolves everything else to the same built-in
+     * defaults a NULL store did. */
+    NmConfig *cfg = nm_config_new();
+    if (!cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(cfg);
+    test_net_pin_keepalive_off(cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_usage_rides_finish_reason_chunk);
     RUN_TEST(test_usage_standalone_chunk);
     RUN_TEST(test_usage_cache_read_and_write_are_distinct);

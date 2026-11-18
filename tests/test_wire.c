@@ -33,6 +33,7 @@
 #include "transport_internal.h" /* nm_connection_reusable */
 #include "wire_recorder.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
 #include "test_helpers.h"
 
 /* The transport resolves its connect knobs (per-address budget, family
@@ -2097,6 +2098,9 @@ static void test_source_wait_any_mixed_set(void)
 }
 #endif
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -2115,6 +2119,8 @@ int main(int argc, char *argv[])
         return 1;
     }
     nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_socket_open_is_close_on_exec);
     RUN_TEST(test_parse_strict_content_length);

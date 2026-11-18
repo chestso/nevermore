@@ -141,6 +141,14 @@ prerequisite (skip).
 - **Never hit real APIs.** Canned SSE servers on loopback, one scripted round
   per connection. A test binary that takes minutes is a bug: it waits on a round
   the code will never ask for, or on a deadline.
+- **A canned server that serves one request and closes MUST say `Connection:
+  close`.** Under a keep-alive pool a reply without the header is an invitation
+  to reuse, and the next exchange on that socket races the server's FIN — a
+  flake, not a failure. Send canned replies through `test_send_reply` (it
+  splices the header in when the reply lacks it); a server that WANTS reuse
+  accepts once and answers twice. The suite's immunity to the keepalive flip
+  is the pin (`test_net_pin_keepalive_off` + `TEST_KEEPALIVE_PIN_CHECK` in
+  every dialing binary's main), not the sweep.
 - **Drain the request.** An unread request plus close is an RST, which on
   macOS/BSD can discard the client's unread reply. **Async-gap assertions must
   make the gap:** a reply already in the socket reports READY, not FETCHING, so

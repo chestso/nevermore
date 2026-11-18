@@ -32,6 +32,7 @@
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "tools_internal.h"
 #include "test_helpers.h"
+#include "test_keepalive_pin.h"
 
 /* The run_command inactivity budget lives in the config STORE now (the
  * `run_command_timeout` key); the tests install a scratch store (no
@@ -5241,6 +5242,9 @@ static void test_schema_json_hooked_tools_last(void)
     nm_toolset_free(ts);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(void)
 {
     printf("test_tools:\n");
@@ -5250,6 +5254,8 @@ int main(void)
         return 1;
     }
     nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_registry_defaults);
     RUN_TEST(test_load_skill_reads_body);
     RUN_TEST(test_load_skill_unknown_name);

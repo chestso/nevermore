@@ -23,6 +23,7 @@
 #include "json.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
+#include "test_keepalive_pin.h"
 #include "transport.h"
 #include "wire_recorder.h"
 
@@ -456,6 +457,9 @@ static void test_connect_retry_line_shape(void)
     free(log);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(int argc, char *argv[])
 {
     (void)argc;
@@ -468,6 +472,18 @@ int main(int argc, char *argv[])
         return 1;
     }
     printf("test_wire_recorder:\n");
+    /* No store existed in this binary before the keepalive work: the
+     * pin needs one to write to, and the scratch store (pure memory,
+     * no paths) resolves everything else to the same built-in
+     * defaults a NULL store did. */
+    NmConfig *cfg = nm_config_new();
+    if (!cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(cfg);
+    test_net_pin_keepalive_off(cfg);
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_off_by_default);
     RUN_TEST(test_banner_and_redaction);
     RUN_TEST(test_response_headers_and_trailers_recorded);

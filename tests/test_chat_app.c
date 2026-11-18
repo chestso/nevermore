@@ -61,6 +61,7 @@
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
 
 /* MinGW has no setenv (POSIX); the tests only ever set/replace. */
 static void test_setenv(const char *name, const char *value)
@@ -623,6 +624,8 @@ static void scratch_store_begin(void)
 {
     g_scratch_cfg = nm_config_new();
     nm_config_set_store(g_scratch_cfg);
+    /* The suite's pin: every store this binary installs carries it. */
+    test_net_pin_keepalive_off(g_scratch_cfg);
 }
 
 static void scratch_store_end(void)
@@ -11647,6 +11650,9 @@ static void test_shell_exchange_never_reaches_the_wire(void)
     close(sc2.fd);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(void)
 {
 #ifndef _WIN32
@@ -11694,7 +11700,18 @@ int main(void)
      * config test pins both, and the others never set one. */
     nm_config_set_paths("/nonexistent/nm-chat-app-config",
                         "/nonexistent/nm-chat-app-shadow");
+    /* main installs the first store so the pin exists before the
+     * first test (the tripwire's question); scratch_store_begin
+     * carries the pin onto every store a test swaps in. */
+    g_scratch_cfg = nm_config_new();
+    if (!g_scratch_cfg) {
+        fprintf(stderr, "  FAIL: config store alloc\n");
+        return 1;
+    }
+    nm_config_set_store(g_scratch_cfg);
+    test_net_pin_keepalive_off(g_scratch_cfg);
     printf("test_chat_app:\n");
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_offline_catalog_is_pinned);
     RUN_TEST(test_submit_echoes_and_prints_answer);
     RUN_TEST(test_separator_blank_line_after_answer);

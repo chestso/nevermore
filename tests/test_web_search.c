@@ -31,6 +31,7 @@
 
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+#include "test_keepalive_pin.h"
 
 /* The web_search endpoint and its reachability latch live in the config
  * STORE now (keys `searxng` / `searxng_enabled`); the tests install a
@@ -681,6 +682,9 @@ static void test_web_search_async_step_seam(void)
     nm_toolset_free(ts);
 }
 
+/* The pin's tripwire: file scope (a static function, not a nested one). */
+TEST_KEEPALIVE_PIN_CHECK();
+
 int main(void)
 {
 #ifndef _WIN32
@@ -697,7 +701,9 @@ int main(void)
         return 1;
     }
     nm_config_set_store(g_cfg);
+    test_net_pin_keepalive_off(g_cfg);
 
+    RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_web_search_is_async);
     RUN_TEST(test_web_search_happy_path);
     RUN_TEST(test_web_search_no_results_is_not_untrusted);
