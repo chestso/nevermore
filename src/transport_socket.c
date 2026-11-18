@@ -1094,6 +1094,7 @@ enum
 };
 
 static int parse_head(NmConnection *conn);
+static int head_pump(NmConnection *conn, int blocking);
 
 /* Reset response state for a new exchange (called once the request
  * is queued — the head arrives through nm_read_body steps; the head
@@ -1256,37 +1257,14 @@ NmTransportStatus nm_socket_request(NmConnection *conn, const char *method,
                                body_len);
     if (rs != NM_TRANSPORT_OK)
         return rs;
-    for (;;) {
-        int r = parse_head(conn);
-        if (r == 0)
-            return NM_TRANSPORT_OK;
-        if (r == -2) {
-            conn->err = NM_TRANSPORT_ERR_PROTOCOL;
-            conn_set_err_detail(conn, "malformed response head");
-            conn_tap_error(conn);
-            return NM_TRANSPORT_ERR_PROTOCOL;
-        }
-        if (conn->scratch_len >= sizeof(conn->scratch)) {
-            conn->err = NM_TRANSPORT_ERR_PROTOCOL; /* oversized head */
-            conn_set_err_detail(conn, "response head exceeds %zu bytes",
-                                sizeof(conn->scratch));
-            conn_tap_error(conn);
-            return NM_TRANSPORT_ERR_PROTOCOL;
-        }
-        long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
-                              sizeof(conn->scratch) - conn->scratch_len);
-        if (n <= 0) {
-            /* n == 0 EOF; n < 0 real error; NM_READ_WOULD_BLOCK only
-             * on an already-non-blocking fd (async connect path) —
-             * treat as a stalled/closed peer, never a busy-loop. */
-            conn->err = NM_TRANSPORT_ERR_CLOSED;
-            conn_set_err_detail(conn, "peer closed before the response "
-                                      "head completed");
-            conn_tap_error(conn);
-            return NM_TRANSPORT_ERR_CLOSED;
-        }
-        conn->scratch_len += (size_t)n;
-    }
+    /* The blocking drive: a would-block is a closed peer (there is no
+     * "later"), which head_pump already stamps. The verdicts it can
+     * return instead of 1 — malformed head, oversized head, peer gone
+     * before the head completed — are the same ERR_* the loop used to
+     * produce, carried on conn->err. */
+    if (head_pump(conn, 1) != 1)
+        return conn->err;
+    return NM_TRANSPORT_OK;
 }
 
 NmTransportStatus nm_socket_set_recv_timeout(NmConnection *conn,
@@ -1520,6 +1498,60 @@ static int parse_head(NmConnection *conn)
     return 0;
 }
 
+/* One head pump: parse what the scratch holds; when the head is
+ * incomplete, pull more bytes and resume. The ONE owner of the
+ * head-scan loop and its three verdicts (malformed head, oversized
+ * head, peer gone before the head completed) — nm_socket_request's
+ * blocking drive and nm_socket_read_body's resumable step are the two
+ * callers, so neither can drift from the other's strings. `blocking`
+ * is the drive's shape: on a blocking fd a would-block answer is not
+ * a wait signal (there is no "later") — it falls into the same
+ * closed-peer verdict the EOF takes.
+ *
+ * Returns: 1 the head is parsed (body bytes left in scratch); 0 the
+ * socket would block (resume on the next call); -1 failure (err +
+ * err_detail stamped, the wire-tap error fired). */
+static int head_pump(NmConnection *conn, int blocking)
+{
+    for (;;) {
+        int r = parse_head(conn);
+        if (r == 0)
+            return 1;
+        if (r == -2) {
+            conn->err = NM_TRANSPORT_ERR_PROTOCOL;
+            conn_set_err_detail(conn, "malformed response head");
+            conn_tap_error(conn);
+            return -1;
+        }
+        /* -1: need more bytes */
+        if (conn->scratch_len >= sizeof(conn->scratch)) {
+            conn->err = NM_TRANSPORT_ERR_PROTOCOL; /* oversized head */
+            conn_set_err_detail(conn, "response head exceeds %zu bytes",
+                                sizeof(conn->scratch));
+            conn_tap_error(conn);
+            return -1;
+        }
+        long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
+                              sizeof(conn->scratch) - conn->scratch_len);
+        if (n == NM_READ_WOULD_BLOCK && !blocking) {
+            /* Head incomplete, no bytes pending. The partial head
+             * stays in scratch; resume on the next call. */
+            return 0;
+        }
+        if (n <= 0) {
+            /* n == 0 EOF; n < 0 real error; on a blocking drive a
+             * would-block is a stalled/closed peer, never a
+             * busy-loop. */
+            conn->err = NM_TRANSPORT_ERR_CLOSED;
+            conn_set_err_detail(conn, "peer closed before the response "
+                                      "head completed");
+            conn_tap_error(conn);
+            return -1;
+        }
+        conn->scratch_len += (size_t)n;
+    }
+}
+
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
 {
     if (!conn || !buf || buf_len == 0)
@@ -1527,40 +1559,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
 
     /* -------- head -------- */
     if (!conn->body_started) {
-        for (;;) {
-            int r = parse_head(conn);
-            if (r == 0)
-                break;
-            if (r == -2) {
-                conn->err = NM_TRANSPORT_ERR_PROTOCOL;
-                conn_set_err_detail(conn, "malformed response head");
-                conn_tap_error(conn);
-                return -1;
-            }
-            /* -1: need more bytes */
-            if (conn->scratch_len >= sizeof(conn->scratch)) {
-                conn->err = NM_TRANSPORT_ERR_PROTOCOL; /* oversized head */
-                conn_set_err_detail(conn, "response head exceeds %zu bytes",
-                                    sizeof(conn->scratch));
-                conn_tap_error(conn);
-                return -1;
-            }
-            long n = nm_conn_read(conn, conn->scratch + conn->scratch_len,
-                                  sizeof(conn->scratch) - conn->scratch_len);
-            if (n == NM_READ_WOULD_BLOCK) {
-                /* Head incomplete, no bytes pending. The partial head
-                 * stays in scratch; resume on the next call. */
-                return NM_READ_WOULD_BLOCK;
-            }
-            if (n <= 0) {
-                conn->err = NM_TRANSPORT_ERR_CLOSED;
-                conn_set_err_detail(conn, "peer closed before the "
-                                          "response head completed");
-                conn_tap_error(conn);
-                return -1; /* head never completed */
-            }
-            conn->scratch_len += (size_t)n;
-        }
+        int hp = head_pump(conn, 0);
+        if (hp < 0)
+            return -1; /* err + detail stamped, tapped */
+        if (hp == 0)
+            return NM_READ_WOULD_BLOCK;
     }
 
     /* -------- plain (content-length or EOF-delimited) -------- */
