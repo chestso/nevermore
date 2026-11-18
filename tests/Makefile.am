@@ -13,6 +13,7 @@ check_PROGRAMS = \
     test_provider \
     test_source \
     test_wire \
+    test_keepalive \
     test_wire_recorder \
     test_openai_client \
     test_tls \
@@ -220,6 +221,19 @@ test_wire_SOURCES = test_wire.c ../src/clock.c ../src/transport.c ../src/transpo
 test_wire_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
+
+# The keep-alive pool: canned servers that serve TWO exchanges on one
+# connection, the idle window moved with the fake clock (linked
+# INSTEAD of src/clock.c, the test_addr_cache precedent). Plain only —
+# the TLS reuse cases live in test_tls, where the TLS server already
+# is. POSIX threads.
+test_keepalive_SOURCES = test_keepalive.c fake_clock.c \
+    ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
+    ../src/conf.c ../src/wire_recorder.c ../src/json.c ../src/sse.c \
+    ../src/openai_client.c $(TEST_TLS_SOURCE)
+test_keepalive_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
+test_keepalive_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+test_keepalive_LDADD = -lpthread $(TEST_TLS_LIBS)
 
 # Wire debug recorder: banner + NDJSON event
 # lines + redaction via the header secret marker, plus a tap round
