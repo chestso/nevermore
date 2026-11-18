@@ -106,7 +106,7 @@ static void *roundtrip_server_thread(void *arg)
         "Transfer-Encoding: chunked\r\n\r\n"
         "12\r\ndata: hello-event\n\n\r\n" /* 18 = 0x12 */
         "0\r\n\r\n";
-    send(cfd, resp, sizeof(resp) - 1, 0);
+    test_send_reply(cfd, resp);
     close(cfd);
     return NULL;
 }
@@ -150,7 +150,7 @@ static void *trailer_roundtrip_server_thread(void *arg)
         "0\r\n"
         "X-Trailer-Field: trailer-value\r\n"
         "\r\n";
-    send(cfd, resp, sizeof(resp) - 1, 0);
+    test_send_reply(cfd, resp);
     close(cfd);
     return NULL;
 }

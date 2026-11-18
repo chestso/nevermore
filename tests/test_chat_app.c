@@ -212,6 +212,7 @@ static void sse_send_chunked(int cfd, const char *body, struct ServerScript *sc)
     char head[256];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: text/event-stream\r\n"
                       "Transfer-Encoding: chunked\r\n\r\n");
     send(cfd, head, (size_t)hl, 0);
@@ -3390,6 +3391,7 @@ static void route_send_json(int cfd, const char *body)
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(body));
@@ -3441,6 +3443,7 @@ static void *credit_route_server_thread(void *arg)
             s->n_credits++;
             if (s->fail_credits) {
                 static const char nf[] = "HTTP/1.1 404 Not Found\r\n"
+                                         "Connection: close\r\n"
                                          "Content-Length: 0\r\n\r\n";
                 send(cfd, nf, sizeof(nf) - 1, 0);
             } else {
@@ -7161,6 +7164,7 @@ static void *wire_only_catalog_server_thread(void *arg)
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(body));
@@ -7251,6 +7255,7 @@ static void *warm_catalog_server_thread(void *arg)
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(body));
@@ -7668,6 +7673,7 @@ static void *slow_catalog_server_thread(void *arg)
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(slow_catalog_body));
@@ -10036,6 +10042,7 @@ static void *big_catalog_server_thread(void *arg)
     char head[160];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: application/json\r\n"
                       "Content-Length: %zu\r\n\r\n",
                       strlen(big_catalog_body));

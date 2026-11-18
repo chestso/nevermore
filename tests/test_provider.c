@@ -467,6 +467,7 @@ static void send_json(int cfd, const char *body)
     char head[128];
     snprintf(head, sizeof(head),
              "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n\r\n",
              strlen(body));
@@ -559,6 +560,7 @@ static void *canned_chat_server_thread(void *arg)
 {
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
@@ -997,6 +999,7 @@ static void *openrouter_chat_server_thread(void *arg)
 {
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "30\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n\r\n"
@@ -1309,6 +1312,7 @@ static void *opencode_chat_server_thread(void *arg)
 {
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "4e\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
@@ -1389,6 +1393,7 @@ static void *opencode_no_done_server_thread(void *arg)
 {
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
@@ -1773,6 +1778,7 @@ static void serve_sse_events(int lfd, const char *const *events, size_t n)
     int cfd = canned_accept(lfd, NULL, 0);
     if (cfd >= 0) {
         static const char head[] = "HTTP/1.1 200 OK\r\n"
+                                   "Connection: close\r\n"
                                    "Content-Type: text/event-stream\r\n"
                                    "Transfer-Encoding: chunked\r\n\r\n";
         send_all(cfd, head, sizeof(head) - 1);

@@ -774,7 +774,7 @@ static void *simple_server_thread(void *arg)
         rn = 0;
     req[rn] = '\0';
     record_request_path(req, s->path, sizeof(s->path));
-    send(cfd, s->resp, strlen(s->resp), 0);
+    test_send_reply(cfd, s->resp);
     close(cfd);
     close(s->fd);
     return NULL;
@@ -910,7 +910,7 @@ static void *openrouter_chain_thread(void *arg)
                      "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
                      strlen(body), body);
         }
-        send(cfd, resp, strlen(resp), 0);
+        test_send_reply(cfd, resp);
         close(cfd);
     }
     close(lfd);

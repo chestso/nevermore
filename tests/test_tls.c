@@ -200,7 +200,7 @@ static void *tls_server_thread(void *arg)
             SSL_read(ssl, d, sizeof(d));
             const char resp[] =
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                "Content-Length: 2\r\n\r\nhi";
+                "Connection: close\r\nContent-Length: 2\r\n\r\nhi";
             SSL_write(ssl, resp, sizeof(resp) - 1);
         }
     }
@@ -347,7 +347,7 @@ static void *tls_server_thread(void *arg)
                     mbedtls_ssl_read(&ssl, d, sizeof(d));
                     const char resp[] =
                         "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-                        "Content-Length: 2\r\n\r\nhi";
+                        "Connection: close\r\nContent-Length: 2\r\n\r\nhi";
                     mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
                                       sizeof(resp) - 1);
                 }

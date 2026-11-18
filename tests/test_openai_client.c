@@ -72,6 +72,7 @@ static void *chat_server_thread(void *arg)
      * then [DONE], chunked. Chunk sizes computed: 0x33, 0x35, 0xe. */
     const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
@@ -237,6 +238,7 @@ static void *sse_server_thread(void *arg)
     last_request_len = got;
 
     static const char head[] = "HTTP/1.1 200 OK\r\n"
+                               "Connection: close\r\n"
                                "Content-Type: text/event-stream\r\n"
                                "Transfer-Encoding: chunked\r\n\r\n";
     send(cfd, head, sizeof(head) - 1, 0);
@@ -1129,6 +1131,7 @@ static void *length_capture_server_thread(void *arg)
     last_request_len = got;
     static const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "e\r\ndata: [DONE]\n\n\r\n"
@@ -1424,6 +1427,7 @@ static void *comment_server_thread(void *arg)
     }
     static const char head[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n";
     static const char comments[] =
@@ -1517,6 +1521,7 @@ static void *dribble_server_thread(void *arg)
     }
     static const char head[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n";
     static const char ev1[] =
@@ -1633,6 +1638,7 @@ static void *burst_server_thread(void *arg)
     }
     static const char head[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n";
     static const char ev[] =
@@ -1764,6 +1770,7 @@ static void *allatonce_tool_server_thread(void *arg)
      * First chunk length: 141 bytes = 0x8d. */
     static const char resp[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "8d\r\n"
@@ -1878,6 +1885,7 @@ static void *parallel_same_index_server_thread(void *arg)
     }
     static const char resp[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "10e\r\n"
@@ -1953,6 +1961,7 @@ static void *fragmented_tool_server_thread(void *arg)
     }
     static const char resp[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "96\r\n"
@@ -2165,6 +2174,7 @@ static void *truncate_server_thread(void *arg)
     }
     static const char resp[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Content-Length: 100\r\n\r\n"
         "data: {\"choices\":";
@@ -2253,6 +2263,7 @@ static void test_chat_no_done_after_finish_reason_is_complete(void)
     BodyServer s = {
         lfd,
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
@@ -2294,6 +2305,7 @@ static void test_chat_no_done_and_no_finish_reason_is_truncated(void)
     BodyServer s = {
         lfd,
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
@@ -2411,6 +2423,7 @@ static void *stream_error_event_server_thread(void *arg)
     }
     const char sse[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n"
         "56\r\ndata: {\"error\":{\"message\":\"context length exceeded\","
@@ -2591,6 +2604,7 @@ static void *extra_capture_server_thread(void *arg)
 static const char *extra_sse_response(void)
 {
     return "HTTP/1.1 200 OK\r\n"
+           "Connection: close\r\n"
            "Content-Type: text/event-stream\r\n"
            "Transfer-Encoding: chunked\r\n\r\n"
            "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
@@ -2729,6 +2743,7 @@ static void test_catalog_fetch_carries_extra_headers(void)
     ExtraServer s = {
         lfd, req, sizeof(req), 0,
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: 11\r\n\r\n"
         "{\"ok\":true}"
@@ -2776,6 +2791,7 @@ static void test_document_fetch_keeps_only_the_named_members(void)
     ExtraServer s = {
         lfd, req, sizeof(req), 0,
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: 33\r\n\r\n"
         "{\"ours\":{\"v\":1},\"theirs\":{\"v\":2}}"

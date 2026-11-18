@@ -169,7 +169,7 @@ static void *srv_thread(void *arg)
     if (s->delay_ms > 0)
         tsleep(s->delay_ms);
     if (!s->send_nothing && s->resp[0])
-        send(c, s->resp, strlen(s->resp), 0);
+        test_send_reply(c, s->resp);
     drain_and_close(c);
     return NULL;
 }

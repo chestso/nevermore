@@ -190,6 +190,7 @@ static void *agent_server_thread(void *arg)
         char head[128];
         int hl = snprintf(head, sizeof(head),
                           "HTTP/1.1 200 OK\r\n"
+                          "Connection: close\r\n"
                           "Content-Type: text/event-stream\r\n"
                           "Transfer-Encoding: chunked\r\n\r\n");
         send(cfd, head, (size_t)hl, 0);
@@ -5622,6 +5623,7 @@ static void *imagegen_stall_server_thread(void *arg)
     char head[128];
     int hl = snprintf(head, sizeof(head),
                       "HTTP/1.1 200 OK\r\n"
+                      "Connection: close\r\n"
                       "Content-Type: text/event-stream\r\n"
                       "Transfer-Encoding: chunked\r\n\r\n");
     send(cfd, head, (size_t)hl, 0);
@@ -5781,6 +5783,7 @@ static void *keepalive_server_thread(void *arg)
     }
     static const char head[] =
         "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
         "Content-Type: text/event-stream\r\n"
         "Transfer-Encoding: chunked\r\n\r\n";
     static const char comment[] = "e\r\n: keep-alive\n\n\r\n";
@@ -6834,6 +6837,7 @@ static void *agent_two_round_thread(void *arg)
         char resp[2048];
         size_t n = (size_t)snprintf(resp, sizeof(resp),
                                     "HTTP/1.1 200 OK\r\n"
+                                    "Connection: close\r\n"
                                     "Content-Type: text/event-stream\r\n"
                                     "Transfer-Encoding: chunked\r\n\r\n");
         n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
@@ -6948,6 +6952,7 @@ static void *agent_402_server_thread(void *arg)
     char resp[1024];
     int n = snprintf(resp, sizeof(resp),
                      "HTTP/1.1 402 Payment Required\r\n"
+                     "Connection: close\r\n"
                      "Content-Type: application/json\r\n"
                      "Content-Length: %zu\r\n"
                      "\r\n"
