@@ -30,6 +30,7 @@
 
 #include "conf.h"
 #include "transport.h"
+#include "transport_internal.h" /* nm_connection_reusable */
 #include "wire_recorder.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
@@ -470,6 +471,93 @@ static void test_wire_body_clamped_to_length(void)
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(sc.fd);
+}
+
+static void test_reuse_verdict(void)
+{
+    /* The verdict is the RESPONSE's: reusable only when the body
+     * ended at a real framing end, nothing failed, and the head
+     * allowed it — computed inline in parse_head, so a Connection
+     * header past the 24-header retention cap is still seen (the
+     * unsafe direction would be reading the verdict from the store). */
+    char with_close[2048];
+    char without_close[2048];
+    snprintf(with_close, sizeof(with_close), "HTTP/1.1 200 OK\r\n");
+    snprintf(without_close, sizeof(without_close), "HTTP/1.1 200 OK\r\n");
+    for (int i = 0; i < 30; i++) {
+        char filler[32];
+        snprintf(filler, sizeof(filler), "X-Filler-%02d: y\r\n", i);
+        strncat(with_close, filler, sizeof(with_close) - strlen(with_close) - 1);
+        strncat(without_close, filler,
+                sizeof(without_close) - strlen(without_close) - 1);
+    }
+    strncat(with_close, "Connection: close\r\nContent-Length: 5\r\n\r\nhello",
+            sizeof(with_close) - strlen(with_close) - 1);
+    strncat(without_close, "Content-Length: 5\r\n\r\nhello",
+            sizeof(without_close) - strlen(without_close) - 1);
+
+    struct
+    {
+        const char *resp;
+        int reusable;
+    } cases[] = {
+        /* 1.1 + Content-Length, no Connection field: persistent
+         * (the ollama.com shape from the live evidence). */
+        { "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", 1 },
+        /* the peer's own close: not reusable. */
+        { "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+          "Connection: close\r\n\r\nhello",
+          0 },
+        /* close wins even when keep-alive also rides the list. */
+        { "HTTP/1.1 200 OK\r\nConnection: keep-alive, close\r\n"
+          "Content-Length: 5\r\n\r\nhello",
+          0 },
+        /* chunked with a real terminal. */
+        { "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+          "5\r\nhello\r\n0\r\n\r\n",
+          1 },
+        /* EOF-delimited (no CL, no chunking): no framing end. */
+        { "HTTP/1.1 200 OK\r\n\r\nhello", 0 },
+        /* 204: body-less by definition, framing end at once. */
+        { "HTTP/1.1 204 No Content\r\n\r\n", 1 },
+        /* 1.0 needs an explicit keep-alive... */
+        { "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n\r\nhello", 0 },
+        { "HTTP/1.0 200 OK\r\nContent-Length: 5\r\n"
+          "Connection: keep-alive\r\n\r\nhello",
+          1 },
+        /* a mid-chunk drop: failed, never reusable. */
+        { "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+          "5\r\nhel",
+          0 },
+        /* the long-head pair: close seen past the retention cap. */
+        { with_close, 0 },
+        { without_close, 1 },
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        struct ServerCase sc = { cases[k].resp, 0, 0, 0 };
+        sc.len = strlen(sc.response);
+        sc.fd = server_bind(&sc.port);
+        ASSERT_TRUE(sc.fd >= 0);
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread, &sc);
+
+        NmConnectInfo ci;
+        NmConnection *c =
+            nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+        ASSERT_NOT_NULL(c);
+        /* The head parses in every case; the mid-chunk drop surfaces
+         * at the body read below. */
+        ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0),
+                  NM_TRANSPORT_OK);
+        char buf[256];
+        for (;;)
+            if (nm_read_body(c, buf, sizeof(buf)) <= 0)
+                break;
+        ASSERT_EQ(nm_connection_reusable(c), cases[k].reusable);
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        close(sc.fd);
+    }
 }
 
 static void test_queue_refuses_an_exchange_in_flight(void)
@@ -1963,6 +2051,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_parse_http10_minor_recorded);
     RUN_TEST(test_wire_body_clamped_to_length);
     RUN_TEST(test_queue_refuses_an_exchange_in_flight);
+    RUN_TEST(test_reuse_verdict);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_chunk_extension);
     RUN_TEST(test_wire_response_headers_and_trailers);

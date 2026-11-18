@@ -1114,6 +1114,8 @@ static void reset_response_state(NmConnection *conn)
     conn->resp_hdr_n = 0;
     conn->resp_head_hdr_n = 0;
     conn->http_minor = 1;
+    conn->reuse_ok = 0;
+    conn->ka_hint_s = 0;
     conn->err = NM_TRANSPORT_OK;
     conn->err_detail[0] = '\0';
     free(conn->resp.content_type);
@@ -1436,6 +1438,9 @@ static int parse_head(NmConnection *conn)
     conn->resp.status = (s[9] - '0') * 100 + (s[10] - '0') * 10 + (s[11] - '0');
     if (conn->resp.status < 100 || conn->resp.status > 599)
         return -2;
+    /* The verdict's default: HTTP/1.1 is persistent, HTTP/1.0 is not
+     * (an explicit `Connection: keep-alive` flips it back). */
+    conn->reuse_ok = conn->http_minor >= 1 ? 1 : 0;
 
     /* Headers: walk line by line to head_end. */
     conn->resp.chunked = 0;
@@ -1515,6 +1520,53 @@ static int parse_head(NmConnection *conn)
             have_cl = 1;
             cl_seen = cl;
             conn->resp.content_len = cl;
+        } else if (llen >= 11 && strncasecmp(line, "Connection:", 11) == 0) {
+            /* The verdict reads the RESPONSE's own mind, inline (see
+             * the layout note): `close` forbids reuse and wins over
+             * anything else on the list; a 1.0 answer needs an
+             * explicit keep-alive; anything else on 1.1 stays
+             * persistent (the ollama.com case measured in the Phase 0
+             * evidence: no Connection field at all = reusable). */
+            if (hdr_value_is(line, llen, 11, "close"))
+                conn->reuse_ok = 0;
+            else if (conn->http_minor == 0 &&
+                     hdr_value_is(line, llen, 11, "keep-alive"))
+                conn->reuse_ok = 1;
+        } else if (llen >= 11 && strncasecmp(line, "Keep-Alive:", 11) == 0) {
+            /* `Keep-Alive: timeout=N, max=M`: the timeout tightens the
+             * pool's idle window for THIS connection. No timeout
+             * token, or a non-numeric one, leaves the hint at 0 — the
+             * caller's own window, never an extension of it. */
+            size_t j = 11;
+            while (j < llen && (line[j] == ' ' || line[j] == '\t'))
+                j++;
+            while (j < llen) {
+                size_t s = j;
+                while (j < llen && line[j] != ',')
+                    j++;
+                size_t e = j;
+                while (s < e && (line[s] == ' ' || line[s] == '\t'))
+                    s++;
+                while (e > s && (line[e - 1] == ' ' || line[e - 1] == '\t'))
+                    e--;
+                if ((size_t)(e - s) > 8 &&
+                    strncasecmp(line + s, "timeout=", 8) == 0) {
+                    long long v = 0;
+                    int digits = 0;
+                    for (size_t k = s + 8; k < e; k++) {
+                        if (line[k] < '0' || line[k] > '9') {
+                            digits = -1;
+                            break;
+                        }
+                        if (v < 100000)
+                            v = v * 10 + (line[k] - '0');
+                        digits++;
+                    }
+                    if (digits > 0)
+                        conn->ka_hint_s = (int)v;
+                }
+                j++;
+            }
         } else if (llen > 13 && strncasecmp(line, "Content-Type:", 13) == 0) {
             size_t j = 13;
             while (j < llen && (line[j] == ' ' || line[j] == '\t'))
@@ -1698,6 +1750,10 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             conn->body_read += (long long)take;
             if (conn->pending_len)
                 memmove(conn->scratch, conn->scratch + take, conn->pending_len);
+            /* The mirror invariant (see the layout note): after the
+             * head, scratch_len IS the pending byte count. The reuse
+             * verdict reads it. */
+            conn->scratch_len = conn->pending_len;
             return (long)take;
         }
         size_t want = buf_len;
@@ -1761,6 +1817,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                     return -1;
                 }
                 conn->pending_len = (size_t)n;
+                conn->scratch_len = conn->pending_len;
                 continue;
             }
             size_t want = (size_t)conn->chunk_remaining < buf_len - out
@@ -1784,6 +1841,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             conn->pending_len -= want;
             if (conn->pending_len)
                 memmove(conn->scratch, conn->scratch + want, conn->pending_len);
+            conn->scratch_len = conn->pending_len;
             out += want;
             conn->chunk_remaining -= (int)want;
             if (conn->chunk_remaining == 0)
@@ -1811,12 +1869,14 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 return -1;
             }
             conn->pending_len = 1;
+            conn->scratch_len = conn->pending_len;
         }
         char c = conn->scratch[0];
         /* Consume exactly one byte from the pending window. */
         conn->pending_len--;
         if (conn->pending_len)
             memmove(conn->scratch, conn->scratch + 1, conn->pending_len);
+        conn->scratch_len = conn->pending_len;
 
         switch (conn->chunk_state) {
         case CHUNK_SIZE:

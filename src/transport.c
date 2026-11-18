@@ -675,6 +675,22 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
     }
 }
 
+/* The reuse verdict: the RESPONSE's, never a caller's guess. A
+ * connection is reusable only when the body reached a real FRAMING
+ * end (derived — nm_socket_body_framing_end), nothing failed, the
+ * response allowed it (reuse_ok, computed inline in parse_head), and
+ * no bytes sit undelivered. Callers hand the connection back and this
+ * decides; there is no boolean for a caller to get wrong. */
+int nm_connection_reusable(const NmConnection *conn)
+{
+    if (!conn || conn->fd < 0 || conn->err != NM_TRANSPORT_OK)
+        return 0;
+    if (!nm_socket_body_framing_end(conn))
+        return 0;
+    return conn->reuse_ok && conn->pending_len == 0 &&
+           conn->scratch_len == 0;
+}
+
 NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    const char *path,
                                    const NmRequestHeader *headers,

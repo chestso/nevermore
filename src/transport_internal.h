@@ -61,6 +61,12 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len);
  * the reuse verdict both ask. */
 int nm_socket_body_framing_end(const NmConnection *conn);
 
+/* The reuse verdict (transport.c): the RESPONSE's, computed from the
+ * derived framing end + the inline verdict in parse_head — no
+ * boolean for a caller to get wrong. The pool's release is its only
+ * production caller. */
+int nm_connection_reusable(const NmConnection *conn);
+
 void nm_socket_shutdown(int fd);
 
 /* Bound blocking reads on the connection's socket: SO_RCVTIMEO, so a

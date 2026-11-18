@@ -70,11 +70,24 @@ struct NmConnection
     void *tls_ctx;
     const NmTlsBackend *tls;
     NmResponse resp;
-    int http_minor;     /* the response head's real minor: "1.1" was
-                           hard-coded into the wire tap before the head
-                           parser learned to keep it; the reuse verdict
-                           needs it too (an HTTP/1.0 answer needs an
-                           explicit keep-alive) */
+    int http_minor; /* the response head's real minor: "1.1" was
+                       hard-coded into the wire tap before the head
+                       parser learned to keep it; the reuse verdict
+                       needs it too (an HTTP/1.0 answer needs an
+                       explicit keep-alive) */
+    /* The reuse verdict, computed INLINE in parse_head's header loop
+     * next to Transfer-Encoding / Content-Length — never read back
+     * from the retained-header store, which keeps only the first 24
+     * headers, so a `Connection: close` past the cap would silently
+     * read as "reuse" (the unsafe direction) if the verdict looked
+     * there. reuse_ok: the response allows a second exchange. The
+     * framing end is NOT a flag here — nm_socket_body_framing_end
+     * derives it from the body state, so no reset or error path can
+     * forget to clear it. ka_hint_s: the optional `Keep-Alive:
+     * timeout=N` hint, 0 = none; it tightens the pool's idle window
+     * per connection. Both reset per exchange. */
+    int reuse_ok;
+    int ka_hint_s;
     int port;           /* connect port (the failure detail's target) */
     char host[256];     /* Host header source, set at connect */
     char tls_host[256]; /* bare hostname (no port): TLS SNI + cert
