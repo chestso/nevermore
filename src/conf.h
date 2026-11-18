@@ -480,9 +480,14 @@ typedef enum
  * their trace (the key comment above says what each mode is for). */
 typedef enum
 {
-    NM_REASONING_ECHO_OFF = 0, /* never attach a trace (the default) */
+    NM_REASONING_ECHO_OFF = 0, /* never attach a trace */
     NM_REASONING_ECHO_TOOLS,   /* only on messages carrying tool_calls */
-    NM_REASONING_ECHO_ALL      /* every assistant message with a trace */
+    NM_REASONING_ECHO_ALL,     /* every assistant message with a trace */
+    NM_REASONING_ECHO_TURN     /* the active turn only: a tool-call message
+                                * on an older turn carries "" (the
+                                * presence placeholder), everything older
+                                * is stripped; appended after ALL —
+                                * nothing orders the enum */
 } NmReasoningEcho;
 
 /* The `kbd` key's value space: when the terminal's keyboard protocol may

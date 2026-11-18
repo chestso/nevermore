@@ -429,6 +429,18 @@ static void test_reasoning_mode_vocabulary(void)
     ASSERT_STR_EQ(out, "all");
     ASSERT_TRUE(nm_config_reasoning_echo_canon("1", out, sizeof(out)));
     ASSERT_STR_EQ(out, "all");
+    /* turn — the research's mode: the active turn only, the vendors'
+     * "interleaved" / "current_turn" name folds in. */
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("turn", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("CURRENT", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("current-turn", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("current_turn", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("interleaved", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
     /* nothing else */
     ASSERT_FALSE(nm_config_reasoning_echo_canon("maybe", out, sizeof(out)));
     ASSERT_FALSE(nm_config_reasoning_echo_canon("", out, sizeof(out)));
@@ -438,6 +450,7 @@ static void test_reasoning_mode_vocabulary(void)
     ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_OFF), "off");
     ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_TOOLS), "tools");
     ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_ALL), "all");
+    ASSERT_STR_EQ(nm_config_reasoning_echo_name(NM_REASONING_ECHO_TURN), "turn");
 
     pin_paths("reasoning-echo-modes");
     write_file_at(g_user, "reasoning_echo = tool-calls\n");
@@ -451,6 +464,23 @@ static void test_reasoning_mode_vocabulary(void)
     nm_config_set_env(c);
     ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "all");
     ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_ALL);
+
+    /* The turn mode through the same layers, alias folded to canon. */
+    write_file_at(g_user, "reasoning_echo = interleaved\n");
+    nm_config_free(c);
+    c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "turn");
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TURN);
+    test_setenv("NEVERMORE_REASONING_ECHO", "current-turn");
+    nm_config_set_env(c);
+    ASSERT_STR_EQ(nm_config_get(c, NM_CFG_KEY_REASONING_ECHO), "turn");
+    ASSERT_EQ(nm_config_reasoning_echo_mode(c), NM_REASONING_ECHO_TURN);
+    test_unsetenv("NEVERMORE_REASONING_ECHO");
+    write_file_at(g_user, "reasoning_echo = tool-calls\n");
+    nm_config_free(c);
+    c = nm_config_load();
+    ASSERT_NOT_NULL(c);
 
     /* Garbage in the env is dropped, never applied (the layer below
      * stands), and the shadow write-back refuses it too. */
@@ -482,6 +512,8 @@ static void test_signature_echo_key(void)
     ASSERT_STR_EQ(out, "all");
     ASSERT_TRUE(nm_config_reasoning_echo_canon("no", out, sizeof(out)));
     ASSERT_STR_EQ(out, "off");
+    ASSERT_TRUE(nm_config_reasoning_echo_canon("interleaved", out, sizeof(out)));
+    ASSERT_STR_EQ(out, "turn");
     ASSERT_FALSE(nm_config_reasoning_echo_canon("garbage", out, sizeof(out)));
 
     pin_paths("signature-echo");

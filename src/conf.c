@@ -821,9 +821,10 @@ static int token_in(const char *value, const char *const *tokens)
     return 0;
 }
 
-/* Three modes, with the old bool spellings folded in: `on` means `all`
+/* Four modes, with the old bool spellings folded in: `on` means `all`
  * (the pre-granularity behavior), so an existing config / env value
- * keeps meaning what it always meant. */
+ * keeps meaning what it always meant. `turn` takes the vendors'
+ * "interleaved" / "current_turn" words as aliases. */
 static const char *const REASONING_OFF[] = { "off", "no", "false", "0",
                                              NULL };
 static const char *const REASONING_TOOLS[] = { "tools", "tool", "calls",
@@ -831,6 +832,9 @@ static const char *const REASONING_TOOLS[] = { "tools", "tool", "calls",
                                                NULL };
 static const char *const REASONING_ALL[] = { "all", "on", "true", "yes", "1",
                                              NULL };
+static const char *const REASONING_TURN[] = { "turn", "current",
+                                              "current-turn", "current_turn",
+                                              "interleaved", NULL };
 
 int nm_config_reasoning_echo_canon(const char *value, char *out, size_t cap)
 {
@@ -839,6 +843,7 @@ int nm_config_reasoning_echo_canon(const char *value, char *out, size_t cap)
     const char *canon = token_in(value, REASONING_OFF)     ? "off"
                         : token_in(value, REASONING_TOOLS) ? "tools"
                         : token_in(value, REASONING_ALL)   ? "all"
+                        : token_in(value, REASONING_TURN)  ? "turn"
                                                            : NULL;
     if (!canon)
         return 0;
@@ -859,6 +864,8 @@ const char *nm_config_reasoning_echo_name(NmReasoningEcho mode)
         return "tools";
     case NM_REASONING_ECHO_ALL:
         return "all";
+    case NM_REASONING_ECHO_TURN:
+        return "turn";
     case NM_REASONING_ECHO_OFF:
         break;
     }
@@ -874,9 +881,10 @@ NmReasoningEcho nm_config_reasoning_echo_mode(const NmConfig *c)
      * `all` — the same answer the store gives when no layer sets it. */
     if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
         return NM_REASONING_ECHO_ALL;
-    return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
-           : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
-                                       : NM_REASONING_ECHO_OFF;
+    return strcmp(canon, "tools") == 0  ? NM_REASONING_ECHO_TOOLS
+           : strcmp(canon, "turn") == 0 ? NM_REASONING_ECHO_TURN
+           : strcmp(canon, "all") == 0  ? NM_REASONING_ECHO_ALL
+                                        : NM_REASONING_ECHO_OFF;
 }
 
 NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c)
@@ -886,9 +894,10 @@ NmReasoningEcho nm_config_signature_echo_mode(const NmConfig *c)
     char canon[16];
     if (!v || !nm_config_reasoning_echo_canon(v, canon, sizeof(canon)))
         return NM_REASONING_ECHO_ALL;
-    return strcmp(canon, "tools") == 0 ? NM_REASONING_ECHO_TOOLS
-           : strcmp(canon, "all") == 0 ? NM_REASONING_ECHO_ALL
-                                       : NM_REASONING_ECHO_OFF;
+    return strcmp(canon, "tools") == 0  ? NM_REASONING_ECHO_TOOLS
+           : strcmp(canon, "turn") == 0 ? NM_REASONING_ECHO_TURN
+           : strcmp(canon, "all") == 0  ? NM_REASONING_ECHO_ALL
+                                        : NM_REASONING_ECHO_OFF;
 }
 
 /* ---------------------------------------------------------------- */
