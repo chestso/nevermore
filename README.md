@@ -379,11 +379,30 @@ rotated.
 Reasoning models send two things besides the answer: a trace
 (`reasoning_content`) and an opaque structured carrier (`reasoning_details`,
 e.g. a Gemini thought signature). Both are always received and the trace is
-shown; the two keys decide what rides back on later requests:
+shown; the two keys decide what rides back on later requests. The modes take
+the vendors' own spellings as aliases (`interleaved` / `current_turn` /
+`all_turns` / `preserved` fold into `turn` / `all`):
 
 - `off`: nothing goes back.
 - `tools`: only assistant messages that carry tool calls.
-- `all` (default): every assistant message that has one.
+- `turn` (aliases `current`, `current-turn`, `interleaved`, …): the active
+  turn's messages only — the trace of the turn you are in, stripped the
+  moment a new turn starts. An old tool-call message keeps the field as an
+  empty string (the replay checks test presence, not content); an old plain
+  answer loses its field entirely.
+- `all` (default): every assistant message that has one, every turn.
+
+Which to leave: on a host that honors the echo (DeepSeek V4, Kimi K2.7/K3,
+GLM 5.x, MiniMax, Claude ≥ 4.6, Gemini) old reasoning is used by the model,
+re-billed as input and cached like everything else — measured, models recall
+a fact only their hidden reasoning held 39/45 times with the echo and 0/45
+without. There `all` is the vendor contract and `turn` trades cross-turn
+continuity for a smaller prompt plus one cache re-bill at each turn's first
+request; leave `all`. On interleaved-native models the host drops old
+reasoning anyway (measured on gpt-oss, Nemotron 3 and Kimi K2.6 on Ollama
+Cloud), so `turn` is a free byte saving; it also relieves a small context
+window. `tools` is the smallest setting that satisfies the presence checks
+with real traces; `off` is the escape hatch.
 
 Some wires need the echo: `opencode:go`'s deepseek endpoint returns an
 intermittent 400 on a tool round missing `reasoning_content`, and OpenRouter's
@@ -391,7 +410,9 @@ Gemini models require their thought signature back with the tool result. If
 nothing is failing and you pay per token on a long session, `off` is cheaper.
 Each knob freezes for the rest of a chat once a request has carried its field
 (changing it mid-chat would invalidate the prompt cache), and `/config` shows
-what the next request will actually send.
+what the next request will actually send. The turn boundary is the user's
+own message: state reminders and tool-image fan-outs ride user-role messages
+inside a turn and never strip it.
 
 ### Prompt cache and usage
 

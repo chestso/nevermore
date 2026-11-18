@@ -12,7 +12,10 @@
 > The 2026-09-22 extension probed a failure nevermore hit live: the
 > routing headers that name the upstream behind a Go request, and the
 > thinking-mode `reasoning_content` replay rule one of those upstreams
-> enforces (§3, "Thinking-mode tool-call replay").
+> enforces (§3, "Thinking-mode tool-call replay"). The 2026-11-18
+> note in §3 records that neither reproduces any more — the header is
+> gone, 130 replays of the failing shapes all returned 200 — and the
+> tables stand as their dates' record.
 
 ## 1. Overview
 
@@ -288,12 +291,10 @@ plain assistant messages, and an empty string is enough for a round
 whose trace the client did not keep. Nevermore echoes the trace back by
 default (`all` — every assistant message with one), so this route's
 requirement is met without the user knowing anything about it. It is
-granular — `off` / `tools`
-(only the messages carrying `tool_calls`: the smallest setting this
-route accepts) / `all` (every assistant message with a trace) — and the
-store's `reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
-`/config set reasoning_echo off|tools|all` decides. That is the exact
-shape of the bug this
+granular — `off` / `tools` / `turn` / `all` — and the store's
+`reasoning_echo` key, `$NEVERMORE_REASONING_ECHO`, or
+`/config set reasoning_echo off|tools|turn|all` decides. That is the
+exact shape of the bug this
 section was probed for: a nevermore tool round on `opencode:go` +
 `deepseek-v4.1-flash` fails with that 400, the next attempt succeeds,
 and the failure returns a few rounds later; the default (or an
@@ -304,6 +305,23 @@ mid-conversation (a prefix that gains or loses the field is a
 different prefix) — nevermore freezes it for the chat
 (`nm_agent_reasoning_echo_frozen`), and a key change applies to the next
 one.
+
+**Reproducibility note (2026-11-18): this section's failure does not
+reproduce any more.** 130 requests replayed the known-failing shapes —
+the baseline (`deepseek-v4.1-flash`, one turn, field omitted, 10/10)
+plus `deepseek-v4-flash`, `deepseek-v4-pro`, `deepseek-flash`,
+`glm-5.3` and `kimi-k2.7-code` (8/8 each), with two-turn shapes and
+real-shaped `call_00_…` ids — and every one returned 200. The gateway
+no longer sends `x-opencode-endpoint-id`, so the strict endpoint can no
+longer be told apart (the triage advice above is dead: the error body
+alone still does not say which host refused, and nothing else does
+either). Consequences, stated plainly: nothing here can say whether
+`""` on an _old_ tool-call message satisfies the check; the table stays
+as the 2026-09-22 record; and the echo default must not rest on this
+wire alone — it rests on the vendors' documented contracts. A
+community write-up claims native DeepSeek treats a present-but-empty
+field as missing on tool-call turns; unverified (no DeepSeek key on
+this box), and it is the reason `turn` stays opt-in on DeepSeek wires.
 
 ### Endpoint variants (Zen, per the docs' endpoint table)
 
@@ -367,6 +385,9 @@ failure: "auth rejected" may mean "bad model id".) The
 the _upstream's_ refusal relayed by the gateway, it depends on which
 endpoint took the request (§3), and only `x-opencode-endpoint-id`
 says which one that was — the same conversation retried may 200.
+(2026-11-18, §3's note: the header is gone and neither this row nor
+the endpoint attribution reproduces; the row stands as the
+2026-09-22 record.)
 
 ## 5. Model catalogs (probed 2026-09-15)
 
@@ -515,11 +536,15 @@ For `provider_opencode.c` (Go, provider name `opencode:go`) and the
 - **`reasoning_content` on every assistant message that carries
   `tool_calls`** when the client streams/replays thinking traces
   (empty string is accepted when the trace was not kept) — without
-  it the `deepseek` endpoint refuses the round (§3). Nevermore's
+  it the `deepseek` endpoint refused the round (§3; 2026-11-18 the
+  refusal does not reproduce any more, so this is the dated
+  record). Nevermore's
   agent attaches the trace only when its echo mode says so
   (`reasoning_echo = tools` is exactly this, and the smallest such
-  setting; `all` also covers answer rounds), so the key must be
-  `tools` or `all` for `opencode:go` DeepSeek routes — `all` is the
+  setting; `all` also covers answer rounds; `turn` keeps only the
+  active turn's tool-call messages, presence included), so the key
+  must be `tools`, `turn` or `all` for `opencode:go` DeepSeek
+  routes — `all` is the
   built-in default, and the mode is frozen for a chat once a trace has
   been sent;
 - catalog `GET {base}/models`, tokenless, mapped id-only with a
@@ -783,4 +808,6 @@ accounting alongside the OpenAI fields:
   of the route, not a client bug, and `x-opencode-endpoint-id` is
   the only way to tell which host refused. Corollary: the Go tier's
   DeepSeek thinking-mode replay rule (§3) cannot be modelled as a
-  per-model id property; it is per-endpoint.
+  per-model id property; it is per-endpoint. (2026-11-18: the header
+  is gone and the 400 no longer reproduces — see §3's note; this
+  bullet stands as the 2026-09-22 record.)

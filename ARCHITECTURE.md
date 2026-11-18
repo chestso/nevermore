@@ -326,8 +326,9 @@ only the shadow, never the user file.
 - `provider` has a built-in default (`ollama:local`); the model has none. With
   every layer empty, ask mode exits 1 before any traffic and the TUI refuses the
   send until `/model` sets one (one hint spelling, `nm_config_no_model_hint`).
-- **The echo knobs are modes, not bools** (`off` / `tools` / `all`, one
-  vocabulary and canon, with the old bool spellings folded in). `reasoning_echo`
+- **The echo knobs are modes, not bools** (`off` / `tools` / `turn` / `all`, one
+  vocabulary and canon, with the old bool spellings and the vendors' history
+  names folded in). `reasoning_echo`
   (trace text) and `signature_echo` (`reasoning_details`) are each decided by
   their store key alone, with no provider layer and a built-in default of `all`.
   Each has its own freeze latch in the agent (see [Agent loop](#agent-loop)). A
@@ -554,10 +555,20 @@ choice. There are two carriers and two independent knobs:
 
 Rules:
 
-- `begin_round` attaches a trace to an outgoing message only when the mode says
-  so (`nm_agent_reasoning_echo`), so the wire client stays a dumb serializer.
-  `tools` = only assistant messages carrying `tool_calls`; `all` = every
-  assistant message with one.
+- `begin_round` attaches a field to an outgoing message only when the mode and
+  the turn scope say so (`echo_trace` / `echo_details` in `agent.c`, the whole
+  table in one place), so the wire client stays a dumb serializer. The modes:
+  `off` = nothing; `tools` = only assistant messages carrying `tool_calls`;
+  `turn` = the active turn's messages, decided by `i >= turn_first` — the
+  REAL user message that started the turn, recorded in `nm_agent_start`
+  before it is appended (never a role scan: the round-budget nudge, the state
+  reminders and the tool-image fan-out are user-role messages inside a turn);
+  `all` = every assistant message with one, every turn. At the boundary
+  `turn` strips once and never re-attaches: an old tool-call message keeps
+  `"reasoning_content":""` (presence without the bytes), an old plain answer
+  loses its field, so between boundaries every request still extends the
+  previous one byte-for-byte and across a boundary only the older messages'
+  echo fields differ.
 - **Strict echo-back for the signature:** only elements the model itself sent,
   never a synthesized placeholder, so a model that never speaks
   `reasoning_details` never receives the field. The trace echo differs by
@@ -568,15 +579,26 @@ Rules:
   is a different prefix, so a mid-chat change would throw the prompt cache away
   and could re-trip the replay check. The change lands in the next chat, and
   `/config` says so.
-- **The default is `all` because two wires make it non-optional:** `opencode:go`
-  load-balances one model id across endpoints, and one of them
-  (`x-opencode-endpoint-id: deepseek`) intermittently 400s a tool-call message
-  missing `reasoning_content`; Google documents the thought signature as
-  required with the tool result, and OpenRouter's Gemini models 400 on
-  `missing thought_signature`. The echo is also cache-safe, but it costs:
-  `reasoning_details` was 8-11% of the request body at peak on a long tool
-  session, mostly billed as cache reads, with a one-time tail re-bill at the
-  freeze. `off` is the cheap answer when nothing fails.
+- **The default is `all` because it is the newest models' contract, and the
+  models use what the host renders.** The newest generation (DeepSeek V4, Kimi
+  K3, GLM 5.x, Claude ≥ 4.6, Gemini, GPT-5.6) is preserved-by-default or
+  preserved-by-contract; live probes found the echoed old reasoning reaches
+  the model on ten of thirteen routes (a fact only the hidden reasoning held
+  recalled 39/45 with the echo, 0/45 without) and is billed as input where it
+  does. The former wire-only reason stands as a wire fact but no longer
+  carries the decision: `opencode:go`'s deepseek endpoint 400s a tool-call
+  message missing `reasoning_content` (2026-09-22 record) and Google's thought
+  signature is required with the tool result (OpenRouter's Gemini models 400
+  on `missing thought_signature`) — but the 400's strict endpoint is no longer
+  distinguishable and 130 re-probes with real-shaped ids all passed (see
+  `docs/OPENCODE-API.md` §3), so the default rests on the vendors' contract,
+  not on that wire alone. `turn` (opt-in) costs 0-20% of billed input less on
+  honoring hosts and is free on interleaved-native ones (gpt-oss, Nemotron 3,
+  Kimi K2.6 on Ollama Cloud drop the echo server-side); the echo is also
+  cache-safe, but it costs: `reasoning_details` was 8-11% of the request body
+  at peak on a long tool session, mostly billed as cache reads, with a
+  one-time tail re-bill at the freeze. `off` is the cheap answer when nothing
+  fails.
 - `NEVERMORE_DEBUG_WIRE=1` is the human's window on the carrier the transcript
   never shows.
 
