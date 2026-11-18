@@ -88,6 +88,14 @@ struct NmConnection
      * per connection. Both reset per exchange. */
     int reuse_ok;
     int ka_hint_s;
+
+    /* Set when the connection came OUT of the pool (an acquire that
+     * found a matching key inside the window): the stale-reuse
+     * redial's trigger is REUSED-and-failed-before-a-response-byte,
+     * and this is its "reused" half. Cleared by the redial itself (a
+     * second failure is final) and by the first response byte
+     * landing. */
+    int redial_ok;
     int port;           /* connect port (the failure detail's target) */
     char host[256];     /* Host header source, set at connect */
     char tls_host[256]; /* bare hostname (no port): TLS SNI + cert

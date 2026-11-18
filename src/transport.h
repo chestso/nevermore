@@ -82,6 +82,38 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
                          NmConnectInfo *info);
 void nm_connection_close(NmConnection *conn);
 
+/* The idle-connection pool (the keep-alive seam). One idle connection
+ * per key (mode + host + port), four slots, process-global,
+ * single-threaded (the app's model; the addr_cache is the lifetime
+ * precedent).
+ *
+ *   acquire: a matching key inside the idle window (`keepalive_idle`,
+ *            tightened by the response's `Keep-Alive: timeout` hint)
+ *            pops the connection — IDLE, already handshaken,
+ *            non-blocking, counting exchanges on it (xchg keeps
+ *            going) — otherwise dials fresh, exactly like
+ *            nm_connect_async. A pure LOOKUP: acquire never touches
+ *            the socket; a stale one is discovered by the exchange
+ *            and repaired (the redial), not probed.
+ *   release: the ONE verb every non-test caller calls on every path.
+ *            A reusable connection (nm_connection_reusable, and the
+ *            policy on) is shelved — one per key, oldest evicted,
+ *            phase normalised to IDLE; anything else is closed.
+ *            Ownership always passes to the pool; a caller never
+ *            closes a pooled connection.
+ *   flush:   main.c at teardown, and tests that want the fds closed
+ *            mid-run. No atexit: reachable globals are not leaks and
+ *            the kernel closes the fds at exit.
+ *
+ * The blocking transport (nm_connect and friends, test-only) stays
+ * out of the pool by construction: its connections are blocking and
+ * release refuses to shelve one. */
+NmConnection *nm_connection_acquire(const char *host, int port,
+                                    NmTransportMode mode,
+                                    NmConnectInfo *info);
+void nm_connection_release(NmConnection *conn);
+void nm_connection_pool_flush(void);
+
 /* The most recent failure's human-readable reason (DNS/connect/TLS/
  * send/framing/truncation). Borrowed pointer: valid until the next
  * request is queued on the connection or it is closed. "" when the
@@ -147,6 +179,13 @@ int nm_connection_handshake_timeout_ms(void);
  * `keepalive_idle` key (`off` refused); the transport resolves it at
  * the point of use and keeps no copy, like every budget here. */
 #define NM_KEEPALIVE_IDLE_MS 30000
+
+/* The margin a response's `Keep-Alive: timeout=N` hint loses from its
+ * own window: a peer that says "I hold it N seconds" is trusted for
+ * N-2, so the client never races the peer's cutoff by a rounding
+ * error. Node defaults to 5 s, which a flat 30 s window would hit
+ * every time. */
+#define NM_KEEPALIVE_HINT_MARGIN_MS 2000
 
 /* Address-family skip: the answer to "that address went silent — so
  * don't dial that FAMILY first again". Not an OS knob (no portable

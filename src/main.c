@@ -705,6 +705,7 @@ int main(int argc, char *argv[])
          * closes them. Group-kill them before the CLI exits. */
         nm_proc_close_all();
         nm_toolset_free(tools);
+        nm_connection_pool_flush(); /* idle keep-alive sockets die here */
         nm_config_free(cfg);
         return rc == 0 ? 0 : 1;
     }
@@ -713,6 +714,7 @@ int main(int argc, char *argv[])
      * through the app's fd/step/tick callbacks. The app writes runtime
      * changes back to cfg's shadow; main frees it after the loop. */
     int rc = run_interactive(provider_name, model, base_url, cfg);
+    nm_connection_pool_flush();
     nm_config_free(cfg);
     return rc;
 }

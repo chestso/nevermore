@@ -711,6 +711,137 @@ int nm_connection_reusable(const NmConnection *conn)
            conn->scratch_len == 0;
 }
 
+/* ---------------------------------------------------------------- */
+/* The idle pool (the keep-alive seam)                               */
+/* ---------------------------------------------------------------- */
+
+/* Four slots, one idle connection per key, no allocation (the
+ * memory-reuse principle: the pool is a fixed array in the process,
+ * like the addr_cache's table). Touched only by the client thread —
+ * the app is single-threaded, and a canned server's thread never
+ * calls into the transport. */
+#define NM_POOL_SLOTS 4
+
+typedef struct NmPoolSlot
+{
+    NmConnection *conn; /* NULL = free */
+    double idle_at;     /* monotonic seconds, stamped at release */
+} NmPoolSlot;
+
+static NmPoolSlot g_pool[NM_POOL_SLOTS];
+
+/* The key: the connection's own fields, so no key strings are stored
+ * or compared beyond them (mode is the TLS pointer's presence — a
+ * blocking connection never reaches the pool, and an async TLS
+ * connection carries its backend from acquire time). */
+static int pool_key_matches(const NmConnection *c, const char *host, int port,
+                            NmTransportMode mode)
+{
+    if (c->port != port)
+        return 0;
+    if ((mode == NM_TRANSPORT_TLS) != (c->tls != NULL))
+        return 0;
+    return strcmp(c->tls_host, host ? host : "") == 0;
+}
+
+/* This connection's idle window: the policy's `keepalive_idle`,
+ * tightened by the LAST response's `Keep-Alive: timeout=N` hint (the
+ * hint loses its margin; 0 = no hint = the policy's window). */
+static int pool_window_ms(const NmConnection *conn)
+{
+    int ms = nm_connection_keepalive_idle_ms();
+    if (conn->ka_hint_s > 0) {
+        int hint = conn->ka_hint_s * 1000 - NM_KEEPALIVE_HINT_MARGIN_MS;
+        if (hint < ms)
+            ms = hint > 0 ? hint : 0;
+    }
+    return ms;
+}
+
+NmConnection *nm_connection_acquire(const char *host, int port,
+                                    NmTransportMode mode,
+                                    NmConnectInfo *info)
+{
+    if (info) {
+        info->status = NM_TRANSPORT_OK;
+        info->detail[0] = '\0';
+    }
+    if (host && nm_connection_keepalive_on()) {
+        double now = nm_monotonic_seconds();
+        for (int i = 0; i < NM_POOL_SLOTS; i++) {
+            NmConnection *c = g_pool[i].conn;
+            if (!c || !pool_key_matches(c, host, port, mode))
+                continue;
+            double idle_ms = (now - g_pool[i].idle_at) * 1000.0;
+            if (idle_ms > (double)pool_window_ms(c))
+                continue; /* outside the window: leave it, evict later */
+            /* Pop: the caller drives the exchange from here. IDLE,
+             * already handshaken, non-blocking, xchg keeps counting. */
+            g_pool[i].conn = NULL;
+            g_pool[i].idle_at = 0;
+            c->redial_ok = 1;
+            return c;
+        }
+    }
+    /* Nothing (or the policy off): a fresh dial, nm_connect_async's
+     * contract unchanged. */
+    return nm_connect_async(host, port, mode, info);
+}
+
+void nm_connection_release(NmConnection *conn)
+{
+    if (!conn)
+        return;
+    if (nm_connection_keepalive_on() && nm_connection_reusable(conn)) {
+        int same = -1, free_slot = -1, oldest = 0;
+        for (int i = 0; i < NM_POOL_SLOTS; i++) {
+            if (!g_pool[i].conn) {
+                if (free_slot < 0)
+                    free_slot = i;
+                continue;
+            }
+            if (pool_key_matches(g_pool[i].conn, conn->tls_host, conn->port,
+                                 conn->tls ? NM_TRANSPORT_TLS
+                                           : NM_TRANSPORT_PLAIN)) {
+                same = i; /* one idle conn per key: the older one goes */
+                break;
+            }
+        }
+        int target;
+        if (same >= 0) {
+            nm_connection_close(g_pool[same].conn);
+            target = same;
+        } else if (free_slot >= 0) {
+            target = free_slot;
+        } else {
+            for (int i = 1; i < NM_POOL_SLOTS; i++)
+                if (g_pool[i].idle_at < g_pool[oldest].idle_at)
+                    oldest = i;
+            nm_connection_close(g_pool[oldest].conn);
+            target = oldest;
+        }
+        /* The verdict is derived, not the phase; IDLE is what an
+         * acquired-but-not-yet-queued connection reports (interest
+         * 0) until its next request flips it to SENDING. */
+        conn->phase = NM_CONN_IDLE;
+        g_pool[target].conn = conn;
+        g_pool[target].idle_at = nm_monotonic_seconds();
+        return;
+    }
+    nm_connection_close(conn);
+}
+
+void nm_connection_pool_flush(void)
+{
+    for (int i = 0; i < NM_POOL_SLOTS; i++) {
+        if (g_pool[i].conn) {
+            nm_connection_close(g_pool[i].conn);
+            g_pool[i].conn = NULL;
+        }
+        g_pool[i].idle_at = 0;
+    }
+}
+
 NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    const char *path,
                                    const NmRequestHeader *headers,
