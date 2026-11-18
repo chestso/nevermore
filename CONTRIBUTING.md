@@ -141,6 +141,18 @@ prerequisite (skip).
 - **Never hit real APIs.** Canned SSE servers on loopback, one scripted round
   per connection. A test binary that takes minutes is a bug: it waits on a round
   the code will never ask for, or on a deadline.
+- **One thread, one poll, no timers: the harness is a reactor, not a
+  schedule.** A canned server is a scripted pump — nonblocking accept, drain,
+  flush — serviced by the same poll that waits on the client's fd, so every
+  byte is an event the test reacts to. A `usleep` orchestrates by calendar
+  and a worker thread is a second order of interleavings the test has to reason
+  about; both are how a suite grows hangs and platform flakes (the v0.16.0 tag
+  run died on a `shutdown()`-on-a-listener shape that Linux tolerates and
+  BSD/Windows reject). A request-counted script makes the timing shapes
+  deterministic — the die case closes the listener in the harness's own thread,
+  before the client's connect step, so the refused redial is the same on every
+  stack. If a case cannot be written as a pump, the case is dropped, not
+  threaded.
 - **A canned server that serves one request and closes MUST say `Connection:
   close`.** Under a keep-alive pool a reply without the header is an invitation
   to reuse, and the next exchange on that socket races the server's FIN — a
