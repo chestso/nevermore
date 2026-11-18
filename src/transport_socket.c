@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h> /* LLONG_MAX: the strict Content-Length's overflow */
 
 #include "transport_internal.h"
 
@@ -1111,6 +1112,7 @@ static void reset_response_state(NmConnection *conn)
     conn->trailer_len = 0;
     conn->resp_hdr_n = 0;
     conn->resp_head_hdr_n = 0;
+    conn->http_minor = 1;
     conn->err = NM_TRANSPORT_OK;
     conn->err_detail[0] = '\0';
     free(conn->resp.content_type);
@@ -1362,6 +1364,36 @@ static void resp_hdr_store(NmConnection *conn, const char *line, size_t llen)
     conn->resp_hdr_n++;
 }
 
+/* Is `token` one of a header's comma-separated values (the value
+ * space after "Name:")? Case-insensitive, whitespace-tolerant around
+ * both the colon and the commas — the exact-one-space assumption the
+ * old Transfer-Encoding match made is not the wire's guarantee. The
+ * token list is the shape BOTH list headers use (Transfer-Encoding
+ * today, Connection when the reuse verdict lands), so one helper
+ * serves them. */
+static int hdr_value_is(const char *line, size_t llen, size_t name_len,
+                        const char *token)
+{
+    size_t tlen = strlen(token);
+    size_t j = name_len; /* just past the colon */
+    while (j < llen && (line[j] == ' ' || line[j] == '\t'))
+        j++;
+    while (j < llen) {
+        size_t s = j;
+        while (j < llen && line[j] != ',')
+            j++;
+        size_t e = j;
+        while (s < e && (line[s] == ' ' || line[s] == '\t'))
+            s++;
+        while (e > s && (line[e - 1] == ' ' || line[e - 1] == '\t'))
+            e--;
+        if (e - s == tlen && strncasecmp(line + s, token, tlen) == 0)
+            return 1;
+        j++; /* past the comma */
+    }
+    return 0;
+}
+
 /* Parse the response head from conn->scratch once the blank line is
  * present. Character-level, case-insensitive header names we care
  * about; everything else is skipped. Returns:
@@ -1369,7 +1401,7 @@ static void resp_hdr_store(NmConnection *conn, const char *line, size_t llen)
  *   -1 need more bytes (head incomplete)
  *   -2 malformed head
  * Side effects: fills conn->resp (status, content_type, chunked,
- * content_len), sets head_len, advances head-parsing state. */
+ * content_len), sets http_minor, advances head-parsing state. */
 static int parse_head(NmConnection *conn)
 {
     char *s = conn->scratch;
@@ -1405,6 +1437,9 @@ static int parse_head(NmConnection *conn)
     /* Status line: HTTP/1.x NNN reason */
     if (n < 12 || memcmp(s, "HTTP/1.", 7) != 0 || s[8] != ' ')
         return -2;
+    if (s[7] < '0' || s[7] > '9')
+        return -2;
+    conn->http_minor = s[7] - '0';
     conn->resp.status = (s[9] - '0') * 100 + (s[10] - '0') * 10 + (s[11] - '0');
     if (conn->resp.status < 100 || conn->resp.status > 599)
         return -2;
@@ -1422,14 +1457,30 @@ static int parse_head(NmConnection *conn)
     i++; /* past \n */
 
     char line[1024];
+    long long cl_seen = 0;
+    int have_cl = 0;
     while (i < head_end) {
         size_t llen = 0;
-        while (i < head_end && s[i] != '\n' && llen + 1 < sizeof(line))
-            line[llen++] = s[i++];
+        int overlong = 0;
+        while (i < head_end && s[i] != '\n') {
+            if (llen + 1 < sizeof(line))
+                line[llen++] = s[i++];
+            else {
+                /* Skip the tail WHOLE: a line longer than the line
+                 * buffer used to be split, and the remainder parsed
+                 * as a phantom second header. Nothing a peer sends
+                 * past 1 KiB is a header this client parses; skipping
+                 * it is bounded and cannot desync the framing. */
+                i++;
+                overlong = 1;
+            }
+        }
         i++; /* past \n */
         /* strip trailing CR */
         while (llen > 0 && (line[llen - 1] == '\r' || line[llen - 1] == ' ' || line[llen - 1] == '\t'))
             llen--;
+        if (overlong)
+            continue; /* the tail was skipped; there is nothing left */
         if (llen == 0)
             break; /* blank line: end of headers */
 
@@ -1437,16 +1488,39 @@ static int parse_head(NmConnection *conn)
          * same way by the de-chunker) for nm_response_header. */
         resp_hdr_store(conn, line, llen);
 
-        /* Case-insensitive match helpers, character level. */
-        if (llen > 19 && strncasecmp(line, "Transfer-Encoding:", 18) == 0 && strncasecmp(line + 19, "chunked", 7) == 0) {
-            conn->resp.chunked = 1;
-        } else if (llen > 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
+        if (llen > 19 && strncasecmp(line, "Transfer-Encoding:", 18) == 0) {
+            if (hdr_value_is(line, llen, 18, "chunked"))
+                conn->resp.chunked = 1;
+        } else if (llen >= 15 && strncasecmp(line, "Content-Length:", 15) == 0) {
+            /* Strict: digits only, overflow-checked, and a duplicate
+             * must agree. "abc" used to parse as 0 — a silent framing
+             * end at zero bytes, a desync hazard once sockets are
+             * reused (the next exchange would start mid-body). The
+             * name-with-no-value case is caught by the same digits
+             * check (the >=15 guard, unlike >15, reaches it). */
             long long cl = 0;
+            int bad = 0;
+            int digits = 0;
             size_t j = 15;
             while (j < llen && (line[j] == ' ' || line[j] == '\t'))
                 j++;
-            for (; j < llen && line[j] >= '0' && line[j] <= '9'; j++)
-                cl = cl * 10 + (line[j] - '0');
+            for (; j < llen && line[j] >= '0' && line[j] <= '9'; j++) {
+                digits++;
+                if (cl > (LLONG_MAX - (line[j] - '0')) / 10)
+                    bad = 1;
+                else
+                    cl = cl * 10 + (line[j] - '0');
+            }
+            if (bad || digits == 0 || j != llen) {
+                conn_set_err_detail(conn, "malformed Content-Length");
+                return -2;
+            }
+            if (have_cl && cl != cl_seen) {
+                conn_set_err_detail(conn, "disagreeing Content-Length");
+                return -2;
+            }
+            have_cl = 1;
+            cl_seen = cl;
             conn->resp.content_len = cl;
         } else if (llen > 13 && strncasecmp(line, "Content-Type:", 13) == 0) {
             size_t j = 13;
@@ -1460,6 +1534,13 @@ static int parse_head(NmConnection *conn)
         }
         /* every other header: skipped */
     }
+
+    /* 204/304 carry no body by definition (and HEAD has no caller to
+     * assume otherwise): a persistent peer's body-less answer must
+     * not wait for an EOF that never comes. A kept-alive socket makes
+     * the old -1 framing hang; 0 completes at the framing end. */
+    if (conn->resp.status == 204 || conn->resp.status == 304)
+        conn->resp.content_len = 0;
 
     /* The head's retained headers are the first resp_hdr_n; anything
      * the de-chunker adds later is a trailer (the wire recorder splits
@@ -1483,7 +1564,12 @@ static int parse_head(NmConnection *conn)
         char *st = status_text;
         while (*st == ' ')
             st++;
-        nm_wire_tap_response_head(conn, conn->resp.status, st, "1.1",
+        /* The head's real version, not a hard-coded "1.1": the minor
+         * decides the reuse verdict's default (an HTTP/1.0 answer
+         * needs an explicit keep-alive). */
+        char version[8];
+        snprintf(version, sizeof(version), "1.%d", conn->http_minor);
+        nm_wire_tap_response_head(conn, conn->resp.status, st, version,
                                   conn->resp.content_type, conn->resp.chunked,
                                   conn->resp.content_len);
     }
@@ -1519,7 +1605,11 @@ static int head_pump(NmConnection *conn, int blocking)
             return 1;
         if (r == -2) {
             conn->err = NM_TRANSPORT_ERR_PROTOCOL;
-            conn_set_err_detail(conn, "malformed response head");
+            /* parse_head stamps its own reason for a framing fault it
+             * can name (a malformed length); the generic text is the
+             * fallback, not the overwrite. */
+            if (!conn->err_detail[0])
+                conn_set_err_detail(conn, "malformed response head");
             conn_tap_error(conn);
             return -1;
         }
@@ -1573,6 +1663,13 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
         if (conn->pending_len) {
             size_t take = conn->pending_len < buf_len ? conn->pending_len
                                                       : buf_len;
+            /* The framing end is EXACT: bytes past Content-Length are
+             * not this body (an over-sending peer, or the head of a
+             * pipelined response nobody asked for) and must never be
+             * delivered as body. The read below clamps the same way. */
+            if (conn->resp.content_len >= 0 &&
+                (long long)take > conn->resp.content_len - conn->body_read)
+                take = (size_t)(conn->resp.content_len - conn->body_read);
             memcpy(buf, conn->scratch, take);
             conn->pending_len -= take;
             conn->body_read += (long long)take;
@@ -1580,7 +1677,11 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 memmove(conn->scratch, conn->scratch + take, conn->pending_len);
             return (long)take;
         }
-        long n = nm_conn_read(conn, buf, buf_len);
+        size_t want = buf_len;
+        if (conn->resp.content_len >= 0 &&
+            (long long)buf_len > conn->resp.content_len - conn->body_read)
+            want = (size_t)(conn->resp.content_len - conn->body_read);
+        long n = nm_conn_read(conn, buf, want);
         if (n == NM_READ_WOULD_BLOCK)
             return NM_READ_WOULD_BLOCK;
         if (n < 0) {

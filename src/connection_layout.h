@@ -70,6 +70,11 @@ struct NmConnection
     void *tls_ctx;
     const NmTlsBackend *tls;
     NmResponse resp;
+    int http_minor;     /* the response head's real minor: "1.1" was
+                           hard-coded into the wire tap before the head
+                           parser learned to keep it; the reuse verdict
+                           needs it too (an HTTP/1.0 answer needs an
+                           explicit keep-alive) */
     int port;           /* connect port (the failure detail's target) */
     char host[256];     /* Host header source, set at connect */
     char tls_host[256]; /* bare hostname (no port): TLS SNI + cert

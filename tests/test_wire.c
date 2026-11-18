@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <windows.h> /* GetHandleInformation: after winsock2.h, house rule */
+#include <io.h>      /* _unlink */
 #else
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -29,6 +30,7 @@
 
 #include "conf.h"
 #include "transport.h"
+#include "wire_recorder.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 
@@ -216,6 +218,255 @@ static void test_socket_open_is_close_on_exec(void)
     ASSERT_TRUE(fl >= 0);
     ASSERT_TRUE(fl & FD_CLOEXEC);
 #endif
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+static void test_parse_strict_content_length(void)
+{
+    /* Framing is the pool's precondition (one socket carries more
+     * than one exchange), so a Content-Length that does not parse is
+     * a refusal, never a silent framing end at zero bytes. */
+    const char *cases[] = {
+        "HTTP/1.1 200 OK\r\nContent-Length: abc\r\n\r\nhi",
+        "HTTP/1.1 200 OK\r\nContent-Length: 12x\r\n\r\nhi",
+        "HTTP/1.1 200 OK\r\nContent-Length: \r\n\r\nhi",
+        "HTTP/1.1 200 OK\r\nContent-Length: 99999999999999999999\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 7\r\n\r\nhi",
+    };
+    const char *details[] = {
+        "malformed Content-Length",
+        "malformed Content-Length",
+        "malformed Content-Length",
+        "malformed Content-Length",
+        "disagreeing Content-Length",
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        struct ServerCase sc = { cases[k], 0, 0, 0 };
+        sc.len = strlen(sc.response);
+        sc.fd = server_bind(&sc.port);
+        ASSERT_TRUE(sc.fd >= 0);
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread, &sc);
+
+        NmConnectInfo ci;
+        NmConnection *c =
+            nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+        ASSERT_NOT_NULL(c);
+        ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0),
+                  NM_TRANSPORT_ERR_PROTOCOL);
+        ASSERT_TRUE(strstr(nm_connection_last_error(c), details[k]) != NULL);
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        close(sc.fd);
+    }
+}
+
+static void test_parse_transfer_encoding_whitespace(void)
+{
+    /* The value space after the colon is the wire's to indent, and a
+     * token list is legal; neither may depend on exactly one space. */
+    const char *cases[] = {
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding:\tchunked\r\n\r\n"
+        "5\r\nhello\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding:  CHUNKED\r\n\r\n"
+        "5\r\nhello\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n"
+        "5\r\nhello\r\n0\r\n\r\n",
+    };
+    for (size_t k = 0; k < sizeof(cases) / sizeof(cases[0]); k++) {
+        struct ServerCase sc = { cases[k], 0, 0, 0 };
+        sc.len = strlen(sc.response);
+        sc.fd = server_bind(&sc.port);
+        ASSERT_TRUE(sc.fd >= 0);
+        pthread_t th;
+        pthread_create(&th, NULL, server_thread, &sc);
+
+        NmConnectInfo ci;
+        NmConnection *c =
+            nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+        ASSERT_NOT_NULL(c);
+        ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0),
+                  NM_TRANSPORT_OK);
+        const NmResponse *r = nm_response(c);
+        ASSERT_EQ(r->status, 200);
+        ASSERT_TRUE(r->chunked);
+        char buf[256];
+        long total = 0;
+        for (;;) {
+            long n = nm_read_body(c, buf, sizeof(buf));
+            if (n <= 0)
+                break;
+            total += n;
+        }
+        ASSERT_EQ(total, 5);
+        nm_connection_close(c);
+        pthread_join(th, NULL);
+        close(sc.fd);
+    }
+}
+
+static void test_parse_overlong_header_line(void)
+{
+    /* A line longer than the line buffer is skipped WHOLE: the old
+     * split turned the tail into a phantom second header. */
+    char head[2048];
+    int off = snprintf(head, sizeof(head), "HTTP/1.1 200 OK\r\nX-Big: ");
+    while (off < 1100 && (size_t)off + 2 < sizeof(head))
+        head[off++] = 'x';
+    off += snprintf(head + off, sizeof(head) - (size_t)off,
+                    "\r\nContent-Length: 5\r\n\r\nhello");
+    struct ServerCase sc = { head, (size_t)off, 0, 0 };
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    const NmResponse *r = nm_response(c);
+    ASSERT_EQ(r->status, 200);
+    ASSERT_EQ(r->content_len, 5);
+    char buf[256];
+    long total = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        total += n;
+    }
+    ASSERT_EQ(total, 5);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+static void test_parse_204_has_no_body(void)
+{
+    /* 204 (and 304) carry no body by definition: the framing is 0,
+     * never -1. A fresh dial hid this (the peer's close answered the
+     * EOF-delimited framing); a pooled socket would sit waiting for
+     * an EOF that never comes. */
+    struct ServerCase sc = {
+        "HTTP/1.1 204 No Content\r\nX-Note: none\r\n\r\n", 0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    const NmResponse *r = nm_response(c);
+    ASSERT_EQ(r->status, 204);
+    ASSERT_EQ(r->content_len, 0); /* the framing, not "absent" */
+    char sink[2];
+    ASSERT_EQ(nm_read_body(c, sink, 1), 0);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+static void test_parse_http10_minor_recorded(void)
+{
+    /* The head's real version rides the wire tap now ("1.1" used to
+     * be hard-coded); the reuse verdict reads the same field. */
+    struct ServerCase sc = {
+        "HTTP/1.0 200 OK\r\nContent-Type: text/plain\r\n"
+        "Connection: keep-alive\r\nContent-Length: 2\r\n\r\nhi",
+        0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    char logpath[640]; /* dir (511) + "/wire-minor-<pid>.ndjson" */
+    mkdir(test_scratch_dir(), 0755);
+    snprintf(logpath, sizeof(logpath), "%s/wire-minor-%d.ndjson",
+             test_scratch_dir(), (int)getpid());
+#ifdef _WIN32
+    _putenv_s("NEVERMORE_DEBUG_WIRE", logpath);
+#else
+    setenv("NEVERMORE_DEBUG_WIRE", logpath, 1);
+#endif
+    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 1);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    char sink[256];
+    size_t total = 0;
+    for (;;) {
+        long n = nm_read_body(c, sink, sizeof(sink));
+        if (n <= 0)
+            break;
+        total += (size_t)n;
+    }
+    ASSERT_EQ(total, 2); /* the 1.0 answer's body, read to its end */
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    nm_wire_recorder_shutdown();
+
+    FILE *f = fopen(logpath, "rb");
+    ASSERT_NOT_NULL(f);
+    char log[8192];
+    size_t got = fread(log, 1, sizeof(log) - 1, f);
+    fclose(f);
+    log[got] = '\0';
+    ASSERT_TRUE(strstr(log, "\"httpVersion\":\"1.0\"") != NULL);
+#ifdef _WIN32
+    _putenv_s("NEVERMORE_DEBUG_WIRE", "");
+    _unlink(logpath);
+#else
+    setenv("NEVERMORE_DEBUG_WIRE", "", 1);
+    unlink(logpath);
+#endif
+    /* The recorder off again: the tap is cleared and later tests run
+     * as they always did. */
+    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 0);
+}
+
+static void test_wire_body_clamped_to_length(void)
+{
+    /* The framing end is EXACT: bytes past Content-Length are not
+     * this body. The old read swallowed the over-send into the body
+     * (and, on a reused socket, would eat the next head with it). */
+    struct ServerCase sc = {
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhelloworld", 0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    char buf[256];
+    char body[256];
+    size_t total = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        memcpy(body + total, buf, (size_t)n);
+        total += (size_t)n;
+    }
+    body[total] = '\0';
+    ASSERT_EQ(total, 5);
+    ASSERT_STR_EQ(body, "hello");
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -1619,6 +1870,12 @@ int main(int argc, char *argv[])
     nm_config_set_store(g_cfg);
     RUN_TEST(test_wire_content_length);
     RUN_TEST(test_socket_open_is_close_on_exec);
+    RUN_TEST(test_parse_strict_content_length);
+    RUN_TEST(test_parse_transfer_encoding_whitespace);
+    RUN_TEST(test_parse_overlong_header_line);
+    RUN_TEST(test_parse_204_has_no_body);
+    RUN_TEST(test_parse_http10_minor_recorded);
+    RUN_TEST(test_wire_body_clamped_to_length);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_response_headers_and_trailers);
     RUN_TEST(test_wire_http_error_status);
