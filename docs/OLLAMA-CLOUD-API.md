@@ -218,9 +218,19 @@ for `/v1/models`, and for **a real streamed chat POST**: a full SSE exchange
 next chat POST rides the same socket. The idle ladder (a fresh connection per
 rung, held idle then re-probed) held the connection **open and answering past
 120 s** at every rung, so nevermore's `keepalive_idle` (30 s) never races a
-measured cutoff. The local daemon was not measured (no box running one); its
-server is Go's stock HTTP, the same family as the cloud's front. Evidence
-dumps: `/tmp/nm-ka-*` (2026-11-18).
+measured cutoff. The local daemon is measured now (installed user-local at
+`~/.local/bin`, v0.40.16, on this box, 2026-11-18): Go's stock HTTP says
+**no `Connection` field at all** (like the cloud's front), both
+`/v1/models` and a **real streamed chat POST pair** reuse the socket
+(`num_connects=0` on the second), and the idle ladder held the
+connection **open and answering past 120 s** at every rung. The live
+proof on the app: a turn's whole local chain — `/v1/models`, `/api/tags`,
+two `/api/show` (the per-model query), and TWO chat rounds — rode **one
+connection, xchg 1-6**, no second handshake, no redial lines. (A first
+model choice, `smollm2:360m`, cannot carry tools — its `/api/show` says
+`capabilities: [completion]` — so the tool turn ran on
+`qwen2.5:0.5b`.) Evidence dumps: `/tmp/nm-ka-*` and
+`/tmp/wire-ka-local3.ndjson` (2026-11-18).
 
 ### 6.0. Authentication realms (verified Sep 2026)
 
