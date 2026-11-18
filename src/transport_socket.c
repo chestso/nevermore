@@ -850,6 +850,30 @@ int nm_socket_wait_ready_ms(int fd, int for_write, int ms)
     }
 }
 
+/* The dial on an EXISTING connection: resolve (the addr_cache makes a
+ * repeat free), arm attempt 0, phase CONNECTING. The async connect
+ * calls it on a fresh connection today; the stale-reuse redial calls
+ * it later on a connection whose exchange died before a response
+ * byte — by then its fd and TLS context are closed and the retained
+ * req_buf drains after the (new) handshake. The walk state is the
+ * caller's to have reset; only what THIS dial owns is set here.
+ * Returns 0 or -1 (err_detail stamped, never tapped — a caller that
+ * closes on it taps "connect"). */
+static int begin_dial(NmConnection *conn)
+{
+    conn->nonblocking = 1;
+    conn->addr_len = 0; /* the walk's "attempt in flight" flag */
+    if (nm_socket_resolve_addrs(conn, conn->tls_host, conn->port) != 0)
+        return -1;
+    nm_socket_arm_attempt(conn, 0);
+    if (conn->fd < 0) {
+        conn_set_err_detail(conn, "socket (attempt 1): %s", nm_sock_errstr());
+        return -1;
+    }
+    conn->phase = NM_CONN_CONNECTING;
+    return 0;
+}
+
 /* Async connect: non-blocking socket, connect() in flight, the rest
  * of the address list kept on the connection so the CONNECTING phase
  * can move on when one address is black-holed (the bounded walk —
@@ -883,13 +907,11 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
     if (!conn) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_NOMEM;
-            snprintf(info->detail, sizeof(info->detail),
-                     "out of memory");
+            snprintf(info->detail, sizeof(info->detail), "out of memory");
         }
         return NULL;
     }
-    conn->nonblocking = 1;
-    if (nm_socket_resolve_addrs(conn, host, port) != 0) {
+    if (begin_dial(conn) != 0) {
         if (info) {
             info->status = NM_TRANSPORT_ERR_SOCKET;
             snprintf(info->detail, sizeof(info->detail), "%s",
@@ -899,19 +921,6 @@ NmConnection *nm_socket_connect_async(const char *host, int port,
         nm_connection_close(conn);
         return NULL;
     }
-    /* Arm the first attempt; the phase machine takes it from here. */
-    nm_socket_arm_attempt(conn, 0);
-    if (conn->fd < 0) {
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_SOCKET;
-            snprintf(info->detail, sizeof(info->detail),
-                     "socket (attempt 1): %s", nm_sock_errstr());
-        }
-        nm_connection_set_connect_error(info ? info->detail : NULL);
-        nm_connection_close(conn);
-        return NULL;
-    }
-    conn->phase = NM_CONN_CONNECTING;
     return conn;
 }
 
