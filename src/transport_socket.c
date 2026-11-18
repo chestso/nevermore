@@ -1097,6 +1097,7 @@ enum
 
 static int parse_head(NmConnection *conn);
 static int head_pump(NmConnection *conn, int blocking);
+static int conn_redial(NmConnection *conn, const char *reason);
 
 /* Reset response state for a new exchange (called once the request
  * is queued — the head arrives through nm_read_body steps; the head
@@ -1123,6 +1124,118 @@ static void reset_response_state(NmConnection *conn)
     conn->resp.status = 0;
     conn->resp.chunked = 0;
     conn->resp.content_len = -1;
+}
+
+/* The stale-reuse redial: one TRANSPARENT redial when a REUSED
+ * connection fails before ANY response byte landed — a send failure,
+ * or an EOF / read error with the head not started and nothing in the
+ * scratch. Nothing at acquire time can see a FIN still in flight, and
+ * the first send into a half-dead socket almost always SUCCEEDS (the
+ * kernel takes the bytes, the peer answers RST/FIN), so the failure a
+ * pool actually produces is this read-side one; without a transport
+ * answer it would surface as a new user-visible "connection closed
+ * before a response arrived" — a regression no fresh-dial-per-round
+ * client has.
+ *
+ * Mechanism, IN PLACE on the same NmConnection: the channel closes
+ * (the TLS close is a write — guarded), a new conn_id is minted (a
+ * redial IS a new TCP connection), xchg restarts at 1, the response
+ * state and the send offset reset, and the dial begins again — the
+ * retained req_buf (the request bytes, already serialized) drains
+ * after the connect and handshake. Callers see only a would-block and
+ * a changed nm_connection_interest; every step calls
+ * nm_connection_step first.
+ *
+ * The OLD id gets ONE error line, stage "redial", naming both ids
+ * (fired BEFORE the id flips, so the line carries the old conn and
+ * xchg); the request anchor is re-fired under the NEW ids from
+ * req_buf — method and path off the request line, the body tail,
+ * headers empty (the caller's header array is long gone by redial
+ * time, and the full request bytes are already on the record under
+ * the old id). No new hook kind.
+ *
+ * Returns 1 = a redial is in flight (the caller reports a would-block
+ * and keeps stepping); 0 = the trigger does not apply (the caller
+ * reports the failure as before); -1 = the redial itself failed (the
+ * reason is stamped + tapped; the caller reports the failure). One
+ * redial per exchange: the flag clears here, so a second failure is
+ * final. */
+static int conn_redial(NmConnection *conn, const char *reason)
+{
+    if (!conn->redial_ok)
+        return 0;
+    /* The trigger's second half: NO response byte landed. A byte in
+     * the scratch (a partial head) or a started body is a failure the
+     * redial must not paper over. */
+    if (conn->body_started || conn->scratch_len > 0)
+        return 0;
+    conn->redial_ok = 0; /* one redial per exchange */
+    long old_id = conn->conn_id;
+    long new_id = ++g_conn_seq;
+    char detail[NM_ERR_DETAIL_MAX];
+    snprintf(detail, sizeof(detail),
+             "reused connection %ld was dead before a response byte (%s); "
+             "redialled as connection %ld",
+             old_id, reason ? reason : "no response byte", new_id);
+    nm_wire_tap_error(conn, "redial", detail); /* the OLD ids */
+    /* The channel closes. The TLS close is a write (a close_notify
+     * record) and the peer may be gone: guarded, like
+     * nm_connection_close. */
+    if (conn->tls_ctx && conn->tls && conn->tls->close) {
+        NmSigpipeGuard sp;
+        nm_sigpipe_guard_enter(&sp);
+        conn->tls->close(conn->tls_ctx);
+        nm_sigpipe_guard_leave(&sp, 1);
+    }
+    conn->tls_ctx = NULL;
+    nm_socket_shutdown(conn->fd);
+    conn->fd = -1;
+    /* The new TCP connection: a new id, and this exchange is the
+     * first one on it. */
+    conn->conn_id = new_id;
+    conn->xchg = 1;
+    reset_response_state(conn);
+    conn->req_off = 0; /* the retained req_buf drains after the dial */
+    if (begin_dial(conn) != 0) {
+        conn->err = NM_TRANSPORT_ERR_SOCKET;
+        conn->phase = NM_CONN_IDLE;
+        conn_tap_error(conn); /* stage "connect": nothing queued yet */
+        return -1;
+    }
+    /* The request anchor under the NEW ids. */
+    size_t line_len = 0;
+    while (line_len < conn->req_len && conn->req_buf[line_len] != '\r' &&
+           conn->req_buf[line_len] != '\n')
+        line_len++;
+    const char *m1 = line_len ? memchr(conn->req_buf, ' ', line_len) : NULL;
+    const char *m2 =
+        m1 ? memchr(m1 + 1, ' ', line_len - (size_t)(m1 + 1 - conn->req_buf))
+           : NULL;
+    if (m1 && m2) {
+        char method[16];
+        char path[512];
+        size_t mlen = (size_t)(m1 - conn->req_buf);
+        size_t plen = (size_t)(m2 - (m1 + 1));
+        if (mlen < sizeof(method) && plen < sizeof(path)) {
+            memcpy(method, conn->req_buf, mlen);
+            method[mlen] = '\0';
+            memcpy(path, m1 + 1, plen);
+            path[plen] = '\0';
+            const char *body = NULL;
+            size_t body_len = 0;
+            for (size_t i = 0; i + 4 <= conn->req_len; i++) {
+                if (conn->req_buf[i] == '\r' && conn->req_buf[i + 1] == '\n' &&
+                    conn->req_buf[i + 2] == '\r' &&
+                    conn->req_buf[i + 3] == '\n') {
+                    body = conn->req_buf + i + 4;
+                    body_len = conn->req_len - (i + 4);
+                    break;
+                }
+            }
+            nm_wire_tap_request(conn, method, path, NULL, 0, body, body_len);
+        }
+    }
+    return 1;
 }
 
 NmTransportStatus nm_socket_request_queue(NmConnection *conn, const char *method,
@@ -1200,7 +1313,10 @@ NmTransportStatus nm_socket_step_send(NmConnection *conn)
          * send window is full) means step again on writability. Plain
          * sockets report it via errno; TLS backends report it as the
          * NM_WRITE_WOULD_BLOCK sentinel (errno does not reflect the
-         * TLS layer's buffer state). Anything else is a hard error. */
+         * TLS layer's buffer state). Anything else is a hard error —
+         * and the redial's send-side trigger: a REUSED connection
+         * whose first write fails hard, before any response byte, is
+         * repaired the same way the read side is. */
         if (n == NM_WRITE_WOULD_BLOCK)
             return NM_TRANSPORT_PENDING;
         if (!conn->tls_ctx) {
@@ -1213,6 +1329,13 @@ NmTransportStatus nm_socket_step_send(NmConnection *conn)
                 (errno == EAGAIN || errno == EWOULDBLOCK))
                 return NM_TRANSPORT_PENDING;
 #endif
+        }
+        {
+            int rd = conn_redial(conn, nm_sock_errstr());
+            if (rd == 1)
+                return NM_TRANSPORT_PENDING; /* the dial is in flight */
+            if (rd < 0)
+                return conn->err; /* the redial failed: reason on the conn */
         }
         conn->err = NM_TRANSPORT_ERR_SEND;
         conn_set_err_detail(conn, "send: %s", nm_sock_errstr());
@@ -1679,9 +1802,17 @@ static int head_pump(NmConnection *conn, int blocking)
             return 0;
         }
         if (n <= 0) {
-            /* n == 0 EOF; n < 0 real error; on a blocking drive a
-             * would-block is a stalled/closed peer, never a
-             * busy-loop. */
+            const char *why = n == 0 ? "EOF"
+                                     : (n == NM_READ_WOULD_BLOCK
+                                            ? "would-block"
+                                            : nm_sock_errstr());
+            /* The redial first: a REUSED connection that died before a
+             * response byte is repaired here, not reported. */
+            int rd = conn_redial(conn, why);
+            if (rd == 1)
+                return 0; /* the dial is in flight: resume on the step */
+            if (rd < 0)
+                return -1; /* the redial failed: the reason is on the conn */
             conn->err = NM_TRANSPORT_ERR_CLOSED;
             conn_set_err_detail(conn, "peer closed before the response "
                                       "head completed");
@@ -1689,6 +1820,7 @@ static int head_pump(NmConnection *conn, int blocking)
             return -1;
         }
         conn->scratch_len += (size_t)n;
+        conn->redial_ok = 0; /* a response byte landed: failures are final */
     }
 }
 
