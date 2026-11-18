@@ -6777,6 +6777,32 @@ static void test_config_runtime_change_writes_shadow(void)
     harness_free(h);
 }
 
+/* The turn mode through /config: the vendors' alias spellings report —
+ * and persist — as the canon, like every other echo mode. */
+static void test_config_reasoning_echo_turn_alias_persists_canon(void)
+{
+    pin_cfg_paths("echo-turn");
+    write_file_at(g_cfg_user, "model.ollama:local = from-user\n");
+
+    AppHarness *h = harness_new("ollama:local", "from-user", NULL);
+    ASSERT_NOT_NULL(h);
+    NmConfig *cfg = cfg_for(h);
+
+    harness_type(h, "/config set reasoning_echo current-turn");
+    harness_enter(h);
+    ASSERT_TRUE(strstr(harness_read(h),
+                       "config: reasoning_echo = turn") != NULL);
+    /* The shadow holds the canon, not the alias the user typed. */
+    ASSERT_STR_EQ(cfg_read_shadow(), "reasoning_echo = turn\n");
+    /* The live agent resolves it (nothing frozen yet: no trace sent). */
+    ASSERT_EQ(nm_agent_reasoning_echo(nm_chat_app_agent(h->app)),
+              NM_REASONING_ECHO_TURN);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(nm_chat_app_agent(h->app)), 0);
+
+    nm_config_free(cfg);
+    harness_free(h);
+}
+
 /* Environment pins the run: the change still lands in the shadow (that
  * is the file's meaning), and the report says it is inert. */
 static void test_config_env_pin_is_reported(void)
@@ -11795,6 +11821,7 @@ int main(void)
     RUN_TEST(test_model_exact_escape_hatch);
     RUN_TEST(test_help_command_lists_commands);
     RUN_TEST(test_config_runtime_change_writes_shadow);
+    RUN_TEST(test_config_reasoning_echo_turn_alias_persists_canon);
     RUN_TEST(test_config_reasoning_echo_freezes_for_the_chat);
     RUN_TEST(test_config_signature_echo_row_and_freeze);
     RUN_TEST(test_config_shows_the_store_value_for_the_signature_echo);
