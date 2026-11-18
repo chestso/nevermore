@@ -67,6 +67,14 @@ int nm_socket_body_framing_end(const NmConnection *conn);
  * production caller. */
 int nm_connection_reusable(const NmConnection *conn);
 
+/* The keep-alive policy and idle window (transport.c), resolved from
+ * the store at the point of use: on = omit `Connection` on requests
+ * and shelve completed exchanges; off (the default) = `Connection:
+ * close`, today's wire. idle_ms is the pool's window (off is refused
+ * by the key's canon, so the resolver's default always applies). */
+int nm_connection_keepalive_on(void);
+int nm_connection_keepalive_idle_ms(void);
+
 void nm_socket_shutdown(int fd);
 
 /* Bound blocking reads on the connection's socket: SO_RCVTIMEO, so a

@@ -137,6 +137,17 @@ int nm_connection_connect_timeout_ms(void);
 #define NM_HANDSHAKE_TIMEOUT_MS 10000
 int nm_connection_handshake_timeout_ms(void);
 
+/* The keep-alive pool's idle window (ms): how long a completed
+ * exchange's connection may sit in the pool before the next acquire
+ * dials fresh. 30 s: the live ladder (the keep-alive evidence) held
+ * every peer's idle connection open past 120 s, so 30 s never races a
+ * measured cutoff; the window serves a turn's sequences and does not
+ * chase cross-turn warmth. A response's `Keep-Alive: timeout=N` hint
+ * tightens it per connection. The value lives in the config store's
+ * `keepalive_idle` key (`off` refused); the transport resolves it at
+ * the point of use and keeps no copy, like every budget here. */
+#define NM_KEEPALIVE_IDLE_MS 30000
+
 /* Address-family skip: the answer to "that address went silent — so
  * don't dial that FAMILY first again". Not an OS knob (no portable
  * socket option exists) and not a getaddrinfo knob (AI_ADDRCONFIG is

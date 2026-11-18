@@ -209,6 +209,26 @@ int nm_connection_handshake_timeout_ms(void)
              : NM_HANDSHAKE_TIMEOUT_MS;
 }
 
+/* The keep-alive POLICY and window, resolved from the store at the
+ * point of use like every budget above. on = a completed exchange may
+ * be shelved for reuse and the request omits `Connection` (HTTP/1.1
+ * defaults to persistent); off (the default) = today's wire, `Connection:
+ * close` on every request. No store (a bare unit test) = off. The
+ * window is the pool's idle budget; the pool reads it at acquire. */
+int nm_connection_keepalive_on(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_bool(c, NM_CFG_KEY_KEEPALIVE, 0) : 0;
+}
+
+int nm_connection_keepalive_idle_ms(void)
+{
+    NmConfig *c = nm_config_store();
+    return c ? nm_config_resolve_duration_ms(c, NM_CFG_KEY_KEEPALIVE_IDLE,
+                                             NM_KEEPALIVE_IDLE_MS)
+             : NM_KEEPALIVE_IDLE_MS;
+}
+
 /* The handshake's remaining budget, measured from `t0` (a
  * nm_monotonic_seconds() stamp the backend takes before its first TLS call):
  * the ms left, 0 when there is NO budget (budget_ms <= 0, the

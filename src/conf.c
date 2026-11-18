@@ -48,7 +48,7 @@
 #define NM_CONFIG_VAL  1024
 #define NM_CONFIG_PATH 4096
 
-#define NM_CFG_NKEYS 27
+#define NM_CFG_NKEYS 29
 
 /* The scoped-key pool: `<base>.<provider>` is a family, not a fixed
  * list, and FOUR bases live in it — `model`, `routing`, `tier` and
@@ -183,6 +183,9 @@ static const struct
      * (test_config pins every index), so a new key joins the end. */
     { NM_CFG_KEY_MENTIONS, "NEVERMORE_MENTIONS", "on" },
     { NM_CFG_KEY_SHELL_MODE, "NEVERMORE_SHELL_MODE", "on" },
+    { NM_CFG_KEY_KEEPALIVE, "NEVERMORE_KEEPALIVE", "off" },
+    { NM_CFG_KEY_KEEPALIVE_IDLE, "NEVERMORE_KEEPALIVE_IDLE_MS",
+      NM_STR(NM_KEEPALIVE_IDLE_MS) },
 };
 
 static void init_keys(NmConfig *c)
@@ -1069,6 +1072,13 @@ static int normalize_value(const char *key, const char *raw, char *out,
          * (which the clamp it feeds cannot express). */
         return nm_config_duration_canon(raw, out, cap) &&
                strcmp(out, "off") != 0;
+    } else if (strcmp(key, NM_CFG_KEY_KEEPALIVE_IDLE) == 0) {
+        /* A duration in ms like the others, but `off` is refused for
+         * its own reason: "never idle out" is a staleness trap (the
+         * pool would hold sockets a middlebox has already cut), and
+         * `keepalive = off` is already the no-reuse spelling. */
+        return nm_config_duration_canon(raw, out, cap) &&
+               strcmp(out, "off") != 0;
     } else if (strcmp(key, NM_CFG_KEY_FAMILY_SKIP) == 0 ||
                strcmp(key, NM_CFG_KEY_SEARXNG_ENABLED) == 0 ||
                strcmp(key, NM_CFG_KEY_REMINDERS) == 0 ||
@@ -1077,6 +1087,7 @@ static int normalize_value(const char *key, const char *raw, char *out,
                strcmp(key, NM_CFG_KEY_SHELL_MODE) == 0 ||
                strcmp(key, NM_CFG_KEY_SERVED_NOTICE) == 0 ||
                strcmp(key, NM_CFG_KEY_SKILLS) == 0 ||
+               strcmp(key, NM_CFG_KEY_KEEPALIVE) == 0 ||
                strcmp(key, NM_CFG_KEY_LOGIN_SHELL) == 0) {
         if (!nm_config_valid_bool(raw))
             return 0;

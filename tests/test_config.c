@@ -866,7 +866,9 @@ static void test_key_vocabulary(void)
     ASSERT_STR_EQ(nm_config_key_at(24), NM_CFG_KEY_CREDITS_TTL);
     ASSERT_STR_EQ(nm_config_key_at(25), NM_CFG_KEY_MENTIONS);
     ASSERT_STR_EQ(nm_config_key_at(26), NM_CFG_KEY_SHELL_MODE);
-    ASSERT_NULL(nm_config_key_at(27));
+    ASSERT_STR_EQ(nm_config_key_at(27), NM_CFG_KEY_KEEPALIVE);
+    ASSERT_STR_EQ(nm_config_key_at(28), NM_CFG_KEY_KEEPALIVE_IDLE);
+    ASSERT_NULL(nm_config_key_at(29));
     /* The model is not a key: no plain spelling, no env name of its own
      * (the run-level override's spelling is NM_ENV_MODEL). */
     ASSERT_NULL(nm_config_env_name(NM_CFG_KEY_MODEL));

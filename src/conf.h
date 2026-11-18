@@ -319,6 +319,27 @@ extern "C" {
  * feature is one switch, because a mode that cannot be trusted to stay
  * shut is worse than no mode. Env spelling: NEVERMORE_SHELL_MODE. */
 #define NM_CFG_KEY_SHELL_MODE "shell_mode"
+/* Connection keep-alive: whether a completed exchange's connection
+ * may be handed back to the transport's idle pool and reused for the
+ * next exchange on the same host. A bool, default OFF — OFF is
+ * today's wire (every request carries `Connection: close`), the
+ * escape hatch for a middlebox that mishandles persistence, and the
+ * byte-identical baseline the keep-alive work is proved against. ON
+ * omits the field (HTTP/1.1 defaults to persistent) and shelves the
+ * connection when the RESPONSE allows reuse. Env spelling:
+ * NEVERMORE_KEEPALIVE. */
+#define NM_CFG_KEY_KEEPALIVE "keepalive"
+/* How long the pool may hold an idle connection before dialling
+ * fresh, in ms (default NM_KEEPALIVE_IDLE_MS, 30 s). The live ladder
+ * held every peer open past 120 s, so 30 s never races a measured
+ * cutoff; the window serves a turn's sequences (rounds, the /api/show
+ * chain, boot's back-to-back fetches) and deliberately does not chase
+ * cross-turn warmth — a gap the window misses is a fresh dial, today's
+ * behaviour, not a regression. `off` is REFUSED ("never idle out" is a
+ * staleness trap; `keepalive = off` is already the no-reuse
+ * spelling). A response's `Keep-Alive: timeout=N` hint tightens the
+ * window per connection. Env spelling: NEVERMORE_KEEPALIVE_IDLE_MS. */
+#define NM_CFG_KEY_KEEPALIVE_IDLE "keepalive_idle"
 
 /* Whether a completed round prints the SERVED-by line: which upstream
  * answered and at which service tier (`openrouter: served by Azure (flex

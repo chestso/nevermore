@@ -607,6 +607,79 @@ static void test_queue_refuses_an_exchange_in_flight(void)
     close(sc.fd);
 }
 
+/* The request-capturing server: one accept, one recv (the request is
+ * a single small write), the canned reply — and the REQUEST's bytes
+ * kept as the assertion's evidence. */
+struct RequestCase
+{
+    const char *response;
+    size_t len;
+    int port;
+    int fd;
+    char req[2048];
+    size_t req_len;
+};
+
+static void *request_server_thread(void *arg)
+{
+    struct RequestCase *rc = arg;
+    int cfd = accept(rc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[4096];
+    long n = recv(cfd, drain, sizeof(drain), 0);
+    if (n > 0) {
+        size_t take =
+            (size_t)n < sizeof(rc->req) - 1 ? (size_t)n : sizeof(rc->req) - 1;
+        memcpy(rc->req, drain, take);
+        rc->req[take] = '\0';
+        rc->req_len = take;
+    }
+    size_t half = rc->len / 2;
+    send(cfd, rc->response, half, 0);
+    usleep(10 * 1000);
+    send(cfd, rc->response + half, rc->len - half, 0);
+    close(cfd);
+    return NULL;
+}
+
+static void test_wire_connection_field_switch(void)
+{
+    /* The keepalive switch's whole wire footprint: off (the default,
+     * and the suite's pin) emits `Connection: close` — today's bytes;
+     * on omits the field (HTTP/1.1 defaults to persistent). */
+    const char *resp = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    struct RequestCase rc = { resp, strlen(resp), 0, 0, { 0 }, 0 };
+    rc.fd = server_bind(&rc.port);
+    ASSERT_TRUE(rc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, request_server_thread, &rc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", rc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(rc.req, "Connection: close\r\n") != NULL);
+    close(rc.fd);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "on");
+    struct RequestCase rc2 = { resp, strlen(resp), 0, 0, { 0 }, 0 };
+    rc2.fd = server_bind(&rc2.port);
+    ASSERT_TRUE(rc2.fd >= 0);
+    pthread_create(&th, NULL, request_server_thread, &rc2);
+    c = nm_connect("127.0.0.1", rc2.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    ASSERT_TRUE(strstr(rc2.req, "Connection:") == NULL);
+    ASSERT_TRUE(strstr(rc2.req, "\r\n\r\n") != NULL); /* a complete head */
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_KEEPALIVE);
+    close(rc2.fd);
+}
+
 static void test_wire_chunked_sse(void)
 {
     /* A canned SSE stream, chunked; the case that phase-1 ask rides on. */
@@ -2052,6 +2125,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_wire_body_clamped_to_length);
     RUN_TEST(test_queue_refuses_an_exchange_in_flight);
     RUN_TEST(test_reuse_verdict);
+    RUN_TEST(test_wire_connection_field_switch);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_chunk_extension);
     RUN_TEST(test_wire_response_headers_and_trailers);

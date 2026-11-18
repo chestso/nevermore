@@ -1153,9 +1153,14 @@ NmTransportStatus nm_socket_request_queue(NmConnection *conn, const char *method
         if (rb_printf(conn, "Content-Length: %zu\r\n", body_len) != 0)
             return NM_TRANSPORT_ERR_SEND;
     }
-    if (rb_puts(conn,
-                "Connection: close\r\n" /* keep-alive comes later */
-                "\r\n") != 0)
+    /* The wire switch: off (the default) emits `Connection: close` —
+     * today's bytes exactly; on omits the field (HTTP/1.1 defaults to
+     * persistent) and the pool's release does the rest. The one place
+     * the policy touches the wire. */
+    if (rb_puts(conn, nm_connection_keepalive_on()
+                          ? "\r\n"
+                          : "Connection: close\r\n"
+                            "\r\n") != 0)
         return NM_TRANSPORT_ERR_SEND;
     if (body && body_len && rb_put(conn, body, body_len) != 0)
         return NM_TRANSPORT_ERR_SEND;
