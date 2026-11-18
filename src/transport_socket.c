@@ -307,14 +307,6 @@ int nm_socket_set_blocking(int fd)
 /* The bounded connect walk                                          */
 /* ---------------------------------------------------------------- */
 
-/* Monotonic seconds, for the per-attempt budget arithmetic. The one
- * clock lives in clock.h (nm_monotonic_seconds); this is a thin
- * alias so the walk's call sites read in its own vocabulary. */
-double nm_socket_now(void)
-{
-    return nm_monotonic_seconds();
-}
-
 /* Address-family text for the walk's diagnostics — the shared
  * vocabulary (nm_family_name), mapped from a sockaddr's family. */
 static const char *addr_family_name(const struct sockaddr_storage *a)
@@ -523,7 +515,7 @@ void nm_socket_arm_attempt(NmConnection *conn, int idx)
         nm_socket_shutdown(conn->fd);
     conn->fd = -1;
     conn->conn_addr_idx = idx;
-    conn->conn_attempt_t0 = nm_socket_now();
+    conn->conn_attempt_t0 = nm_monotonic_seconds();
     if (idx < 0 || idx >= conn->conn_n_addrs)
         return;
     int fam = conn->conn_addrs[idx].ss_family;
@@ -612,7 +604,7 @@ static void walk_fail(NmConnection *conn)
  * attempt that is still EALREADY/EWOULDBLOCK past this is moved on.) */
 static int attempt_budget_spent(const NmConnection *conn)
 {
-    return (nm_socket_now() - conn->conn_attempt_t0) * 1000.0 >=
+    return (nm_monotonic_seconds() - conn->conn_attempt_t0) * 1000.0 >=
            (double)nm_connection_connect_timeout_ms();
 }
 
@@ -642,7 +634,7 @@ int nm_socket_wait_ms(const NmConnection *conn)
         return -1;
     int budget = nm_connection_connect_timeout_ms();
     double left =
-        (double)budget - (nm_socket_now() - conn->conn_attempt_t0) * 1000.0;
+        (double)budget - (nm_monotonic_seconds() - conn->conn_attempt_t0) * 1000.0;
     if (left <= 0)
         return 0; /* spent: the next step advances the walk */
     if (left > (double)budget)
@@ -787,7 +779,7 @@ int nm_socket_connect_blocking(NmConnection *conn)
          * on — the next step's own budget test advances the address,
          * so this cannot spin. */
         int left = (int)((double)nm_connection_connect_timeout_ms() -
-                         (nm_socket_now() - conn->conn_attempt_t0) * 1000.0);
+                         (nm_monotonic_seconds() - conn->conn_attempt_t0) * 1000.0);
         if (left > 0)
             nm_socket_wait_writable_budget(conn, left);
     }
@@ -1311,18 +1303,10 @@ NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn)
      * layer, so the body stream is event-driven for TLS exactly as
      * for a plain socket — the live spinner and Ctrl+C are honored
      * between SSE events instead of hanging the loop inside a
-     * blocking SSL_read. */
-#ifdef _WIN32
-    u_long mode = 1;
-    if (ioctlsocket(conn->fd, FIONBIO, &mode) != 0)
+     * blocking SSL_read. One body with the walk's own setter above:
+     * the mode cannot disagree between the two. */
+    if (socket_set_nonblocking(conn->fd) != 0)
         return NM_TRANSPORT_ERR_SOCKET;
-#else
-    int fl = fcntl(conn->fd, F_GETFL, 0);
-    if (fl < 0)
-        return NM_TRANSPORT_ERR_SOCKET;
-    if (fcntl(conn->fd, F_SETFL, fl | O_NONBLOCK) < 0)
-        return NM_TRANSPORT_ERR_SOCKET;
-#endif
     conn->nonblocking = 1;
     return NM_TRANSPORT_OK;
 }

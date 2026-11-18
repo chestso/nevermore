@@ -36,6 +36,11 @@
  * answer EPIPE like any other failed write. */
 #include "sigpipe.h"
 
+/* The one clock (clock.h): the handshake budget's t0 stamps and the
+ * remaining-budget arithmetic. After the platform headers — clock.h
+ * pulls <windows.h> on Windows, and winsock2.h must come first. */
+#include "clock.h"
+
 /* Full definition lives in transport.c — this file needs field access,
  * so pull it in via the shared connection layout. */
 #define NM_TRANSPORT_LAYOUT_HERE
@@ -205,7 +210,7 @@ int nm_connection_handshake_timeout_ms(void)
 }
 
 /* The handshake's remaining budget, measured from `t0` (a
- * nm_socket_now() stamp the backend takes before its first TLS call):
+ * nm_monotonic_seconds() stamp the backend takes before its first TLS call):
  * the ms left, 0 when there is NO budget (budget_ms <= 0, the
  * `handshake_timeout = off` spelling — the wait is then the OS
  * default), or -1 when the budget is spent and the backend must fail.
@@ -218,7 +223,7 @@ int nm_handshake_left(double t0, int budget_ms)
 {
     if (budget_ms <= 0)
         return 0;
-    double left = (double)budget_ms - (nm_socket_now() - t0) * 1000.0;
+    double left = (double)budget_ms - (nm_monotonic_seconds() - t0) * 1000.0;
     if (left <= 0)
         return -1;
     int ms = (int)left;
@@ -401,19 +406,29 @@ static NmTransportStatus conn_handshake_step(NmConnection *conn)
     return NM_TRANSPORT_OK;
 }
 
+/* The TLS-asked-but-no-backend guard, shared by the two connects: the
+ * same status, the same detail text, the same pre-connection error
+ * line (no conn to correlate to). Returns 1 when the caller must
+ * fail. */
+static int tls_backend_guard(NmTransportMode mode, NmConnectInfo *info)
+{
+    if (mode != NM_TRANSPORT_TLS || nm_tls_backend())
+        return 0;
+    if (info) {
+        info->status = NM_TRANSPORT_ERR_TLS;
+        snprintf(info->detail, sizeof(info->detail),
+                 "TLS requested but no TLS backend is compiled in "
+                 "(configure with a TLS backend or use http://)");
+    }
+    nm_wire_tap_error(NULL, "tls", info ? info->detail : "");
+    return 1;
+}
+
 NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
                          NmConnectInfo *info)
 {
-    if (mode == NM_TRANSPORT_TLS && !nm_tls_backend()) {
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_TLS;
-            snprintf(info->detail, sizeof(info->detail),
-                     "TLS requested but no TLS backend is compiled in "
-                     "(configure with a TLS backend or use http://)");
-        }
-        nm_wire_tap_error(NULL, "tls", info ? info->detail : "");
+    if (tls_backend_guard(mode, info))
         return NULL;
-    }
     /* Socket connect implemented in transport_socket.c (Winsock/BSD). */
     NmConnection *conn = nm_socket_connect(host, port, info);
     if (!conn) {
@@ -454,21 +469,11 @@ NmConnection *nm_connect(const char *host, int port, NmTransportMode mode,
 NmConnection *nm_connect_async(const char *host, int port,
                                NmTransportMode mode, NmConnectInfo *info)
 {
-    /* TLS mode: the handshake blocks today (narrowed deferral —
-     * only the TCP connect is async). We can still take the async
-     * path for the connect; the handshake happens inside
-     * nm_connection_step once the socket is writable, which keeps
-     * connect() itself off the UI thread. */
-    if (mode == NM_TRANSPORT_TLS && !nm_tls_backend()) {
-        if (info) {
-            info->status = NM_TRANSPORT_ERR_TLS;
-            snprintf(info->detail, sizeof(info->detail),
-                     "TLS requested but no TLS backend is compiled in "
-                     "(configure with a TLS backend or use http://)");
-        }
-        nm_wire_tap_error(NULL, "tls", info ? info->detail : "");
+    if (tls_backend_guard(mode, info))
         return NULL;
-    }
+    /* The TLS handshake is a PHASE of the step machine (one attempt
+     * per step, the direction the backend asks for): the connect walk
+     * and the handshake both stay off the UI thread here. */
     NmConnection *conn = nm_socket_connect_async(host, port, info);
     if (!conn) {
         nm_wire_tap_error(NULL, "connect", info ? info->detail : "");
@@ -558,7 +563,7 @@ NmTransportStatus nm_connection_tls_handshake(NmConnection *conn,
     if (owner_blocking)
         nm_socket_set_nonblocking(conn); /* sets conn->nonblocking */
     conn->phase = NM_CONN_HANDSHAKE;
-    conn->hs_t0 = nm_socket_now();
+    conn->hs_t0 = nm_monotonic_seconds();
     conn->hs_want_write = 0;
 
     /* The phase is the state: the step leaves it on completion or failure
@@ -647,7 +652,7 @@ NmTransportStatus nm_connection_step(NmConnection *conn)
         conn->addr_len = 0;
         if (conn->tls) {
             conn->phase = NM_CONN_HANDSHAKE;
-            conn->hs_t0 = nm_socket_now();
+            conn->hs_t0 = nm_monotonic_seconds();
             conn->hs_want_write = 0;
             return conn_handshake_step(conn);
         }

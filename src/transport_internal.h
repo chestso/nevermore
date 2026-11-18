@@ -81,12 +81,11 @@ int nm_handshake_left(double t0, int budget_ms);
 const char *nm_handshake_timeout_reason(int budget_ms);
 
 /* Connect-walk helpers (transport_socket.c): resolve + store the
- * address list on the connection, start the attempt at index `idx`,
- * and read the monotonic clock the per-attempt budget is measured
- * against (the process-global nm_connection_connect_timeout_ms). */
+ * address list on the connection, start the attempt at index `idx`;
+ * the per-attempt budget is measured against nm_monotonic_seconds()
+ * (the one clock, clock.h). */
 int nm_socket_resolve_addrs(NmConnection *conn, const char *host, int port);
 void nm_socket_arm_attempt(NmConnection *conn, int idx);
-double nm_socket_now(void);
 
 /* Blocking connect with the bounded address walk: resolve + arm the
  * first attempt, then pump nm_socket_connect_walk (the same walk the

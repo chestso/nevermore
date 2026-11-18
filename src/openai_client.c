@@ -1337,22 +1337,11 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         free(st);
         return NULL;
     }
-    /* The body stream is event-driven for plain AND TLS: the fd is
-     * flipped here and the TLS record layer reports would-block, so
-     * reads return to the event loop instead of blocking inside
-     * chat_step (the old TLS deferral froze the loop for the whole
-     * response: dead spinner, Ctrl+C postponed to the end). */
-    if (nm_connection_set_nonblocking(conn) != NM_TRANSPORT_OK) {
-        if (err) {
-            err->status = NM_CHAT_ERR_TRANSPORT;
-            snprintf(err->message, sizeof(err->message),
-                     "could not set the socket non-blocking: %s",
-                     nm_connection_last_error(conn));
-        }
-        nm_connection_close(conn);
-        free(st);
-        return NULL;
-    }
+    /* The body stream is event-driven for plain AND TLS: an async
+     * connection is BORN non-blocking (begin_dial flips the fd before
+     * the first step), so there is nothing to set here — the TLS
+     * record layer reports would-block and reads return to the event
+     * loop instead of blocking inside chat_step. */
     st->sse = nm_sse_new();
     if (!st->sse) {
         if (err) {
