@@ -752,7 +752,13 @@ static int tls_exchange_drive(const char *host, int port)
         nm_connection_release(c);
         return -1;
     }
+    char buf[512];
+    long total = 0;
     for (;;) {
+        /* The drive is STEP-FIRST, like every production caller: a
+         * redial re-enters CONNECTING mid-exchange, and only the step
+         * machine walks it (the fetch/chat steps do this; a test
+         * helper that skips it strands the walk). */
         NmTransportStatus s = nm_connection_step(c);
         if (s == NM_TRANSPORT_PENDING) {
             NmSource i = nm_connection_interest(c);
@@ -764,11 +770,6 @@ static int tls_exchange_drive(const char *host, int port)
             nm_connection_release(c);
             return -1;
         }
-        break;
-    }
-    char buf[512];
-    long total = 0;
-    for (;;) {
         long n = nm_read_body(c, buf, sizeof(buf));
         if (n == NM_READ_WOULD_BLOCK) {
             NmSource i = nm_connection_interest(c);
@@ -843,6 +844,189 @@ static void test_tls_reuse_two_exchanges_one_handshake(void)
 static void test_tls_reuse_two_exchanges_one_handshake(void)
 {
     printf("  (no Linux TLS backend compiled — TLS reuse test n/a)\n");
+}
+
+#endif
+
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
+
+/* ---------------------------------------------------------------- */
+/* The redial's TLS half: a fresh handshake on the SAME connection    */
+/* ---------------------------------------------------------------- */
+
+/* The redial test's server: TWO connections on purpose. Connection 1
+ * serves exchange 1, then reads exchange 2 and closes WITHOUT
+ * answering — the FIN in flight. Connection 2 is the redial's: it
+ * serves. The counters are the evidence: two accepts (two handshakes,
+ * a redial IS a new TCP connection), three exchanges seen, two
+ * answered. */
+static void *tls_redial_server_thread(void *arg)
+{
+    (void)arg;
+#ifdef NM_TLS_OPENSSL
+    for (int conn = 0; conn < 2; conn++) {
+        int cfd = accept(tls_listen_fd, NULL, NULL);
+        if (cfd < 0)
+            return NULL;
+        tls_server_accepts++;
+        SSL_CTX *ctx = SSL_CTX_new(TLS_server_method());
+        if (!ctx) {
+            close(cfd);
+            return NULL;
+        }
+        SSL_CTX_use_certificate_file(ctx, CERT, SSL_FILETYPE_PEM);
+        SSL_CTX_use_PrivateKey_file(ctx, KEY, SSL_FILETYPE_PEM);
+        SSL *ssl = SSL_new(ctx);
+        SSL_set_fd(ssl, cfd);
+        if (SSL_accept(ssl) == 1) {
+            for (;;) {
+                char d[512];
+                if (SSL_read(ssl, d, sizeof(d)) <= 0)
+                    break;
+                tls_server_exchanges++;
+                if (tls_server_exchanges == 2)
+                    break; /* read, no answer: the FIN in flight */
+                const char resp[] =
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    "Content-Length: 2\r\n\r\nhi";
+                SSL_write(ssl, resp, sizeof(resp) - 1);
+            }
+        }
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        SSL_CTX_free(ctx);
+        close(cfd);
+    }
+    return NULL;
+#else /* NM_TLS_MBEDTLS */
+    for (int conn = 0; conn < 2; conn++) {
+        int cfd = accept(tls_listen_fd, NULL, NULL);
+        if (cfd < 0)
+            return NULL;
+        tls_server_accepts++;
+        mbedtls_ssl_context ssl;
+        mbedtls_ssl_config conf;
+        mbedtls_x509_crt crt;
+        mbedtls_pk_context key;
+        mbedtls_entropy_context entropy;
+        mbedtls_ctr_drbg_context drbg;
+        mbedtls_ssl_init(&ssl);
+        mbedtls_ssl_config_init(&conf);
+        mbedtls_x509_crt_init(&crt);
+        mbedtls_pk_init(&key);
+        mbedtls_entropy_init(&entropy);
+        mbedtls_ctr_drbg_init(&drbg);
+        if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                                  (const unsigned char *)"tls-redial", 9) !=
+                0 ||
+            mbedtls_x509_crt_parse_file(&crt, CERT) != 0 ||
+#if MBEDTLS_VERSION_NUMBER >= 0x03000000
+            mbedtls_pk_parse_keyfile(&key, KEY, NULL, mbedtls_ctr_drbg_random,
+                                     &drbg) != 0 ||
+#else
+            mbedtls_pk_parse_keyfile(&key, KEY, NULL) != 0 ||
+#endif
+            mbedtls_ssl_config_defaults(&conf, MBEDTLS_SSL_IS_SERVER,
+                                        MBEDTLS_SSL_TRANSPORT_STREAM,
+                                        MBEDTLS_SSL_PRESET_DEFAULT) != 0)
+            goto done;
+        mbedtls_ssl_conf_ca_chain(&conf, &crt, NULL);
+        if (mbedtls_ssl_conf_own_cert(&conf, &crt, &key) != 0)
+            goto done;
+        mbedtls_ssl_conf_rng(&conf, mbedtls_ctr_drbg_random, &drbg);
+        if (mbedtls_ssl_setup(&ssl, &conf) != 0)
+            goto done;
+        mbedtls_ssl_set_bio(&ssl, &cfd, mbedtls_net_send, mbedtls_net_recv,
+                            NULL);
+        if (mbedtls_ssl_handshake(&ssl) == 0) {
+            for (;;) {
+                unsigned char d[512];
+                if (mbedtls_ssl_read(&ssl, d, sizeof(d)) <= 0)
+                    break;
+                tls_server_exchanges++;
+                if (tls_server_exchanges == 2)
+                    break; /* read, no answer: the FIN in flight */
+                const char resp[] =
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    "Content-Length: 2\r\n\r\nhi";
+                mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
+                                  sizeof(resp) - 1);
+            }
+        }
+done:
+        mbedtls_ssl_close_notify(&ssl);
+        mbedtls_ssl_free(&ssl);
+        mbedtls_ssl_config_free(&conf);
+        mbedtls_x509_crt_free(&crt);
+        mbedtls_pk_free(&key);
+        mbedtls_ctr_drbg_free(&drbg);
+        mbedtls_entropy_free(&entropy);
+        close(cfd);
+    }
+    return NULL;
+#endif
+}
+
+static int tls_redial_child(void)
+{
+    if (tls_server_start() != 0) {
+        fprintf(stderr, "  child: loopback bind failed\n");
+        return 2;
+    }
+    pthread_t th;
+    if (pthread_create(&th, NULL, tls_redial_server_thread, NULL) != 0) {
+        tls_server_stop();
+        return 3;
+    }
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "on");
+    int fails = 0;
+    /* Exchange 1: served, released, shelved. Exchange 2: the shelved
+     * connection is dropped before a response byte — the redial runs
+     * a fresh handshake on the SAME NmConnection and serves. */
+    int r1 = tls_exchange_drive("localhost", tls_port);
+    int r2 = tls_exchange_drive("localhost", tls_port);
+    fprintf(stderr, "DBG r1=%d r2=%d accepts=%d exch=%d\n", r1, r2,
+            tls_server_accepts, tls_server_exchanges);
+    if (r1 != 0)
+        fails++;
+    if (r2 != 0)
+        fails++;
+    if (tls_server_accepts != 2)
+        fails++;
+    if (tls_server_exchanges != 3)
+        fails++;
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "off");
+    nm_connection_pool_flush();
+    pthread_join(th, NULL);
+    tls_server_stop();
+    return fails ? 4 : 0;
+}
+
+static void test_tls_redial_fresh_handshake(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("  FAIL: fork failed\n");
+        return;
+    }
+    if (pid == 0) {
+        setenv(NM_TLS_CA_FILE_ENV, CERT, 1);
+        _exit(tls_redial_child());
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("  FAIL: waitpid failed\n");
+        return;
+    }
+    ASSERT_TRUE(WIFEXITED(st));
+    ASSERT_EQ(WEXITSTATUS(st), 0);
+}
+
+#else /* no Linux TLS backend in this build */
+
+static void test_tls_redial_fresh_handshake(void)
+{
+    printf("  (no Linux TLS backend compiled — TLS redial test n/a)\n");
 }
 
 #endif
@@ -1653,6 +1837,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_tls_large_write_arrives_intact);
     RUN_TEST(test_tls_survives_a_closed_peer); /* cold trust store: before the refusal */
     RUN_TEST(test_tls_reuse_two_exchanges_one_handshake);
+    RUN_TEST(test_tls_redial_fresh_handshake);
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_step_pends_on_a_held_reply);
