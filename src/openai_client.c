@@ -1358,24 +1358,18 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
      * connect in flight, request serialized into the connection's
      * owned buffer. NO blocking before returning — the connect/send
      * phases are driven by chat_step, which the event loop calls on
-     * writability. The stream handle owns the connection from here. */
+     * writability. The stream handle owns the connection from here.
+     *
+     * ACQUIRE LAST: the body, the stream and the headers are built
+     * first, so the only failure after the acquire is the queue —
+     * "the begin-failure paths release" is then a single path, not a
+     * rule four sites have to remember. */
     char *body = compose_body(ep, req);
     if (!body) {
         if (err) {
             err->status = NM_CHAT_ERR_PARSE;
             snprintf(err->message, sizeof(err->message),
                      "internal: could not compose the request body");
-        }
-        return NULL;
-    }
-
-    NmConnectInfo ci;
-    NmConnection *conn = nm_connect_async(host, port, mode, &ci);
-    if (!conn) {
-        free(body);
-        if (err) {
-            err->status = NM_CHAT_ERR_TRANSPORT;
-            snprintf(err->message, sizeof(err->message), "%s", ci.detail);
         }
         return NULL;
     }
@@ -1390,7 +1384,6 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                               ep->extra_headers, ep->n_extra_headers,
                               ep->user_agent) != 0) {
         free(body);
-        nm_connection_close(conn);
         if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
             snprintf(err->message, sizeof(err->message), "out of memory");
@@ -1404,8 +1397,8 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
 
     NmChatStream *st = calloc(1, sizeof(*st));
     if (!st) {
+        request_headers_free(&hs);
         free(body);
-        nm_connection_close(conn);
         if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
             snprintf(err->message, sizeof(err->message),
@@ -1413,7 +1406,6 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         }
         return NULL;
     }
-    st->conn = conn;
     st->on_delta = req->on_delta;
     st->on_usage = req->on_usage;
     st->userdata = req->userdata;
@@ -1421,9 +1413,40 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
     if (ep->provider && ep->provider->name)
         snprintf(st->source, sizeof(st->source), "%s", ep->provider->name);
     st->status = NM_CHAT_OK;
+    st->sse = nm_sse_new();
+    if (!st->sse) {
+        request_headers_free(&hs);
+        free(body);
+        free(st);
+        if (err) {
+            err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message),
+                     "out of memory (SSE parser)");
+        }
+        return NULL;
+    }
+
+    /* The pool: an idle, handshaken connection for this endpoint comes
+     * out ready to queue; anything else dials fresh (non-blocking, as
+     * before). */
+    NmConnectInfo ci;
+    NmConnection *conn = nm_connection_acquire(host, port, mode, &ci);
+    if (!conn) {
+        request_headers_free(&hs);
+        free(body);
+        nm_sse_free(st->sse);
+        free(st);
+        if (err) {
+            err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message), "%s", ci.detail);
+        }
+        return NULL;
+    }
+    st->conn = conn;
 
     /* Queue the request; the connect/send phases drain inside
-     * chat_step. The stream is returned in CONNECTING. */
+     * chat_step. The stream is returned in CONNECTING (or SENDING, on
+     * a reused connection). */
     NmTransportStatus rs = nm_request_queue(conn, "POST", path, hs.hdrs,
                                             hs.n, body, strlen(body));
     request_headers_free(&hs);
@@ -1435,23 +1458,12 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                      "could not queue the request: %s",
                      nm_connection_last_error(conn));
         }
-        nm_connection_close(conn);
-        free(st);
-        return NULL;
-    }
-    /* The body stream is event-driven for plain AND TLS: an async
-     * connection is BORN non-blocking (begin_dial flips the fd before
-     * the first step), so there is nothing to set here — the TLS
-     * record layer reports would-block and reads return to the event
-     * loop instead of blocking inside chat_step. */
-    st->sse = nm_sse_new();
-    if (!st->sse) {
-        if (err) {
-            err->status = NM_CHAT_ERR_TRANSPORT;
-            snprintf(err->message, sizeof(err->message),
-                     "out of memory (SSE parser)");
-        }
-        nm_connection_close(conn);
+        /* The one failure past the acquire: the queue. Release, not
+         * close — a queued-and-failed connection is never reusable,
+         * so release closes it; and if the pool ever grows a smarter
+         * verdict, this is still the right verb. */
+        nm_connection_release(conn);
+        nm_sse_free(st->sse);
         free(st);
         return NULL;
     }
@@ -1827,7 +1839,32 @@ struct NmFetchStream
     double deadline; /* monotonic seconds; 0 = none */
     int terminal;    /* 1 once the status is OK or ERR */
     int ok;
+    /* The response facts, snapshotted at the terminal release: the
+     * connection may be reused by the next exchange the moment it is
+     * shelved, and the accessors (credit.c reads the status and
+     * Retry-After after the step) keep serving from here. */
+    int http_status;
+    NmResponseHeader hdrs[NM_RESPONSE_HEADERS_MAX];
+    size_t n_hdrs;
 };
+
+/* The fetch's terminal release: snapshot the response facts first
+ * (the accessors serve them after the step), then hand the connection
+ * back — the pool shelves it when the exchange was reusable, and it
+ * may serve the next exchange the moment it is. Called by fetch_fail
+ * (every error path) and at the OK terminal; nm_fetch_end keeps the
+ * defensive release for a non-terminal teardown. */
+static void fetch_release(NmFetchStream *f)
+{
+    if (!f || !f->conn)
+        return;
+    const NmResponse *resp = nm_response(f->conn);
+    f->http_status = resp ? resp->status : 0;
+    f->n_hdrs = nm_response_headers_copy(f->conn, f->hdrs,
+                                         NM_RESPONSE_HEADERS_MAX);
+    nm_connection_release(f->conn);
+    f->conn = NULL;
+}
 
 /* Mark the fetch terminal-failed. The reason is not kept: no caller
  * has ever surfaced one (the providers discarded nm_fetch_json's
@@ -1836,6 +1873,7 @@ static void fetch_fail(NmFetchStream *f)
 {
     f->terminal = 1;
     f->ok = 0;
+    fetch_release(f);
 }
 
 /* The fetch's own begin: the common path of the two shapes (a catalog
@@ -1863,15 +1901,18 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
                                  &mode) != 0)
         return NULL;
 
-    /* Non-blocking connect: the caller drives it (step + source). */
+    /* Non-blocking connect via the POOL: a matching idle connection
+     * inside the window is reused (already handshaken, xchg keeps
+     * counting); anything else dials fresh. The caller drives it
+     * (step + source). */
     NmConnectInfo ci;
-    NmConnection *conn = nm_connect_async(host, port, mode, &ci);
+    NmConnection *conn = nm_connection_acquire(host, port, mode, &ci);
     if (!conn)
         return NULL;
 
     NmFetchStream *f = calloc(1, sizeof(*f));
     if (!f) {
-        nm_connection_close(conn);
+        nm_connection_release(conn);
         return NULL;
     }
     f->conn = conn;
@@ -1886,7 +1927,7 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
     if (keep && n_keep) {
         f->keep = calloc(n_keep, sizeof(char *));
         if (!f->keep) {
-            nm_connection_close(conn);
+            nm_connection_release(conn);
             free(f);
             return NULL;
         }
@@ -1897,7 +1938,7 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
                     free(f->keep[k]);
                 free(f->keep);
                 f->keep = NULL;
-                nm_connection_close(conn);
+                nm_connection_release(conn);
                 free(f);
                 return NULL;
             }
@@ -1913,7 +1954,7 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
     NmRequestHeaders hs;
     if (request_headers_build(&hs, body != NULL, auth_header, api_key,
                               extra, n_extra, NULL) != 0) {
-        nm_connection_close(conn);
+        nm_connection_release(conn);
         for (size_t i = 0; i < f->n_keep; i++)
             free(f->keep[i]);
         free(f->keep);
@@ -1926,7 +1967,7 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
         nm_request_queue(conn, method, path, hs.hdrs, hs.n, body, body_len);
     request_headers_free(&hs);
     if (rs != NM_TRANSPORT_OK) {
-        nm_connection_close(conn);
+        nm_connection_release(conn);
         for (size_t i = 0; i < f->n_keep; i++)
             free(f->keep[i]);
         free(f->keep);
@@ -2071,6 +2112,7 @@ NmCatalogStatus nm_fetch_step(NmFetchStream *f)
     }
     f->terminal = 1;
     f->ok = 1;
+    fetch_release(f); /* the OK terminal: snapshot, then hand it back */
     return NM_CATALOG_OK;
 }
 
@@ -2108,8 +2150,10 @@ void nm_fetch_end(NmFetchStream *f)
 {
     if (!f)
         return;
+    /* Terminal steps already released (and snapshotted); this is the
+     * defensive path for a teardown before the terminal. */
     if (f->conn)
-        nm_connection_close(f->conn);
+        nm_connection_release(f->conn);
     if (f->doc)
         nm_json_free(f->doc);
     for (size_t i = 0; i < f->n_keep; i++)
@@ -2121,17 +2165,36 @@ void nm_fetch_end(NmFetchStream *f)
 
 int nm_fetch_http_status(const NmFetchStream *f)
 {
-    if (!f || !f->conn)
-        return 0;
-    const NmResponse *resp = nm_response(f->conn);
-    return resp ? resp->status : 0;
+    /* The snapshot: the connection is gone by the time these are
+     * read (the terminal release). */
+    return f ? f->http_status : 0;
+}
+
+/* Case-insensitive header-name match for the snapshot (the same rule
+ * nm_response_header applies to the live store). */
+static int fetch_hdr_name_eq(const char *a, const char *b)
+{
+    for (; *a && *b; a++, b++) {
+        char ca = *a;
+        char cb = *b;
+        if (ca >= 'A' && ca <= 'Z')
+            ca = (char)(ca - 'A' + 'a');
+        if (cb >= 'A' && cb <= 'Z')
+            cb = (char)(cb - 'A' + 'a');
+        if (ca != cb)
+            return 0;
+    }
+    return *a == *b;
 }
 
 const char *nm_fetch_header(const NmFetchStream *f, const char *name)
 {
-    if (!f || !f->conn || !name)
+    if (!f || !name)
         return NULL;
-    return nm_response_header(f->conn, name);
+    for (size_t i = 0; i < f->n_hdrs; i++)
+        if (fetch_hdr_name_eq(f->hdrs[i].name, name))
+            return f->hdrs[i].value;
+    return NULL;
 }
 
 /* ---------------------------------------------------------------- */

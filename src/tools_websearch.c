@@ -596,8 +596,11 @@ static void ws_end(NmToolExec *e)
 {
     if (!e)
         return;
+    /* The pool owns the verdict: a completed exchange is shelved for
+     * the next query on the same instance; a failed or capped one
+     * closes. */
     if (e->conn)
-        nm_connection_close(e->conn);
+        nm_connection_release(e->conn);
     free(e->buf);
     nm_tool_result_free(&e->result);
     free(e);
@@ -684,7 +687,9 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     NmConnectInfo ci;
     ci.status = NM_TRANSPORT_OK;
     ci.detail[0] = '\0';
-    e->conn = nm_connect_async(host, port, mode, &ci);
+    /* The pool: an idle SearXNG connection inside the window is
+     * reused; anything else dials fresh. */
+    e->conn = nm_connection_acquire(host, port, mode, &ci);
     if (!e->conn) {
         char msg[256];
         snprintf(msg, sizeof(msg), "web_search: SearXNG unreachable: %s",

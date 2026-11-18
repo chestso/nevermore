@@ -75,6 +75,14 @@ int nm_connection_reusable(const NmConnection *conn);
 int nm_connection_keepalive_on(void);
 int nm_connection_keepalive_idle_ms(void);
 
+/* Copy the retained response headers (head + trailers — the store
+ * nm_response_header reads) into out, up to cap. Returns how many.
+ * The fetch's terminal release snapshots them, so nm_fetch_header
+ * keeps serving after the connection is gone (it may be reused by
+ * the next exchange the moment it is shelved). */
+size_t nm_response_headers_copy(const NmConnection *conn,
+                                NmResponseHeader *out, size_t cap);
+
 void nm_socket_shutdown(int fd);
 
 /* Bound blocking reads on the connection's socket: SO_RCVTIMEO, so a

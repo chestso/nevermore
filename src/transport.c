@@ -842,6 +842,16 @@ void nm_connection_pool_flush(void)
     }
 }
 
+size_t nm_response_headers_copy(const NmConnection *conn,
+                                NmResponseHeader *out, size_t cap)
+{
+    if (!conn || !out || cap == 0)
+        return 0;
+    size_t n = conn->resp_hdr_n < cap ? conn->resp_hdr_n : cap;
+    memcpy(out, conn->resp_hdrs, n * sizeof(NmResponseHeader));
+    return n;
+}
+
 NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    const char *path,
                                    const NmRequestHeader *headers,
