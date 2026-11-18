@@ -523,6 +523,45 @@ static void test_wire_chunked_sse(void)
     close(sc.fd);
 }
 
+static void test_wire_chunk_extension(void)
+{
+    /* A chunk-size line may carry ";name=value": the extension is
+     * eaten to its EOL and the data follows; the framing end is
+     * still the trailer section. */
+    struct ServerCase sc = {
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        "5;name=val\r\nhello\r\n"
+        "0;last=nope\r\n\r\n",
+        0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request(c, "GET", "/", NULL, 0, NULL, 0), NM_TRANSPORT_OK);
+    char buf[256];
+    char body[256];
+    size_t total = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        memcpy(body + total, buf, (size_t)n);
+        total += (size_t)n;
+    }
+    body[total] = '\0';
+    ASSERT_STR_EQ(body, "hello");
+    ASSERT_STR_EQ(nm_response_header(c, "X-Missing"), NULL);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_wire_response_headers_and_trailers(void)
 {
     /* Head headers are retained for nm_response_header; a chunked
@@ -1877,6 +1916,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_parse_http10_minor_recorded);
     RUN_TEST(test_wire_body_clamped_to_length);
     RUN_TEST(test_wire_chunked_sse);
+    RUN_TEST(test_wire_chunk_extension);
     RUN_TEST(test_wire_response_headers_and_trailers);
     RUN_TEST(test_wire_http_error_status);
     RUN_TEST(test_wire_refused);

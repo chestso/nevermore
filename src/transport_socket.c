@@ -1642,6 +1642,19 @@ static int head_pump(NmConnection *conn, int blocking)
     }
 }
 
+/* The size line ended (its LF consumed): either the chunk's data
+ * starts or — at size 0 — the trailer section does. ONE author for
+ * the transition and the trailer-line reset, so the framing end has
+ * one author: both the plain size line and its extension tail reach
+ * here. */
+static void chunk_size_line_end(NmConnection *conn)
+{
+    conn->chunk_state =
+        conn->chunk_remaining == 0 ? CHUNK_TRAILER : CHUNK_DATA;
+    conn->trailer_line_empty = 1;
+    conn->trailer_len = 0;
+}
+
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
 {
     if (!conn || !buf || buf_len == 0)
@@ -1805,10 +1818,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                 v = c - 'a' + 10;
             else if (c >= 'A' && c <= 'F')
                 v = c - 'A' + 10;
-            else if (c == ';' && conn->chunk_remaining == 0) {
-                conn->chunk_state = CHUNK_SIZE_EXT;
-                break;
-            } else if (c == ';') {
+            else if (c == ';') {
                 conn->chunk_state = CHUNK_SIZE_EXT;
                 break;
             } else
@@ -1825,12 +1835,7 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
                     return -1;
                 }
             } else if (c == '\n') {
-                if (conn->chunk_remaining == 0)
-                    conn->chunk_state = CHUNK_TRAILER;
-                else
-                    conn->chunk_state = CHUNK_DATA;
-                conn->trailer_line_empty = 1;
-                conn->trailer_len = 0;
+                chunk_size_line_end(conn);
             } else if (c != '\r') {
                 conn->err = NM_TRANSPORT_ERR_PROTOCOL;
                 conn_set_err_detail(conn,
@@ -1843,14 +1848,8 @@ long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len)
             break;
         }
         case CHUNK_SIZE_EXT:
-            if (c == '\n') {
-                if (conn->chunk_remaining == 0)
-                    conn->chunk_state = CHUNK_TRAILER;
-                else
-                    conn->chunk_state = CHUNK_DATA;
-                conn->trailer_line_empty = 1;
-                conn->trailer_len = 0;
-            }
+            if (c == '\n')
+                chunk_size_line_end(conn);
             break; /* eat everything else in the extension */
         case CHUNK_DATA_CRLF:
             /* exactly CRLF after data; track both bytes */
