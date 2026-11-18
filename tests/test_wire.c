@@ -11,8 +11,10 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
+#include <windows.h> /* GetHandleInformation: after winsock2.h, house rule */
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -178,6 +180,42 @@ static void test_wire_content_length(void)
                            stack garbage differs across platforms/builds) */
     ASSERT_EQ(total, 5);
     ASSERT_STR_EQ(body, "hello");
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
+static void test_socket_open_is_close_on_exec(void)
+{
+    /* The socket-open seam's second per-fd option: a child must never
+     * inherit a transport fd (a pooled socket idles exactly while
+     * tools run, and a child holding the fd past our close() never
+     * lets the peer see the FIN). POSIX checks FD_CLOEXEC on a live
+     * connection; Windows checks the inheritable flag is refused
+     * (WSASocket's NO_HANDLE_INHERIT) via GetHandleInformation. */
+    struct ServerCase sc = {
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    int fd = nm_connection_fd(c);
+#ifdef _WIN32
+    DWORD hflags = 0;
+    ASSERT_TRUE(GetHandleInformation((HANDLE)(intptr_t)fd, &hflags));
+    ASSERT_FALSE(hflags & HANDLE_FLAG_INHERIT);
+#else
+    int fl = fcntl(fd, F_GETFD);
+    ASSERT_TRUE(fl >= 0);
+    ASSERT_TRUE(fl & FD_CLOEXEC);
+#endif
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(sc.fd);
@@ -1580,6 +1618,7 @@ int main(int argc, char *argv[])
     }
     nm_config_set_store(g_cfg);
     RUN_TEST(test_wire_content_length);
+    RUN_TEST(test_socket_open_is_close_on_exec);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_response_headers_and_trailers);
     RUN_TEST(test_wire_http_error_status);

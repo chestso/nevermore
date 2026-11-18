@@ -149,11 +149,32 @@ static int socket_init(void)
  * ride here, so no later call site (the blocking dial, the walk's
  * per-attempt arm, the async connect) can forget them. On BSD/macOS
  * that option is what keeps a write into a closed peer from raising
- * SIGPIPE inside a TLS backend's own write() — see sigpipe.h. Returns
- * -1 with errno/WSA error set, exactly like socket(). */
+ * SIGPIPE inside a TLS backend's own write() — see sigpipe.h. The
+ * other is close-on-exec: a socket that outlives one exchange (the
+ * keep-alive pool) sits idle exactly while tools run, and children
+ * inherit every descriptor today; a child holding the fd past our
+ * close() never lets the peer see the FIN. Returns -1 with errno/WSA
+ * error set, exactly like socket(). */
 static int nm_socket_open(int fam)
 {
+#ifdef _WIN32
+    /* Plain socket() creates an INHERITABLE handle by default; the
+     * WSASocket flag is the one place inheritance is refused. */
+    int fd = (int)WSASocketW(fam, SOCK_STREAM, IPPROTO_TCP, NULL, 0,
+                             WSA_FLAG_OVERLAPPED |
+                                 WSA_FLAG_NO_HANDLE_INHERIT);
+#else
+#ifdef SOCK_CLOEXEC
+    int fd = socket(fam, SOCK_STREAM | SOCK_CLOEXEC, IPPROTO_TCP);
+#else
     int fd = socket(fam, SOCK_STREAM, IPPROTO_TCP);
+#endif
+    /* Belt and braces: where SOCK_CLOEXEC does not exist, and as
+     * insurance where it does, FD_CLOEXEC lands either way. */
+    int fl = fcntl(fd, F_GETFD);
+    if (fl >= 0)
+        (void)fcntl(fd, F_SETFD, fl | FD_CLOEXEC);
+#endif
     if (fd < 0)
         return -1;
     /* Best effort: where the option does not exist this is a no-op, and
