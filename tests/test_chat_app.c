@@ -609,6 +609,10 @@ static NmConfig *cfg_for(AppHarness *h)
 {
     NmConfig *cfg = nm_config_load();
     nm_config_set_env(cfg);
+    /* The pin rides the app's own store, AFTER the env layer: neither
+     * the Phase 6 default flip nor a developer's NEVERMORE_KEEPALIVE=on
+     * export may reach the harness's dials. */
+    test_net_pin_keepalive_off(cfg);
     nm_chat_app_set_config(h->app, cfg);
     return cfg;
 }
@@ -622,6 +626,12 @@ static NmConfig *g_scratch_cfg;
 
 static void scratch_store_begin(void)
 {
+    /* A store left installed (main's pin home, or a test that forgot
+     * its end) is replaced here — freed, not orphaned, or the leak
+     * checker reports it. */
+    NmConfig *old = nm_config_store();
+    nm_config_set_store(NULL);
+    nm_config_free(old);
     g_scratch_cfg = nm_config_new();
     nm_config_set_store(g_scratch_cfg);
     /* The suite's pin: every store this binary installs carries it. */
@@ -11700,16 +11710,19 @@ int main(void)
      * config test pins both, and the others never set one. */
     nm_config_set_paths("/nonexistent/nm-chat-app-config",
                         "/nonexistent/nm-chat-app-shadow");
-    /* main installs the first store so the pin exists before the
-     * first test (the tripwire's question); scratch_store_begin
-     * carries the pin onto every store a test swaps in. */
-    g_scratch_cfg = nm_config_new();
-    if (!g_scratch_cfg) {
+    /* The pin's tripwire needs the pin DONE before the first test,
+     * but this binary's process store is app-owned (cfg_for) or
+     * scratch-owned (scratch_store_begin) — both pin at creation. So
+     * main only proves the helper path: create, pin, free, never
+     * installed (an uninstalled store would be orphaned the moment
+     * the first harness replaced it). */
+    NmConfig *pin_store = nm_config_new();
+    if (!pin_store) {
         fprintf(stderr, "  FAIL: config store alloc\n");
         return 1;
     }
-    nm_config_set_store(g_scratch_cfg);
-    test_net_pin_keepalive_off(g_scratch_cfg);
+    test_net_pin_keepalive_off(pin_store);
+    nm_config_free(pin_store);
     printf("test_chat_app:\n");
     RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_offline_catalog_is_pinned);

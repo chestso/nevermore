@@ -217,21 +217,28 @@ static int test_offline_catalog_pinned(void)
 /* A canned server that serves one request and closes MUST say
  * `Connection: close` (CONTRIBUTING's rule): under a keep-alive pool
  * a reply without the header is an invitation to reuse, and the next
- * exchange on that socket races the server's FIN. Send a canned
- * reply through HERE, not raw send(): the header is spliced in
- * before the blank line when the reply lacks it, so a new canned
- * server cannot forget; a reply that already says so passes through
- * untouched, and a reply with no blank line at all is sent verbatim
- * (a malformed-head fixture on purpose). Returns the bytes sent, or
- * -1 like send(). */
-static long test_send_reply(int cfd, const char *reply)
+ * exchange on that socket races the server's FIN.
+ *
+ * Two shapes, one rule:
+ *  - test_send_reply: send a canned reply whole through HERE;
+ *  - test_reply_with_close: build the spliced reply once, for a
+ *    server that must send it in pieces (the head/body split the
+ *    wire tests exercise). The caller owns (and frees) the buffer.
+ *
+ * The header is spliced in after the last header line's CRLF when the
+ * reply lacks it, so a new canned server cannot forget; a reply that
+ * already says so passes through untouched (NULL reply, the caller
+ * sends the original), and a reply with no blank line at all is a
+ * malformed-head fixture on purpose (also untouched). */
+static char *test_reply_with_close(const char *reply, size_t *out_len)
     TEST_NET_HELPERS_UNUSED;
-static long test_send_reply(int cfd, const char *reply)
+static char *test_reply_with_close(const char *reply, size_t *out_len)
 {
     size_t len = strlen(reply);
+    *out_len = len;
     const char *blank = strstr(reply, "\r\n\r\n");
     if (!blank)
-        return (long)send(cfd, reply, (int)len, 0); /* malformed fixture */
+        return NULL; /* malformed fixture: send it verbatim */
     /* Any header line already named Connection? (case-insensitive,
      * line starts within the head only). */
     const char *p = reply;
@@ -247,23 +254,31 @@ static long test_send_reply(int cfd, const char *reply)
             size_t off = (size_t)(c - p);
             if (off + 11 <= llen &&
                 strncasecmp(c, "connection:", 11) == 0)
-                return (long)send(cfd, reply, (int)len, 0); /* says so */
+                return NULL; /* says so: verbatim */
         }
         p = eol + 1;
     }
-    /* Splice "Connection: close\r\n" AFTER the last header line's own
-     * CRLF (the first CRLF of the blank line) and before the empty
-     * line. */
-    size_t at = (size_t)(blank - reply) + 2;
     static const char hdr[] = "Connection: close\r\n";
     size_t hlen = sizeof(hdr) - 1;
+    size_t at = (size_t)(blank - reply) + 2; /* past the header CRLF */
     char *buf = malloc(len + hlen);
     if (!buf)
-        return -1;
+        return NULL;
     memcpy(buf, reply, at);
     memcpy(buf + at, hdr, hlen);
     memcpy(buf + at + hlen, reply + at, len - at);
-    long r = (long)send(cfd, buf, (int)(len + hlen), 0);
+    *out_len = len + hlen;
+    return buf;
+}
+
+static long test_send_reply(int cfd, const char *reply)
+    TEST_NET_HELPERS_UNUSED;
+static long test_send_reply(int cfd, const char *reply)
+{
+    size_t len;
+    char *buf = test_reply_with_close(reply, &len);
+    long r = buf ? (long)send(cfd, buf, (int)len, 0)
+                 : (long)send(cfd, reply, (int)strlen(reply), 0);
     free(buf);
     return r;
 }

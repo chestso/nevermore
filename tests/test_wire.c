@@ -100,7 +100,32 @@ static void *server_thread(void *arg)
     char drain[2048];
     recv(cfd, drain, sizeof(drain), 0);
     /* Send the canned response, possibly in two flushes to exercise
-     * the head/body split. */
+     * the head/body split. The one-exchange contract rides the splice
+     * helper: a reply without `Connection: close` gains it here (a
+     * malformed-head fixture has no blank line and passes verbatim). */
+    size_t slen = sc->len;
+    char *sp = test_reply_with_close(sc->response, &slen);
+    const char *r = sp ? sp : sc->response;
+    size_t half = slen / 2;
+    send(cfd, r, half, 0);
+    usleep(10 * 1000);
+    send(cfd, r + half, slen - half, 0);
+    free(sp);
+    close(cfd);
+    return NULL;
+}
+
+/* The verbatim server: the test owns the wire contract (the reuse
+ * verdict's "no Connection field" cases assert the absence the splice
+ * helper would fill in). */
+static void *verbatim_server_thread(void *arg)
+{
+    struct ServerCase *sc = arg;
+    int cfd = accept(sc->fd, NULL, NULL);
+    if (cfd < 0)
+        return NULL;
+    char drain[2048];
+    recv(cfd, drain, sizeof(drain), 0);
     size_t half = sc->len / 2;
     send(cfd, sc->response, half, 0);
     usleep(10 * 1000);
@@ -540,7 +565,7 @@ static void test_reuse_verdict(void)
         sc.fd = server_bind(&sc.port);
         ASSERT_TRUE(sc.fd >= 0);
         pthread_t th;
-        pthread_create(&th, NULL, server_thread, &sc);
+        pthread_create(&th, NULL, verbatim_server_thread, &sc);
 
         NmConnectInfo ci;
         NmConnection *c =
@@ -636,10 +661,14 @@ static void *request_server_thread(void *arg)
         rc->req[take] = '\0';
         rc->req_len = take;
     }
-    size_t half = rc->len / 2;
-    send(cfd, rc->response, half, 0);
+    size_t slen = rc->len;
+    char *sp = test_reply_with_close(rc->response, &slen);
+    const char *r = sp ? sp : rc->response;
+    size_t half = slen / 2;
+    send(cfd, r, half, 0);
     usleep(10 * 1000);
-    send(cfd, rc->response + half, rc->len - half, 0);
+    send(cfd, r + half, slen - half, 0);
+    free(sp);
     close(cfd);
     return NULL;
 }
@@ -995,11 +1024,13 @@ static void test_wire_nonblocking_head_resume(void)
 {
     /* Head split mid-header-value: first flush is a partial head, the
      * rest (incl. the blank line + chunked body) lands after a
-     * stall. */
+     * stall. The one-exchange header rides in the second flush, after
+     * the last header line's own CRLF (the split point is untouched). */
     static const char first[] = "HTTP/1.1 200 OK\r\nContent-Type: "
                                 "text/event-stream\r\nTransfer-E";
     static const char second[] =
-        "ncoding: chunked\r\n\r\n"
+        "ncoding: chunked\r\n"
+        "Connection: close\r\n\r\n"
         "5\r\nhello\r\n"
         "0\r\n\r\n";
     struct DribbleCase sc = { first, sizeof(first) - 1, second,
@@ -1238,7 +1269,7 @@ static void *slow_drain_server(void *arg)
         if (total >= sc->len)
             break;
     }
-    send(cfd, sc->response, sc->len, 0);
+    test_send_reply(cfd, sc->response);
     close(cfd);
     return NULL;
 }
@@ -1344,7 +1375,7 @@ static void *capture_server(void *arg)
         if (strstr(cc->req, "\r\n\r\n"))
             break;
     }
-    send(cfd, cc->response, cc->len, 0);
+    test_send_reply(cfd, cc->response);
     close(cfd);
     return NULL;
 }
@@ -1428,7 +1459,7 @@ static void *one_shot_server(void *arg)
         return NULL;
     char drain[2048];
     recv(cfd, drain, sizeof(drain), 0);
-    send(cfd, sc->response, sc->len, 0);
+    test_send_reply(cfd, sc->response);
     close(cfd);
     return NULL;
 }
