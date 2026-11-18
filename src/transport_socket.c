@@ -1635,6 +1635,23 @@ static int head_pump(NmConnection *conn, int blocking)
     }
 }
 
+/* Has the body reached a real FRAMING end? The reuse verdict's core:
+ * chunked terminates at CHUNK_DONE, a length-delimited body at its
+ * Content-Length. Everything else — EOF-delimited, a cancel, an
+ * error, a body cap, a capped error-body drain — leaves the socket
+ * unusable for a second exchange. Defined here because the dechunker's
+ * states are this file's vocabulary; the request queue's refusal and
+ * the pool's verdict both read it. */
+int nm_socket_body_framing_end(const NmConnection *conn)
+{
+    if (!conn || !conn->body_started)
+        return 0;
+    if (conn->resp.chunked)
+        return conn->chunk_state == CHUNK_DONE;
+    return conn->resp.content_len >= 0 &&
+           conn->body_read >= conn->resp.content_len;
+}
+
 /* The size line ended (its LF consumed): either the chunk's data
  * starts or — at size 0 — the trailer section does. ONE author for
  * the transition and the trailer-line reset, so the framing end has

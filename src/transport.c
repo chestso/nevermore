@@ -681,19 +681,34 @@ NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    size_t n_headers, const char *body,
                                    size_t body_len)
 {
-    /* Correlation first: bump per queued request (1-based) so the
-     * request event below carries the pair the head/stream/error
-     * lines will carry — the anchor line must not be the odd one
-     * out. */
-    if (conn)
-        conn->xchg++;
-    /* The request event fires at queue time — exactly what the app
-     * constructed, before wire serialization (the reproducible
-     * truth). */
+    if (!conn)
+        return NM_TRANSPORT_ERR_PROTOCOL;
+    /* One exchange at a time on one socket: a connection that is
+     * neither fresh (CONNECTING/HANDSHAKE — the caller queues before
+     * the dial completes and the step machine drains it in order) nor
+     * idle-after-a-complete-exchange refuses a queue. An exchange
+     * still in flight (SENDING, or READING with an unread body) would
+     * interleave two exchanges on one wire. */
+    if (conn->phase == NM_CONN_SENDING ||
+        (conn->phase == NM_CONN_READING &&
+         !nm_socket_body_framing_end(conn))) {
+        conn_fail(conn, "queue", NM_TRANSPORT_ERR_PROTOCOL,
+                  "queue refused: an exchange is still in flight");
+        return NM_TRANSPORT_ERR_PROTOCOL;
+    }
+    NmTransportStatus st = nm_socket_request_queue(conn, method, path,
+                                                   headers, n_headers, body,
+                                                   body_len);
+    if (st != NM_TRANSPORT_OK)
+        return st;
+    /* Correlation now, and only on success: the (conn, xchg) pair the
+     * head/stream/error lines will carry exists for a request that
+     * was actually queued. The event still carries the app's
+     * constructed headers — serialization only copied them. */
+    conn->xchg++;
     nm_wire_tap_request(conn, method, path, headers, n_headers, body,
                         body_len);
-    return nm_socket_request_queue(conn, method, path, headers, n_headers,
-                                   body, body_len);
+    return st;
 }
 
 void nm_connection_close(NmConnection *conn)

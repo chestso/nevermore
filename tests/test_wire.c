@@ -472,6 +472,53 @@ static void test_wire_body_clamped_to_length(void)
     close(sc.fd);
 }
 
+static void test_queue_refuses_an_exchange_in_flight(void)
+{
+    /* One exchange at a time on one socket: the queue refuses a
+     * connection whose exchange has not reached a framing end (the
+     * discipline a pool's reuse depends on), and allows it again the
+     * moment the body is drained. */
+    struct ServerCase sc = {
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello", 0, 0, 0
+    };
+    sc.len = strlen(sc.response);
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+    pthread_t th;
+    pthread_create(&th, NULL, server_thread, &sc);
+
+    NmConnectInfo ci;
+    NmConnection *c = nm_connect("127.0.0.1", sc.port, NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    /* The request is on the wire, the body unread. */
+    ASSERT_EQ(nm_request_send(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+    ASSERT_EQ(nm_request_queue(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_ERR_PROTOCOL);
+    ASSERT_TRUE(strstr(nm_connection_last_error(c), "still in flight") !=
+                NULL);
+    /* The refusal left the exchange intact: it completes normally. */
+    char buf[256];
+    char body[256];
+    size_t total = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        memcpy(body + total, buf, (size_t)n);
+        total += (size_t)n;
+    }
+    body[total] = '\0';
+    ASSERT_EQ(total, 5);
+    ASSERT_STR_EQ(body, "hello");
+    /* At the framing end the queue is allowed again. */
+    ASSERT_EQ(nm_request_queue(c, "GET", "/", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+    nm_connection_close(c);
+    pthread_join(th, NULL);
+    close(sc.fd);
+}
+
 static void test_wire_chunked_sse(void)
 {
     /* A canned SSE stream, chunked; the case that phase-1 ask rides on. */
@@ -1915,6 +1962,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_parse_204_has_no_body);
     RUN_TEST(test_parse_http10_minor_recorded);
     RUN_TEST(test_wire_body_clamped_to_length);
+    RUN_TEST(test_queue_refuses_an_exchange_in_flight);
     RUN_TEST(test_wire_chunked_sse);
     RUN_TEST(test_wire_chunk_extension);
     RUN_TEST(test_wire_response_headers_and_trailers);

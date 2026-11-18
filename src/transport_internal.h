@@ -55,6 +55,12 @@ NmTransportStatus nm_socket_set_nonblocking(NmConnection *conn);
 int nm_socket_fd(NmConnection *conn);
 int nm_socket_wait_ms(const NmConnection *conn);
 long nm_socket_read_body(NmConnection *conn, char *buf, size_t buf_len);
+
+/* Has the body reached a real FRAMING end (see the definition above
+ * nm_socket_read_body): the one thing the request queue's refusal and
+ * the reuse verdict both ask. */
+int nm_socket_body_framing_end(const NmConnection *conn);
+
 void nm_socket_shutdown(int fd);
 
 /* Bound blocking reads on the connection's socket: SO_RCVTIMEO, so a
