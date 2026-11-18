@@ -55,7 +55,8 @@
 #include <string.h>
 
 #include "json.h"
-#include "conf.h" /* the store the tool reads (no proxies) */
+#include "conf.h"          /* the store the tool reads (no proxies) */
+#include "openai_client.h" /* nm_openai_split_url: the ONE URL parser */
 #include "tools.h"
 #include "tools_internal.h"
 #include "transport.h"
@@ -217,85 +218,6 @@ static char *build_url(const char *base, const char *query,
         buf_add_encoded(&b, engines);
     }
     return b.p; /* NULL on OOM */
-}
-
-/* Decimal port text; -1 on non-digits or overflow. */
-static int parse_port(const char *s)
-{
-    int v = 0;
-    if (!s || *s < '0' || *s > '9')
-        return -1;
-    for (; *s >= '0' && *s <= '9'; s++) {
-        v = v * 10 + (*s - '0');
-        if (v > 65535)
-            return -1;
-    }
-    return (*s == '\0' || *s == '/') ? v : -1;
-}
-
-/* scheme://host[:port][/path] -> host (heap), port, mode, path (heap,
- * "" when the base carries none). 0 = ok, -1 = malformed. Bracketed
- * IPv6 hosts are accepted. */
-static int parse_url(const char *url, char **host_out, int *port_out,
-                     NmTransportMode *mode_out, char **path_out)
-{
-    const char *sep = strstr(url, "://");
-    if (!sep)
-        return -1;
-    size_t slen = (size_t)(sep - url);
-    NmTransportMode mode;
-    int defport;
-    if (slen == 4 && strncmp(url, "http", 4) == 0) {
-        mode = NM_TRANSPORT_PLAIN;
-        defport = 80;
-    } else if (slen == 5 && strncmp(url, "https", 5) == 0) {
-        mode = NM_TRANSPORT_TLS;
-        defport = 443;
-    } else {
-        return -1;
-    }
-    const char *rest = sep + 3;
-    const char *slash = strchr(rest, '/');
-    size_t alen = slash ? (size_t)(slash - rest) : strlen(rest);
-    if (alen == 0)
-        return -1;
-
-    const char *hstart = rest;
-    size_t hlen = alen;
-    int port = defport;
-    if (rest[0] == '[') {
-        const char *close = memchr(rest, ']', alen);
-        if (!close)
-            return -1;
-        hstart = rest + 1;
-        hlen = (size_t)(close - (rest + 1));
-        if ((size_t)(close - rest) + 1 < alen && close[1] == ':')
-            port = parse_port(close + 2);
-    } else {
-        const char *colon = memchr(rest, ':', alen);
-        if (colon) {
-            hlen = (size_t)(colon - rest);
-            port = parse_port(colon + 1);
-        }
-    }
-    if (hlen == 0 || port <= 0)
-        return -1;
-
-    char *host = malloc(hlen + 1);
-    if (!host)
-        return -1;
-    memcpy(host, hstart, hlen);
-    host[hlen] = '\0';
-    char *path = strdup(slash ? slash : "");
-    if (!path) {
-        free(host);
-        return -1;
-    }
-    *host_out = host;
-    *port_out = port;
-    *mode_out = mode;
-    *path_out = path;
-    return 0;
 }
 
 /* ---------------------------------------------------------------- */
@@ -735,22 +657,25 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     if (!url)
         return fail_exec(nm_tool_result_error("web_search: out of memory"));
 
-    char *host = NULL, *path = NULL;
+    /* One URL parser (nm_openai_split_url): the path is a BORROWED
+     * pointer into url, so url lives until the request is queued. */
+    char host[256];
     int port = 0;
     NmTransportMode mode = NM_TRANSPORT_PLAIN;
-    if (parse_url(url, &host, &port, &mode, &path) != 0) {
+    const char *path = NULL;
+    if (nm_openai_split_url(url, host, sizeof(host), &port, &mode, &path) !=
+            0 ||
+        !path || !*path) {
         free(url);
         char msg[NM_WEBSEARCH_URL_MAX + 64];
         snprintf(msg, sizeof(msg), "web_search: invalid SearXNG URL: %s",
                  nm_tool_web_search_base_url());
         return fail_exec(nm_tool_result_error(msg));
     }
-    free(url);
 
     NmToolExec *e = calloc(1, sizeof(*e));
     if (!e) {
-        free(host);
-        free(path);
+        free(url);
         return NULL;
     }
     e->deadline = nm_monotonic_seconds() + timeout_seconds();
@@ -760,19 +685,18 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     ci.status = NM_TRANSPORT_OK;
     ci.detail[0] = '\0';
     e->conn = nm_connect_async(host, port, mode, &ci);
-    free(host);
     if (!e->conn) {
         char msg[256];
         snprintf(msg, sizeof(msg), "web_search: SearXNG unreachable: %s",
                  ci.detail[0] ? ci.detail : "connect failed");
         ws_mark_unreachable();
-        free(path);
+        free(url);
         ws_fail(e, msg);
         return e;
     }
     NmTransportStatus ts =
         nm_request_queue(e->conn, "GET", path, NULL, 0, NULL, 0);
-    free(path);
+    free(url); /* the borrowed path was copied into the request buffer */
     if (ts != NM_TRANSPORT_OK) {
         ws_fail(e, "web_search: could not queue the SearXNG request");
         return e;
@@ -783,31 +707,6 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
 /* ---------------------------------------------------------------- */
 /* execute (direct callers: begin + a readiness pump)                */
 /* ---------------------------------------------------------------- */
-
-/* Blocking readiness wait for the direct-call pump. The event-driven
- * path (the agent) never reaches it — boba or nm_agent_turn owns the
- * wait; this only serves nm_toolset_execute callers (tests, tools
- * without a loop). The timeout lets the deadline be checked even when
- * the fd never becomes readable (an accepted-but-silent server). */
-static int wait_ready(int fd, unsigned interest, int timeout_ms)
-{
-    fd_set r, w;
-    FD_ZERO(&r);
-    FD_ZERO(&w);
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    if (interest & NM_INTEREST_READ)
-        FD_SET(fd, &r);
-    if (interest & NM_INTEREST_WRITE)
-        FD_SET(fd, &w);
-#ifdef _WIN32
-    return select(0, (interest & NM_INTEREST_READ) ? &r : NULL,
-                  (interest & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#else
-    return select(fd + 1, &r, &w, NULL, &tv);
-#endif
-}
 
 static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
                                const NmToolCtx *ctx)
@@ -828,7 +727,9 @@ static NmToolResult ws_execute(const NmTool *tool, const char *args_json,
             ws_end(e);
             return nm_tool_result_error("web_search: request stalled");
         }
-        wait_ready((int)src.handle, src.flags, 50);
+        /* The one readiness wait for the blocking drives: the deadline
+         * is still re-checked every slice. */
+        nm_source_wait_any(&src, 1, 50);
     }
 }
 

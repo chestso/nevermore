@@ -172,6 +172,14 @@ int nm_openai_stream_fd(NmChatStream *h);
  * boba's fill_io_sources array. */
 unsigned nm_openai_stream_interest(NmChatStream *h);
 
+/* The stream's wait source in the ONE shape every feeder of the
+ * event loop speaks (NmSource): {handle, flags, kind}, handle -1
+ * when there is nothing to wait on. The blocking pump
+ * (nm_openai_chat) waits through it instead of hand-rolled select —
+ * nm_source_wait_any is the one readiness wait for the blocking
+ * drives. */
+NmSource nm_openai_stream_source(NmChatStream *h);
+
 /* The stream's deadline seam: milliseconds until it wants a step with
  * no fd ready (a connect attempt's per-address budget, or the
  * post-[DONE] framing tail's own budget — the stream owns the round's
@@ -190,6 +198,19 @@ void nm_openai_chat_end(NmChatStream *h);
  * success. */
 int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
                              int *port, NmTransportMode *mode);
+
+/* THE URL parser (one implementation for every split: the chat/fetch
+ * base above AND the web_search tool's full query URL, so the pool
+ * key cannot learn a second opinion). Split
+ * "http(s)://host[:port][/path]" into host/port/mode, and — when
+ * path_out is non-NULL — the path as a BORROWED pointer into `url`
+ * (the part after the authority, "" when the URL carries none): the
+ * caller keeps url alive as long as it reads the path. The port is
+ * strict (digits only, <= 65535, ending at '/' or the string end);
+ * bracketed IPv6 literals are accepted. 0 on success, -1 malformed. */
+int nm_openai_split_url(const char *url, char *host, size_t host_cap,
+                        int *port, NmTransportMode *mode,
+                        const char **path);
 
 /* Blocking one-shot JSON fetch — GONE (2026-10-07): the catalog seam
  * below is the only one-shot fetch. `nm_fetch_json` and

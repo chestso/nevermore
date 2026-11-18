@@ -289,7 +289,7 @@ test_tools_SOURCES = test_tools.c fake_clock.c ../src/tools.c ../src/tools_file.
     ../src/tools_websearch.c ../src/tools_exec.c \
     ../src/file_ledger.c ../src/skills.c \
     ../src/proc.c $(PROCESS_SOURCE) \
-    $(TOOLS_SPAWN_SOURCE) ../src/json.c \
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
     ../src/wire_recorder.c ../src/image_bytes.c ../src/size.c \
     $(TEST_TLS_SOURCE)
@@ -304,7 +304,7 @@ test_web_search_SOURCES = test_web_search.c ../src/clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/file_ledger.c ../src/skills.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
-    $(TOOLS_SPAWN_SOURCE) ../src/json.c \
+    $(TOOLS_SPAWN_SOURCE) ../src/json.c ../src/sse.c ../src/openai_client.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c \
     ../src/wire_recorder.c ../src/image_bytes.c ../src/size.c \
     $(TEST_TLS_SOURCE)

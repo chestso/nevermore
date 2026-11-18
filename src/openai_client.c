@@ -83,17 +83,114 @@ static void append_extra_headers(NmRequestHeader *hdrs, size_t *nh,
     }
 }
 
+/* One request-header set (the shape BOTH request builders make):
+ * Content-Type (bodies), the secret-marked auth, provider extras in
+ * array order, User-Agent last. The auth value is the ONE heap
+ * allocation here, sized exactly from the format and the key — the
+ * fixed 512 the builders used to share silently truncated a long key.
+ * Owned by the set, freed by request_headers_free at the call site,
+ * right after the queue copied the headers into the request buffer.
+ * The redaction seam rides the array: the auth value is marked secret
+ * HERE, at its construction site. */
+typedef struct NmRequestHeaders
+{
+    NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
+    size_t n;
+    char *auth; /* owned; NULL when keyless */
+} NmRequestHeaders;
+
+/* The composed length of a format whose only substitution is %s (the
+ * auth value is the only format in play). */
+static size_t fmt_sub_len(const char *fmt, const char *s)
+{
+    size_t n = 0;
+    for (const char *p = fmt; *p; p++) {
+        if (p[0] == '%' && p[1] == 's') {
+            n += strlen(s);
+            p++;
+        } else
+            n++;
+    }
+    return n;
+}
+
+/* 0 = built, -1 = out of memory (nothing to free; hs->auth is NULL). */
+static int request_headers_build(NmRequestHeaders *hs, int content_type,
+                                 const char *auth_header,
+                                 const char *api_key,
+                                 const NmExtraHeader *extra, size_t n_extra,
+                                 const char *user_agent)
+{
+    hs->n = 0;
+    hs->auth = NULL;
+    if (content_type) {
+        hs->hdrs[hs->n].name = "Content-Type";
+        hs->hdrs[hs->n].value = "application/json";
+        hs->hdrs[hs->n].secret = 0;
+        hs->n++;
+    }
+    if (auth_header && api_key && *api_key) {
+        size_t need = fmt_sub_len(auth_header, api_key);
+        char *auth = malloc(need + 1);
+        if (!auth)
+            return -1;
+        /* Exact size: the format cannot truncate (the fixed 512 it
+         * replaced could, and did, for a long key). */
+        snprintf(auth, need + 1, auth_header, api_key);
+        hs->auth = auth;
+        hs->hdrs[hs->n].name = "Authorization";
+        hs->hdrs[hs->n].value = auth;
+        hs->hdrs[hs->n].secret = 1;
+        hs->n++;
+    }
+    append_extra_headers(hs->hdrs, &hs->n, extra, n_extra);
+    hs->hdrs[hs->n].name = "User-Agent";
+    hs->hdrs[hs->n].value = user_agent ? user_agent : NM_USER_AGENT;
+    hs->hdrs[hs->n].secret = 0;
+    hs->n++;
+    return 0;
+}
+
+/* The headers are copied into the request buffer at queue time; the
+ * auth value's memory does not outlive the call. */
+static void request_headers_free(NmRequestHeaders *hs)
+{
+    free(hs->auth);
+    hs->auth = NULL;
+}
+
 /* ---------------------------------------------------------------- */
 /* URL / endpoint plumbing                                          */
 /* ---------------------------------------------------------------- */
 
-/* Parse "http(s)://host[:port]" out of base_url. Writes host/port.
- * Returns 0 on success. Character-level, no regex. */
-int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
-                             int *port, NmTransportMode *mode)
+/* Strict port text: digits only, <= 65535, ending at '/' or the
+ * string end — "host:abc" and "host:99999999" are malformed, not
+ * port 0. Shared by both authority shapes below. */
+static int url_port(const char *s)
+{
+    if (!s || *s < '0' || *s > '9')
+        return 0;
+    int v = 0;
+    for (; *s >= '0' && *s <= '9'; s++) {
+        v = v * 10 + (*s - '0');
+        if (v > 65535)
+            return 0;
+    }
+    return (*s == '\0' || *s == '/') ? v : 0;
+}
+
+/* THE URL parser (see the header). One implementation for every
+ * split — chat/fetch base and the websearch tool's query URL — so
+ * the pool key cannot learn a second opinion. */
+int nm_openai_split_url(const char *url, char *host, size_t host_cap,
+                        int *port, NmTransportMode *mode, const char **path)
 {
     *mode = NM_TRANSPORT_PLAIN;
     *port = 80;
+    if (path)
+        *path = NULL;
+    if (!url)
+        return -1;
     if (strncmp(url, "https://", 8) == 0) {
         *mode = NM_TRANSPORT_TLS;
         *port = 443;
@@ -105,6 +202,9 @@ int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
     }
     const char *slash = strchr(url, '/');
     size_t hlen = slash ? (size_t)(slash - url) : strlen(url);
+    /* The path is the part after the authority: borrowed into url. */
+    if (path)
+        *path = slash ? slash : url + strlen(url);
     /* Bracketed IPv6 literal ("[::1]:8080"): the colons inside the
      * literal are not the port delimiter, so the split must skip to the
      * closing bracket and only a colon AFTER it is the port. Without
@@ -122,20 +222,30 @@ int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
         if (close + 1 < url + hlen) {
             if (close[1] != ':')
                 return -1; /* host:port — anything else is malformed */
-            *port = atoi(close + 2);
+            *port = url_port(close + 2);
+            if (*port == 0)
+                return -1;
         }
         return 0;
     }
     const char *colon = memchr(url, ':', hlen);
     if (colon) {
         hlen = (size_t)(colon - url);
-        *port = atoi(colon + 1);
+        *port = url_port(colon + 1);
+        if (*port == 0)
+            return -1;
     }
     if (hlen == 0 || hlen >= host_cap)
         return -1;
     memcpy(host, url, hlen);
     host[hlen] = '\0';
     return 0;
+}
+
+int nm_openai_split_base_url(const char *url, char *host, size_t host_cap,
+                             int *port, NmTransportMode *mode)
+{
+    return nm_openai_split_url(url, host, host_cap, port, mode, NULL);
 }
 
 /* Path prefix from base_url ("" or "/v1"); the request path appends
@@ -1270,32 +1380,23 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
         return NULL;
     }
 
-    /* Headers: Content-Type, auth, provider extras, User-Agent
-     * (nevermore as itself — see openai_client.h). The auth header is
-     * built here and marked
-     * secret HERE — the recorder redacts marked values at log-write
-     * time; onboarding a provider via NmOpenaiEndpoint carries
-     * redaction with it. Extras sit between auth
-     * and UA, in array order; UA stays the tail. */
-    NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
-    size_t nh = 0;
-    hdrs[nh].name = "Content-Type";
-    hdrs[nh].value = "application/json";
-    hdrs[nh].secret = 0;
-    nh++;
-    char authbuf[512];
-    if (ep->auth_header && ep->api_key && *ep->api_key) {
-        snprintf(authbuf, sizeof(authbuf), ep->auth_header, ep->api_key);
-        hdrs[nh].name = "Authorization";
-        hdrs[nh].value = authbuf;
-        hdrs[nh].secret = 1;
-        nh++;
+    /* Headers: one builder shared with the fetch path — Content-Type,
+     * auth, provider extras, User-Agent (nevermore as itself). The
+     * auth value is marked secret at its construction site (the
+     * redaction seam) and sized exactly, so a long key cannot be
+     * truncated; the set is freed after the queue copied it. */
+    NmRequestHeaders hs;
+    if (request_headers_build(&hs, 1, ep->auth_header, ep->api_key,
+                              ep->extra_headers, ep->n_extra_headers,
+                              ep->user_agent) != 0) {
+        free(body);
+        nm_connection_close(conn);
+        if (err) {
+            err->status = NM_CHAT_ERR_TRANSPORT;
+            snprintf(err->message, sizeof(err->message), "out of memory");
+        }
+        return NULL;
     }
-    append_extra_headers(hdrs, &nh, ep->extra_headers, ep->n_extra_headers);
-    hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = ep->user_agent ? ep->user_agent : NM_USER_AGENT;
-    hdrs[nh].secret = 0;
-    nh++;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/chat/completions",
@@ -1323,8 +1424,9 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
 
     /* Queue the request; the connect/send phases drain inside
      * chat_step. The stream is returned in CONNECTING. */
-    NmTransportStatus rs = nm_request_queue(conn, "POST", path, hdrs, nh,
-                                            body, strlen(body));
+    NmTransportStatus rs = nm_request_queue(conn, "POST", path, hs.hdrs,
+                                            hs.n, body, strlen(body));
+    request_headers_free(&hs);
     free(body);
     if (rs != NM_TRANSPORT_OK) {
         if (err) {
@@ -1588,6 +1690,15 @@ unsigned nm_openai_stream_interest(NmChatStream *h)
     return i.handle >= 0 ? i.flags : 0;
 }
 
+NmSource nm_openai_stream_source(NmChatStream *h)
+{
+    NmSource none = { -1, 0, nm_socket_source_kind() };
+    if (!h || !h->conn)
+        return none;
+    NmSource i = nm_connection_interest(h->conn);
+    return i;
+}
+
 int nm_openai_stream_wait_ms(NmChatStream *h)
 {
     /* The framing tail owns the wait while it is owed: the tail budget
@@ -1647,26 +1758,13 @@ NmChatResult nm_openai_chat(const NmOpenaiEndpoint *ep,
             break;
         /* PENDING: wait on the CURRENT interest bits (connect/send
          * phases wait writability, the response phase readability),
-         * then step again. 10ms-bounded poll keeps this simple (ask
-         * mode is a one-shot process, not a UI loop). */
-        int fd = nm_openai_stream_fd(h);
-        unsigned interest = nm_openai_stream_interest(h);
-        if (fd < 0 || !interest)
+         * then step again. nm_source_wait_any is the one readiness
+         * wait for the blocking drives; the 10ms slice keeps this
+         * simple (ask mode is a one-shot process, not a UI loop). */
+        NmSource src = nm_openai_stream_source(h);
+        if (src.handle < 0 || src.flags == 0)
             break; /* torn down mid-step (error path) */
-        fd_set rd, wr;
-        FD_ZERO(&rd);
-        FD_ZERO(&wr);
-        struct timeval tv = { 0, 10 * 1000 };
-        if (interest & NM_INTEREST_READ)
-            FD_SET(fd, &rd);
-        if (interest & NM_INTEREST_WRITE)
-            FD_SET(fd, &wr);
-#ifdef _WIN32
-        select(fd + 1, (interest & NM_INTEREST_READ) ? &rd : NULL,
-               (interest & NM_INTEREST_WRITE) ? &wr : NULL, NULL, &tv);
-#else
-        select(fd + 1, &rd, &wr, NULL, &tv);
-#endif
+        nm_source_wait_any(&src, 1, 10);
     }
     nm_openai_chat_end(h);
     return r;
@@ -1807,35 +1905,27 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
         f->n_keep = n_keep;
     }
 
-    /* Same header set as chat: Content-Type (bodies), auth (absent
-     * for tokenless catalogs (e.g. a tokenless /v1/models)
-     * §5), provider extras, + User-Agent. The auth header is marked
-     * secret at its construction site (the redaction seam). */
-    NmRequestHeader hdrs[3 + NM_EXTRA_HEADERS_MAX];
-    size_t nh = 0;
-    if (body) {
-        hdrs[nh].name = "Content-Type";
-        hdrs[nh].value = "application/json";
-        hdrs[nh].secret = 0;
-        nh++;
+    /* Same header set as chat, through the same builder: Content-Type
+     * (bodies only), auth (absent for tokenless catalogs (e.g. a
+     * tokenless /v1/models) §5), provider extras, + User-Agent. The
+     * auth value is marked secret at its construction site (the
+     * redaction seam) and sized exactly; freed after the queue. */
+    NmRequestHeaders hs;
+    if (request_headers_build(&hs, body != NULL, auth_header, api_key,
+                              extra, n_extra, NULL) != 0) {
+        nm_connection_close(conn);
+        for (size_t i = 0; i < f->n_keep; i++)
+            free(f->keep[i]);
+        free(f->keep);
+        free(f);
+        return NULL;
     }
-    char authbuf[512];
-    if (auth_header && api_key && *api_key) {
-        snprintf(authbuf, sizeof(authbuf), auth_header, api_key);
-        hdrs[nh].name = "Authorization";
-        hdrs[nh].value = authbuf;
-        hdrs[nh].secret = 1;
-        nh++;
-    }
-    append_extra_headers(hdrs, &nh, extra, n_extra);
-    hdrs[nh].name = "User-Agent";
-    hdrs[nh].value = NM_USER_AGENT;
-    hdrs[nh].secret = 0;
-    nh++;
 
     size_t body_len = body ? strlen(body) : 0;
-    if (nm_request_queue(conn, method, path, hdrs, nh, body, body_len) !=
-        NM_TRANSPORT_OK) {
+    NmTransportStatus rs =
+        nm_request_queue(conn, method, path, hs.hdrs, hs.n, body, body_len);
+    request_headers_free(&hs);
+    if (rs != NM_TRANSPORT_OK) {
         nm_connection_close(conn);
         for (size_t i = 0; i < f->n_keep; i++)
             free(f->keep[i]);
