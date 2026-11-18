@@ -183,7 +183,7 @@ static const struct
      * (test_config pins every index), so a new key joins the end. */
     { NM_CFG_KEY_MENTIONS, "NEVERMORE_MENTIONS", "on" },
     { NM_CFG_KEY_SHELL_MODE, "NEVERMORE_SHELL_MODE", "on" },
-    { NM_CFG_KEY_KEEPALIVE, "NEVERMORE_KEEPALIVE", "off" },
+    { NM_CFG_KEY_KEEPALIVE, "NEVERMORE_KEEPALIVE", "on" },
     { NM_CFG_KEY_KEEPALIVE_IDLE, "NEVERMORE_KEEPALIVE_IDLE_MS",
       NM_STR(NM_KEEPALIVE_IDLE_MS) },
 };

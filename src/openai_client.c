@@ -994,7 +994,10 @@ static void stream_teardown(NmChatStream *h)
             nm_wire_tap_error(h->conn, "body", h->error_body);
     }
     if (h->conn) {
-        nm_connection_close(h->conn);
+        /* The pool owns the verdict: a stream that ended at a real
+         * framing end is shelved for the next round on the same
+         * endpoint; a drop, cancel, capped drain or error closes. */
+        nm_connection_release(h->conn);
         h->conn = NULL;
     }
     if (h->sse) {

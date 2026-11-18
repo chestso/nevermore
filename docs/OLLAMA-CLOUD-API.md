@@ -206,6 +206,22 @@ using `https://ollama.com/api` (native) and `https://ollama.com/v1`
 > without one); `/api/ps` and `/api/embed` return 401 even **with** a key on the
 > cloud.
 
+### 6.0.0 Connection persistence (verified 2026-11-18)
+
+Every live surface answers **HTTP/1.1 and keeps the connection open**; with
+no `Connection` field in the request, the responses carry **no `Connection`
+field at all** (HTTP/1.1's default: persistent) — ollama.com fronts on Google
+Frontend, which says nothing rather than `keep-alive`. Proven with two
+back-to-back requests on one socket (`curl`'s `num_connects=0` on the second)
+for `/v1/models`, and for **a real streamed chat POST**: a full SSE exchange
+(chunked, `[DONE]`, chunk terminator) leaves the connection reusable, and the
+next chat POST rides the same socket. The idle ladder (a fresh connection per
+rung, held idle then re-probed) held the connection **open and answering past
+120 s** at every rung, so nevermore's `keepalive_idle` (30 s) never races a
+measured cutoff. The local daemon was not measured (no box running one); its
+server is Go's stock HTTP, the same family as the cloud's front. Evidence
+dumps: `/tmp/nm-ka-*` (2026-11-18).
+
 ### 6.0. Authentication realms (verified Sep 2026)
 
 There are **two disjoint auth realms**, plus a third (signature) that shares the

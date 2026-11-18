@@ -282,6 +282,14 @@ variable says so with an `_MS` suffix.
   addresses in turn
 - `handshake_timeout` (default 10000 ms): TLS handshake budget; `off` restores
   the OS default
+- `keepalive` (default on): reuse a completed exchange's connection for the
+  next exchange on the same host (a turn's rounds stop paying connect + TLS
+  per round); off sends `Connection: close` again — today's wire — as the
+  escape hatch for a middlebox that mishandles persistence
+- `keepalive_idle` (default 30000 ms): how long the pool may hold an idle
+  connection before the next exchange dials fresh; a response's
+  `Keep-Alive: timeout` hint tightens it; `off` is refused (`keepalive off`
+  is the no-reuse spelling)
 - `family_skip` (default off): once one IP family (IPv4 or IPv6) burns the
   connect budget and the other answers, dial the slow family last for the
   session

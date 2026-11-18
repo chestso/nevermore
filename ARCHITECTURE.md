@@ -489,7 +489,35 @@ are guarded stubs (`#ifdef NM_TLS_*`), one file per OS.
   TLS close in `transport.c` wrap theirs, and `nm_socket_open` is the single
   place a socket is created, so the option cannot be forgotten at a new call
   site. A process-wide `SIG_IGN` is rejected on purpose: a disposition survives
-  `execve`, so every tool child would inherit the ignore.
+  `execve`, so every tool child would inherit the ignore. Sockets open
+  close-on-exec there too: a pooled fd idles exactly while tools run, and a
+  child that inherits it would hold the connection past `close()` so the peer
+  never sees the FIN (`WSA_FLAG_NO_HANDLE_INHERIT` on Windows).
+- **The pool, and the response's reuse verdict.** `keepalive` (default on)
+  lets a completed exchange's connection be shelved in a small fixed pool
+  keyed by mode+host+port (one idle connection per key, the `addr_cache`
+  lifetime precedent), and the next exchange on the same endpoint pops it
+  instead of paying connect + TLS per round — a turn's rounds, ollama's
+  per-model chain and boot's back-to-back fetches all ride one connection
+  (`xchg` counts the exchanges on it). Whether a connection is reusable is
+  THE RESPONSE's verdict, computed inline in `parse_head` (never read back
+  from the retained-header store, whose 24-header cap would silently turn a
+  dropped `Connection: close` into reuse): 1.1 with no `close` is persistent,
+  1.0 needs an explicit `keep-alive`, and the framing must have ENDED
+  (chunked at its terminator, length-delimited at its `Content-Length`) with
+  nothing failed and no bytes undelivered — a cancel, a mid-body drop, a body
+  cap or a capped error drain closes, never pools. 204/304 are body-less by
+  definition (framing 0). `keepalive_idle` (default 30 s, `off` refused)
+  bounds how long a slot may idle, tightened per connection by a
+  `Keep-Alive: timeout` hint minus a margin. Acquire is a pure lookup: a
+  stale slot is discovered by the exchange and repaired — **one transparent
+  redial** when a REUSED connection fails before ANY response byte (a send
+  failure, or EOF with nothing read), on the same `NmConnection` with a new
+  conn id, a `redial` wire line naming both ids, and the retained request
+  re-drained after the dial. One redial per exchange; a failure after the
+  first response byte is final (it can never reach the round-level retry, so
+  a POST is never re-billed after the model started answering). The blocking
+  transport stays out of the pool by construction.
 - `nm_socket_wait_ready_ms` retries EINTR (SIGWINCH can land mid-handshake).
 
 ## Agent loop

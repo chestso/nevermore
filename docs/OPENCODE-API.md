@@ -45,6 +45,20 @@ marketing site). The catalog lives under the tier prefix
 (`/zen/v1/models`, `/zen/go/v1/models`) and answers **without any
 header** (200, probed tokenless).
 
+### 1.1 Connection persistence (verified 2026-11-18)
+
+Every live surface answers **HTTP/1.1 and keeps the connection open**:
+`/zen/v1/models` and `/zen/go/v1/models` (Cloudflare) say `Connection:
+keep-alive`, Content-Length; `models.opencode.ai/api.json` (the runtime
+coverage's document) says the same — the document is now 6,736,600 bytes
+(it was 5.9 MB when the gzip note was written). Even the 400
+`MissingSessionID` answer (a chat request without `x-opencode-session`)
+stays `keep-alive`, so an error exchange does not cost the connection. A
+**real streamed chat POST** (`stream: true`, SSE chunked, `Connection:
+keep-alive`) leaves the connection reusable: the next chat POST rides
+the same socket. The idle ladder held every surface **open and answering
+past 120 s** at every rung. Evidence dumps: `/tmp/nm-ka-*` (2026-11-18).
+
 ## 2. The session header — the non-negotiable part
 
 Go monitors traffic for abuse and asks every client to identify

@@ -1548,6 +1548,41 @@ static void test_mentions_key(void)
 
 /* The `!` shell mode's switch: a bool, default on, in the same shape as
  * `mentions` (the two prompt sigils are two switches). */
+static void test_keepalive_key(void)
+{
+    pin_paths("keepalive");
+    NmConfig *c = nm_config_load();
+    ASSERT_NOT_NULL(c);
+    /* The default is ON: the pool is the shipped behaviour, and the
+     * escape hatch is the escape hatch. */
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_KEEPALIVE), "on");
+    ASSERT_TRUE(nm_config_resolve_bool(c, NM_CFG_KEY_KEEPALIVE, 0));
+    /* The window: the evidence-backed 30 s. */
+    ASSERT_STR_EQ(nm_config_default(NM_CFG_KEY_KEEPALIVE_IDLE), "30000");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_KEEPALIVE),
+                  "NEVERMORE_KEEPALIVE");
+    ASSERT_STR_EQ(nm_config_env_name(NM_CFG_KEY_KEEPALIVE_IDLE),
+                  "NEVERMORE_KEEPALIVE_IDLE_MS");
+
+    /* Off is a real opinion (the escape hatch for a middlebox). */
+    write_file_at(g_user, "keepalive = off\n");
+    NmConfig *c2 = nm_config_load();
+    ASSERT_NOT_NULL(c2);
+    ASSERT_FALSE(nm_config_get_bool(c2, NM_CFG_KEY_KEEPALIVE, 1));
+    nm_config_free(c2);
+
+    /* The window refuses `off`: "never idle out" is a staleness trap,
+     * and keepalive = off is already the no-reuse spelling. */
+    write_file_at(g_user, "keepalive_idle = off\n");
+    NmConfig *c3 = nm_config_load();
+    ASSERT_NOT_NULL(c3);
+    ASSERT_NULL(nm_config_get(c3, NM_CFG_KEY_KEEPALIVE_IDLE));
+    ASSERT_EQ(nm_config_source(c3, NM_CFG_KEY_KEEPALIVE_IDLE),
+              NM_CFG_DEFAULT);
+    nm_config_free(c3);
+    nm_config_free(c); /* the first load (the default flip's own) */
+}
+
 static void test_shell_mode_key(void)
 {
     pin_paths("shell_mode");
@@ -2075,6 +2110,7 @@ int main(void)
     RUN_TEST(test_spinner_ramp_key);
     RUN_TEST(test_mentions_key);
     RUN_TEST(test_shell_mode_key);
+    RUN_TEST(test_keepalive_key);
     RUN_TEST(test_sampling_knobs);
     RUN_TEST(test_scoped_model_resolution);
     RUN_TEST(test_scoped_key_vocabulary);

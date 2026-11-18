@@ -27,6 +27,15 @@ Optional attribution headers exist (`HTTP-Referer`, `X-Title`) —
 not required for the request to succeed, but nevermore DOES send them:
 the app's identity rides every chat round (§9).
 
+### 1.1 Connection persistence (verified 2026-11-18)
+
+`/api/v1/models` (Cloudflare front) answers **HTTP/1.1 with an explicit
+`Connection: keep-alive`**, chunked, and a second request on the same socket
+rides it (`curl`'s `num_connects=0`). The idle ladder held the connection
+**open and answering past 120 s** at every rung. nevermore's `keepalive`
+(default on) reuses it across boot fetches and a turn's rounds. Evidence
+dumps: `/tmp/nm-ka-*` (2026-11-18).
+
 ## 2. Model catalog (live test, 445 entries, Sep 2026)
 
 `GET /api/v1/models` → `{"data":[...], "total_count":N, "links":{...}}`
