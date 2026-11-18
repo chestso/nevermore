@@ -131,6 +131,16 @@ struct NmAgent
      * latch holds the signature it fired at) and a per-result reminder
      * needs no latch at all. */
     unsigned turn;
+    /* The session index of the ACTIVE turn's first message: the real
+     * user message that started it, recorded in nm_agent_start
+     * immediately BEFORE that message is appended — never derived from
+     * roles (reminders, mention notes and tool-image fan-outs are
+     * user-role messages that live INSIDE a turn). A message at or
+     * after turn_first is in the active turn; the reasoning echo's
+     * `turn` mode strips every older trace by this line, not by
+     * scanning roles. Between turns the value is stale and never read:
+     * nothing is composed outside a turn's rounds. */
+    size_t turn_first;
     int reminder_latch[NM_REMINDER_MAX_RULES];
     /* The `@` mentions the user pointed at in THIS message, as the text
      * the harness will append right after the user's own (see
@@ -1577,6 +1587,67 @@ static void chat_failure(NmAgent *a, const NmChatResult *r, char *out,
 
 /* Open the next round's stream from the session.
  * Returns 0 on success. */
+/* The echo mode's compose rule, in two pure functions — the four-row
+ * table (docs: README's Reasoning echo) in one unit-testable place.
+ * Both take the mode, whether the message carries tool_calls and
+ * whether the message is in the active turn (i >= turn_first), and
+ * return what the wire gets: NULL leaves the field off, "" is the
+ * presence placeholder a replay check reads. "Active turn" = every
+ * message from the turn's real user message on; "older" = before it.
+ *
+ * The modes are not ordered: nothing in either function may compare
+ * them with <. `turn` is not a subset or superset of `tools` (it drops
+ * older tool-call traces `tools` keeps, and adds active-turn answers
+ * `tools` omits); `all` is a superset of both. */
+/* The trace (the session's `reasoning_content` text, NULL when the
+ * round streamed none). A tool-call message always carries the field
+ * under tools/turn/all — the round's trace, or "" when there was
+ * none — because the replay check tests the field's PRESENCE, not its
+ * content (docs/OPENCODE-API.md §3). `turn`'s one strip is an older
+ * turn: the placeholder stays (presence), the text does not. A plain
+ * answer echoes its trace only under turn/all, only when it has one. */
+static const char *echo_trace(NmReasoningEcho mode, int calls, int in_turn,
+                              const char *trace)
+{
+    if (mode == NM_REASONING_ECHO_OFF)
+        return NULL;
+    if (calls) {
+        if (mode == NM_REASONING_ECHO_TURN && !in_turn)
+            return ""; /* the strip: presence without the bytes */
+        return (trace && *trace) ? trace : "";
+    }
+    /* A plain answer echoes its trace only when the mode keeps
+     * answers AND the message is in the active turn: `all` keeps
+     * every answer, `turn` only the active one, `tools` and `off`
+     * keep none. */
+    if (mode == NM_REASONING_ECHO_ALL ||
+        (mode == NM_REASONING_ECHO_TURN && in_turn))
+        return (trace && *trace) ? trace : NULL;
+    return NULL;
+}
+
+/* The reasoning_details array, with STRICT echo-back: only a message
+ * whose round actually delivered an array ever carries one — the knob
+ * never fabricates the field, so no mode produces a placeholder here.
+ * Otherwise the same table: an older message loses its array under
+ * `turn`, `tools` keeps it on tool-call messages only, `all` keeps
+ * every array there is. */
+static const char *echo_details(NmReasoningEcho mode, int calls, int in_turn,
+                                const char *details_json)
+{
+    if (mode == NM_REASONING_ECHO_OFF)
+        return NULL;
+    if (!details_json || !*details_json)
+        return NULL; /* strict echo-back: never a placeholder */
+    if (calls)
+        return (in_turn || mode != NM_REASONING_ECHO_TURN) ? details_json
+                                                           : NULL;
+    return (mode == NM_REASONING_ECHO_ALL ||
+            (mode == NM_REASONING_ECHO_TURN && in_turn))
+               ? details_json
+               : NULL;
+}
+
 static int begin_round(NmAgent *a)
 {
     int cap = nm_agent_max_rounds(a);
@@ -1843,27 +1914,14 @@ static int begin_round(NmAgent *a)
         }
         /* Reasoning echo-back: the session keeps every trace for
          * display either way — the mode decides which ones ride back.
-         * A tool-call round is where the upstream replay check
-         * actually bites (docs/OPENCODE-API.md §3), which is what
-         * `tools` covers; `all` re-sends the answer rounds' traces
-         * too.
-         *
-         * The check demands the FIELD, not a real trace: it 400s a
-         * tool_calls message that omits reasoning_content even when
-         * the round streamed no trace at all (the model may answer
-         * straight to a tool call, as the 2026-09-22 wire dump shows),
-         * and `""` satisfies it. So every tool_calls message under
-         * `tools`/`all` carries the field — the round's trace, or ""
-         * when there was none (NmMessage.reasoning: NULL omits, ""
-         * emits an empty string). */
+         * The compose rule lives in echo_trace / echo_details above:
+         * one table, one place, driven by the message's tool_calls and
+         * by the turn boundary (i >= turn_first — the real user
+         * message that started the active turn, not a role scan). */
         int carries_calls = sm->tool_calls_json && *sm->tool_calls_json;
-        int mode_tools = echo == NM_REASONING_ECHO_TOOLS;
-        int mode_all = echo == NM_REASONING_ECHO_ALL;
-        const char *trace = NULL;
-        if (carries_calls && (mode_tools || mode_all))
-            trace = (sm->reasoning && *sm->reasoning) ? sm->reasoning : "";
-        else if (mode_all && sm->reasoning && *sm->reasoning)
-            trace = sm->reasoning;
+        int in_turn = i >= a->turn_first;
+        const char *trace =
+            echo_trace(echo, carries_calls, in_turn, sm->reasoning);
         msgs[i].reasoning = trace;
         if (trace)
             echoed = 1;
@@ -1873,17 +1931,12 @@ static int begin_round(NmAgent *a)
          * signature_echo mode — the SAME shape as the trace echo, a
          * separate latch (a prefix that gains or loses either field
          * is a different prefix; the two knobs must not yank each
-         * other). STRICT ECHO-BACK: only a message whose round
-         * actually delivered an array ever carries one — the knob
-         * cannot fabricate the field, so a model that never speaks
-         * reasoning_details never sees it. */
-        const char *details = NULL;
-        if (sm->reasoning_details_json && *sm->reasoning_details_json) {
-            if (carries_calls && sig != NM_REASONING_ECHO_OFF)
-                details = sm->reasoning_details_json;
-            else if (sig == NM_REASONING_ECHO_ALL)
-                details = sm->reasoning_details_json;
-        }
+         * other). STRICT ECHO-BACK (echo_details above): only a
+         * message whose round actually delivered an array ever
+         * carries one — the knob cannot fabricate the field, so a
+         * model that never speaks reasoning_details never sees it. */
+        const char *details = echo_details(sig, carries_calls, in_turn,
+                                           sm->reasoning_details_json);
         msgs[i].reasoning_details_json = details;
         if (details)
             sig_echoed = 1;
@@ -2581,6 +2634,10 @@ int nm_agent_start(NmAgent *a, const char *user_input,
      * store; the bytes stay there for the rest of the conversation). The
      * session builds the deterministic text part when the input is empty
      * but images are pending — the wire shape is frozen either way. */
+    /* The turn boundary is the REAL user message, recorded before it
+     * rides the session — in both branches, so one site for the
+     * nm_agent_turn and TUI paths alike. */
+    a->turn_first = nm_session_len(a->session);
     if (n_images > 0) {
         if (!nm_session_append_user_images(a->session, user_input, image_ids,
                                            n_images)) {

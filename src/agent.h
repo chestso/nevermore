@@ -226,15 +226,21 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
 
 /* Reasoning echo-back: which assistant messages riding a later request
  * carry their trace as "reasoning_content" — the store's
- * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / ALL (see
- * conf.h for what each mode means). The agent
+ * `reasoning_echo` key, one of NM_REASONING_ECHO_OFF / TOOLS / TURN /
+ * ALL (see conf.h for what each mode means). The agent
  * keeps no copy: it resolves at the point of use. The trace is
  * received, displayed and kept in the session in every mode — the mode
- * decides only what goes back on the wire. `tools`/`all` attach the
- * field to EVERY tool-call message, the round's trace or "" when the
- * round streamed none: the replay check tests the field's presence, so
- * a trace-less tool round must still ride back an empty
- * `reasoning_content` (docs/OPENCODE-API.md §3).
+ * decides only what goes back on the wire. `tools`/`turn`/`all` attach
+ * the field to EVERY tool-call message of the active turn, the round's
+ * trace or "" when the round streamed none: the replay check tests the
+ * field's presence, so a trace-less tool round must still ride back an
+ * empty `reasoning_content` (docs/OPENCODE-API.md §3). `turn`'s strip
+ * is older turns: an OLD tool-call message keeps the field as ""
+ * (presence without the bytes) and an old plain answer loses its trace
+ * entirely — decided per message by `i >= turn_first`, the REAL user
+ * message that started the active turn (agent.c's NmAgent.turn_first;
+ * never a role scan: reminders and tool-image fan-outs are user-role
+ * messages that live inside a turn).
  *
  * THE KNOB IS THE WHOLE CONTROL. There is no provider layer: a
  * provider's wire is served by the mode the key names, and the key's
@@ -252,8 +258,8 @@ int nm_agent_next_timeout_ms(const NmAgent *a);
  * can re-trip DeepSeek's thinking-mode replay check — the very failure
  * the echo exists to avoid (docs/OPENCODE-API.md §3). A change after
  * the latch applies to the next chat (a fresh agent).
- * nm_agent_reasoning_echo reports the mode in force (store, provider
- * default, or latch); nm_agent_reasoning_echo_frozen says which it was.
+ * nm_agent_reasoning_echo reports the mode in force (the store, or the
+ * latch); nm_agent_reasoning_echo_frozen says which it was.
  *
  * NOTE (why the mode exists at all): some upstreams 400 a `tool_calls`
  * message that omits `reasoning_content` (`""` is enough; plain
@@ -280,10 +286,12 @@ int nm_agent_reasoning_echo_frozen(const NmAgent *a);
  * carry their round's `reasoning_details` array — the structured
  * reasoning carrier (Gemini's thought signature, OpenAI's encrypted
  * blob) — as a message-level field. The store's `signature_echo` key,
- * one of NM_REASONING_ECHO_OFF / TOOLS / ALL (the SAME value space as
- * `reasoning_echo`, see conf.h). The array is received and
+ * one of NM_REASONING_ECHO_OFF / TOOLS / TURN / ALL (the SAME value
+ * space as `reasoning_echo`, see conf.h). The array is received and
  * kept on the session message in every mode; the mode decides only what
- * goes back on the wire.
+ * goes back on the wire. Under `turn` an older message loses its array
+ * at the same boundary the trace echo strips by (the REAL user message
+ * that started the active turn, `i >= turn_first`).
  *
  * THE KNOB IS THE WHOLE CONTROL — the same rule as the trace echo: no
  * provider layer, the built-in default is `all`, and an explicit

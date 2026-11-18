@@ -2436,6 +2436,493 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* `turn`: the active turn only, the strip at the boundary               */
+/* ------------------------------------------------------------------ */
+
+/* Defined below with the image tests (the image section owns it). */
+static int count_substr(const char *hay, const char *needle);
+
+/* The turn mode's scope: inside the active turn it is identical to
+ * `all` (tool-call trace or "", answer trace), at the boundary the
+ * older turns are stripped — an old tool-call message keeps the field
+ * as "" (the presence placeholder, docs/OPENCODE-API.md §3), an old
+ * plain answer loses its field entirely. Scripted: two turns, each a
+ * tool round then a traced answer. */
+static void test_agent_reasoning_echo_turn_scope(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 4;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"call trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_t1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"answer trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"call trace two\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_t2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[3] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"answer trace two\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TURN);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_n_requests, 4);
+
+    /* Request 2 (turn 1's tool round, turn 1 active): everything
+     * in-turn rides — the round's real trace on its tool-call message,
+     * no placeholder needed. */
+    ASSERT_TRUE(strstr(g_requests[1], "call trace one") != NULL);
+    ASSERT_EQ(count_substr(g_requests[1], "\"reasoning_content\":\"\""), 0);
+    /* Same-turn prefix: request 2's messages extend request 1's
+     * byte-for-byte (the invariant inside a turn). */
+    const char *m1 = strstr(g_requests[0], "\"messages\":[");
+    const char *m2 = strstr(g_requests[1], "\"messages\":[");
+    ASSERT_NOT_NULL(m1);
+    ASSERT_NOT_NULL(m2);
+    const char *end1 = strstr(m1, "],\"stream\"");
+    ASSERT_NOT_NULL(end1);
+    ASSERT_TRUE(memcmp(m1, m2, (size_t)(end1 + 1 - m1) - 1) == 0);
+
+    /* Request 3 (turn 2's tool round; turn 1 is now OLDER): the old
+     * tool-call message keeps the field as "" and the old answer loses
+     * its field entirely — the strip, and nothing else changed. */
+    ASSERT_TRUE(strstr(g_requests[2], "the quick brown fox") != NULL);
+    ASSERT_EQ(count_substr(g_requests[2], "\"reasoning_content\":\"\""), 1);
+    ASSERT_TRUE(strstr(g_requests[2], "call trace one") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "answer trace one") == NULL);
+
+    /* Request 4 (turn 2's answer round): turn 2 rides in full, turn 1
+     * stays stripped. */
+    ASSERT_TRUE(strstr(g_requests[3], "call trace two") != NULL);
+    ASSERT_TRUE(strstr(g_text, "answer two") != NULL);
+    ASSERT_EQ(count_substr(g_requests[3], "\"reasoning_content\":\"\""), 1);
+    ASSERT_TRUE(strstr(g_requests[3], "call trace one") == NULL);
+    ASSERT_TRUE(strstr(g_requests[3], "answer trace one") == NULL);
+    /* And request 4's messages extend request 3's byte-for-byte: the
+     * strip happened once, at the boundary, and never again (the
+     * same discipline as the image-aging rule's ONE change). */
+    const char *m3 = strstr(g_requests[2], "\"messages\":[");
+    const char *m4 = strstr(g_requests[3], "\"messages\":[");
+    ASSERT_NOT_NULL(m3);
+    ASSERT_NOT_NULL(m4);
+    const char *end3 = strstr(m3, "],\"stream\"");
+    ASSERT_NOT_NULL(end3);
+    ASSERT_TRUE(memcmp(m3, m4, (size_t)(end3 + 1 - m3) - 1) == 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* The boundary is the REAL user message that started the turn, never
+ * derived from roles: the round-budget nudge (a user-role message
+ * appended inside the turn) and a tool-image fan-out (also user-role)
+ * do not start a turn, so the traces streamed before them still ride.
+ * A role-derived boundary ("a user message after a tool result is a
+ * turn start") would strip exactly these. Scripted: one turn,
+ * `rounds` = 3, three rounds — round 1's tool call reads an IMAGE (the
+ * fan-out lands after its tool result), round 2's tool call reads the
+ * text fixture, and the third round begins with the budget nudge. */
+static void test_agent_reasoning_echo_turn_boundary_is_real_message(void)
+{
+    reset_capture();
+    write_fixture();
+    static const unsigned char local_png[] = {
+        0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, /* signature */
+        0x00, 0x00, 0x00, 0x0d, 'I', 'H', 'D', 'R',  /* IHDR      */
+        0x00, 0x00, 0x00, 0x40,                      /* width 64  */
+        0x00, 0x00, 0x00, 0x20                       /* height 32 */
+    };
+    const char *img = "nm-agent-turn-img.png";
+    FILE *f = fopen(img, "wb");
+    ASSERT_NOT_NULL(f);
+    fwrite(local_png, 1, sizeof(local_png), f);
+    fclose(f);
+
+    char sse0[1024];
+    snprintf(sse0, sizeof(sse0),
+             "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+             "\"reasoning_content\":\"image round trace\"}}]}\n\n"
+             "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+             "\"id\":\"call_img\",\"type\":\"function\",\"function\":"
+             "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"%s"
+             "\\\"}\"}}]}}]}\n\n"
+             "data: [DONE]\n\n",
+             img);
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] = sse0;
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"text round trace\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_txt\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"nudged and done\"}}]}\n"
+        "\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
+    /* The cap makes the round-budget rule fire: round + 1 == cap is the
+     * turn's LAST allowed round, so the nudge rides a user message
+     * INTO the middle of this turn. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROUNDS, "3"), 0);
+
+    ASSERT_EQ(nm_agent_turn(agent, "loop with a nudge", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "nudged and done");
+    ASSERT_EQ(g_n_requests, 3);
+
+    /* The fan-out landed (an image part on the wire) and round 2's
+     * request — built AFTER it — still carries the image round's
+     * trace: the fan-out message did not start a turn. */
+    ASSERT_TRUE(strstr(g_requests[1], "\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "image round trace") != NULL);
+
+    /* Request 3 carries the budget nudge (a user-role message, mid
+     * turn) and BOTH earlier traces — the nudge did not start a turn
+     * either, and no strip ran anywhere in this turn. */
+    ASSERT_TRUE(strstr(g_requests[2], "last tool round allowed") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "image round trace") != NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "text round trace") != NULL);
+    ASSERT_EQ(count_substr(g_requests[2], "\"reasoning_content\":\"\""), 0);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    remove(img);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROUNDS);
+}
+
+/* A cancelled turn leaves its messages in the session; the next start
+ * makes them OLDER, and the strip applies to them like any other old
+ * turn — the tool-call message keeps "" (presence), its trace is gone.
+ * Scripted: a tool call streamed with a trace, cancelled before the
+ * tool ran; then a plain-answer turn. */
+static void test_agent_reasoning_echo_turn_interrupted_turn(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 2;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"interrupted trace\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_ix\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
+
+    /* Stream to the tool phase, then abandon the turn. */
+    ASSERT_EQ(nm_agent_start(agent, "interrupt me", NULL, 0), 0);
+    for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
+         i++) {
+        int fd = agent_fd(agent);
+        if (fd >= 0) {
+            fd_set r;
+            struct timeval tv = { 0, 10 * 1000 };
+            FD_ZERO(&r);
+            FD_SET(fd, &r);
+            select(fd + 1, &r, NULL, NULL, &tv);
+        }
+        ASSERT_EQ(nm_agent_step(agent), 0);
+    }
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
+    nm_agent_cancel(agent);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_IDLE);
+
+    /* The next turn: the interrupted turn's messages are older, so the
+     * request strips their trace and keeps the presence placeholder —
+     * exactly the shape of an ordinary old turn. Nothing special. */
+    ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_STR_EQ(g_text, "after cancel");
+    ASSERT_EQ(g_n_requests, 2);
+    ASSERT_TRUE(strstr(g_requests[1], "carry on") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "\"tool_call_id\":\"call_ix\"") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "interrupted trace") == NULL);
+    ASSERT_EQ(count_substr(g_requests[1], "\"reasoning_content\":\"\""), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* `turn` freezes like every mode: the first request that actually
+ * carried a field latches it, and a later `all` in the store is inert
+ * for this conversation (a change applies to the next chat). Scripted:
+ * a tool round (whose request carries the trace on the ACTIVE call —
+ * the latch fires here), a traced answer, then the store switched to
+ * `all` before the next turn. */
+static void test_agent_reasoning_echo_turn_freezes_once_sent(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 3;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"latch trace\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_l1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_content\":\"answer trace one\"}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    /* Request 2 replayed the active call with its real trace: frozen. */
+    ASSERT_TRUE(strstr(g_requests[1], "latch trace") != NULL);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TURN);
+
+    /* The store now says `all`: inert — the frozen mode decides. */
+    ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all"),
+              0);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(g_n_requests, 3);
+    ASSERT_TRUE(strstr(g_text, "answer two") != NULL);
+    /* The old turn stays stripped (mode still `turn`), the new mode
+     * never resurrects anything: the strip is one-way, like every
+     * frozen mode. */
+    ASSERT_TRUE(strstr(g_requests[2], "latch trace") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "answer trace one") == NULL);
+    ASSERT_EQ(count_substr(g_requests[2], "\"reasoning_content\":\"\""), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TURN);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* The signature echo under `turn`: STRICT echo-back holds at the
+ * boundary too — an older message's array is dropped (no placeholder:
+ * the knob cannot fabricate the field), the active turn's arrays ride
+ * as usual. Scripted: turn 1 = a tool round with an array, then an
+ * answer round with an array; turn 2 = a tool round with an array. */
+static void test_agent_signature_echo_turn_scope(void)
+{
+    reset_capture();
+    write_fixture();
+
+    struct ServerScript sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.n_rounds = 4;
+    sc.sse[0] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-one\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_st1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[1] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+        "\"data\":\"blob-two\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer one\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[2] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+        "\"signature\":\"sig-three\"}]}}]}\n\n"
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_st2\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\"}\"}}]}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.sse[3] =
+        "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
+        "data: [DONE]\n\n";
+    sc.fd = server_bind(&sc.port);
+    ASSERT_TRUE(sc.fd >= 0);
+
+    pthread_t th;
+    pthread_create(&th, NULL, agent_server_thread, &sc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    const NmProvider *p = nm_provider_by_name("ollama:local");
+    ASSERT_NOT_NULL(p);
+
+    NmToolset *tools = nm_toolset_new_defaults();
+    NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
+    nm_agent_set_endpoint(agent, base, NULL);
+    nm_agent_on_delta(agent, cap_delta);
+    nm_agent_on_tool(agent, cap_tool);
+    nm_agent_on_state(agent, cap_state);
+
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "turn");
+    /* The trace echo stays off: this test is about the signature's
+     * scope alone. */
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
+    ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TURN);
+
+    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
+    ASSERT_EQ(g_n_requests, 4);
+
+    /* Request 2 (turn 1's answer round): the ACTIVE tool call's array
+     * rides (latched here), the trace echo never fired. */
+    ASSERT_TRUE(strstr(g_requests[1], "sig-one") != NULL);
+    ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
+    ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
+    ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
+
+    /* Request 3 (turn 2's tool round): turn 1's arrays are gone — and
+     * no placeholder stands in (strict echo-back), so the field
+     * disappears with the boundary. */
+    ASSERT_TRUE(strstr(g_requests[2], "sig-one") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "blob-two") == NULL);
+    ASSERT_TRUE(strstr(g_requests[2], "reasoning_details") == NULL);
+
+    /* Request 4: turn 2's own array rides, turn 1 stays stripped. */
+    ASSERT_TRUE(strstr(g_requests[3], "sig-three") != NULL);
+    ASSERT_TRUE(strstr(g_requests[3], "sig-one") == NULL);
+    ASSERT_TRUE(strstr(g_requests[3], "blob-two") == NULL);
+
+    nm_agent_free(agent);
+    nm_toolset_free(tools);
+    pthread_join(th, NULL);
+    close(sc.fd);
+    remove(FIXTURE);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
+    nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
+}
+
+/* ------------------------------------------------------------------ */
 /* The signature echo: the round's reasoning_details array replayed     */
 /* ------------------------------------------------------------------ */
 
@@ -7606,6 +8093,11 @@ int main(void)
     RUN_TEST(test_agent_reasoning_echo_user_overrides_the_default);
     RUN_TEST(test_agent_reasoning_echo_tools_scope);
     RUN_TEST(test_agent_reasoning_echo_tools_covers_traceless_round);
+    RUN_TEST(test_agent_reasoning_echo_turn_scope);
+    RUN_TEST(test_agent_reasoning_echo_turn_boundary_is_real_message);
+    RUN_TEST(test_agent_reasoning_echo_turn_interrupted_turn);
+    RUN_TEST(test_agent_reasoning_echo_turn_freezes_once_sent);
+    RUN_TEST(test_agent_signature_echo_turn_scope);
     RUN_TEST(test_agent_reasoning_mode_change_before_send_applies);
     RUN_TEST(test_agent_reasoning_echo_freezes_once_sent);
     RUN_TEST(test_agent_signature_echo_default_on_the_wire_that_needs_it);

@@ -4061,9 +4061,9 @@ static void note_frozen_echo(NmChatApp *app, const char *key)
         return;
     NmReasoningEcho frozen = reasoning ? nm_agent_reasoning_echo(app->agent)
                                        : nm_agent_signature_echo(app->agent);
-    /* What the change WOULD do (the store's key, else the provider's
-     * declaration) — the agent's own resolution with the freeze
-     * ignored, so a reset back to the provider default (which leaves
+    /* What the change WOULD do (the store's key; there is no provider
+     * layer) — the agent's own resolution with the freeze
+     * ignored, so a reset back to the built-in default (which leaves
      * the effective mode unchanged) is correctly silent. */
     NmReasoningEcho after = reasoning
                                 ? nm_agent_reasoning_echo_next(app->agent)
