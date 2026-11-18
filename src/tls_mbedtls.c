@@ -83,7 +83,16 @@ static int mb_init_once(void)
                             "/etc/ssl/cert.pem", NULL };
     int loaded = 0;
     for (int i = 0; paths[i]; i++) {
-        if (mbedtls_x509_crt_parse_file(&g_cacert, paths[i]) == 0) {
+        /* A system bundle may carry individual certificates the
+         * parser skips; parse_file answers "0 + how many were kept"
+         * on success and a POSITIVE "error class + how many failed"
+         * when some were skipped — the kept ones are in the store
+         * either way. Only a hard read/parse error (< 0) means "this
+         * path is not a bundle": try the next. A strict == 0 test
+         * made one skipped certificate in the distribution bundle
+         * read as "no trust store at all". */
+        int pr = mbedtls_x509_crt_parse_file(&g_cacert, paths[i]);
+        if (pr >= 0) {
             loaded = 1;
             break;
         }
@@ -152,8 +161,11 @@ static void *mbedtls_handshake_new(int fd, const char *host,
         *err = NULL;
     int ret = mb_init_once();
     if (ret != 0) {
-        if (err)
-            *err = "mbedTLS init failed (no trust store?)";
+        if (err) {
+            static char dbg[96];
+            snprintf(dbg, sizeof(dbg), "mbedTLS init failed: -0x%04x", -ret);
+            *err = dbg;
+        }
         return NULL;
     }
 

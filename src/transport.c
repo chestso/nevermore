@@ -792,7 +792,11 @@ void nm_connection_release(NmConnection *conn)
 {
     if (!conn)
         return;
-    if (nm_connection_keepalive_on() && nm_connection_reusable(conn)) {
+    /* The blocking transport stays out of the pool by construction:
+     * its connections are born blocking and a shelve would hand a
+     * step-driven caller a socket that blocks. */
+    if (conn->nonblocking && nm_connection_keepalive_on() &&
+        nm_connection_reusable(conn)) {
         int same = -1, free_slot = -1, oldest = 0;
         for (int i = 0; i < NM_POOL_SLOTS; i++) {
             if (!g_pool[i].conn) {

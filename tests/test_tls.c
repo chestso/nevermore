@@ -91,6 +91,13 @@ static int tls_server_defer_ms;
  * write, which is a different (and signal-free) failure than the EPIPE
  * this test is about. 0 = the normal server. */
 static int tls_server_hang_up;
+/* The keep-alive case: serve TWO exchanges on the one connection
+ * (no Connection field in the reply: 1.1 is persistent by default).
+ * The counters are the test's evidence (one accept, one handshake,
+ * two exchanges). */
+static volatile int tls_server_serve_two;
+static volatile int tls_server_accepts;
+static volatile int tls_server_exchanges;
 
 /* The committed fixture lives in the SOURCE tests/ tree: `make check`
  * exports $srcdir (../../tests from the build dir) and a direct run from
@@ -128,6 +135,8 @@ static int tls_server_start(void)
     tls_port = ntohs(a.sin_port);
     if (listen(tls_listen_fd, 1) < 0)
         return -1;
+    tls_server_accepts = 0;
+    tls_server_exchanges = 0;
     return 0;
 }
 
@@ -151,6 +160,7 @@ static void *tls_server_thread(void *arg)
     int cfd = accept(tls_listen_fd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    tls_server_accepts++;
     /* The hold: nothing is spoken in TLS until it is over (see
      * tls_server_hold_ms). */
     if (tls_server_hold_ms > 0)
@@ -194,6 +204,18 @@ static void *tls_server_thread(void *arg)
                 tls_server_recv_len = total;
             }
             tls_server_recv_len = total;
+        } else if (tls_server_serve_two) {
+            /* The keep-alive case: one accept, ONE handshake, TWO
+             * exchanges on the connection. */
+            for (int i = 0; i < 2; i++) {
+                char d[512];
+                SSL_read(ssl, d, sizeof(d));
+                const char resp[] =
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                    "Content-Length: 2\r\n\r\nhi";
+                SSL_write(ssl, resp, sizeof(resp) - 1);
+                tls_server_exchanges++;
+            }
         } else {
             /* Drain any request bytes, answer with a tiny page. */
             char d[512];
@@ -264,6 +286,7 @@ static void *tls_server_thread(void *arg)
     int cfd = accept(tls_listen_fd, NULL, NULL);
     if (cfd < 0)
         return NULL;
+    tls_server_accepts++;
     /* The hold: nothing is spoken in TLS until it is over (see
      * tls_server_hold_ms). */
     if (tls_server_hold_ms > 0)
@@ -342,6 +365,19 @@ static void *tls_server_thread(void *arg)
                         tls_server_recv_len = total;
                     }
                     tls_server_recv_len = total;
+                } else if (tls_server_serve_two) {
+                    /* The keep-alive case: one accept, ONE handshake,
+                     * TWO exchanges on the connection. */
+                    for (int i = 0; i < 2; i++) {
+                        unsigned char d[512];
+                        mbedtls_ssl_read(&ssl, d, sizeof(d));
+                        const char resp[] =
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
+                            "Content-Length: 2\r\n\r\nhi";
+                        mbedtls_ssl_write(&ssl, (const unsigned char *)resp,
+                                          sizeof(resp) - 1);
+                        tls_server_exchanges++;
+                    }
                 } else {
                     unsigned char d[512];
                     mbedtls_ssl_read(&ssl, d, sizeof(d));
@@ -689,6 +725,126 @@ static void test_tls_handshake_step_pends_on_a_held_reply(void)
 {
     printf("  (no Linux TLS backend compiled — held-reply gap n/a)\n");
 }
+#endif
+
+#if defined(NM_TLS_OPENSSL) || defined(NM_TLS_MBEDTLS)
+
+/* ---------------------------------------------------------------- */
+/* The keep-alive pool's TLS half: one accept, ONE handshake, TWO     */
+/* exchanges on the connection                                       */
+/* ---------------------------------------------------------------- */
+
+/* The child shape is the large-write test's: the committed cert must
+ * be TRUSTED for the positive half, and the extra anchor is read once
+ * at TLS-config init — so the child sets it before its own first TLS
+ * use and needs a cold parent. Two exchanges on one connection via
+ * the pool: acquire, queue, drive, release (the verdict shelves it),
+ * acquire again. */
+static int tls_exchange_drive(const char *host, int port)
+{
+    NmConnectInfo ci;
+    NmConnection *c =
+        nm_connection_acquire(host, port, NM_TRANSPORT_TLS, &ci);
+    if (!c)
+        return -1;
+    if (nm_request_queue(c, "GET", "/models", NULL, 0, NULL, 0) !=
+        NM_TRANSPORT_OK) {
+        nm_connection_release(c);
+        return -1;
+    }
+    for (;;) {
+        NmTransportStatus s = nm_connection_step(c);
+        if (s == NM_TRANSPORT_PENDING) {
+            NmSource i = nm_connection_interest(c);
+            if (i.handle >= 0 && i.flags)
+                nm_source_wait_any(&i, 1, 20);
+            continue;
+        }
+        if (s != NM_TRANSPORT_OK) {
+            nm_connection_release(c);
+            return -1;
+        }
+        break;
+    }
+    char buf[512];
+    long total = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n == NM_READ_WOULD_BLOCK) {
+            NmSource i = nm_connection_interest(c);
+            if (i.handle >= 0 && i.flags)
+                nm_source_wait_any(&i, 1, 20);
+            continue;
+        }
+        if (n < 0) {
+            nm_connection_release(c);
+            return -1;
+        }
+        if (n == 0)
+            break;
+        total += n;
+    }
+    int ok = total == 2;
+    nm_connection_release(c); /* the verdict shelves a completed exchange */
+    return ok ? 0 : -1;
+}
+
+static int tls_reuse_child(void)
+{
+    if (tls_server_start() != 0) {
+        fprintf(stderr, "  child: loopback bind failed\n");
+        return 2;
+    }
+    tls_server_serve_two = 1;
+    pthread_t th;
+    if (pthread_create(&th, NULL, tls_server_thread, NULL) != 0) {
+        tls_server_stop();
+        return 3;
+    }
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "on");
+    int fails = 0;
+    if (tls_exchange_drive("localhost", tls_port) != 0)
+        fails++;
+    if (tls_exchange_drive("localhost", tls_port) != 0)
+        fails++;
+    if (tls_server_accepts != 1)
+        fails++;
+    if (tls_server_exchanges != 2)
+        fails++;
+    nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "off");
+    nm_connection_pool_flush();
+    pthread_join(th, NULL);
+    tls_server_stop();
+    return fails ? 4 : 0;
+}
+
+static void test_tls_reuse_two_exchanges_one_handshake(void)
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("  FAIL: fork failed\n");
+        return;
+    }
+    if (pid == 0) {
+        setenv(NM_TLS_CA_FILE_ENV, CERT, 1);
+        _exit(tls_reuse_child());
+    }
+    int st = 0;
+    if (waitpid(pid, &st, 0) != pid) {
+        printf("  FAIL: waitpid failed\n");
+        return;
+    }
+    ASSERT_TRUE(WIFEXITED(st));
+    ASSERT_EQ(WEXITSTATUS(st), 0);
+}
+
+#else /* no Linux TLS backend in this build */
+
+static void test_tls_reuse_two_exchanges_one_handshake(void)
+{
+    printf("  (no Linux TLS backend compiled — TLS reuse test n/a)\n");
+}
+
 #endif
 
 /* ---------------------------------------------------------------- */
@@ -1496,6 +1652,7 @@ int main(int argc, char *argv[])
     RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_tls_large_write_arrives_intact);
     RUN_TEST(test_tls_survives_a_closed_peer); /* cold trust store: before the refusal */
+    RUN_TEST(test_tls_reuse_two_exchanges_one_handshake);
     RUN_TEST(test_tls_rejects_untrusted_cert);
     RUN_TEST(test_tls_no_backend_fails_fast);
     RUN_TEST(test_tls_handshake_step_pends_on_a_held_reply);
