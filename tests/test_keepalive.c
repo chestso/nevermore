@@ -35,6 +35,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <io.h> /* _unlink */
+#define SHUT_RDWR SD_BOTH
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -73,6 +74,15 @@ struct KaServer
     int requests;
     char first_req[2048];
     int first_req_set;
+    char last_req[4096]; /* every request's bytes: the re-sent POST's
+                            evidence */
+    /* The redial's deterministic shapes: a request read and closed
+     * WITHOUT an answer is what a FIN in flight past the exchange
+     * looks like. drop: exactly one, then normal service (the redial
+     * is served). die: the whole server goes with it (the redial
+     * dials a corpse). */
+    int drop_one_after_first;
+    int die_after_first;
 };
 
 /* One accepted connection, served in its own thread — the shape a
@@ -106,7 +116,27 @@ static void *ka_conn_thread(void *arg)
             s->first_req[take] = '\0';
             __atomic_store_n(&s->first_req_set, 1, __ATOMIC_RELAXED);
         }
+        size_t ltake =
+            (size_t)n < sizeof(s->last_req) - 1 ? (size_t)n
+                                                : sizeof(s->last_req) - 1;
+        memcpy(s->last_req, drain, ltake);
+        s->last_req[ltake] = '\0';
         __atomic_fetch_add(&s->requests, 1, __ATOMIC_SEQ_CST);
+        /* The redial's shapes: the SECOND request is read and closed
+         * without an answer. drop: service resumes for the redial's
+         * new connection. die: the listener goes too, so the redial
+         * dials a corpse and its failure is final. */
+        if (__atomic_load_n(&s->requests, __ATOMIC_SEQ_CST) == 2) {
+            if (__atomic_exchange_n(&s->drop_one_after_first, 0,
+                                    __ATOMIC_SEQ_CST)) {
+                break;
+            }
+            if (__atomic_exchange_n(&s->die_after_first, 0,
+                                    __ATOMIC_SEQ_CST)) {
+                shutdown(s->fd, SHUT_RDWR); /* the listener dies too */
+                break;
+            }
+        }
         /* Two flushes, like every canned server here: the head and
          * the body may arrive apart. */
         size_t len = strlen(s->reply);
@@ -197,6 +227,9 @@ static void ka_server_start(struct KaServer *s, pthread_t *th)
     s->requests = 0;
     s->first_req[0] = '\0';
     s->first_req_set = 0;
+    s->last_req[0] = '\0';
+    /* drop_one_after_first / die_after_first are the TEST's knobs:
+     * they are set before start and must survive it. */
     s->fd = ka_bind(&s->port);
     ASSERT_TRUE(s->fd >= 0);
     pthread_create(th, NULL, ka_server_thread, s);
@@ -210,6 +243,59 @@ static void ka_server_stop(struct KaServer *s, pthread_t *th)
     nm_connection_pool_flush();
     close(s->fd);
     pthread_join(*th, NULL);
+}
+
+/* ---------------------------------------------------------------- */
+/* The recorder (the redial line is the evidence)                    */
+/* ---------------------------------------------------------------- */
+
+static char g_rec_path[640];
+static char g_log[16384];
+
+static void recorder_arm(void)
+{
+    mkdir(test_scratch_dir(), 0755);
+    snprintf(g_rec_path, sizeof(g_rec_path), "%s/ka-%d.ndjson",
+             test_scratch_dir(), (int)getpid());
+#ifdef _WIN32
+    _putenv_s("NEVERMORE_DEBUG_WIRE", g_rec_path);
+#else
+    setenv("NEVERMORE_DEBUG_WIRE", g_rec_path, 1);
+#endif
+    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 1);
+}
+
+static void recorder_take(void)
+{
+    nm_wire_recorder_shutdown();
+#ifdef _WIN32
+    _putenv_s("NEVERMORE_DEBUG_WIRE", "");
+#else
+    setenv("NEVERMORE_DEBUG_WIRE", "", 1);
+#endif
+    /* Off again: later tests run as they always did. */
+    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 0);
+    FILE *f = fopen(g_rec_path, "rb");
+    ASSERT_NOT_NULL(f);
+    size_t got = fread(g_log, 1, sizeof(g_log) - 1, f);
+    fclose(f);
+    g_log[got] = '\0';
+#ifdef _WIN32
+    _unlink(g_rec_path);
+#else
+    unlink(g_rec_path);
+#endif
+}
+
+static int count_of(const char *hay, const char *needle)
+{
+    int n = 0;
+    const char *p = hay;
+    while ((p = strstr(p, needle)) != NULL) {
+        n++;
+        p++;
+    }
+    return n;
 }
 
 /* ---------------------------------------------------------------- */
@@ -254,7 +340,7 @@ static void test_reuse_across_two_fetches(void)
     /* Two fetches, one accept: the second acquire pops the shelved
      * connection (no Connection field on either request, xchg 1 then
      * 2, same conn). */
-    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0 };
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
     pthread_t th;
     ka_server_start(&s, &th);
 
@@ -277,58 +363,27 @@ static void test_reuse_records_one_conn_and_rising_xchg(void)
     /* The wire-recorder assertion: one conn id across the exchanges,
      * xchg incrementing, no second connect (the async path never
      * fires one). */
-    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0 };
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
     pthread_t th;
     ka_server_start(&s, &th);
 
-    char logpath[640];
-    mkdir(test_scratch_dir(), 0755);
-    snprintf(logpath, sizeof(logpath), "%s/ka-%d.ndjson",
-             test_scratch_dir(), (int)getpid());
-#ifdef _WIN32
-    _putenv_s("NEVERMORE_DEBUG_WIRE", logpath);
-#else
-    setenv("NEVERMORE_DEBUG_WIRE", logpath, 1);
-#endif
-    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 1);
+    recorder_arm();
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
     keepalive_on();
     ASSERT_EQ(fetch_run(base, "/models"), 0);
     ASSERT_EQ(fetch_run(base, "/models"), 0);
-
-    nm_wire_recorder_shutdown();
-#ifdef _WIN32
-    _putenv_s("NEVERMORE_DEBUG_WIRE", "");
-#else
-    setenv("NEVERMORE_DEBUG_WIRE", "", 1);
-#endif
-    ASSERT_EQ(nm_wire_recorder_init(NULL, NULL), 0); /* off again */
-
-    FILE *f = fopen(logpath, "rb");
-    ASSERT_NOT_NULL(f);
-    static char log[16384];
-    size_t got = fread(log, 1, sizeof(log) - 1, f);
-    fclose(f);
-    log[got] = '\0';
-#ifdef _WIN32
-    _unlink(logpath);
-#else
-    unlink(logpath);
-#endif
+    recorder_take();
 
     /* Two request lines: the first xchg 1, the second xchg 2, and the
      * two conn ids equal. */
-    const char *r1 = strstr(log, "\"kind\":\"request\"");
+    const char *r1 = strstr(g_log, "\"kind\":\"request\"");
     ASSERT_NOT_NULL(r1);
     const char *r2 = r1 ? strstr(r1 + 1, "\"kind\":\"request\"") : NULL;
     ASSERT_NOT_NULL(r2);
-    const char *x1 = r1 ? strstr(r1, "\"xchg\":1") : NULL;
-    const char *x2 = r2 ? strstr(r2, "\"xchg\":2") : NULL;
-    ASSERT_NOT_NULL(x1);
-    ASSERT_NOT_NULL(x2);
-    ASSERT_TRUE(x2 > r2); /* the 2 belongs to the second exchange */
+    ASSERT_NOT_NULL(strstr(r1, "\"xchg\":1"));
+    ASSERT_TRUE(strstr(r2, "\"xchg\":2") > r2); /* the 2 is the second's */
     /* Same conn on both request lines. */
     const char *c1 = strstr(r1, "\"conn\":");
     const char *c2 = strstr(r2, "\"conn\":");
@@ -356,6 +411,9 @@ static void test_peer_close_is_never_reused(void)
         0,
         0,
         { 0 },
+        0,
+        { 0 },
+        0,
         0
     };
     pthread_t th;
@@ -382,6 +440,9 @@ static void test_http10_without_keepalive_is_never_reused(void)
         0,
         0,
         { 0 },
+        0,
+        { 0 },
+        0,
         0
     };
     pthread_t th;
@@ -410,6 +471,9 @@ static void test_midstream_drop_is_never_reused(void)
         0,
         0,
         { 0 },
+        0,
+        { 0 },
+        0,
         0
     };
     pthread_t th;
@@ -440,6 +504,9 @@ static void test_idle_window_and_hint(void)
         0,
         0,
         { 0 },
+        0,
+        { 0 },
+        0,
         0
     };
     pthread_t th;
@@ -459,7 +526,7 @@ static void test_idle_window_and_hint(void)
     ka_server_stop(&hint, &th);
     nm_test_clock_reset();
 
-    struct KaServer plain = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0 };
+    struct KaServer plain = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
     ka_server_start(&plain, &th);
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", plain.port);
     keepalive_on();
@@ -479,7 +546,7 @@ static void test_keepalive_off_is_todays_wire(void)
 {
     /* The escape hatch: two accepts, and the request carries
      * `Connection: close` — today's bytes. */
-    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0 };
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
     pthread_t th;
     ka_server_start(&s, &th);
 
@@ -510,6 +577,9 @@ static void test_204_on_a_persistent_socket(void)
                           0,
                           0,
                           { 0 },
+                          0,
+                          { 0 },
+                          0,
                           0 };
     pthread_t th;
     ka_server_start(&s, &th);
@@ -521,6 +591,136 @@ static void test_204_on_a_persistent_socket(void)
     ASSERT_EQ(fetch_run(base, "/models"), -1);
     ASSERT_EQ(s.accepts, 1);
     ASSERT_EQ(s.requests, 2);
+
+    keepalive_off();
+    ka_server_stop(&s, &th);
+}
+
+static void test_redial_repairs_a_dropped_reuse(void)
+{
+    /* The stale-reuse shape, made deterministic: the server answers
+     * the first exchange, reads the REUSED connection's request and
+     * closes WITHOUT answering (what a FIN in flight past the
+     * exchange looks like), and serves the redial's new connection.
+     * The client sees only success - and the wire log one redial
+     * line naming both ids. */
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
+    s.drop_one_after_first = 1;
+    pthread_t th;
+    ka_server_start(&s, &th);
+
+    recorder_arm();
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    keepalive_on();
+    ASSERT_EQ(fetch_run(base, "/models"), 0);
+    ASSERT_EQ(fetch_run(base, "/models"), 0); /* the redial repaired it */
+    recorder_take();
+
+    ASSERT_EQ(s.accepts, 2);
+    ASSERT_EQ(s.requests, 3);
+    /* The redial line: exactly one, and it names both ids. */
+    ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 1);
+    const char *red = strstr(g_log, "\"stage\":\"redial\"");
+    ASSERT_NOT_NULL(red);
+    ASSERT_TRUE(strstr(red, "redialled as connection") != NULL);
+    /* The request anchor was re-fired under the NEW ids: three
+     * request lines total (exchange 1, exchange 2 on the dead conn,
+     * the replay). */
+    ASSERT_EQ(count_of(g_log, "\"kind\":\"request\""), 3);
+
+    keepalive_off();
+    ka_server_stop(&s, &th);
+}
+
+static void test_redial_replays_a_post_body(void)
+{
+    /* The same shape on the chat's verb: the POST is re-sent WHOLE
+     * (the retained req_buf drains after the dial) and the stream
+     * completes. */
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
+    s.drop_one_after_first = 1;
+    pthread_t th;
+    ka_server_start(&s, &th);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    keepalive_on();
+    const char *body = "{\"model\":\"m\",\"messages\":[]}";
+    ASSERT_EQ(fetch_run(base, "/chat/completions"), 0);
+    /* The second fetch carries the POST: dropped once, redialled,
+     * served - and the body rides the replay intact. */
+    NmFetchStream *f = nm_fetch_begin(base, "POST", "/chat/completions",
+                                      NULL, NULL, NULL, 0, body);
+    ASSERT_NOT_NULL(f);
+    ASSERT_EQ(fetch_drive(f), 0);
+    nm_fetch_end(f);
+    ASSERT_EQ(s.accepts, 2);
+    ASSERT_EQ(s.requests, 3);
+    ASSERT_TRUE(strstr(s.last_req, body) != NULL);
+    ASSERT_TRUE(strstr(s.last_req,
+                       "Content-Length: 27\r\n") != NULL);
+
+    keepalive_off();
+    ka_server_stop(&s, &th);
+}
+
+static void test_redial_that_fails_is_final(void)
+{
+    /* The whole server dies with the second exchange: the redial
+     * dials a corpse, the connect is refused, and the exchange fails
+     * - exactly ONE redial line, no loop. */
+    struct KaServer s = { RESP_200_CL, 0, 0, 0, 0, 0, { 0 }, 0, { 0 }, 0, 0 };
+    s.die_after_first = 1;
+    pthread_t th;
+    ka_server_start(&s, &th);
+
+    recorder_arm();
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    keepalive_on();
+    ASSERT_EQ(fetch_run(base, "/models"), 0);
+    ASSERT_EQ(fetch_run(base, "/models"), -1);
+    recorder_take();
+
+    ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 1);
+    ASSERT_TRUE(strstr(g_log, "redialled as connection") != NULL);
+
+    keepalive_off();
+    ka_server_stop(&s, &th);
+}
+
+static void test_byte_after_failure_is_not_redialled(void)
+{
+    /* A failure AFTER a response byte is final: the truncated reply
+     * lands bytes (the head), the drop comes mid-body, and the wire
+     * log carries NO redial line. */
+    struct KaServer s = {
+        "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
+        1,
+        0,
+        0,
+        0,
+        0,
+        { 0 },
+        0,
+        { 0 },
+        0,
+        0
+    };
+    pthread_t th;
+    ka_server_start(&s, &th);
+
+    recorder_arm();
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    keepalive_on();
+    ASSERT_EQ(fetch_run(base, "/models"), -1);
+    ASSERT_EQ(fetch_run(base, "/models"), -1);
+    recorder_take();
+
+    ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 0);
+    ASSERT_EQ(s.accepts, 2); /* plain fresh dials, no repair */
 
     keepalive_off();
     ka_server_stop(&s, &th);
@@ -556,6 +756,11 @@ int main(void)
     RUN_TEST(test_idle_window_and_hint);
     RUN_TEST(test_keepalive_off_is_todays_wire);
     RUN_TEST(test_204_on_a_persistent_socket);
+
+    RUN_TEST(test_redial_repairs_a_dropped_reuse);
+    RUN_TEST(test_redial_replays_a_post_body);
+    RUN_TEST(test_redial_that_fails_is_final);
+    RUN_TEST(test_byte_after_failure_is_not_redialled);
     nm_connection_pool_flush();
     nm_config_free(g_cfg);
     TEST_SUMMARY();
