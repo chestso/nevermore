@@ -144,15 +144,18 @@ prerequisite (skip).
 - **One thread, one poll, no timers: the harness is a reactor, not a
   schedule.** A canned server is a scripted pump — nonblocking accept, drain,
   flush — serviced by the same poll that waits on the client's fd, so every
-  byte is an event the test reacts to. A `usleep` orchestrates by calendar
-  and a worker thread is a second order of interleavings the test has to reason
-  about; both are how a suite grows hangs and platform flakes (the v0.16.0 tag
-  run died on a `shutdown()`-on-a-listener shape that Linux tolerates and
-  BSD/Windows reject). A request-counted script makes the timing shapes
-  deterministic — the die case closes the listener in the harness's own thread,
-  before the client's connect step, so the refused redial is the same on every
-  stack. If a case cannot be written as a pump, the case is dropped, not
-  threaded.
+  byte is an event the test reacts to; `tests/net_server.[ch]` is that pump,
+  shared by every test that needs a wire peer (`nm_ts_start`, `nm_ts_pump`,
+  `nm_ts_wait`, a script of rounds with `NM_TS_SERVE`/`DROP`/`DIE`/`STALL`
+  actions and an `on_request` hook for routing). A `usleep` orchestrates by
+  calendar and a worker thread is a second order of interleavings the test
+  has to reason about; both are how a suite grows hangs and platform flakes
+  (the v0.16.0 tag run died on a `shutdown()`-on-a-listener shape that
+  Linux tolerates and BSD/Windows reject). A request-counted script makes
+  the timing shapes deterministic — the die case closes the listener in the
+  harness's own thread, before the client's connect step, so the refused
+  redial is the same on every stack. If a case cannot be written as a pump,
+  the case is dropped, not threaded.
 - **A canned server that serves one request and closes MUST say `Connection:
   close`.** Under a keep-alive pool a reply without the header is an invitation
   to reuse, and the next exchange on that socket races the server's FIN — a

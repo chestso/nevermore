@@ -1,24 +1,12 @@
-/* test_keepalive.c - the idle pool against a single-threaded canned server
+/* test_keepalive.c - the idle pool against the scripted pump server
  *
- * One thread, one poll, no timers. The server is a scripted pump
- * (ka_pump): nonblocking accept, drain, flush, driven by the same
- * poll that waits on the client's fd, so every byte is an event the
- * harness reacts to - never a sleep the harness waits through, and
- * never a second thread the test has to reason about. The fake clock
- * stays: the idle window is MOVED past, not slept through. Plain HTTP
- * only; the TLS reuse cases live in test_tls.
- *
- * One connection slot is the whole accept state: the client is a
- * pool, so it dials one connection and shelves it, and a redial only
- * happens after the pump closed the old socket - a second accept
- * while the first is live is a protocol surprise, not a shape.
- *
- * The die shape closes the listener, not shutdown() on it: BSD and
- * Windows reject shutdown() on a listening socket (ENOTCONN), so the
- * port stayed open and the redial connected to a live corpse - the
- * v0.16.0 CI failure on macOS and Windows. The close happens in the
- * same thread, before the client's connect step, so the refused dial
- * is deterministic on every stack.
+ * The suite's only binary that serves a canned reply TWICE on one
+ * connection (the opt-in: the pin is set per test, not in main). The
+ * server is the shared scripted pump (tests/net_server.[ch]) - one
+ * thread, one poll, serviced by this drive between every client step.
+ * The fake clock is this binary's clock: the idle window is MOVED
+ * past, never slept through. Plain HTTP only; the TLS reuse cases
+ * live in test_tls, where the in-process TLS server already is.
  *
  * Cases: reuse across two fetches (one accept, two requests, no
  * Connection field, xchg 1 then 2), the peer's own close, an HTTP/1.0
@@ -34,6 +22,7 @@
 #include "conf.h"
 #include "fake_clock.h" /* this binary IS the clock (see fake_clock.h) */
 #include "json.h"
+#include "net_server.h"    /* the scripted pump: no thread, no timer */
 #include "openai_client.h" /* nm_fetch_begin / step / end: the pool's caller */
 #include "transport.h"
 #include "transport_internal.h"
@@ -45,21 +34,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#include <io.h> /* _unlink */
-#define ka_poll(fds, n, ms) WSAPoll((fds), (ULONG)(n), (ms))
-#else
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#define ka_poll(fds, n, ms) poll((fds), (n), (ms))
-#endif
 
 static NmConfig *g_cfg;
 
@@ -73,309 +47,24 @@ static void keepalive_off(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_KEEPALIVE, "off");
 }
 
-/* ---------------------------------------------------------------- */
-/* The canned server: a scripted pump, serviced one event at a time  */
-/* ---------------------------------------------------------------- */
-
-struct KaServer
+/* The scripted server for this test, with the failure reported where
+ * the test macros can act on it: ka_start prints, the caller's
+ * ASSERT_NOT_NULL counts it (the helpers return values, so the
+ * ASSERT macros' `return;` cannot live inside them). */
+static NmTsServer *ka_start(const NmTsRound *rs, int n)
 {
-    const char *reply;    /* head+body, armed per completed request */
-    int close_after_each; /* 1 = close after each reply (the peer's
-                             own contract); 0 = hold the socket open
-                             for the next exchange on it */
-    int port;
-    int lfd; /* listener; -1 once the die shape killed it */
-    int cfd; /* the one connection slot; -1 = idle */
-    /* observed */
-    int accepts;
-    int requests; /* completed requests: head + Content-Length */
-    char first_req[2048];
-    int first_req_set;
-    char last_req[4096]; /* the last completed request, whole: the
-                           re-sent POST's evidence */
-    /* the request being drained */
-    char req[4096];
-    size_t req_len;
-    /* the reply being written */
-    const char *out;
-    size_t out_len;
-    size_t out_off;
-    int head_sent;
-    /* the redial's scripted shapes: a request read and closed WITHOUT
-     * an answer is what a FIN in flight past the exchange looks
-     * like. drop: exactly one, then normal service (the redial is
-     * served). die: the listener goes too, so the redial dials a
-     * corpse and its failure is final. */
-    int drop_one_after_first;
-    int die_after_first;
-};
-
-static void ka_nonblock(int fd)
-{
-#ifdef _WIN32
-    u_long one = 1;
-    ioctlsocket(fd, FIONBIO, &one);
-#else
-    int fl = fcntl(fd, F_GETFL, 0);
-    if (fl >= 0)
-        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
-#endif
+    NmTsServer *s = nm_ts_start(rs, n);
+    if (!s)
+        fprintf(stderr, "  FAIL: %s:%d: nm_ts_start\n", __FILE__, __LINE__);
+    return s;
 }
 
-/* Bind a loopback listener on an ephemeral port (test_wire's
- * server_bind shape), nonblocking: the pump only accepts what poll
- * already called readable, and the one thread must never block. */
-static int ka_bind(int *port)
+/* The client lets go of every shelved connection first (the pool owns
+ * them), then the server's fds close once, in stop. */
+static void ka_stop(NmTsServer *s)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        close(fd);
-        return -1;
-    }
-    struct sockaddr_in got;
-    socklen_t gl = sizeof(got);
-    if (getsockname(fd, (struct sockaddr *)&got, &gl) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(got.sin_port);
-    if (listen(fd, 4) < 0) {
-        close(fd);
-        return -1;
-    }
-    ka_nonblock(fd);
-    return fd;
-}
-
-static void ka_server_start(struct KaServer *s)
-{
-    s->lfd = ka_bind(&s->port);
-    ASSERT_TRUE(s->lfd >= 0);
-    s->cfd = -1;
-    s->accepts = 0;
-    s->requests = 0;
-    s->first_req[0] = '\0';
-    s->first_req_set = 0;
-    s->last_req[0] = '\0';
-    s->req[0] = '\0';
-    s->req_len = 0;
-    s->out = NULL;
-    s->out_len = 0;
-    s->out_off = 0;
-    s->head_sent = 0;
-    /* drop_one_after_first / die_after_first are the TEST's knobs:
-     * they are set before start and must survive it. */
-}
-
-static void ka_server_stop(struct KaServer *s)
-{
-    /* The client lets go of every shelved connection first (the pool
-     * owns them); then both server fds close once, here. */
     nm_connection_pool_flush();
-    if (s->cfd >= 0) {
-        close(s->cfd);
-        s->cfd = -1;
-    }
-    if (s->lfd >= 0) {
-        close(s->lfd);
-        s->lfd = -1;
-    }
-}
-
-/* The head of a request ends at the blank line; the body is whatever
- * Content-Length says. -1 while the head has not landed. */
-static long ka_request_complete(const struct KaServer *s)
-{
-    const char *blank = strstr(s->req, "\r\n\r\n");
-    if (!blank)
-        return -1;
-    size_t head = (size_t)(blank - s->req) + 4;
-    long body = 0;
-    const char *p = s->req;
-    while (p < blank) {
-        const char *eol = memchr(p, '\n', (size_t)(blank - p) + 1);
-        if (!eol || eol > blank)
-            eol = blank;
-        size_t llen = (size_t)(eol - p);
-        if (llen > 16 && strncasecmp(p, "Content-Length:", 15) == 0)
-            body = atol(p + 15);
-        p = eol + 1;
-    }
-    return (long)head + body <= (long)s->req_len ? (long)head + body : -1;
-}
-
-/* A capped copy: the capture buffers are smaller than the drain
- * buffer on purpose (the head is the evidence, not the whole POST),
- * and an explicit bound keeps the compiler out of the decision. */
-static void ka_copy_capped(char *dst, size_t cap, const char *src)
-{
-    size_t n = strlen(src);
-    if (n >= cap)
-        n = cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
-/* One pass over every ready server event: accept, drain what arrived,
- * act on a completed request, flush pending reply bytes. Every call
- * is nonblocking - the single thread reacts, it never waits. */
-static void ka_pump(struct KaServer *s)
-{
-    if (s->lfd >= 0) {
-        struct pollfd p = { 0, 0, 0 };
-        p.fd = s->lfd;
-        p.events = POLLIN;
-        if (ka_poll(&p, 1, 0) == 1 && (p.revents & POLLIN)) {
-            int fd = accept(s->lfd, NULL, NULL);
-            if (fd >= 0) {
-                ka_nonblock(fd);
-                /* A second dial with the slot busy means the client
-                 * moved on without the old socket dying first: take
-                 * the new connection, drop the stale one. */
-                if (s->cfd >= 0)
-                    close(s->cfd);
-                s->cfd = fd;
-                s->accepts++;
-                s->req[0] = '\0';
-                s->req_len = 0;
-                s->out = NULL;
-                s->head_sent = 0;
-            }
-        }
-    }
-    if (s->cfd < 0)
-        return;
-
-    /* Drain whatever arrived, whole passes only. */
-    for (;;) {
-        char buf[2048];
-        int n = recv(s->cfd, buf, sizeof(buf), 0);
-        if (n < 0)
-            break;    /* nothing more right now */
-        if (n == 0) { /* the peer closed: so does the slot */
-            close(s->cfd);
-            s->cfd = -1;
-            return;
-        }
-        size_t take = (size_t)n;
-        if (s->req_len + take >= sizeof(s->req))
-            take = sizeof(s->req) - 1 - s->req_len;
-        if (take > 0) {
-            memcpy(s->req + s->req_len, buf, take);
-            s->req_len += take;
-            s->req[s->req_len] = '\0';
-        }
-        if ((size_t)n < sizeof(buf))
-            break; /* a short read: the segment is drained */
-    }
-
-    /* A completed request: record it, then the scripted verdict. The
-     * slot resets right here, so the next exchange on the same
-     * socket drains into an empty buffer. */
-    if (ka_request_complete(s) >= 0) {
-        s->requests++;
-        if (!s->first_req_set) {
-            ka_copy_capped(s->first_req, sizeof(s->first_req), s->req);
-            s->first_req_set = 1;
-        }
-        ka_copy_capped(s->last_req, sizeof(s->last_req), s->req);
-        s->req[0] = '\0';
-        s->req_len = 0;
-        if (s->drop_one_after_first && s->requests == 2) {
-            /* Read and closed WITHOUT an answer: a FIN in flight
-             * past the exchange, the shape a stale reuse dies on. */
-            close(s->cfd);
-            s->cfd = -1;
-            return;
-        }
-        if (s->die_after_first && s->requests == 2) {
-            /* The whole server goes with it - the listener CLOSES
-             * (shutdown() on one is not portable), so the redial
-             * dials a corpse and its failure is final. */
-            close(s->cfd);
-            s->cfd = -1;
-            close(s->lfd);
-            s->lfd = -1;
-            return;
-        }
-        s->out = s->reply;
-        s->out_len = strlen(s->reply);
-        s->out_off = 0;
-        s->head_sent = 0;
-    }
-
-    /* Flush the reply in two passes - head, then body - the split
-     * arrival the client's incremental parser must survive. One
-     * pass is one pump, which is one client step apart: no timer. */
-    if (!s->out || s->cfd < 0)
-        return;
-    size_t limit = s->out_len;
-    if (!s->head_sent) {
-        const char *blank = strstr(s->out, "\r\n\r\n");
-        limit = blank ? (size_t)(blank - s->out) + 4 : s->out_len;
-    }
-    while (s->out_off < limit) {
-        int n = send(s->cfd, s->out + s->out_off, (int)(limit - s->out_off),
-                     0);
-        if (n <= 0)
-            return; /* no room right now: a later pump */
-        s->out_off += (size_t)n;
-    }
-    if (!s->head_sent) {
-        s->head_sent = 1; /* the body rides the NEXT pump */
-        return;
-    }
-    s->out = NULL; /* the whole reply is on the wire */
-    s->head_sent = 0;
-    if (s->close_after_each) {
-        close(s->cfd);
-        s->cfd = -1;
-    }
-}
-
-/* Wait for whichever end moves next, then service the server. The
- * poll covers the client's fd (its own declared interest) and every
- * server fd that has work; the watchdog bound turns a stall into a
- * loud diagnostic plus a failed assertion, never a hang. */
-static void ka_wait(struct KaServer *s, const NmSource *src)
-{
-    struct pollfd pf[3];
-    int n = 0;
-    if (s->lfd >= 0) {
-        pf[n].fd = s->lfd;
-        pf[n].events = POLLIN;
-        pf[n].revents = 0;
-        n++;
-    }
-    if (s->cfd >= 0) {
-        pf[n].fd = s->cfd;
-        pf[n].events = POLLIN;
-        if (s->out)
-            pf[n].events |= POLLOUT; /* pending reply bytes */
-        pf[n].revents = 0;
-        n++;
-    }
-    if (src->handle >= 0 && src->flags) {
-        pf[n].fd = (int)src->handle;
-        pf[n].events = 0;
-        if (src->flags & NM_INTEREST_READ)
-            pf[n].events |= POLLIN;
-        if (src->flags & NM_INTEREST_WRITE)
-            pf[n].events |= POLLOUT;
-        pf[n].revents = 0;
-        n++;
-    }
-    int r = ka_poll(pf, n, 5000);
-    if (r == 0)
-        fprintf(stderr,
-                "  (keepalive drive stalled: neither end moved for"
-                " 5 s)\n");
-    ka_pump(s);
+    nm_ts_stop(s);
 }
 
 /* ---------------------------------------------------------------- */
@@ -435,7 +124,7 @@ static int count_of(const char *hay, const char *needle)
 /* The fetch drive (the pool's caller shape, one thread)             */
 /* ---------------------------------------------------------------- */
 
-static int fetch_drive(struct KaServer *s, NmFetchStream *f)
+static int fetch_drive(NmTsServer *s, NmFetchStream *f)
 {
     for (;;) {
         NmCatalogStatus st = nm_fetch_step(f);
@@ -443,14 +132,20 @@ static int fetch_drive(struct KaServer *s, NmFetchStream *f)
             return st == NM_CATALOG_OK ? 0 : -1;
         NmSource src = nm_fetch_source(f);
         if (!(src.handle >= 0 && src.flags)) {
-            ka_pump(s); /* the step advances on its own */
+            nm_ts_pump(s); /* the step advances on its own */
             continue;
         }
-        ka_wait(s, &src);
+        /* THE wait: the client's fd and the server's fds in one poll.
+         * A quiet 5 s slice is a stall, not a step - say so, so the
+         * next failed assertion reads with a cause. */
+        if (nm_ts_wait(s, src.handle, src.flags, 5000) == 0)
+            fprintf(stderr,
+                    "  (keepalive drive stalled: neither end moved for"
+                    " 5 s)\n");
     }
 }
 
-static int fetch_run(struct KaServer *s, const char *base, const char *path)
+static int fetch_run(NmTsServer *s, const char *base, const char *path)
 {
     NmFetchStream *f = nm_fetch_begin(base, "GET", path, NULL, NULL, NULL, 0,
                                       NULL);
@@ -473,22 +168,23 @@ static void test_reuse_across_two_fetches(void)
 {
     /* Two fetches, one accept: the second acquire pops the shelved
      * connection (no Connection field on either request, xchg 1 then
-     * 2, same conn). */
-    struct KaServer s = { .reply = RESP_200_CL };
-    ka_server_start(&s);
+     * 2, same conn). One round, repeating - the persistent peer. */
+    static const NmTsRound rs[] = { { .reply = RESP_200_CL } };
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
 
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(s.accepts, 1);
-    ASSERT_EQ(s.requests, 2);
-    ASSERT_TRUE(strstr(s.first_req, "Connection:") == NULL);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(s), 1);
+    ASSERT_EQ(nm_ts_requests(s), 2);
+    ASSERT_TRUE(strstr(nm_ts_request(s, 0), "Connection:") == NULL);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_reuse_records_one_conn_and_rising_xchg(void)
@@ -496,16 +192,17 @@ static void test_reuse_records_one_conn_and_rising_xchg(void)
     /* The wire-recorder assertion: one conn id across the exchanges,
      * xchg incrementing, no second connect (the async path never
      * fires one). */
-    struct KaServer s = { .reply = RESP_200_CL };
-    ka_server_start(&s);
+    static const NmTsRound rs[] = { { .reply = RESP_200_CL } };
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     recorder_arm();
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
     recorder_take();
 
     /* Two request lines: the first xchg 1, the second xchg 2, and the
@@ -527,69 +224,72 @@ static void test_reuse_records_one_conn_and_rising_xchg(void)
     ASSERT_EQ(id1, id2);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_peer_close_is_never_reused(void)
 {
     /* The response says close: the verdict forbids, the release
      * closes, the second fetch dials. */
-    struct KaServer s = {
-        .reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
-                 "Connection: close\r\n\r\n{}",
-        .close_after_each = 1,
+    static const NmTsRound rs[] = {
+        { .reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                   "Connection: close\r\n\r\n{}",
+          .close_after_reply = 1 },
     };
-    ka_server_start(&s);
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(s.accepts, 2);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_http10_without_keepalive_is_never_reused(void)
 {
-    struct KaServer s = {
-        .reply = "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}",
-        .close_after_each = 1,
+    static const NmTsRound rs[] = {
+        { .reply = "HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\n{}",
+          .close_after_reply = 1 },
     };
-    ka_server_start(&s);
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(s.accepts, 2);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_midstream_drop_is_never_reused(void)
 {
     /* The reply truncates mid-body and the server hangs up: the read
      * fails, the release closes, the second fetch dials fresh. */
-    struct KaServer s = {
-        .reply = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
-        .close_after_each = 1,
+    static const NmTsRound rs[] = {
+        { .reply = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
+          .close_after_reply = 1 },
     };
-    ka_server_start(&s);
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1); /* the drop is the error */
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
-    ASSERT_EQ(s.accepts, 2);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1); /* the drop is the error */
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_idle_window_and_hint(void)
@@ -597,39 +297,43 @@ static void test_idle_window_and_hint(void)
     /* The window is moved with the fake clock, never slept: 5 s idle
      * reuses, 31 s dials fresh; a Keep-Alive: timeout=10 hint
      * tightens the window to 8 s (the 2 s margin). */
-    struct KaServer hint = {
-        .reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
-                 "Keep-Alive: timeout=10\r\n\r\n{}",
+    static const NmTsRound hint_rs[] = {
+        { .reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                   "Keep-Alive: timeout=10\r\n\r\n{}" },
     };
-    ka_server_start(&hint);
+    NmTsServer *hint = ka_start(hint_rs, 1);
+    ASSERT_NOT_NULL(hint);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", hint.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(hint));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&hint, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(hint, base, "/models"), 0);
     nm_test_clock_advance_ms(5000);
-    ASSERT_EQ(fetch_run(&hint, base, "/models"), 0); /* inside the 8 s */
-    ASSERT_EQ(hint.accepts, 1);
+    ASSERT_EQ(fetch_run(hint, base, "/models"), 0); /* inside the 8 s */
+    ASSERT_EQ(nm_ts_accepts(hint), 1);
     nm_test_clock_advance_ms(9000); /* 14 s idle > 8 s */
-    ASSERT_EQ(fetch_run(&hint, base, "/models"), 0);
-    ASSERT_EQ(hint.accepts, 2);
+    ASSERT_EQ(fetch_run(hint, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(hint), 2);
     keepalive_off();
-    ka_server_stop(&hint);
+    ka_stop(hint);
     nm_test_clock_reset();
 
-    struct KaServer plain = { .reply = RESP_200_CL };
-    ka_server_start(&plain);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", plain.port);
+    static const NmTsRound plain_rs[] = { { .reply = RESP_200_CL } };
+    NmTsServer *plain = ka_start(plain_rs, 1);
+    ASSERT_NOT_NULL(plain);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(plain));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&plain, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(plain, base, "/models"), 0);
     nm_test_clock_advance_ms(5000);
-    ASSERT_EQ(fetch_run(&plain, base, "/models"), 0); /* inside 30 s */
-    ASSERT_EQ(plain.accepts, 1);
+    ASSERT_EQ(fetch_run(plain, base, "/models"), 0); /* inside 30 s */
+    ASSERT_EQ(nm_ts_accepts(plain), 1);
     nm_test_clock_advance_ms(31000); /* 36 s idle > 30 s */
-    ASSERT_EQ(fetch_run(&plain, base, "/models"), 0);
-    ASSERT_EQ(plain.accepts, 2);
+    ASSERT_EQ(fetch_run(plain, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(plain), 2);
     keepalive_off();
-    ka_server_stop(&plain);
+    ka_stop(plain);
     nm_test_clock_reset();
 }
 
@@ -637,19 +341,21 @@ static void test_keepalive_off_is_todays_wire(void)
 {
     /* The escape hatch: two accepts, and the request carries
      * `Connection: close` — today's bytes. */
-    struct KaServer s = { .reply = RESP_200_CL };
-    ka_server_start(&s);
+    static const NmTsRound rs[] = { { .reply = RESP_200_CL } };
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_off(); /* the suite's pin, asserted here */
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(s.accepts, 2);
-    ASSERT_EQ(s.requests, 2);
-    ASSERT_TRUE(strstr(s.first_req, "Connection: close\r\n") != NULL);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
+    ASSERT_EQ(nm_ts_requests(s), 2);
+    ASSERT_TRUE(strstr(nm_ts_request(s, 0),
+                       "Connection: close\r\n") != NULL);
 
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_204_on_a_persistent_socket(void)
@@ -660,21 +366,22 @@ static void test_204_on_a_persistent_socket(void)
      * empty-body rule still errors the fetch - an application
      * judgment, not a framing fault - so both runs report -1 while
      * the SOCKET serves two exchanges on one accept. */
-    struct KaServer s = {
-        .reply = "HTTP/1.1 204 No Content\r\n\r\n",
+    static const NmTsRound rs[] = {
+        { .reply = "HTTP/1.1 204 No Content\r\n\r\n" },
     };
-    ka_server_start(&s);
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
-    ASSERT_EQ(s.accepts, 1);
-    ASSERT_EQ(s.requests, 2);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
+    ASSERT_EQ(nm_ts_accepts(s), 1);
+    ASSERT_EQ(nm_ts_requests(s), 2);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_redial_repairs_a_dropped_reuse(void)
@@ -685,20 +392,24 @@ static void test_redial_repairs_a_dropped_reuse(void)
      * exchange looks like), and serves the redial's new connection.
      * The client sees only success - and the wire log one redial
      * line naming both ids. */
-    struct KaServer s = { .reply = RESP_200_CL };
-    s.drop_one_after_first = 1;
-    ka_server_start(&s);
+    static const NmTsRound rs[] = {
+        { .reply = RESP_200_CL },
+        { .action = NM_TS_DROP },
+        { .reply = RESP_200_CL },
+    };
+    NmTsServer *s = ka_start(rs, 3);
+    ASSERT_NOT_NULL(s);
 
     recorder_arm();
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0); /* the redial repaired it */
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0); /* the redial repaired it */
     recorder_take();
 
-    ASSERT_EQ(s.accepts, 2);
-    ASSERT_EQ(s.requests, 3);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
+    ASSERT_EQ(nm_ts_requests(s), 3);
     /* The redial line: exactly one, and it names both ids. */
     ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 1);
     const char *red = strstr(g_log, "\"stage\":\"redial\"");
@@ -710,7 +421,7 @@ static void test_redial_repairs_a_dropped_reuse(void)
     ASSERT_EQ(count_of(g_log, "\"kind\":\"request\""), 3);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_redial_replays_a_post_body(void)
@@ -718,30 +429,34 @@ static void test_redial_replays_a_post_body(void)
     /* The same shape on the chat's verb: the POST is re-sent WHOLE
      * (the retained req_buf drains after the dial) and the stream
      * completes. */
-    struct KaServer s = { .reply = RESP_200_CL };
-    s.drop_one_after_first = 1;
-    ka_server_start(&s);
+    static const NmTsRound rs[] = {
+        { .reply = RESP_200_CL },
+        { .action = NM_TS_DROP },
+        { .reply = RESP_200_CL },
+    };
+    NmTsServer *s = ka_start(rs, 3);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
     const char *body = "{\"model\":\"m\",\"messages\":[]}";
-    ASSERT_EQ(fetch_run(&s, base, "/chat/completions"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/chat/completions"), 0);
     /* The second fetch carries the POST: dropped once, redialled,
      * served - and the body rides the replay intact. */
     NmFetchStream *f = nm_fetch_begin(base, "POST", "/chat/completions",
                                       NULL, NULL, NULL, 0, body);
     ASSERT_NOT_NULL(f);
-    ASSERT_EQ(fetch_drive(&s, f), 0);
+    ASSERT_EQ(fetch_drive(s, f), 0);
     nm_fetch_end(f);
-    ASSERT_EQ(s.accepts, 2);
-    ASSERT_EQ(s.requests, 3);
-    ASSERT_TRUE(strstr(s.last_req, body) != NULL);
-    ASSERT_TRUE(strstr(s.last_req,
-                       "Content-Length: 27\r\n") != NULL);
+    ASSERT_EQ(nm_ts_accepts(s), 2);
+    ASSERT_EQ(nm_ts_requests(s), 3);
+    const char *last = nm_ts_request(s, nm_ts_requests(s) - 1);
+    ASSERT_TRUE(strstr(last, body) != NULL);
+    ASSERT_TRUE(strstr(last, "Content-Length: 27\r\n") != NULL);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_redial_that_fails_is_final(void)
@@ -749,23 +464,26 @@ static void test_redial_that_fails_is_final(void)
     /* The whole server dies with the second exchange: the redial
      * dials a corpse, the connect is refused, and the exchange fails
      * - exactly ONE redial line, no loop. */
-    struct KaServer s = { .reply = RESP_200_CL };
-    s.die_after_first = 1;
-    ka_server_start(&s);
+    static const NmTsRound rs[] = {
+        { .reply = RESP_200_CL },
+        { .action = NM_TS_DIE },
+    };
+    NmTsServer *s = ka_start(rs, 2);
+    ASSERT_NOT_NULL(s);
 
     recorder_arm();
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), 0);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
     recorder_take();
 
     ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 1);
     ASSERT_TRUE(strstr(g_log, "redialled as connection") != NULL);
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 static void test_byte_after_failure_is_not_redialled(void)
@@ -773,25 +491,26 @@ static void test_byte_after_failure_is_not_redialled(void)
     /* A failure AFTER a response byte is final: the truncated reply
      * lands bytes (the head), the drop comes mid-body, and the wire
      * log carries NO redial line. */
-    struct KaServer s = {
-        .reply = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
-        .close_after_each = 1,
+    static const NmTsRound rs[] = {
+        { .reply = "HTTP/1.1 200 OK\r\nContent-Length: 20\r\n\r\nshort",
+          .close_after_reply = 1 },
     };
-    ka_server_start(&s);
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     recorder_arm();
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     keepalive_on();
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
-    ASSERT_EQ(fetch_run(&s, base, "/models"), -1);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
+    ASSERT_EQ(fetch_run(s, base, "/models"), -1);
     recorder_take();
 
     ASSERT_EQ(count_of(g_log, "\"stage\":\"redial\""), 0);
-    ASSERT_EQ(s.accepts, 2); /* plain fresh dials, no repair */
+    ASSERT_EQ(nm_ts_accepts(s), 2); /* plain fresh dials, no repair */
 
     keepalive_off();
-    ka_server_stop(&s);
+    ka_stop(s);
 }
 
 /* The pin's tripwire: file scope (a static function, not a nested

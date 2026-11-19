@@ -226,14 +226,15 @@ test_wire_LDADD = -lpthread $(TEST_TLS_LIBS)
 # connection, the idle window moved with the fake clock (linked
 # INSTEAD of src/clock.c, the test_addr_cache precedent). Plain only —
 # the TLS reuse cases live in test_tls, where the TLS server already
-# is. POSIX threads.
-test_keepalive_SOURCES = test_keepalive.c fake_clock.c \
+# is. The server is the shared scripted pump (net_server.c): one
+# thread, no timers, driven between every client step.
+test_keepalive_SOURCES = test_keepalive.c net_server.c fake_clock.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     ../src/conf.c ../src/wire_recorder.c ../src/json.c ../src/sse.c \
     ../src/openai_client.c $(TEST_TLS_SOURCE)
 test_keepalive_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_keepalive_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_keepalive_LDADD = -lpthread $(TEST_TLS_LIBS)
+test_keepalive_LDADD = $(TEST_TLS_LIBS)
 
 # Wire debug recorder: banner + NDJSON event
 # lines + redaction via the header secret marker, plus a tap round
@@ -311,10 +312,12 @@ test_tools_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_tools_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
 test_tools_LDADD = -lpthread $(TEST_TLS_LIBS)
 
-# web_search: the SearXNG HTTP tool against a canned loopback server —
+# web_search: the SearXNG HTTP tool against the scripted pump server —
 # request shaping, result normalization (sort/dedup/cap), errors, the
-# reachability cache and its timeout.
-test_web_search_SOURCES = test_web_search.c ../src/clock.c \
+# reachability cache and its timeout. The tool is driven on its async
+# seam; the budget is VIRTUAL (fake_clock.c linked instead of
+# src/clock.c), so the deadline tests move the clock, never sleep it.
+test_web_search_SOURCES = test_web_search.c net_server.c fake_clock.c \
     ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
     ../src/file_ledger.c ../src/skills.c \
     ../src/tools_exec.c ../src/proc.c $(PROCESS_SOURCE) \
@@ -571,6 +574,7 @@ TESTS_ENVIRONMENT = NM_NO_UNBIDDEN_FETCH=1 \
     NM_E2E_TOOLS='$(abs_top_srcdir)/tools'
 
 EXTRA_DIST = test_helpers.h test_net_helpers.h fake_clock.h \
+    net_server.h \
     tls/test-cert.pem tls/test-key.pem \
     tls/README.md \
     e2e_portty/README.md e2e_portty/e2e-driver.sh \
