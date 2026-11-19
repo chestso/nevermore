@@ -234,6 +234,13 @@ prerequisite (skip).
   over UNREAD data is an RST, which answers `ECONNRESET` and never raises the
   signal at all: the peer half must drain what it was sent before it closes,
   or the test proves nothing.
+- **A send into a connection nobody has accepted is a platform race.**
+  The kernel buffers it on Linux and wine, but the accept backlog is not a
+  contract: a pump that accepts only after the client's first send can hang
+  the client's read forever on a BSD stack (macOS CI hung the recorder's
+  round trip exactly there, green twice before it bit). Take the connection
+  BEFORE the send — `nm_ts_wait` with no client fd waits on the listener
+  alone, the pump accepts, and the step then sends onto a live socket pair.
 - **`select()`:** pass NULL for unset directions, never an empty non-NULL
   `fd_set` (Windows).
 - **PENDING is part of the contract:** continue on OK/PENDING, break only on a
