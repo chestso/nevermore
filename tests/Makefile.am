@@ -188,8 +188,11 @@ TEST_PROVIDER_SOURCES = \
     ../src/columns.c ../src/credit.c
 
 # Provider registry (nevermore.c + the provider vtables; the ollama
-# vtables call into the shared openai_client, so it links too).
-test_provider_SOURCES = test_provider.c ../src/clock.c ../src/conf.c \
+# vtables call into the shared openai_client, so it links too). The
+# wire peers are the shared scripted pump (net_server.c): the chat
+# drives drive chat_begin/chat_step, the catalog drives
+# models_begin/step, one thread, no timers.
+test_provider_SOURCES = test_provider.c net_server.c ../src/clock.c ../src/conf.c \
     ../src/nevermore.c \
     ../src/authinfo.c \
     ../src/conversation_id.c \
@@ -198,7 +201,7 @@ test_provider_SOURCES = test_provider.c ../src/clock.c ../src/conf.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_provider_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_provider_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_provider_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
+test_provider_LDADD = $(BOBA_LIBS) $(TEST_TLS_LIBS)
 
 # Listing-plane sources (registry + static catalog) — the picker's
 # data seam. Same link set as test_provider (sources wrap providers).

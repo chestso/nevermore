@@ -1,21 +1,14 @@
 /* test_provider.c - provider registry + provider vtable tests.
  *
- * Registry tests run offline. The openrouter tests run the provider's
- * real chat vtables against a canned loopback OpenAI-shaped
- * server (never a real API — house rule), exactly as test_openai_client
- * drives the shared client: request validation, SSE delta assembly.
+ * Registry tests run offline. The wire tests run the providers' real
+ * chat and catalog seams against the scripted pump
+ * (tests/net_server.[ch] - one thread, no timers): the CHAT drives
+ * chat_begin/chat_step (the same pump the provider's blocking chat
+ * runs internally), the CATALOG drives models_begin/step, and the
+ * Ollama native machine's rounds route by path on the module's
+ * on_request hook. Never a real API — house rule.
  */
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,7 +16,9 @@
 
 #include "authinfo.h"
 #include "identity.h"
+#include "net_server.h" /* the scripted pump: no thread, no timer */
 #include "provider.h"
+#include "transport.h" /* NmSource / NM_INTEREST_* */
 #include "test_helpers.h"
 #include "test_net_helpers.h"
 #include "test_keepalive_pin.h"
@@ -345,242 +340,155 @@ static void test_provider_authinfo_machines(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Canned loopback servers (openrouter vtable tests)                  */
+/* The scripted pump: every canned wire peer in this file            */
 /* ---------------------------------------------------------------- */
 
-/* Shared plumbing: listen on loopback, one scripted round. */
+/* One thread, no timers: the canned peer is a script of rounds and a
+ * pump the drives service between every client step (net_server.h).
+ * The script is a BORROW - its storage must outlive the server - so
+ * every script below is static. */
 
-static int server_listen(int *port)
+static NmTsServer *pv_start(const NmTsRound *rs, int n)
 {
-    int lfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (lfd < 0)
-        return -1;
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    if (bind(lfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
-        close(lfd);
-        return -1;
-    }
-    if (listen(lfd, 1) != 0) {
-        close(lfd);
-        return -1;
-    }
-    struct sockaddr_in got;
-    socklen_t sl = sizeof(got);
-    if (getsockname(lfd, (struct sockaddr *)&got, &sl) != 0) {
-        close(lfd);
-        return -1;
-    }
-    *port = ntohs(got.sin_port);
-    return lfd;
+    NmTsServer *s = nm_ts_start(rs, n);
+    if (!s)
+        fprintf(stderr, "  FAIL: %s:%d: nm_ts_start\n", __FILE__, __LINE__);
+    return s;
 }
 
-/* What the client actually sent (per test, single round). */
-static char last_request[4096];
-static size_t last_request_len;
-
-/* Drain until the request looks complete: headers + (POST) a body
- * ending in '}', or (GET) the blank line. Bounded. The bytes land in
- * the caller's buffer: a test with TWO servers (the tier's list and
- * the catalog document) needs to see each request separately. */
-static void drain_request_into(char *buf, size_t cap, int cfd)
+/* The chat seam's drive: begin, step, THE wait (the stream's fd with
+ * its declared interest, and the server's fds, in one poll). The
+ * provider's BLOCKING chat runs this same pump internally, so driving
+ * the seam keeps every assertion on the same wire with the peer
+ * serviced by this thread. */
+static NmChatResult chat_round(const NmProvider *p, NmTsServer *s,
+                               const NmChatRequest *req, const char *api_key)
 {
-    size_t got = 0;
-    while (got < cap - 1) {
-        /* Bounded poll-recv: a closed/EOF peer reads as 0. */
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 1, 0 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
+    NmChatResult err;
+    memset(&err, 0, sizeof(err));
+    NmChatStream *h = p->chat_begin(p, req, base, api_key, &err);
+    if (!h)
+        return err;
+    NmChatResult res;
+    memset(&res, 0, sizeof(res));
+    NmChatStatus st = NM_CHAT_PENDING;
+    while (st == NM_CHAT_PENDING) {
+        st = p->chat_step(h, &res);
+        if (st != NM_CHAT_PENDING)
             break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        long n = recv(cfd, buf + got, cap - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(buf, "\r\n\r\n") &&
-            (buf[got - 1] == '}' || buf[got - 4] == '\r' ||
-             buf[got - 3] == '\n'))
-            break;
+        int fd = p->chat_stream_fd(h);
+        unsigned interest = p->chat_stream_interest(h);
+        if (fd >= 0 && interest) {
+            if (nm_ts_wait(s, fd, interest, 5000) == 0)
+                fprintf(stderr,
+                        "  (chat drive stalled: neither end moved for"
+                        " 5 s)\n");
+        } else {
+            nm_ts_pump(s); /* a phase with no fd: keep both ends moving */
+        }
     }
-    buf[got] = '\0';
+    p->chat_end(h);
+    return res;
 }
 
-static void drain_request(int cfd)
+/* One canned chat round: the named provider's chat seam against a
+ * one-reply script. The request the peer saw lands in req_out (the
+ * test's own evidence buffer - the assertions read it after). A
+ * setup failure comes back as a non-OK status, which the caller's
+ * ASSERT reports. */
+static NmChatResult canned_chat_round(const char *provider,
+                                      const char *reply,
+                                      const NmChatRequest *req,
+                                      const char *api_key,
+                                      char *req_out, size_t req_cap)
 {
-    drain_request_into(last_request, sizeof(last_request), cfd);
-    last_request_len = strlen(last_request);
-}
-
-/* ---------------------------------------------------------------- */
-/* Canned servers: the round plumbing every server thread shares      */
-/* ---------------------------------------------------------------- */
-
-/* Write the whole buffer, or stop at the peer's first refusal: a short
- * send is a dead connection, not a reason to retry forever. */
-static void send_all(int cfd, const char *buf, size_t len)
-{
-    size_t off = 0;
-    while (off < len) {
-        long n = send(cfd, buf + off, len - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
+    NmChatResult none;
+    memset(&none, 0, sizeof(none));
+    const NmProvider *p = nm_provider_by_name(provider);
+    if (!p) {
+        none.status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(none.message, sizeof(none.message),
+                 "no %s provider", provider);
+        return none;
     }
+    static NmTsRound round; /* static: the pump reads it per request */
+    round.reply = reply;
+    round.action = NM_TS_SERVE;
+    round.close_after_reply = 1;
+    round.chunk_events = 0;
+    round.on_request = NULL;
+    NmTsServer *s = nm_ts_start(&round, 1);
+    if (!s) {
+        none.status = NM_CHAT_ERR_TRANSPORT;
+        snprintf(none.message, sizeof(none.message), "no canned server");
+        return none;
+    }
+    NmChatResult r = chat_round(p, s, req, api_key);
+    if (req_out && req_cap) {
+        const char *got = nm_ts_request(s, 0);
+        snprintf(req_out, req_cap, "%s", got ? got : "");
+    }
+    nm_ts_stop(s);
+    return r;
 }
 
-/* Drain-recv stall loop: the peer closes after reading its reply, and
- * a select-only loop hot-spins on the EOF-readable socket, so wait in
- * 50 ms slices and leave when nothing is readable. */
-static void stall_until_peer_closes(int cfd)
+/* The catalog seam's drive: models_begin/step, the fetch's fd with its
+ * interest waited against the same poll. The rows land in the
+ * provider's cache either way - models() reads the cache after. */
+static int models_run(const NmProvider *p, NmTsServer *s, const char *base,
+                      const char *key)
 {
+    if (!p->models_begin(p, base, key))
+        return 0;
     for (;;) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(cfd, &r);
-        struct timeval tv = { 0, 50 * 1000 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break;
-#else
-        if (select(cfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        char sink[64];
-        if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-            break; /* peer gone */
+        NmCatalogStatus st = p->models_step(p);
+        if (st != NM_CATALOG_PENDING)
+            return st == NM_CATALOG_OK ? 1 : 0;
+        NmSource src = p->models_source(p);
+        if (src.handle >= 0 && src.flags) {
+            if (nm_ts_wait(s, src.handle, src.flags, 5000) == 0)
+                fprintf(stderr,
+                        "  (models drive stalled: neither end moved for"
+                        " 5 s)\n");
+        } else {
+            nm_ts_pump(s); /* a phase with no fd: keep both ends moving */
+        }
     }
 }
 
-/* An HTTP 200 whose body is the whole document, the length in the
- * head: the non-chunked body path every catalog answers with. */
-static void send_json(int cfd, const char *body)
+/* The canned OpenAI-shaped chat stream every plain round serves. Chunk
+ * sizes computed: 0x33, 0x35, 0xe. */
+static const char CANNED_CHAT_SSE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Connection: close\r\n"
+    "Content-Type: text/event-stream\r\n"
+    "Transfer-Encoding: chunked\r\n\r\n"
+    "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+    "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
+    "e\r\ndata: [DONE]\n\n\r\n"
+    "0\r\n\r\n";
+
+/* A JSON document reply: the non-chunked body path every catalog
+ * answers with, one exchange, the length in the head. */
+static void json_reply(char *buf, size_t cap, const char *body)
 {
-    char head[128];
-    snprintf(head, sizeof(head),
+    snprintf(buf, cap,
              "HTTP/1.1 200 OK\r\n"
              "Connection: close\r\n"
              "Content-Type: application/json\r\n"
-             "Content-Length: %zu\r\n\r\n",
-             strlen(body));
-    send_all(cfd, head, strlen(head));
-    send_all(cfd, body, strlen(body));
+             "Content-Length: %zu\r\n"
+             "\r\n"
+             "%s",
+             strlen(body), body);
 }
 
-/* Take the round's connection and land its request in `req` (NULL =
- * the shared last_request). -1 when no peer came. */
-static int canned_accept(int lfd, char *req, size_t cap)
-{
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return -1;
-    if (req)
-        drain_request_into(req, cap, cfd);
-    else
-        drain_request(cfd);
-    return cfd;
-}
+/* ---------------------------------------------------------------- */
+/* The Ollama catalog machine, routed BY PATH                        */
+/* ---------------------------------------------------------------- */
 
-/* End of a served round: hold the connection while the peer reads (the
- * stall above), then release BOTH the connection and the listener it
- * arrived on. A server thread owns the fd it was handed, which is why
- * no test closes a listener it started. */
-static void canned_close(int cfd, int lfd)
-{
-    if (cfd >= 0) {
-        stall_until_peer_closes(cfd);
-        close(cfd);
-    }
-    close(lfd);
-}
-
-/* Serve ONE ready-made round on `lfd`: `head`, then `tail` `gap_us`
- * later (a server whose trailer section follows the stream's end),
- * then close the round. */
-static void serve_round(int lfd, const char *head, const char *tail,
-                        unsigned gap_us)
-{
-    int cfd = canned_accept(lfd, NULL, 0);
-    if (cfd >= 0) {
-        if (head)
-            send_all(cfd, head, strlen(head));
-        if (tail) {
-            if (gap_us)
-                usleep(gap_us);
-            send_all(cfd, tail, strlen(tail));
-        }
-    }
-    canned_close(cfd, lfd);
-}
-
-/* serve_round for one reply written once: every SSE chat server. */
-static void serve_reply(int lfd, const char *reply)
-{
-    serve_round(lfd, reply, NULL, 0);
-}
-
-/* serve_round for a JSON document (Content-Length, no chunking). */
-static void serve_json(int lfd, const char *body)
-{
-    int cfd = canned_accept(lfd, NULL, 0);
-    if (cfd >= 0)
-        send_json(cfd, body);
-    canned_close(cfd, lfd);
-}
-
-/* Start `thread` on a fresh loopback listener and fill `base` with the
- * "/v1" URL its round is driven against. 0 on success. The thread owns
- * the listener (canned_close releases it), so the caller only joins. */
-static int server_start(void *(*thread)(void *), pthread_t *th, char *base,
-                        size_t cap)
-{
-    int port;
-    int lfd = server_listen(&port);
-    if (lfd < 0)
-        return -1;
-    if (pthread_create(th, NULL, thread, (void *)(intptr_t)lfd) != 0) {
-        close(lfd);
-        return -1;
-    }
-    snprintf(base, cap, "http://127.0.0.1:%d/v1", port);
-    return 0;
-}
-
-/* Chat server: two content deltas then [DONE], chunked. Chunk sizes
- * computed: 0x33, 0x35, 0xe (verified: printf | wc -c pattern). */
-static void *canned_chat_server_thread(void *arg)
-{
-    static const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
-        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
-    serve_reply((int)(intptr_t)arg, sse);
-    return NULL;
-}
-
-/* Ollama catalog server. The cloud's catalog starts with the
- * ONE-request verbose shape (GET /v1/models?verbose=true), and falls
- * through to the NATIVE machine (GET /api/tags for membership, then
- * one POST /api/show per tagged model with the real metadata —
- * OLLAMA-CLOUD-API.md §6.3/§6.4) when the peer does not answer the
- * verbose half. The rounds are dispatched by the request's PATH, not
- * by their order: the machine's shape is the code under test, and a
- * round counter would have pinned the order instead.
- *
- * The mode picks what the verbose request answers:
+/* The mode picks what the verbose request answers:
  *   0 = the plain OpenAI list (no "models" array) -> the native
  *       machine runs (the local daemon's shape);
  *   1 = the verbose shape (slug / display_name / context_window /
@@ -604,64 +512,52 @@ static const char *ollama_verbose_body(void)
            "\"input_modalities\":[\"text\",\"image\"]}]}";
 }
 
-static void *ollama_catalog_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    /* Bound the rounds: 1 verbose + 1 tags + up to N shows; accept
-     * with a timeout so the thread exits when the client stops
-     * connecting (the stall-drain below handles per-connection EOF). */
-    for (int round = 0; round < 16; round++) {
-        fd_set r;
-        FD_ZERO(&r);
-        FD_SET(lfd, &r);
-        struct timeval tv = { 2, 0 };
-#ifdef _WIN32
-        if (select(0, &r, NULL, NULL, &tv) <= 0)
-            break; /* no more client rounds within 2s */
-#else
-        if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
-            break;
-#endif
-        int cfd = accept(lfd, NULL, NULL);
-        if (cfd < 0)
-            break;
-        drain_request(cfd);
+/* The machine's ONE round, dispatched by the request's PATH, not by
+ * its order: the machine's shape is the code under test, and a round
+ * counter would have pinned the order instead. The script repeats this
+ * round for as many requests as the machine walks. */
+static char ollama_route_reply[4096];
 
-        const char *body = NULL;
-        if (strstr(last_request, "GET /v1/models?verbose=true")) {
-            /* The cloud's one-request shape. */
-            body = ollama_server_verbose_mode
-                       ? ollama_verbose_body()
-                       : "{\"object\":\"list\",\"data\":["
-                         "{\"id\":\"gpt-oss:20b\"},"
-                         "{\"id\":\"gemma4:31b\"}]}";
-        } else if (strstr(last_request, "GET /api/tags")) {
-            body =
-                "{\"models\":["
-                "{\"name\":\"gpt-oss:20b\",\"model\":\"gpt-oss:20b\"},"
-                "{\"name\":\"gemma4:31b\",\"model\":\"gemma4:31b\"}"
-                "]}";
-        } else {
-            /* /api/show per model: the request body named it. */
-            const char *is_gemma =
-                strstr(last_request, "\"model\":\"gemma4:31b\"");
-            body = is_gemma
-                       ? "{\"capabilities\":[\"completion\",\"vision\",\"tools\"],"
-                         "\"model_info\":{\"gemma4.embedding_length\":2560,"
-                         "\"gemma4.context_length\":262144}}"
-                       : "{\"capabilities\":[\"completion\",\"tools\",\"thinking\"],"
-                         "\"model_info\":{\"gptoss.embedding_length\":2880,"
-                         "\"gptoss.context_length\":131072}}";
-        }
-        send_json(cfd, body);
-        stall_until_peer_closes(cfd); /* peer closes after reading */
-        close(cfd);
+static void ollama_route(NmTsServer *s, int round, const char *req,
+                         size_t len)
+{
+    (void)round;
+    (void)len;
+    const char *body;
+    if (strstr(req, "GET /v1/models?verbose=true")) {
+        body = ollama_server_verbose_mode
+                   ? ollama_verbose_body()
+                   : "{\"object\":\"list\",\"data\":["
+                     "{\"id\":\"gpt-oss:20b\"},"
+                     "{\"id\":\"gemma4:31b\"}]}";
+    } else if (strstr(req, "GET /api/tags")) {
+        body =
+            "{\"models\":["
+            "{\"name\":\"gpt-oss:20b\",\"model\":\"gpt-oss:20b\"},"
+            "{\"name\":\"gemma4:31b\",\"model\":\"gemma4:31b\"}"
+            "]}";
+    } else {
+        /* /api/show per model: the request body named it. */
+        const char *is_gemma = strstr(req, "\"model\":\"gemma4:31b\"");
+        body = is_gemma
+                   ? "{\"capabilities\":[\"completion\",\"vision\",\"tools\"],"
+                     "\"model_info\":{\"gemma4.embedding_length\":2560,"
+                     "\"gemma4.context_length\":262144}}"
+                   : "{\"capabilities\":[\"completion\",\"tools\",\"thinking\"],"
+                     "\"model_info\":{\"gptoss.embedding_length\":2880,"
+                     "\"gptoss.context_length\":131072}}";
     }
-    close(lfd);
-    return NULL;
+    json_reply(ollama_route_reply, sizeof(ollama_route_reply), body);
+    nm_ts_reply_override(s, ollama_route_reply);
 }
 
-/* OpenRouter vtable (real provider code, canned wire)                */
+/* The machine's script: one repeating, by-path round. */
+static const NmTsRound ollama_catalog_rounds[] = {
+    { .on_request = ollama_route, .close_after_reply = 1 },
+};
+
+/* ---------------------------------------------------------------- */
+/* OpenRouter vtable (real provider code, canned wire)               */
 /* ---------------------------------------------------------------- */
 
 typedef struct
@@ -696,34 +592,6 @@ static void capture_delta(NmStreamChannel channel, const char *delta_text,
         cap->text[cap->len] = '\0';
     }
 }
-
-/* One canned chat round: `thread` started on a loopback port, the
- * named provider's BLOCKING chat driven against it, the server joined
- * (the thread releases its listener). The caller owns the request —
- * it is what the assertions read off the wire — and last_request holds
- * it on return. A setup failure comes back as a non-OK status, which
- * is what the caller's ASSERT reports. */
-static NmChatResult canned_chat_round(const char *provider,
-                                      void *(*thread)(void *),
-                                      const NmChatRequest *req,
-                                      const char *api_key)
-{
-    NmChatResult r;
-    memset(&r, 0, sizeof(r));
-    const NmProvider *p = nm_provider_by_name(provider);
-    pthread_t th;
-    char base[64];
-    if (!p || server_start(thread, &th, base, sizeof(base)) != 0) {
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        snprintf(r.message, sizeof(r.message),
-                 "no %s provider, or no canned server", provider);
-        return r;
-    }
-    r = p->chat(p, req, base, api_key);
-    pthread_join(th, NULL);
-    return r;
-}
-
 static void test_openrouter_chat_end_to_end(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
@@ -733,28 +601,37 @@ static void test_openrouter_chat_end_to_end(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("openrouter", canned_chat_server_thread, &req,
-                                       "sk-or-test");
+    char wire[4096]; /* what the peer received: the assertions read it */
+    NmChatResult r = canned_chat_round("openrouter", CANNED_CHAT_SSE, &req,
+                                       "sk-or-test", wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
 
-    /* The request the server received: path, Bearer auth,
+    /* The request the peer received: path, Bearer auth,
      * model, stream:true, messages. */
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"model\":\"gpt-oss-120b\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"role\":\"user\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization: Bearer sk-or-test") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"model\":\"gpt-oss-120b\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"stream\":true") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"role\":\"user\"") != NULL);
 }
 
 static void test_openrouter_chat_begin_step(void)
 {
+    /* This test IS the seam contract: begin, the interest bits, THE
+     * wait (the stream's fd together with the peer's fds, one pump
+     * per wake - never a timed slice), end. The provider's blocking
+     * chat runs this same pump internally; these drives run it here. */
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
-    pthread_t th;
+    static const NmTsRound rs[] = {
+        { .reply = CANNED_CHAT_SSE, .close_after_reply = 1 },
+    };
+    NmTsServer *srv = pv_start(rs, 1);
+    ASSERT_NOT_NULL(srv);
     char base[64];
-    ASSERT_EQ(server_start(canned_chat_server_thread, &th, base, sizeof(base)),
-              0);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(srv));
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
@@ -767,21 +644,22 @@ static void test_openrouter_chat_begin_step(void)
     NmChatStream *h = p->chat_begin(p, &req, base, "sk-or-test", &err);
     ASSERT_NOT_NULL(h);
 
-    /* Blocking pump over the step seam: poll until the collector has
-     * content or the stream completes, never on socket readiness
-     * alone (send can race the step). */
     NmChatResult res = { 0 };
     NmChatStatus st = NM_CHAT_PENDING;
-    int guard = 0;
-    while (st == NM_CHAT_PENDING && guard++ < 2000) {
+    while (st == NM_CHAT_PENDING) {
         st = p->chat_step(h, &res);
-        if (st == NM_CHAT_PENDING)
-            usleep(10 * 1000); /* pump wait; not the UI path */
+        if (st != NM_CHAT_PENDING)
+            break;
+        int fd = p->chat_stream_fd(h);
+        unsigned interest = p->chat_stream_interest(h);
+        ASSERT_TRUE(fd >= 0);
+        ASSERT_TRUE(interest);
+        nm_ts_wait(srv, fd, interest, 5000);
     }
     ASSERT_EQ(st, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
     p->chat_end(h);
-    pthread_join(th, NULL);
+    nm_ts_stop(srv);
 }
 
 /* ---------------------------------------------------------------- */
@@ -801,14 +679,14 @@ static void test_ollama_models_tags_and_show(void)
     ollama_server_verbose_mode = 0; /* the plain list: the fallback */
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
-    pthread_t th;
-    char base[64];
-    ASSERT_EQ(server_start(ollama_catalog_server_thread, &th, base,
-                           sizeof(base)),
-              0);
+    NmTsServer *srv = pv_start(ollama_catalog_rounds, 1);
+    ASSERT_NOT_NULL(srv);
 
     /* Base as the chat surface (with /v1): the catalog derives the
      * API root by stripping it — /api/tags is at the host root. */
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(srv));
+    ASSERT_EQ(models_run(p, srv, base, NULL), 1);
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
@@ -829,7 +707,7 @@ static void test_ollama_models_tags_and_show(void)
     ASSERT_EQ(models[1].context_length, 262144); /* gemma4.context_length */
     ASSERT_EQ(models[1].tools, 0);
 
-    pthread_join(th, NULL);
+    nm_ts_stop(srv);
 
     /* The tags round hit the host root, not /v1 (OLLAMA-CLOUD-API.md
      * §6: native endpoints are not under the OpenAI prefix). */
@@ -850,12 +728,11 @@ static void test_ollama_models_verbose_catalog(void)
     ollama_server_verbose_mode = 1; /* the verbose shape */
     const NmProvider *p = nm_provider_by_name("ollama:cloud");
     ASSERT_NOT_NULL(p);
-    pthread_t th;
+    NmTsServer *srv = pv_start(ollama_catalog_rounds, 1);
+    ASSERT_NOT_NULL(srv);
     char base[64];
-    ASSERT_EQ(server_start(ollama_catalog_server_thread, &th, base,
-                           sizeof(base)),
-              0);
-
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(srv));
+    ASSERT_EQ(models_run(p, srv, base, NULL), 1);
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
@@ -873,7 +750,7 @@ static void test_ollama_models_verbose_catalog(void)
     ASSERT_EQ(models[1].context_length, 262144);
     ASSERT_EQ(models[1].tools, 0);
 
-    pthread_join(th, NULL);
+    nm_ts_stop(srv);
     ollama_server_verbose_mode = 0;
 }
 
@@ -927,15 +804,16 @@ static void test_ollama_local_chat_never_carries_a_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("ollama:local", canned_chat_server_thread,
-                                       &req, api_key);
+    char wire[4096];
+    NmChatResult r = canned_chat_round("ollama:local", CANNED_CHAT_SSE,
+                                       &req, api_key, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
     test_unsetenv("OLLAMA_API_KEY");
 
     /* No auth header, not even an empty one: the wire is the proof. */
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization") == NULL);
+    ASSERT_TRUE(strstr(wire, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization") == NULL);
 }
 
 /* The symmetric half: the CLOUD tier still speaks with its credential.
@@ -963,11 +841,12 @@ static void test_ollama_cloud_chat_carries_the_key(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("ollama:cloud", canned_chat_server_thread,
-                                       &req, api_key);
+    char wire[4096];
+    NmChatResult r = canned_chat_round("ollama:cloud", CANNED_CHAT_SSE,
+                                       &req, api_key, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "Authorization: Bearer sk-cloud-rides-here") != NULL);
 }
 
@@ -993,89 +872,83 @@ static void test_ollama_local_catalog_uses_local_default(void)
 /* docs/OPENROUTER-API.md, verified Sep 2026)                        */
 /* ---------------------------------------------------------------- */
 
-/* Chat server with SSE comment keep-alives (": OPENROUTER PROCESSING"
- * — live-observed on the real wire; the parser must ignore them). */
-static void *openrouter_chat_server_thread(void *arg)
-{
-    static const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "30\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n\r\n"
-        "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
-        "34\r\ndata: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n\r\n"
-        "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
-    serve_reply((int)(intptr_t)arg, sse);
-    return NULL;
-}
+/* The OpenRouter-shaped chat stream, SSE comment keep-alives between
+ * the data events (": OPENROUTER PROCESSING" — live-observed on the
+ * real wire; the parser must ignore them). */
+static const char OPENROUTER_CHAT_SSE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Connection: close\r\n"
+    "Content-Type: text/event-stream\r\n"
+    "Transfer-Encoding: chunked\r\n\r\n"
+    "30\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\n\r\n"
+    "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
+    "34\r\ndata: {\"choices\":[{\"delta\":{\"content\":\" there\"}}]}\n\n\r\n"
+    "19\r\n: OPENROUTER PROCESSING\n\n\r\n"
+    "e\r\ndata: [DONE]\n\n\r\n"
+    "0\r\n\r\n";
 
 /* OpenRouter catalog shape (differs from OpenAI's — §2): label is
  * "name", context is TOP-LEVEL "context_length", vision is
  * architecture.input_modalities containing "image". Tokenless. */
-static void *openrouter_models_server_thread(void *arg)
-{
-    static const char body[] =
-        "{\"data\":["
-        "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
-        "\"context_length\":1050000,"
-        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
-        "\"output_modalities\":[\"text\"]},"
-        "\"supported_parameters\":[\"tools\",\"tool_choice\",\"reasoning\"],"
-        "\"reasoning\":{\"mandatory\":true,"
-        "\"supported_efforts\":[\"low\",\"high\"],"
-        "\"default_effort\":\"high\"}},"
-        "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
-        "\"context_length\":8192,"
-        "\"architecture\":{\"input_modalities\":[\"text\"]}},"
-        "{\"id\":\"google/gemini-3.1-flash-lite-image\",\"name\":\"Gemini"
-        " Image\",\"context_length\":65536,"
-        "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
-        "\"output_modalities\":[\"image\"]},"
-        "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]},"
-        /* No "name": the label falls back to the id. */
-        "{\"id\":\"vendor/unnamed\",\"context_length\":4096,"
-        "\"architecture\":{\"input_modalities\":[\"text\"]}},"
-        /* A ":batch" variant: vetoed, so it never becomes a row
-         * (OPENROUTER-API.md §6 — only the Batch API can serve it). */
-        "{\"id\":\"anthropic/claude-haiku-5.5:batch\","
-        "\"name\":\"Claude Haiku 5.5 (batch)\","
-        "\"context_length\":1000000,"
-        "\"architecture\":{\"input_modalities\":[\"text\"]}}"
-        "],\"total_count\":5}";
-    serve_json((int)(intptr_t)arg, body);
-    return NULL;
-}
+static const char OPENROUTER_MODELS_BODY[] =
+    "{\"data\":["
+    "{\"id\":\"~openai/gpt-astra-latest\",\"name\":\"GPT Astra\","
+    "\"context_length\":1050000,"
+    "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
+    "\"output_modalities\":[\"text\"]},"
+    "\"supported_parameters\":[\"tools\",\"tool_choice\",\"reasoning\"],"
+    "\"reasoning\":{\"mandatory\":true,"
+    "\"supported_efforts\":[\"low\",\"high\"],"
+    "\"default_effort\":\"high\"}},"
+    "{\"id\":\"vendor/text-only\",\"name\":\"Text Only\","
+    "\"context_length\":8192,"
+    "\"architecture\":{\"input_modalities\":[\"text\"]}},"
+    "{\"id\":\"google/gemini-3.1-flash-lite-image\",\"name\":\"Gemini"
+    " Image\",\"context_length\":65536,"
+    "\"architecture\":{\"input_modalities\":[\"text\",\"image\"],"
+    "\"output_modalities\":[\"image\"]},"
+    "\"supported_parameters\":[\"max_tokens\",\"temperature\",\"top_p\"]},"
+    /* No "name": the label falls back to the id. */
+    "{\"id\":\"vendor/unnamed\",\"context_length\":4096,"
+    "\"architecture\":{\"input_modalities\":[\"text\"]}},"
+    /* A ":batch" variant: vetoed, so it never becomes a row
+     * (OPENROUTER-API.md §6 — only the Batch API can serve it). */
+    "{\"id\":\"anthropic/claude-haiku-5.5:batch\","
+    "\"name\":\"Claude Haiku 5.5 (batch)\","
+    "\"context_length\":1000000,"
+    "\"architecture\":{\"input_modalities\":[\"text\"]}}"
+    "],\"total_count\":5}";
 
 /* One canned OpenRouter chat round. Every round in this section has no
  * system prompt and authenticates with the test key, so the request is
- * built here; canned_chat_round owns the server's life. */
+ * built here; the request the peer saw lands in wire (the test's
+ * evidence buffer). */
 static NmChatResult openrouter_chat_round(const char *model,
                                           const NmMessage *msgs, size_t n_msgs,
                                           const char *conversation_id,
-                                          Capture *cap)
+                                          Capture *cap,
+                                          char *wire, size_t wire_cap)
 {
     NmChatRequest req = { model, msgs, n_msgs, NULL, NULL, -1, -1,
                           conversation_id, capture_delta, NULL, cap, NULL };
-    return canned_chat_round("openrouter", openrouter_chat_server_thread, &req,
-                             "sk-or-test");
+    return canned_chat_round("openrouter", OPENROUTER_CHAT_SSE, &req,
+                             "sk-or-test", wire, wire_cap);
 }
 
 static void test_openrouter_chat_with_keepalive_comments(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
-                                           NULL, &cap);
+                                           NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     /* Comment keep-alives between data events must not break the
      * delta assembly (live-observed framing, OPENROUTER-API.md §3). */
     ASSERT_STR_EQ(cap.text, "Hi there");
 
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-or-test") != NULL);
+    ASSERT_TRUE(strstr(wire, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization: Bearer sk-or-test") != NULL);
 }
 
 /* The app attribution headers (OPENROUTER-API.md §9): the chat round
@@ -1085,21 +958,22 @@ static void test_openrouter_chat_carries_app_attribution(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
-                                           NULL, &cap);
+                                           NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hi there");
 
     /* The app's identity: the referer IS the app's key, the title is
      * the display name, the category files it under cli-agent. */
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "HTTP-Referer: " NM_APP_URL) != NULL);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "X-OpenRouter-Title: " NM_APP_NAME) != NULL);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "X-OpenRouter-Categories: " NM_APP_CATEGORY) != NULL);
     /* The attribution rides the CHAT round only. */
-    ASSERT_TRUE(strstr(last_request, "User-Agent: " NM_USER_AGENT) != NULL);
+    ASSERT_TRUE(strstr(wire, "User-Agent: " NM_USER_AGENT) != NULL);
 }
 
 /* The environment knob replaces the app's URL for one run. It is a
@@ -1111,31 +985,32 @@ static void test_openrouter_app_url_env_knob(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
 
     /* A valid override rides the request instead of the shipped URL. */
     test_setenv(NM_APP_URL_ENV, "https://example.test/fork");
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
-                                           NULL, &cap);
+                                           NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "HTTP-Referer: https://example.test/fork") != NULL);
-    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) == NULL);
+    ASSERT_TRUE(strstr(wire, "HTTP-Referer: " NM_APP_URL) == NULL);
 
     /* A malformed one is refused: the shipped URL rides, so no junk
      * app is created on the provider's side. */
     test_setenv(NM_APP_URL_ENV, "not-a-url");
-    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap);
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
-    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: not-a-url") == NULL);
+    ASSERT_TRUE(strstr(wire, "HTTP-Referer: " NM_APP_URL) != NULL);
+    ASSERT_TRUE(strstr(wire, "HTTP-Referer: not-a-url") == NULL);
 
     /* A value that would SPLIT the request (a CR/LF in a header
      * value) is refused too — the same rule, one more reason. */
     test_setenv(NM_APP_URL_ENV, "https://a.test/x\r\nX-Evil: 1");
-    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap);
+    r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "HTTP-Referer: " NM_APP_URL) != NULL);
-    ASSERT_TRUE(strstr(last_request, "X-Evil") == NULL);
+    ASSERT_TRUE(strstr(wire, "HTTP-Referer: " NM_APP_URL) != NULL);
+    ASSERT_TRUE(strstr(wire, "X-Evil") == NULL);
 
     test_unsetenv(NM_APP_URL_ENV);
 }
@@ -1147,22 +1022,24 @@ static void test_openrouter_anthropic_chat_requests_caching(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round("anthropic/claude-sonnet-5.5", &msg,
-                                           1, NULL, &cap);
+                                           1, NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "\"cache_control\":{\"type\":\"ephemeral\"}") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"ttl\"") == NULL);
+    ASSERT_TRUE(strstr(wire, "\"ttl\"") == NULL);
 }
 
 static void test_openrouter_non_anthropic_chat_sends_no_marker(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
-                                           NULL, &cap);
+                                           NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
+    ASSERT_TRUE(strstr(wire, "cache_control") == NULL);
 }
 
 /* OPENROUTER_PROMPT_CACHE=off drops the marker for one run. */
@@ -1170,12 +1047,13 @@ static void test_openrouter_prompt_cache_opt_out(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     test_setenv("OPENROUTER_PROMPT_CACHE", "off");
     NmChatResult r = openrouter_chat_round("anthropic/claude-sonnet-5.5", &msg,
-                                           1, NULL, &cap);
+                                           1, NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     test_unsetenv("OPENROUTER_PROMPT_CACHE");
-    ASSERT_TRUE(strstr(last_request, "cache_control") == NULL);
+    ASSERT_TRUE(strstr(wire, "cache_control") == NULL);
 }
 
 /* OPENROUTER_PROMPT_CACHE=1h asks for the 1-hour TTL (2x the write
@@ -1184,12 +1062,13 @@ static void test_openrouter_prompt_cache_ttl_1h(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     test_setenv("OPENROUTER_PROMPT_CACHE", "1h");
     NmChatResult r = openrouter_chat_round("~anthropic/claude-haiku-latest",
-                                           &msg, 1, NULL, &cap);
+                                           &msg, 1, NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     test_unsetenv("OPENROUTER_PROMPT_CACHE");
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "\"cache_control\":{\"type\":\"ephemeral\","
                        "\"ttl\":\"1h\"}") != NULL);
 }
@@ -1200,11 +1079,12 @@ static void test_openrouter_chat_carries_session_id(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round(
         "~openai/gpt-astra-latest", &msg, 1,
-        "nm-0123456789abcdef0123456789abcdef", &cap);
+        "nm-0123456789abcdef0123456789abcdef", &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "\"session_id\":\"nm-0123456789abcdef0123456789"
                        "abcdef\"") != NULL);
 }
@@ -1215,22 +1095,27 @@ static void test_openrouter_chat_without_session_id(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1,
-                                           NULL, &cap);
+                                           NULL, &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "session_id") == NULL);
+    ASSERT_TRUE(strstr(wire, "session_id") == NULL);
 }
 
 static void test_openrouter_models_fetch(void)
 {
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
-    pthread_t th;
+    static char reply[2048];
+    json_reply(reply, sizeof(reply), OPENROUTER_MODELS_BODY);
+    static const NmTsRound rs[] = {
+        { .reply = reply, .close_after_reply = 1 },
+    };
+    NmTsServer *srv = pv_start(rs, 1);
+    ASSERT_NOT_NULL(srv);
     char base[64];
-    ASSERT_EQ(server_start(openrouter_models_server_thread, &th, base,
-                           sizeof(base)),
-              0);
-
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(srv));
+    ASSERT_EQ(models_run(p, srv, base, NULL), 1);
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
     ASSERT_NOT_NULL(models);
@@ -1285,11 +1170,14 @@ static void test_openrouter_models_fetch(void)
     ASSERT_EQ(n, 4);
     for (size_t i = 0; i < n; i++)
         ASSERT_TRUE(strstr(models[i].id, ":batch") == NULL);
-    pthread_join(th, NULL);
-
+    /* The wire evidence is read BEFORE the stop: the capture store is
+     * the server's, and nm_ts_stop frees it. */
+    const char *wire = nm_ts_request(srv, 0);
+    ASSERT_NOT_NULL(wire);
     /* Tokenless catalog (public — OPENROUTER-API.md §1). */
-    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL);
+    ASSERT_TRUE(strstr(wire, "GET /v1/models") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization:") == NULL);
+    nm_ts_stop(srv);
 }
 
 static void test_openrouter_needs_auth(void)
@@ -1304,30 +1192,40 @@ static void test_openrouter_needs_auth(void)
 /* in docs/OPENCODE-API.md, probed 2026-09-15)                      */
 /* ---------------------------------------------------------------- */
 
-/* The OpenCode chat body: a reasoning-only delta (content:"",
+/* The OpenCode chat stream: a reasoning-only delta (content:"",
  * reasoning present) BEFORE any content, so the tolerance assertions
- * ride the same server. Chunk sizes verified with the printf|wc
+ * ride the same reply. Chunk sizes verified with the printf|wc
  * pattern. */
-static void *opencode_chat_server_thread(void *arg)
-{
-    static const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "4e\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning\":\"thinking about it\"}}]}\n\n\r\n"
-        "e\r\n: keep-alive\n\n\r\n"
-        "51\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"more thought\"}}]}\n\n\r\n"
-        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
-        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
-        "0\r\n\r\n";
-    serve_reply((int)(intptr_t)arg, sse);
-    return NULL;
-}
+static const char OPENCODE_CHAT_SSE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Connection: close\r\n"
+    "Content-Type: text/event-stream\r\n"
+    "Transfer-Encoding: chunked\r\n\r\n"
+    "4e\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
+    "\"reasoning\":\"thinking about it\"}}]}\n\n\r\n"
+    "e\r\n: keep-alive\n\n\r\n"
+    "51\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"\","
+    "\"reasoning_content\":\"more thought\"}}]}\n\n\r\n"
+    "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+    "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
+    "e\r\ndata: [DONE]\n\n\r\n"
+    "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
+    "0\r\n\r\n";
+
+/* minimax-m3 on Go sends no `[DONE]` at all: finish_reason chunk ->
+ * choices-empty usage chunk -> `{"choices":[],"cost":"0"}` -> chunked
+ * end. The turn must report OK (live probe + docs/OPENCODE-API.md
+ * §3); the regression this pins is the post-answer "stream ended
+ * before [DONE]" failure. */
+static const char OPENCODE_NO_DONE_SSE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Connection: close\r\n"
+    "Content-Type: text/event-stream\r\n"
+    "Transfer-Encoding: chunked\r\n\r\n"
+    "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
+    "\"finish_reason\":\"stop\"}]}\n\n\r\n"
+    "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
+    "0\r\n\r\n";
 
 static void test_opencode_registry_and_identity(void)
 {
@@ -1366,8 +1264,10 @@ static void test_opencode_chat_carries_session_header(void)
         "nm-0123456789abcdef0123456789abcdef", /* conversation id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("opencode:go", opencode_chat_server_thread,
-                                       &req, "sk-opencode-test");
+    char wire[4096];
+    NmChatResult r = canned_chat_round("opencode:go", OPENCODE_CHAT_SSE,
+                                       &req, "sk-opencode-test",
+                                       wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
     /* Reasoning-only deltas are not content and not end-of-stream;
@@ -1376,32 +1276,12 @@ static void test_opencode_chat_carries_session_header(void)
     ASSERT_STR_EQ(cap.text, "Hello, world");
     ASSERT_STR_EQ(cap.reasoning, "thinking about itmore thought");
 
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer sk-opencode-test") != NULL);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire, "POST /v1/chat/completions") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization: Bearer sk-opencode-test") != NULL);
+    ASSERT_TRUE(strstr(wire,
                        "x-opencode-session: nm-0123456789abcdef0123456789abcdef") != NULL);
-    ASSERT_TRUE(strstr(last_request, "User-Agent: " NM_USER_AGENT) != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
-}
-
-/* minimax-m3 on Go sends no `[DONE]` at all: finish_reason chunk →
- * choices-empty usage chunk → `{"choices":[],"cost":"0"}` → chunked
- * end. The turn must report OK (live probe + docs/OPENCODE-API.md
- * §3); the regression this pins is the post-answer "stream ended
- * before [DONE]" failure. */
-static void *opencode_no_done_server_thread(void *arg)
-{
-    static const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "4a\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n\r\n"
-        "21\r\ndata: {\"choices\":[],\"cost\":\"0\"}\n\n\r\n"
-        "0\r\n\r\n";
-    serve_reply((int)(intptr_t)arg, sse);
-    return NULL;
+    ASSERT_TRUE(strstr(wire, "User-Agent: " NM_USER_AGENT) != NULL);
+    ASSERT_TRUE(strstr(wire, "\"stream\":true") != NULL);
 }
 
 static void test_opencode_chat_without_done_is_complete(void)
@@ -1413,7 +1293,8 @@ static void test_opencode_chat_without_done_is_complete(void)
         "nm-0123456789abcdef0123456789abcdef", capture_delta, NULL, &cap, NULL
     };
     NmChatResult r = canned_chat_round(
-        "opencode:go", opencode_no_done_server_thread, &req, "sk-opencode-test");
+        "opencode:go", OPENCODE_NO_DONE_SSE, &req, "sk-opencode-test",
+        NULL, 0);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.message, "");
     ASSERT_STR_EQ(cap.text, "Hello");
@@ -1431,11 +1312,13 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
         NULL, /* no conversation id (direct caller) */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("opencode:zen", opencode_chat_server_thread,
-                                       &req, "sk-opencode-test");
+    char wire[4096];
+    NmChatResult r = canned_chat_round("opencode:zen", OPENCODE_CHAT_SSE,
+                                       &req, "sk-opencode-test",
+                                       wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    const char *h = strstr(last_request, "x-opencode-session: ");
+    const char *h = strstr(wire, "x-opencode-session: ");
     ASSERT_NOT_NULL(h);
     /* Non-empty value (the next char is not CR). */
     ASSERT_TRUE(h[sizeof("x-opencode-session: ") - 1] != '\r');
@@ -1451,58 +1334,39 @@ static void test_opencode_chat_null_conversation_id_still_sends_header(void)
  * ("glm-5.3"), one only the DOCUMENT covers ("future-model-9" — the
  * drift the runtime resolution exists for), and one NO source covers
  * ("future-model-10" — the coverage rule drops it). */
-static void *opencode_models_server_thread(void *arg)
-{
-    static const char body[] =
-        "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
-        "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
-        "{\"id\":\"future-model-10\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
-        "]}";
-    serve_json((int)(intptr_t)arg, body);
-    return NULL;
-}
+/* The tier's ids-only list (the coverage test's first fetch). */
+static const char OPENCODE_GO_LIST_BODY[] =
+    "{\"object\":\"list\",\"data\":["
+    "{\"id\":\"glm-5.3\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+    "{\"id\":\"future-model-9\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+    "{\"id\":\"future-model-10\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+    "]}";
 
-/* The catalog document's request — its own buffer: the test runs two
- * servers (the tier's list and the document), and the shared one
- * holds the list's request. */
-static char document_request[4096];
-
-/* The catalog DOCUMENT server: the shape models.dev serves (the same
- * document OpenCode's own domain serves). The kept-parse reads only
- * the two entries the tiers want, so the third provider here is the
- * one that proves the skip: it is never built.
+/* The catalog DOCUMENT: the shape models.dev serves (the same document
+ * OpenCode's own domain serves). The kept-parse reads only the two
+ * entries the tiers want, so the third provider here is the one that
+ * proves the skip: it is never built.
  *
  * "glm-5.3" is in the shipped table AND here, with DIFFERENT values:
  * the document is the live truth and wins over the snapshot. */
-static void *opencode_document_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = canned_accept(lfd, document_request, sizeof(document_request));
-
-    static const char body[] =
-        "{"
-        "\"opencode\":{\"models\":{"
-        "\"big-pickle\":{\"name\":\"Big Pickle\","
-        "\"limit\":{\"context\":200000},"
-        "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
-        "\"tool_call\":true}}},"
-        "\"opencode-go\":{\"models\":{"
-        "\"glm-5.3\":{\"name\":\"GLM 5.3 live\","
-        "\"limit\":{\"context\":999000},"
-        "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
-        "\"tool_call\":true},"
-        "\"future-model-9\":{\"name\":\"Future Model 9\","
-        "\"limit\":{\"context\":640000},"
-        "\"modalities\":{\"input\":[\"text\",\"image\"],\"output\":[\"image\"]},"
-        "\"tool_call\":true}}},"
-        "\"other-provider\":{\"models\":{\"never-read\":{\"name\":\"Nope\"}}}"
-        "}";
-    if (cfd >= 0)
-        send_json(cfd, body);
-    canned_close(cfd, lfd);
-    return NULL;
-}
+static const char OPENCODE_DOCUMENT_BODY[] =
+    "{"
+    "\"opencode\":{\"models\":{"
+    "\"big-pickle\":{\"name\":\"Big Pickle\","
+    "\"limit\":{\"context\":200000},"
+    "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
+    "\"tool_call\":true}}},"
+    "\"opencode-go\":{\"models\":{"
+    "\"glm-5.3\":{\"name\":\"GLM 5.3 live\","
+    "\"limit\":{\"context\":999000},"
+    "\"modalities\":{\"input\":[\"text\"],\"output\":[\"text\"]},"
+    "\"tool_call\":true},"
+    "\"future-model-9\":{\"name\":\"Future Model 9\","
+    "\"limit\":{\"context\":640000},"
+    "\"modalities\":{\"input\":[\"text\",\"image\"],\"output\":[\"image\"]},"
+    "\"tool_call\":true}}},"
+    "\"other-provider\":{\"models\":{\"never-read\":{\"name\":\"Nope\"}}}"
+    "}";
 
 /* The runtime COVERAGE: the tier's live list carries a model the
  * shipped table has never heard of, and the catalog document resolves
@@ -1514,25 +1378,59 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
 
-    pthread_t th;
-    char base[64];
-    ASSERT_EQ(server_start(opencode_models_server_thread, &th, base,
-                           sizeof(base)),
-              0);
+    static char list_reply[2048];
+    json_reply(list_reply, sizeof(list_reply), OPENCODE_GO_LIST_BODY);
+    static const NmTsRound list_rounds[] = {
+        { .reply = list_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *list = pv_start(list_rounds, 1);
+    ASSERT_NOT_NULL(list);
 
-    pthread_t dth;
-    char docbase[64];
-    ASSERT_EQ(server_start(opencode_document_server_thread, &dth, docbase,
-                           sizeof(docbase)),
-              0);
+    static char doc_reply[8192];
+    json_reply(doc_reply, sizeof(doc_reply), OPENCODE_DOCUMENT_BODY);
+    static const NmTsRound doc_rounds[] = {
+        { .reply = doc_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *doc = pv_start(doc_rounds, 1);
+    ASSERT_NOT_NULL(doc);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(list));
     /* The document lives at the host ROOT, not under the /v1 prefix
      * the base carries: cut the prefix and name the path. */
+    char docbase[64];
+    snprintf(docbase, sizeof(docbase), "http://127.0.0.1:%d/v1",
+             nm_ts_port(doc));
     char docurl[128];
     const char *prefix = strstr(docbase, "/v1");
     ASSERT_NOT_NULL(prefix);
     snprintf(docurl, sizeof(docurl), "%.*s/api.json",
              (int)(prefix - docbase), docbase);
     test_setenv("NEVERMORE_OPENCODE_CATALOG_URL", docurl);
+
+    /* The chain is one models_begin/step walk whose fetch SWITCHES
+     * mid-walk: the list first, then the document on the other host.
+     * One thread serves both: every iteration pumps BOTH peers, and
+     * the wait rides the current fetch's fd (whichever server's poll
+     * it joins - the client fd is in every one of them). */
+    ASSERT_EQ(p->models_begin(p, base, NULL), 1);
+    for (;;) {
+        NmCatalogStatus st = p->models_step(p);
+        if (st != NM_CATALOG_PENDING)
+            break;
+        NmSource fsrc = p->models_source(p);
+        nm_ts_pump(list);
+        nm_ts_pump(doc);
+        if (fsrc.handle >= 0 && fsrc.flags) {
+            if (nm_ts_wait(list, fsrc.handle, fsrc.flags, 5000) == 0)
+                fprintf(stderr,
+                        "  (catalog chain stalled: neither end moved"
+                        " for 5 s)\n");
+            nm_ts_pump(doc);
+        }
+    }
+    p->models_end(p);
 
     size_t n = 0;
     const NmModel *models = p->models(p, base, NULL, &n);
@@ -1561,21 +1459,28 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
     /* An id NO source covers is NOT offered: the row would be id-only
      * with an unknown context and no capability claim - a half-row the
      * picker cannot say anything about. The coverage rule drops it. */
-    pthread_join(th, NULL);
-    pthread_join(dth, NULL);
-    test_unsetenv("NEVERMORE_OPENCODE_CATALOG_URL");
+    /* The wire evidence is read BEFORE the stops: the capture store
+     * is the server's, and nm_ts_stop frees it. */
+    const char *list_wire = nm_ts_request(list, 0);
+    const char *doc_wire = nm_ts_request(doc, 0);
+    ASSERT_NOT_NULL(list_wire);
+    ASSERT_NOT_NULL(doc_wire);
 
-    ASSERT_TRUE(strstr(last_request, "GET /v1/models") != NULL);
+    ASSERT_TRUE(strstr(list_wire, "GET /v1/models") != NULL);
     /* Catalog sends the session header too (consistency; harmless). */
-    ASSERT_TRUE(strstr(last_request, "x-opencode-session: ") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization:") == NULL); /* tokenless */
+    ASSERT_TRUE(strstr(list_wire, "x-opencode-session: ") != NULL);
+    ASSERT_TRUE(strstr(list_wire, "Authorization:") == NULL); /* tokenless */
     /* The document is a request of its own: another host, another
      * path, and no provider's credentials (it is a public document). */
-    ASSERT_TRUE(strstr(document_request, "GET /api.json") != NULL);
-    ASSERT_TRUE(strstr(document_request, "Authorization:") == NULL);
+    ASSERT_TRUE(strstr(doc_wire, "GET /api.json") != NULL);
+    ASSERT_TRUE(strstr(doc_wire, "Authorization:") == NULL);
+
+    nm_ts_stop(list);
+    nm_ts_stop(doc);
+    test_unsetenv("NEVERMORE_OPENCODE_CATALOG_URL");
 }
 
-/* Zen's ids-only catalog round (the per-tier isolation test below): a
+/* Zen's ids-only list (the per-tier isolation test below): a
  * DIFFERENT id set than Go's, so the two slots cannot be confused.
  *
  * The list carries an id no source covers ("uncovered-zen-id"): the
@@ -1583,16 +1488,11 @@ static void test_opencode_models_fetch_resolves_the_drift(void)
  * knob is pinned in this binary, so the document is NOT fetched — the
  * suite never reaches the network — and the uncovered id is dropped by
  * the coverage rule. */
-static void *opencode_zen_models_server_thread(void *arg)
-{
-    static const char body[] =
-        "{\"object\":\"list\",\"data\":["
-        "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
-        "{\"id\":\"uncovered-zen-id\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
-        "]}";
-    serve_json((int)(intptr_t)arg, body);
-    return NULL;
-}
+static const char OPENCODE_ZEN_LIST_BODY[] =
+    "{\"object\":\"list\",\"data\":["
+    "{\"id\":\"big-pickle\",\"object\":\"model\",\"owned_by\":\"opencode\"},"
+    "{\"id\":\"uncovered-zen-id\",\"object\":\"model\",\"owned_by\":\"opencode\"}"
+    "]}";
 
 /* The live catalogs are PER TIER: each provider keeps its own cache
  * (the two talk to different endpoints, and one process may exercise
@@ -1605,11 +1505,16 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     ASSERT_NOT_NULL(zen);
     ASSERT_NOT_NULL(go);
 
-    pthread_t th;
+    static char zen_reply[1024];
+    json_reply(zen_reply, sizeof(zen_reply), OPENCODE_ZEN_LIST_BODY);
+    static const NmTsRound zen_rounds[] = {
+        { .reply = zen_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *srv = pv_start(zen_rounds, 1);
+    ASSERT_NOT_NULL(srv);
     char base[64];
-    ASSERT_EQ(server_start(opencode_zen_models_server_thread, &th, base,
-                           sizeof(base)),
-              0);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(srv));
+    ASSERT_EQ(models_run(zen, srv, base, NULL), 1);
     size_t zn = 0;
     const NmModel *z = zen->models(zen, base, NULL, &zn);
     ASSERT_NOT_NULL(z);
@@ -1618,7 +1523,7 @@ static void test_opencode_live_catalogs_are_per_tier(void)
     ASSERT_STR_EQ(z[0].label, "Big Pickle"); /* from Zen's own table */
     ASSERT_EQ(z[0].context_length, 200000);
     ASSERT_EQ(z[0].tools, 1);
-    pthread_join(th, NULL);
+    nm_ts_stop(srv);
 
     /* Go's committed slot is still Go's (id set, and the label from
      * the GO coverage — the fetch test's row, not Zen's). */
@@ -1701,37 +1606,38 @@ static void test_openrouter_body_carries_the_pricing_knobs(void)
 
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
+    char wire[4096]; /* what the peer received */
 
     /* Unset: neither member rides (the provider's own routing and its
      * workspace's tier — the "no extras" case). */
     NmChatResult r = openrouter_chat_round("~openai/gpt-astra-latest", &msg,
-                                           1, "conv-1", &cap);
+                                           1, "conv-1", &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hi there");
-    ASSERT_TRUE(strstr(last_request, "service_tier") == NULL);
-    ASSERT_TRUE(strstr(last_request, "\"provider\"") == NULL);
-    ASSERT_TRUE(strstr(last_request, "\"session_id\":\"conv-1\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "service_tier") == NULL);
+    ASSERT_TRUE(strstr(wire, "\"provider\"") == NULL);
+    ASSERT_TRUE(strstr(wire, "\"session_id\":\"conv-1\"") != NULL);
 
     /* `fast` is the wire's alias: the body carries the canon. The scratch
      * store has no shadow path, so the write answers -1 while the layer
      * is set. */
     nm_config_shadow_set(cfg, "tier.openrouter", "fast");
     r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
-                              &cap);
+                              &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"priority\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"fast\"") == NULL);
+    ASSERT_TRUE(strstr(wire, "\"service_tier\":\"priority\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"service_tier\":\"fast\"") == NULL);
 
     /* max_price is $/Mtokens — the wire's own unit, no conversion. */
     nm_config_shadow_set(cfg, "max_price.openrouter", "3,15");
     r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
-                              &cap);
+                              &cap, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "\"provider\":{\"max_price\":{\"prompt\":3,"
                        "\"completion\":15}}") != NULL);
     /* Both members ride the same round, and the session id still does. */
-    ASSERT_TRUE(strstr(last_request, "\"service_tier\":\"priority\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"service_tier\":\"priority\"") != NULL);
 
     nm_config_set_store(NULL);
     nm_config_free(cfg);
@@ -1756,11 +1662,12 @@ static void test_cloud_round_carries_no_pricing_knobs(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = canned_chat_round("ollama:cloud", canned_chat_server_thread, &req,
-                                       "sk-or-test");
+    char wire[4096];
+    NmChatResult r = canned_chat_round("ollama:cloud", CANNED_CHAT_SSE, &req,
+                                       "sk-or-test", wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    ASSERT_TRUE(strstr(last_request, "service_tier") == NULL);
-    ASSERT_TRUE(strstr(last_request, "\"provider\"") == NULL);
+    ASSERT_TRUE(strstr(wire, "service_tier") == NULL);
+    ASSERT_TRUE(strstr(wire, "\"provider\"") == NULL);
 
     nm_config_set_store(NULL);
     nm_config_free(cfg);
@@ -1770,87 +1677,88 @@ static void test_cloud_round_carries_no_pricing_knobs(void)
  * (docs/OPENROUTER-API.md §7.9): every chunk names the upstream as a
  * TOP-LEVEL `provider`, the last one adds `service_tier`. The chunk
  * sizes are computed — a hand-counted string length is a bug. */
-/* Serve ONE chunked SSE round made of `events` (each a complete
+/* A chunked SSE reply built from raw events (each a complete
  * "data: ...\n\n"), with the chunk sizes COMPUTED — a hand-counted
- * string length is a bug. */
-static void serve_sse_events(int lfd, const char *const *events, size_t n)
+ * string length is a bug. Returns a malloc'd reply; the caller frees
+ * (the canned rounds hold it for the life of the server). */
+static char *sse_events_reply(const char *const *events, size_t n)
 {
-    int cfd = canned_accept(lfd, NULL, 0);
-    if (cfd >= 0) {
-        static const char head[] = "HTTP/1.1 200 OK\r\n"
-                                   "Connection: close\r\n"
-                                   "Content-Type: text/event-stream\r\n"
-                                   "Transfer-Encoding: chunked\r\n\r\n";
-        send_all(cfd, head, sizeof(head) - 1);
-        for (size_t i = 0; i < n; i++) {
-            char chunk[512];
-            size_t bl = strlen(events[i]);
-            int hl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
-            memcpy(chunk + hl, events[i], bl);
-            memcpy(chunk + hl + bl, "\r\n", 2);
-            send_all(cfd, chunk, (size_t)hl + bl + 2);
-        }
-        send_all(cfd, "0\r\n\r\n", 5);
+    size_t cap = 256;
+    for (size_t i = 0; i < n; i++)
+        cap += strlen(events[i]) + 16;
+    char *buf = malloc(cap);
+    if (!buf)
+        return NULL;
+    size_t off = (size_t)snprintf(buf, cap,
+                                  "HTTP/1.1 200 OK\r\n"
+                                  "Connection: close\r\n"
+                                  "Content-Type: text/event-stream\r\n"
+                                  "Transfer-Encoding: chunked\r\n\r\n");
+    for (size_t i = 0; i < n; i++) {
+        size_t bl = strlen(events[i]);
+        off += (size_t)snprintf(buf + off, cap - off, "%zx\r\n", bl);
+        memcpy(buf + off, events[i], bl);
+        off += bl;
+        memcpy(buf + off, "\r\n", 2);
+        off += 2;
+        buf[off] = '\0';
     }
-    canned_close(cfd, lfd);
+    off += (size_t)snprintf(buf + off, cap - off, "0\r\n\r\n");
+    return buf;
 }
 
-static void *openrouter_served_server_thread(void *arg)
-{
-    static const char *const events[] = {
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],"
-        "\"provider\":\"Azure\"}\n\n",
-        "data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}],"
-        "\"provider\":\"Azure\"}\n\n",
-        "data: {\"choices\":[{\"delta\":{}, \"finish_reason\":\"stop\"}],"
-        "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n",
-        "data: [DONE]\n\n",
-    };
-    serve_sse_events((int)(intptr_t)arg, events,
-                     sizeof(events) / sizeof(events[0]));
-    return NULL;
-}
+/* A canned round whose chunks carry the routing report
+ * (docs/OPENROUTER-API.md §7.9): every chunk names the upstream as a
+ * TOP-LEVEL `provider`, the last one adds `service_tier`. */
+static const char *const served_events[] = {
+    "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"}}],"
+    "\"provider\":\"Azure\"}\n\n",
+    "data: {\"choices\":[{\"delta\":{\"content\":\" there\"}}],"
+    "\"provider\":\"Azure\"}\n\n",
+    "data: {\"choices\":[{\"delta\":{}, \"finish_reason\":\"stop\"}],"
+    "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n",
+    "data: [DONE]\n\n",
+};
 
 /* A chunk that LIES with a generic top-level `provider` on a wire whose
  * endpoint leaves the parse off: the gate is the endpoint's
  * flag, not a check of what the other providers happen to send. */
-static void *lying_provider_server_thread(void *arg)
-{
-    static const char *const events[] = {
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
-        "\"provider\":\"NotAProvider\",\"service_tier\":\"priority\"}"
-        "\n\n",
-        "data: [DONE]\n\n",
-    };
-    serve_sse_events((int)(intptr_t)arg, events,
-                     sizeof(events) / sizeof(events[0]));
-    return NULL;
-}
+static const char *const lying_events[] = {
+    "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
+    "\"provider\":\"NotAProvider\",\"service_tier\":\"priority\"}"
+    "\n\n",
+    "data: [DONE]\n\n",
+};
 
 /* A `provider` member that is an OBJECT (a made-up provider dialect):
  * not a report, never a misread string. */
-static void *openrouter_object_provider_server_thread(void *arg)
-{
-    static const char *const events[] = {
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
-        "\"provider\":{\"name\":\"Azure\"},\"service_tier\":\"flex\"}"
-        "\n\n",
-        "data: [DONE]\n\n",
-    };
-    serve_sse_events((int)(intptr_t)arg, events,
-                     sizeof(events) / sizeof(events[0]));
-    return NULL;
-}
+static const char *const object_provider_events[] = {
+    "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}],"
+    "\"provider\":{\"name\":\"Azure\"},\"service_tier\":\"flex\"}"
+    "\n\n",
+    "data: [DONE]\n\n",
+};
 
-/* One canned OpenRouter round on the served-meta server. */
+/* One canned OpenRouter round on the served-meta reply. The reply is
+ * the CALLER's to free: the round ends before it does. */
 static NmChatResult openrouter_served_round(const char *model,
                                             const NmMessage *msgs,
-                                            size_t n_msgs, Capture *cap)
+                                            size_t n_msgs, Capture *cap,
+                                            const char *const *events,
+                                            size_t n_events)
 {
+    char *reply = sse_events_reply(events, n_events);
+    NmChatResult r;
+    memset(&r, 0, sizeof(r));
+    if (!reply) {
+        r.status = NM_CHAT_ERR_TRANSPORT;
+        return r;
+    }
     NmChatRequest req = { model, msgs, n_msgs, NULL, NULL, -1, -1,
                           NULL, capture_delta, NULL, cap, NULL };
-    return canned_chat_round("openrouter", openrouter_served_server_thread,
-                             &req, "sk-or-test");
+    r = canned_chat_round("openrouter", reply, &req, "sk-or-test", NULL, 0);
+    free(reply);
+    return r;
 }
 
 /* The served upstream and tier the chunks report land in the round's
@@ -1860,8 +1768,9 @@ static void test_openrouter_round_reports_the_served_meta(void)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
-    NmChatResult r = openrouter_served_round("~openai/gpt-astra-latest", &msg,
-                                             1, &cap);
+    NmChatResult r = openrouter_served_round(
+        "~openai/gpt-astra-latest", &msg, 1, &cap, served_events,
+        sizeof(served_events) / sizeof(served_events[0]));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hi there");
     ASSERT_STR_EQ(r.meta.served_provider, "Azure");
@@ -1869,8 +1778,9 @@ static void test_openrouter_round_reports_the_served_meta(void)
     ASSERT_STR_EQ(r.meta.source, "openrouter");
     /* The plain canned round carries neither field. */
     Capture cap2 = { 0 };
+    char wire2[4096];
     r = openrouter_chat_round("~openai/gpt-astra-latest", &msg, 1, NULL,
-                              &cap2);
+                              &cap2, wire2, sizeof(wire2));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.served_provider, "");
     ASSERT_STR_EQ(r.meta.service_tier, "");
@@ -1881,9 +1791,9 @@ static void test_openrouter_round_reports_the_served_meta(void)
     NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
                           -1, -1, NULL,
                           capture_delta, NULL, &cap3, NULL };
-    r = canned_chat_round("openrouter",
-                          openrouter_object_provider_server_thread, &req,
-                          "sk-or-test");
+    r = openrouter_served_round(
+        "~openai/gpt-astra-latest", &msg, 1, &cap3, object_provider_events,
+        sizeof(object_provider_events) / sizeof(object_provider_events[0]));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.served_provider, "");
     /* The tier on the same chunk IS a report. */
@@ -1892,10 +1802,15 @@ static void test_openrouter_round_reports_the_served_meta(void)
     /* A wire whose endpoint leaves the parse off reports nothing,
      * however its chunks lie about a top-level `provider`. */
     Capture cap4 = { 0 };
-    NmChatRequest hreq = { "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1, NULL,
-                           capture_delta, NULL, &cap4, NULL };
-    r = canned_chat_round("ollama:cloud", lying_provider_server_thread, &hreq,
-                          "sk-or-test");
+    {
+        char *lying = sse_events_reply(
+            lying_events, sizeof(lying_events) / sizeof(lying_events[0]));
+        NmChatRequest hreq = { "gpt-oss-120b", &msg, 1, NULL, NULL, -1, -1,
+                               NULL, capture_delta, NULL, &cap4, NULL };
+        r = canned_chat_round("ollama:cloud", lying, &hreq, "sk-or-test",
+                              NULL, 0);
+        free(lying);
+    }
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.meta.served_provider, "");
     ASSERT_STR_EQ(r.meta.service_tier, "");
