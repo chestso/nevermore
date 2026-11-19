@@ -6,21 +6,12 @@
  * an unmarked one always does.
  */
 
-#ifdef _WIN32
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "json.h"
+#include "net_server.h" /* the scripted pump: no thread, no timer */
 #include "test_net_helpers.h"
 #include "test_helpers.h"
 #include "test_keepalive_pin.h"
@@ -92,67 +83,17 @@ static char *log_read(void)
 /* Canned server (the tap round trip)                                */
 /* ---------------------------------------------------------------- */
 
-static void *roundtrip_server_thread(void *arg)
+/* One round per test, one exchange each: the reply literals say
+ * `Connection: close` (house rule), and the round closes the socket
+ * after it. The SCRIPT is the caller's - its storage must outlive the
+ * server (the pump reads it on every completed request), so the tests
+ * pass tables of static storage duration. */
+static NmTsServer *wr_start(const NmTsRound *rs, int n)
 {
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char drain[2048];
-    recv(cfd, drain, sizeof(drain), 0);
-    static const char resp[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "12\r\ndata: hello-event\n\n\r\n" /* 18 = 0x12 */
-        "0\r\n\r\n";
-    test_send_reply(cfd, resp);
-    close(cfd);
-    return NULL;
-}
-
-static int server_listen(int *port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0)
-        return -1;
-    *port = ntohs(a.sin_port);
-    if (listen(fd, 1) < 0)
-        return -1;
-    return fd;
-}
-
-/* A response whose head carries a header and whose chunked TRAILER
- * section carries another. The recorder logs the head group on the
- * response-head event and the trailer group on its own event. */
-static void *trailer_roundtrip_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char drain[2048];
-    recv(cfd, drain, sizeof(drain), 0);
-    static const char resp[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "X-Head-Field: head-value\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "12\r\ndata: hello-event\n\n\r\n" /* 18 = 0x12 */
-        "0\r\n"
-        "X-Trailer-Field: trailer-value\r\n"
-        "\r\n";
-    test_send_reply(cfd, resp);
-    close(cfd);
-    return NULL;
+    NmTsServer *s = nm_ts_start(rs, n);
+    if (!s)
+        fprintf(stderr, "  FAIL: %s:%d: nm_ts_start\n", __FILE__, __LINE__);
+    return s;
 }
 
 /* ---------------------------------------------------------------- */
@@ -234,31 +175,44 @@ static void test_banner_and_redaction(void)
     hdrs[1].secret = 0;
 
     /* A real connection through the tap (loopback server). */
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, roundtrip_server_thread,
-                   (void *)(intptr_t)lfd);
+    /* A real connection through the tap: the scripted pump answers in
+     * two flushes (the head pass, then the body pass), the round
+     * closing the socket after — one exchange, so the reply says
+     * `Connection: close` and the chunk size is computed (0x12 = 18). */
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "12\r\ndata: hello-event\n\n\r\n"
+        "0\r\n\r\n";
+    static const NmTsRound rs[] = {
+        { .reply = resp, .close_after_reply = 1 },
+    };
+    NmTsServer *s = wr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     NmConnectInfo ci;
-    NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &ci);
+    NmConnection *c = nm_connect("127.0.0.1", nm_ts_port(s),
+                                 NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     ASSERT_EQ(nm_request_queue(c, "POST", "/v1/chat/completions", hdrs, 2,
                                "{\"model\":\"gpt-oss-120b\",\"path\\\\\":"
                                "\"C:\\\\Users\"}",
                                43),
               NM_TRANSPORT_OK);
-    /* Drain the send + read the response head + body (the SSE body
-     * is recorded by openai_client, not the raw transport — here
-     * the head line is the recorded artifact). */
+    /* One thread, both ends: the step SENDS, then the pump answers
+     * (the head pass, then the body pass) before the read pulls what
+     * landed (the SSE body is recorded by openai_client, not the raw
+     * transport — here the head line is the recorded artifact). */
     ASSERT_EQ(nm_connection_step(c), NM_TRANSPORT_OK);
+    nm_ts_pump(s);
+    nm_ts_pump(s);
     char buf[256];
     long n = nm_read_body(c, buf, sizeof(buf));
     ASSERT_TRUE(n >= 0);
     nm_connection_close(c);
-    pthread_join(th, NULL);
-    close(lfd);
+    nm_ts_stop(s);
 
     nm_wire_recorder_shutdown();
 
@@ -301,28 +255,44 @@ static void test_response_headers_and_trailers_recorded(void)
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
     ASSERT_EQ(nm_wire_recorder_init("openrouter", "head-value"), 1);
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, trailer_roundtrip_server_thread,
-                   (void *)(intptr_t)lfd);
+    /* The scripted pump's round: a header in the head group, another
+     * in the chunked TRAILER section; the round closes the socket
+     * after the reply. */
+    static const char resp[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "X-Head-Field: head-value\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "12\r\ndata: hello-event\n\n\r\n"
+        "0\r\n"
+        "X-Trailer-Field: trailer-value\r\n"
+        "\r\n";
+    static const NmTsRound rs[] = {
+        { .reply = resp, .close_after_reply = 1 },
+    };
+    NmTsServer *s = wr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     NmConnectInfo ci;
-    NmConnection *c = nm_connect("127.0.0.1", port, NM_TRANSPORT_PLAIN, &ci);
+    NmConnection *c = nm_connect("127.0.0.1", nm_ts_port(s),
+                                 NM_TRANSPORT_PLAIN, &ci);
     ASSERT_NOT_NULL(c);
     /* nm_request_queue (not the blocking nm_request): the request tap
      * rides the queue path, so the dump carries the request event too. */
     ASSERT_EQ(nm_request_queue(c, "POST", "/v1/chat/completions", NULL, 0,
                                NULL, 0),
               NM_TRANSPORT_OK);
+    /* Both ends in one thread: the step sends, the two pump passes
+     * answer the whole reply and close, the drain pulls it. */
     ASSERT_EQ(nm_connection_step(c), NM_TRANSPORT_OK);
+    nm_ts_pump(s);
+    nm_ts_pump(s);
     char buf[256];
     while (nm_read_body(c, buf, sizeof(buf)) > 0)
         ;
     nm_connection_close(c);
-    pthread_join(th, NULL);
-    close(lfd);
+    nm_ts_stop(s);
     nm_wire_recorder_shutdown();
 
     char *log = log_read();

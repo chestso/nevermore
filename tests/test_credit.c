@@ -4,13 +4,14 @@
 #include "clock.h"
 #include "columns.h"
 #include "fake_clock.h" /* this binary's clock is virtual (see the age test) */
+#include "net_server.h" /* the scripted pump: no thread, no timer */
 #include "provider_internal.h"
+#include "transport.h" /* NmSource / NM_INTEREST_* */
 #include "test_helpers.h"
 #include "test_keepalive_pin.h"
-#include "test_net_helpers.h" /* WSAStartup on Windows: raw sockets below */
+#include "test_net_helpers.h" /* WSAStartup on Windows: the pump needs it */
 
 #include <math.h>
-#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,17 +19,6 @@
 #include <time.h>
 
 #include <boba/unicode.h>
-
-#ifdef _WIN32
-/* winsock2.h / ws2tcpip.h and the close() shim come from
- * test_net_helpers.h; the loopback servers still need WSA initialized
- * (test_wsa_init in main). */
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
 
 /* ------------------------------------------------------------------ */
 /* Unit tests: grammar, units, window tags, compression                */
@@ -700,44 +690,44 @@ static void test_columns_field_is_measured_in_columns(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Canned loopback servers for out-of-band fetch driver                */
+/* ------------------------------------------------------------------ */
+/* The scripted pump: the fetch driver's wire peer                    */
 /* ------------------------------------------------------------------ */
 
-static int server_bind(int *port_out)
+static NmTsServer *cr_start(const NmTsRound *rs, int n)
 {
-    int fd = (int)socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0)
-        return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char *)&opt, sizeof(opt));
-    struct sockaddr_in sin;
-    memset(&sin, 0, sizeof(sin));
-    sin.sin_family = AF_INET;
-    sin.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    sin.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&sin, sizeof(sin)) < 0) {
-        close(fd);
-        return -1;
-    }
-    socklen_t len = sizeof(sin);
-    if (getsockname(fd, (struct sockaddr *)&sin, &len) < 0) {
-        close(fd);
-        return -1;
-    }
-    if (listen(fd, 4) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port_out = ntohs(sin.sin_port);
-    return fd;
+    NmTsServer *s = nm_ts_start(rs, n);
+    if (!s)
+        fprintf(stderr, "  FAIL: %s:%d: nm_ts_start\n", __FILE__, __LINE__);
+    return s;
 }
 
-typedef struct
+/* The refresh's own seam, driven the way nm_credits_refresh_sync drives
+ * it (begin, step, wait on the fetch's source) - with the peer served
+ * by the same poll instead of a second thread. Returns 1 on OK, 0 on
+ * error or latch, exactly like the blocking refresh. */
+static int credits_refresh(NmTsServer *s, NmProviderId id,
+                           const char *base, const char *key)
 {
-    int fd;
-    const char *resp;
-    char path[256]; /* the request line's target, recorded for the test */
-} SimpleServer;
+    if (!nm_credits_fetch_begin(id, base, key))
+        return 0;
+    for (;;) {
+        NmCatalogStatus st = nm_credits_fetch_step(id);
+        if (st == NM_CATALOG_OK)
+            return 1;
+        if (st == NM_CATALOG_ERR)
+            return 0;
+        NmSource src = nm_credits_fetch_source(id);
+        if (src.handle >= 0 && src.flags) {
+            if (nm_ts_wait(s, src.handle, src.flags, 5000) == 0)
+                fprintf(stderr,
+                        "  (credits drive stalled: neither end moved for"
+                        " 5 s)\n");
+        } else {
+            nm_ts_pump(s); /* a phase with no fd: both ends keep moving */
+        }
+    }
+}
 
 /* Copy the request line's target out of a raw request head ("GET <path>
  * HTTP/1.1"). The path is an ASSERTION, not decoration: the fetch driver
@@ -747,6 +737,8 @@ typedef struct
 static void record_request_path(const char *req, char *out, size_t cap)
 {
     out[0] = '\0';
+    if (!req)
+        return;
     const char *sp = strchr(req, ' ');
     if (!sp)
         return;
@@ -758,34 +750,8 @@ static void record_request_path(const char *req, char *out, size_t cap)
     out[n] = '\0';
 }
 
-static void *simple_server_thread(void *arg)
-{
-    SimpleServer *s = (SimpleServer *)arg;
-    struct sockaddr_in sin;
-    socklen_t slen = sizeof(sin);
-    int cfd = accept(s->fd, (struct sockaddr *)&sin, &slen);
-    if (cfd < 0) {
-        close(s->fd);
-        return NULL;
-    }
-    char req[4096];
-    ssize_t rn = recv(cfd, req, sizeof(req) - 1, 0);
-    if (rn < 0)
-        rn = 0;
-    req[rn] = '\0';
-    record_request_path(req, s->path, sizeof(s->path));
-    test_send_reply(cfd, s->resp);
-    close(cfd);
-    close(s->fd);
-    return NULL;
-}
-
 static void test_credit_fetch_ollama_standard(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
     const char body[] =
         "{\"included\":{\"balance_usd\":13.22513,\"allowance_usd\":60,"
         "\"period\":{\"from\":\"2026-10-20T04:24:38Z\",\"until\":\"2026-11-20T04:24:35Z\"}},"
@@ -793,20 +759,20 @@ static void test_credit_fetch_ollama_standard(void)
     char resp[1024];
     snprintf(resp, sizeof(resp),
              "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n"
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
+    const NmTsRound rs[] = { { .reply = resp, .close_after_reply = 1 } };
+    NmTsServer *s = cr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(s));
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OLLAMA, base, "sk-ollama-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OLLAMA, base, "sk-ollama-test");
     ASSERT_EQ(ok, 1);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OLLAMA);
@@ -829,15 +795,11 @@ static void test_credit_fetch_ollama_standard(void)
     /* Immediate retry is latched */
     ASSERT_EQ(nm_credits_fetch_begin(NM_PROVIDER_OLLAMA, base, "sk-ollama-test"), 0);
 
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
 static void test_credit_fetch_ollama_legacy(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
     const char body[] =
         "{\"included\":{\"session\":{\"remaining_percent\":75,\"resets_at\":\"2026-10-01T07:00:00Z\"},"
         "\"weekly\":{\"remaining_percent\":40,\"resets_at\":\"2026-10-05T00:00:00Z\"}},"
@@ -845,20 +807,20 @@ static void test_credit_fetch_ollama_legacy(void)
     char resp[1024];
     snprintf(resp, sizeof(resp),
              "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n"
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
+    const NmTsRound rs[] = { { .reply = resp, .close_after_reply = 1 } };
+    NmTsServer *s = cr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(s));
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OLLAMA, base, "sk-ollama-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OLLAMA, base, "sk-ollama-test");
     ASSERT_EQ(ok, 1);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OLLAMA);
@@ -881,56 +843,53 @@ static void test_credit_fetch_ollama_legacy(void)
                           "h 40%\xc2\xb7"
                           "w $25 ");
 
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
-static void *openrouter_chain_thread(void *arg)
+/* The chain's two rounds, dispatched BY PATH (the module's on_request
+ * hook): the account purse at /api/v1/credits, the key usage at the
+ * free-model endpoint. A round counter would pin the order; the path
+ * is what the code under test walks. */
+static char chain_account_resp[512];
+static char chain_usage_resp[1024];
+
+static void chain_route(NmTsServer *s, int round, const char *req, size_t len)
 {
-    int lfd = (int)(intptr_t)arg;
-    for (int step = 0; step < 2; step++) {
-        struct sockaddr_in sin;
-        socklen_t slen = sizeof(sin);
-        int cfd = accept(lfd, (struct sockaddr *)&sin, &slen);
-        if (cfd < 0)
-            break;
-        char req[4096];
-        (void)recv(cfd, req, sizeof(req), 0);
-        char resp[2048];
-        if (strstr(req, "/api/v1/credits")) {
-            const char body[] = "{\"data\":{\"total_credits\":265,\"total_usage\":257.289128774}}";
-            snprintf(resp, sizeof(resp),
-                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
-                     strlen(body), body);
-        } else {
-            const char body[] =
-                "{\"data\":{\"limit\":null,\"limit_remaining\":null,"
-                "\"free_model_daily_requests\":{\"used\":0,\"limit\":1000,\"remaining\":1000},"
-                "\"usage_daily\":0.552686729,\"usage_weekly\":23.507445535,\"usage_monthly\":32.014127785}}";
-            snprintf(resp, sizeof(resp),
-                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %zu\r\n\r\n%s",
-                     strlen(body), body);
-        }
-        test_send_reply(cfd, resp);
-        close(cfd);
-    }
-    close(lfd);
-    return NULL;
+    (void)round;
+    (void)len;
+    nm_ts_reply_override(s, strstr(req, "/api/v1/credits") ? chain_account_resp
+                                                           : chain_usage_resp);
 }
 
 static void test_credit_fetch_openrouter_chain(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, openrouter_chain_thread, (void *)(intptr_t)lfd);
-
+    const char account_body[] =
+        "{\"data\":{\"total_credits\":265,\"total_usage\":257.289128774}}";
+    snprintf(chain_account_resp, sizeof(chain_account_resp),
+             "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+             "Content-Type: application/json\r\nContent-Length: %zu\r\n"
+             "\r\n%s",
+             strlen(account_body), account_body);
+    const char usage_body[] =
+        "{\"data\":{\"limit\":null,\"limit_remaining\":null,"
+        "\"free_model_daily_requests\":{\"used\":0,\"limit\":1000,\"remaining\":1000},"
+        "\"usage_daily\":0.552686729,\"usage_weekly\":23.507445535,\"usage_monthly\":32.014127785}}";
+    snprintf(chain_usage_resp, sizeof(chain_usage_resp),
+             "HTTP/1.1 200 OK\r\nConnection: close\r\n"
+             "Content-Type: application/json\r\nContent-Length: %zu\r\n"
+             "\r\n%s",
+             strlen(usage_body), usage_body);
+    const NmTsRound rs[] = {
+        { .on_request = chain_route, .close_after_reply = 1 },
+        { .on_request = chain_route, .close_after_reply = 1 },
+    };
+    NmTsServer *s = cr_start(rs, 2);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(s));
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OPENROUTER, base, "sk-or-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OPENROUTER, base, "sk-or-test");
     ASSERT_EQ(ok, 1);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENROUTER);
@@ -957,15 +916,11 @@ static void test_credit_fetch_openrouter_chain(void)
     ASSERT_STR_EQ(status, "$7.71 1k\xc2\xb7"
                           "d ");
 
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
 static void test_credit_fetch_opencode_go(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
     const char body[] =
         "{\"usage\":{\"rolling\":{\"status\":\"ok\",\"percent\":0,\"resetsAt\":\"2026-10-31T13:20:00.000Z\"},"
         "\"weekly\":{\"status\":\"ok\",\"percent\":26,\"resetsAt\":\"2026-11-02T00:00:00.000Z\"},"
@@ -973,20 +928,20 @@ static void test_credit_fetch_opencode_go(void)
     char resp[1024];
     snprintf(resp, sizeof(resp),
              "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
              "Content-Type: application/json\r\n"
              "Content-Length: %zu\r\n"
              "\r\n"
              "%s",
              strlen(body), body);
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
+    const NmTsRound rs[] = { { .reply = resp, .close_after_reply = 1 } };
+    NmTsServer *s = cr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(s));
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OPENCODE, base, "sk-oc-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OPENCODE, base, "sk-oc-test");
     ASSERT_EQ(ok, 1);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENCODE);
@@ -1013,36 +968,34 @@ static void test_credit_fetch_opencode_go(void)
                           "w 37%\xc2\xb7"
                           "mo ");
 
-    pthread_join(th, NULL);
     /* The request TARGET is the endpoint string verbatim (base_url supplies
      * scheme/host/port only), so the Go meter lives at the tier's full path
      * — "/usage" is the marketing site's 404, and it used to read as three
      * unknown brackets. */
-    ASSERT_STR_EQ(s.path, "/zen/go/v1/usage");
+    char path[256];
+    record_request_path(nm_ts_request(s, 0), path, sizeof(path));
+    ASSERT_STR_EQ(path, "/zen/go/v1/usage");
+    nm_ts_stop(s);
 }
 
 static void test_credit_fetch_opencode_go_403(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
     const char resp[] =
         "HTTP/1.1 403 Forbidden\r\n"
+        "Connection: close\r\n"
         "Content-Type: application/json\r\n"
         "Content-Length: 26\r\n"
         "\r\n"
         "{\"error\":\"no subscription\"}";
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
+    const NmTsRound rs[] = { { .reply = resp, .close_after_reply = 1 } };
+    NmTsServer *s = cr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(s));
 
     nm_credits_reset();
     /* Fetch fails with 403 */
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OPENCODE, base, "sk-oc-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OPENCODE, base, "sk-oc-test");
     ASSERT_EQ(ok, 0);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OPENCODE);
@@ -1050,29 +1003,25 @@ static void test_credit_fetch_opencode_go_403(void)
     for (size_t i = 0; i < cr->n_brackets; i++)
         ASSERT_EQ(cr->brackets[i].state, NM_CREDIT_UNKNOWN);
 
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
 static void test_credit_fetch_429_retry_after_latch(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-
     const char resp[] =
         "HTTP/1.1 429 Too Many Requests\r\n"
+        "Connection: close\r\n"
         "Retry-After: 4\r\n"
         "Content-Length: 0\r\n"
         "\r\n";
-    SimpleServer s = { .fd = lfd, .resp = resp };
-    pthread_t th;
-    pthread_create(&th, NULL, simple_server_thread, &s);
-
+    const NmTsRound rs[] = { { .reply = resp, .close_after_reply = 1 } };
+    NmTsServer *s = cr_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
 
     nm_credits_reset();
-    int ok = nm_credits_refresh_sync(NM_PROVIDER_OLLAMA, base, "sk-test");
+    int ok = credits_refresh(s, NM_PROVIDER_OLLAMA, base, "sk-test");
     ASSERT_EQ(ok, 0);
 
     NmCredits *cr = nm_credits_get(NM_PROVIDER_OLLAMA);
@@ -1081,7 +1030,7 @@ static void test_credit_fetch_429_retry_after_latch(void)
     /* Immediate next attempt is latched */
     ASSERT_EQ(nm_credits_fetch_begin(NM_PROVIDER_OLLAMA, base, "sk-test"), 0);
 
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
 /* The pin's tripwire: file scope (a static function, not a nested one). */

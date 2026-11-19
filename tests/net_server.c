@@ -337,7 +337,13 @@ void nm_ts_pump(NmTsServer *s)
         }
         if (r->action == NM_TS_STALL)
             return; /* read, then nothing: the clock owns the verdict */
-        nm_ts_reply_override(s, r->reply);
+        /* The on_request hook may already have rewritten this round's
+         * answer (nm_ts_reply_override arms its own bytes); arm the
+         * script's bytes only when nothing of the previous round is
+         * still pending - a hook-suppressed arm, and never a clobber
+         * of a half-flushed reply. */
+        if (s->out_off >= s->out_len)
+            nm_ts_reply_override(s, r->reply);
         s->paced = r->chunk_events;
         s->close_after = r->close_after_reply;
     }

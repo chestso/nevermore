@@ -238,15 +238,16 @@ test_keepalive_LDADD = $(TEST_TLS_LIBS)
 
 # Wire debug recorder: banner + NDJSON event
 # lines + redaction via the header secret marker, plus a tap round
-# trip against a canned loopback server. Direct recorder calls, no
-# real network.
-test_wire_recorder_SOURCES = test_wire_recorder.c ../src/clock.c ../src/wire_recorder.c \
+# trip against the scripted pump server (net_server.c - one thread,
+# the step sends, the pump answers, the read pulls). Direct recorder
+# calls, no real network.
+test_wire_recorder_SOURCES = test_wire_recorder.c net_server.c ../src/clock.c ../src/wire_recorder.c \
     ../src/json.c ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c \
     ../src/conf.c \
     $(TEST_TLS_SOURCE)
 test_wire_recorder_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_wire_recorder_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_wire_recorder_LDADD = -lpthread $(TEST_TLS_LIBS)
+test_wire_recorder_LDADD = $(TEST_TLS_LIBS)
 
 # End-to-end: the shared OpenAI-compatible client against a canned
 # chat/completions SSE server (request validation + delta assembly).
@@ -447,8 +448,10 @@ test_highlight_CFLAGS = $(TEST_CFLAGS)
 # and the Retry-After latch are pure functions of "now", and a runner's
 # uptime must not decide the verdict — a fresh CI VM reported a 2 h-old
 # observation as "unknown" because now (a small monotonic value) minus
-# 7200 ran below zero.
-test_credit_SOURCES = test_credit.c fake_clock.c ../src/conf.c \
+# 7200 ran below zero. The wire peer is the shared scripted pump
+# (net_server.c): the refresh drives its own async seam
+# (fetch_begin/step/source) against nm_ts_wait, one thread, no timers.
+test_credit_SOURCES = test_credit.c net_server.c fake_clock.c ../src/conf.c \
     ../src/nevermore.c ../src/authinfo.c \
     ../src/conversation_id.c \
     $(TEST_PROVIDER_SOURCES) \
@@ -456,7 +459,7 @@ test_credit_SOURCES = test_credit.c fake_clock.c ../src/conf.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/wire_recorder.c $(TEST_TLS_SOURCE)
 test_credit_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_credit_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_credit_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
+test_credit_LDADD = $(BOBA_LIBS) $(TEST_TLS_LIBS)
 
 # The prompt's `!` shell mode: the armed bit, the submit branch and the
 # run, over a real text input and the real proc layer. Its LINK SET is
