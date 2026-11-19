@@ -7057,6 +7057,21 @@ static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
      * after this one (they would then dial the real provider). */
     test_unsetenv("NM_NO_UNBIDDEN_FETCH");
     nm_chat_app_warm_catalog(h->app);
+    /* PARK the catalog's GET before the turn dials: the pump's one
+     * connection slot takes ONE accept per pass, so two connects
+     * completing in the same dispatch (the fetch's and the agent's)
+     * would displace each other — the displaced one closes over its
+     * unread request, an RST the surviving side then eats. The thread
+     * this replaces never had the window (the holder kept the GET in
+     * its own thread while the accept loop kept taking connections);
+     * the pump says it deterministically instead: drive until the GET
+     * completed its round and parked, THEN submit. */
+    for (int i = 0; i < 100 && nm_ts_requests(ts) < 1; i++) {
+        if (app_waiting(h->app))
+            harness_event_once(h, 10);
+        tui_runtime_flush(h->rt);
+    }
+    ASSERT_EQ(nm_ts_requests(ts), 1);
     /* The fetch is in flight: its socket is the wait set's only entry
      * (the agent is idle, no job runs). */
     NmSource only[TUI_IO_SOURCE_MAX];
