@@ -264,7 +264,7 @@ test_openai_client_SOURCES = test_openai_client.c net_server.c ../src/clock.c \
     $(TEST_PROVIDER_SOURCES)
 test_openai_client_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_openai_client_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_openai_client_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
+test_openai_client_LDADD = $(BOBA_LIBS) $(TEST_TLS_LIBS)
 
 # TLS: negative handshake over loopback with the committed self-signed
 # cert (system trust must reject it). Live probe is manual
