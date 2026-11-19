@@ -35,7 +35,6 @@
 #include <sys/time.h>
 #include <unistd.h>
 #endif
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -61,6 +60,7 @@
 #include "fake_clock.h" /* nm_test_clock_advance_ms (virtual deadlines) */
 #include "test_helpers.h"
 #include "test_net_helpers.h"
+#include "net_server.h"
 #include "test_keepalive_pin.h"
 
 /* MinGW has no setenv (POSIX); the tests only ever set/replace. */
@@ -83,10 +83,8 @@ static void test_unsetenv(const char *name)
 }
 
 /* ---------------------------------------------------------------- */
-/* Canned server (test_agent's, single-round convenience wrapper)   */
+/* Canned server: the scripted pump's test-side script               */
 /* ---------------------------------------------------------------- */
-
-#define REQ_CAP 16384
 
 /* Tool fixture path — string-pasted into the SSE literal (forward
  * slashes on Windows keep the JSON string escape-free, per the house
@@ -129,205 +127,112 @@ static int interest_has(NmChatApp *app, intptr_t handle)
     return 0;
 }
 
-static char g_request[REQ_CAP];
-
+/* The test-side script: what the worker thread this file used to spawn
+ * served, as shapes a test can read at a glance — chat_server_start
+ * translates each round into a pump round (tests/net_server.[ch]).
+ *
+ * sse[i] is RAW EVENTS ("data: ...\n\n" pairs, no head, no framing):
+ * the pump builds the 200 head and one computed chunk per event. An
+ * EMPTY round is the stall shape (read the request, answer nothing,
+ * hold the connection). delay_us and paced both ask for ONE EVENT PER
+ * DRIVE PASS (chunk_events) — what the thread's inter-event sleeps and
+ * rendezvous permits bought, deterministically. stall_at_end holds the
+ * LAST round's socket open past its events: no terminator, no close,
+ * until the peer (a cancel) closes it. */
 struct ServerScript
 {
     const char *sse[4];
     int n_rounds;
-    int port;
-    int fd;
-    int delay_us;            /* between events of each round (0 = none) */
-    int stall_at_end;        /* keep the last round's connection open (no
-                              * terminating chunk) until the peer closes */
-    int terminator_delay_ms; /* hold between the last event and the
-                              * 0-chunk: a late-trailer shape, where an
-                              * upstream computes the figure after
-                              * [DONE]. 0 = the terminator rides the
-                              * last event's read. */
+    int port;         /* filled by chat_server_start: the pump's bound port */
+    int delay_us;     /* > 0 = one event per drive pass */
+    int stall_at_end; /* hold the last round open past its events */
+    int paced;        /* one event per step (the rendezvous's shape) */
 
-    /* Rendezvous pacing — the deterministic replacement for delay_us
-     * for tests that need ONE event per client step. With `paced` set,
-     * the server sends event N only after the test has granted permit
-     * N (see server_paced_init / server_ack): a handshake, not a
-     * guessed sleep, so the interleaving is the test's to decide and
-     * costs no wall clock. `released` unblocks a server left waiting
-     * when the test stops driving (teardown, an early break). */
-    int paced;
-    pthread_mutex_t lock;
-    pthread_cond_t cv;
-    int permits;  /* events the test has let through */
-    int released; /* test is done driving: send the rest */
+    /* The pump translation: the rounds borrow the built replies, so
+     * they live here (chat_server_stop frees them). */
+    NmTsRound rounds[4];
+    char *built[4];
+    NmTsServer *ts;
 };
 
-/* Arm the rendezvous (call right after memset'ing the script). */
-static void server_paced_init(struct ServerScript *sc)
-{
-    pthread_mutex_init(&sc->lock, NULL);
-    pthread_cond_init(&sc->cv, NULL);
-    sc->paced = 1;
-}
+/* The most recent pump: harness_new wires it into the harness's drives
+ * (the drive helpers service the peer between every step — the work a
+ * worker thread owned). Cleared by the stop that frees it, so a
+ * serverless harness built after a stopped one never pumps a corpse. */
+static NmTsServer *g_ts;
 
-/* Let one more event through: the test calls this once per step it
- * takes, so the client sees one event per step. */
-static void server_ack(struct ServerScript *sc)
+/* Translate the script and bind the pump. sc->port is filled for the
+ * caller's base URL; the caller reads wire evidence through
+ * nm_ts_request(sc->ts, ...) and tears down with chat_server_stop. */
+static NmTsServer *chat_server_start(struct ServerScript *sc)
 {
-    if (!sc->paced)
-        return;
-    pthread_mutex_lock(&sc->lock);
-    sc->permits++;
-    pthread_cond_broadcast(&sc->cv);
-    pthread_mutex_unlock(&sc->lock);
-}
-
-/* Stop pacing: whatever is left goes out at once (teardown path). */
-static void server_release(struct ServerScript *sc)
-{
-    if (!sc->paced)
-        return;
-    pthread_mutex_lock(&sc->lock);
-    sc->released = 1;
-    pthread_cond_broadcast(&sc->cv);
-    pthread_mutex_unlock(&sc->lock);
-}
-
-/* Block until event `idx` may be sent (paced mode only). */
-static void server_wait_permit(struct ServerScript *sc, int idx)
-{
-    if (!sc->paced)
-        return;
-    pthread_mutex_lock(&sc->lock);
-    while (sc->permits <= idx && !sc->released)
-        pthread_cond_wait(&sc->cv, &sc->lock);
-    pthread_mutex_unlock(&sc->lock);
-}
-
-/* Send one SSE body as a chunked response — the canned server's wire
- * shape. `sc` may be NULL: no pacing, no inter-event delay, no extra
- * head lines (the servers that need a held catalog request have their
- * own thread). The 0-chunk terminator is the caller's (the stalling
- * rounds send none). */
-static void sse_send_chunked(int cfd, const char *body, struct ServerScript *sc)
-{
-    char head[256];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: text/event-stream\r\n"
-                      "Transfer-Encoding: chunked\r\n\r\n");
-    send(cfd, head, (size_t)hl, 0);
-    size_t bl = strlen(body);
-    size_t off = 0;
-    int ev_idx = 0;
-    while (off < bl) {
-        const char *ev_end = strstr(body + off, "\n\n");
-        size_t ev_len =
-            ev_end ? (size_t)(ev_end - (body + off)) + 2 : bl - off;
-        /* Paced: event N goes out only once the test has stepped N
-         * times (so the client sees one event per step). */
-        if (sc)
-            server_wait_permit(sc, ev_idx);
-        char chunk[REQ_CAP];
-        int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", ev_len);
-        memcpy(chunk + cl, body + off, ev_len);
-        cl += (int)ev_len;
-        memcpy(chunk + cl, "\r\n", 2);
-        cl += 2;
-        size_t cs = 0;
-        while (cs < (size_t)cl) {
-            long n = send(cfd, chunk + cs, (size_t)cl - cs, 0);
-            if (n <= 0)
-                break;
-            cs += (size_t)n;
+    memset(sc->rounds, 0, sizeof(sc->rounds));
+    for (int i = 0; i < sc->n_rounds; i++) {
+        int last = i == sc->n_rounds - 1;
+        int hold = sc->stall_at_end && last;
+        if (!sc->sse[i] || !*sc->sse[i]) {
+            sc->rounds[i].action = NM_TS_STALL;
+            continue;
         }
-        if (sc && sc->delay_us)
-            usleep((unsigned)sc->delay_us);
-        off += ev_len;
-        ev_idx++;
-    }
-}
-
-static void *chat_server_thread(void *arg)
-{
-    struct ServerScript *sc = arg;
-    for (int round = 0; round < sc->n_rounds; round++) {
-        /* Bounded accept: a turn cancelled during the async connect
-         * or send phase may never produce a deliverable connection
-         * (macOS/BSD drop it from the backlog; Linux delivers EOF).
-         * Wait bounded, then treat a no-show as end of script. */
-        struct timeval atv = { 2, 0 };
-        fd_set arfds;
-        FD_ZERO(&arfds);
-        FD_SET(sc->fd, &arfds);
-        if (select(sc->fd + 1, &arfds, NULL, NULL, &atv) <= 0)
-            return NULL; /* cancelled before connecting: fine */
-        int cfd = accept(sc->fd, NULL, NULL);
-        if (cfd < 0)
+        sc->built[i] = nm_ts_sse_chunked(sc->sse[i], hold);
+        if (!sc->built[i])
             return NULL;
-        /* Drain the request; capture it. */
-        char req[REQ_CAP];
-        size_t got = 0;
-        while (got < sizeof(req) - 1) {
-            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-            if (n <= 0)
-                break;
-            got += (size_t)n;
-            if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-                break;
-        }
-        req[got] = '\0';
-        if (got < REQ_CAP)
-            snprintf(g_request, REQ_CAP, "%s", req);
-
-        const char *body = sc->sse[round];
-        if (!body || !*body) {
-            /* Stalling round: keep the connection open, send nothing.
-             * A closed peer is READABLE (EOF), so drain: 0 = gone. */
-            while (1) {
-                struct timeval tv = { 0, 500 * 1000 };
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(cfd, &rfds);
-                if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-                    continue; /* keep stalling until the peer closes */
-                char sink[256];
-                long n = recv(cfd, sink, sizeof(sink), 0);
-                if (n <= 0)
-                    break; /* peer closed */
-            }
-            close(cfd);
-            continue;
-        }
-
-        sse_send_chunked(cfd, body, sc);
-        if (sc->stall_at_end && round == sc->n_rounds - 1) {
-            /* Hold the connection open without the terminal chunk —
-             * the client stays mid-stream until it cancels. A closed
-             * peer is READABLE (EOF), so drain bytes: 0 = peer gone. */
-            while (1) {
-                struct timeval tv = { 0, 500 * 1000 };
-                fd_set rfds;
-                FD_ZERO(&rfds);
-                FD_SET(cfd, &rfds);
-                if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-                    continue;
-                char sink[256];
-                long n = recv(cfd, sink, sizeof(sink), 0);
-                if (n <= 0)
-                    break; /* peer closed (cancel) */
-            }
-            close(cfd);
-            continue;
-        }
-        /* The 0-chunk terminator + trailer section. The hold makes the
-         * trailer arrive in a segment AFTER [DONE] was read (the
-         * framing tail). */
-        if (sc->terminator_delay_ms)
-            usleep((unsigned)sc->terminator_delay_ms * 1000);
-        send(cfd, "0\r\n\r\n", 5, 0);
-        close(cfd);
+        sc->rounds[i].reply = sc->built[i];
+        sc->rounds[i].chunk_events = (sc->paced || sc->delay_us) ? 1 : 0;
+        sc->rounds[i].close_after_reply = !hold;
     }
-    return NULL;
+    sc->ts = nm_ts_start(sc->rounds, sc->n_rounds);
+    if (!sc->ts)
+        return NULL;
+    sc->port = nm_ts_port(sc->ts);
+    g_ts = sc->ts;
+    return sc->ts;
+}
+
+/* Free the pump and the built replies. Wire evidence dies here: every
+ * nm_ts_request read must happen BEFORE the stop. */
+static void chat_server_stop(struct ServerScript *sc)
+{
+    if (sc->ts == g_ts)
+        g_ts = NULL;
+    nm_ts_stop(sc->ts);
+    sc->ts = NULL;
+    for (int i = 0; i < 4; i++) {
+        free(sc->built[i]);
+        sc->built[i] = NULL;
+    }
+}
+
+/* The LAST completed request, whole — the threaded server's greq(sc.ts)
+ * semantics (every round overwrote it). */
+static const char *greq(NmTsServer *s)
+{
+    return nm_ts_request(s, nm_ts_requests(s) - 1);
+}
+
+/* ---------------------------------------------------------------- */
+/* The hand-built pump helpers: the families that script NmTsRound
+ * by hand (the raw responder's verbatim replies) bind through these
+ * so harness_new wires the peer into the drives the same way
+ * chat_server_start does. */
+/* ---------------------------------------------------------------- */
+
+/* Bind a pump and make it the harness's peer. */
+static NmTsServer *pump_start(const NmTsRound *rounds, int n_rounds)
+{
+    NmTsServer *s = nm_ts_start(rounds, n_rounds);
+    if (s)
+        g_ts = s;
+    return s;
+}
+
+/* Free a hand-built pump (wire evidence dies here: read
+ * nm_ts_request BEFORE the stop). */
+static void pump_stop(NmTsServer *s)
+{
+    if (s == g_ts)
+        g_ts = NULL;
+    nm_ts_stop(s);
 }
 
 static int server_bind(int *port)
@@ -365,11 +270,11 @@ typedef struct AppHarness
     TuiRuntime *rt;
     FILE *out;
     char *text; /* snapshot of everything written */
-    /* Optional rendezvous partner: when set, every step this harness
-     * takes grants the scripted server one more event (see
-     * server_paced_init). Tests that need one event per step set it
-     * instead of a delay_us guess. */
-    struct ServerScript *pacer;
+    /* The scripted pump this harness's drives service (wired by
+     * harness_new from the most recent chat_server_start — the work a
+     * worker thread used to own now rides every step and every wait
+     * wake these helpers make). NULL = no peer on this harness. */
+    NmTsServer *ts;
 } AppHarness;
 
 /* Read the whole output FILE* into a heap string (rewinds nothing —
@@ -431,6 +336,12 @@ static AppHarness *harness_new_full(const char *provider, const char *model,
     h->text = malloc(OUT_CAP);
     h->out = tmpfile();
     h->app = nm_chat_app_new(provider, model);
+    /* The harness's drives service the most recent scripted pump: a
+     * test starts its server, then builds the harness that talks to it
+     * (the base URL needs the port first). chat_server_stop clears the
+     * slot when it frees one, so a serverless harness never pumps a
+     * corpse. */
+    h->ts = g_ts;
     if (!h->text || !h->out || !h->app) {
         harness_free(h);
         return NULL;
@@ -745,16 +656,23 @@ static void app_wait(AppHarness *h, int timeout_ms)
     NmSource s = app_source(h->app);
     if (s.handle < 0 || !s.flags)
         return;
+    if (h->ts) {
+        /* THE wait: the app's fd together with the server's, then one
+         * pump — whichever end moved gets serviced. */
+        nm_ts_wait(h->ts, s.handle, s.flags, timeout_ms);
+        return;
+    }
     app_wait_src(&s, timeout_ms);
 }
 
-/* One step, plus the rendezvous grant the step just consumed (a paced
- * server sends the next event only when the test asks for it). */
+/* One step, plus the pump pass the step just made possible: the request
+ * the step sent is accepted and answered HERE (one event per pass when
+ * the round paces) — the worker thread's share of the work, inline. */
 static void harness_step_ack(AppHarness *h)
 {
     nm_chat_app_step(h->app);
-    if (h->pacer)
-        server_ack(h->pacer);
+    if (h->ts)
+        nm_ts_pump(h->ts);
 }
 
 static void harness_event_once(AppHarness *h, int wait_ms);
@@ -871,10 +789,22 @@ static int app_wait_ready(const NmSource *sp, int timeout_ms)
  * is the only thing that wakes it. */
 static void harness_event_once(AppHarness *h, int wait_ms)
 {
+    /* The server's pass for this iteration: whatever the last step
+     * sent is accepted and answered before the wait, so the app's
+     * wait set never sleeps on a peer the pump has not serviced. */
+    if (h->ts)
+        nm_ts_pump(h->ts);
     NmSource set[TUI_IO_SOURCE_MAX];
     size_t n = nm_chat_app_interest(h->app, set, TUI_IO_SOURCE_MAX);
     int ready = 0;
     if (n > 0 && nm_source_wait_any(set, n, wait_ms) == 0) {
+        /* The accept-before-send rule (CONTRIBUTING): the wait above
+         * watched the app's fds, not the listener — take the
+         * connection HERE, so the ready dispatch below sends onto a
+         * live socket pair, never into the accept backlog (a send
+         * nobody accepted is a platform race; it hung macOS CI once). */
+        if (h->ts)
+            nm_ts_pump(h->ts);
         for (size_t i = 0; i < n; i++) {
             if (set[i].handle < 0 || !set[i].flags)
                 continue;
@@ -970,6 +900,10 @@ static int harness_drive_virtual(AppHarness *h, int max_ticks)
         if (wait < 0)
             wait = 5;
         nm_test_clock_advance_ms(wait);
+        /* The peer rides the tick too: a round whose bytes arrive on
+         * the (virtual) clock lands here, one pass per tick. */
+        if (h->ts)
+            nm_ts_pump(h->ts);
         nm_chat_app_tick(h->app);
         tui_runtime_flush(h->rt);
     }
@@ -1232,10 +1166,7 @@ static void test_submit_echoes_and_prints_answer(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1256,11 +1187,10 @@ static void test_submit_echoes_and_prints_answer(void)
     /* The answer is terminated as a whole line (line-buffered). */
     ASSERT_TRUE(strstr(out, "Hello world\r\n") != NULL);
     /* The request rode the configured model. */
-    ASSERT_TRUE(strstr(g_request, "\"model\":\"test-model\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"model\":\"test-model\"") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The "remove if too many" half: a body that ends in blank lines — here
@@ -1284,22 +1214,18 @@ static void test_delta_line_continuation_is_preserved(void)
      * (a handshake, not a guessed delay). */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
-    server_paced_init(&sc);
+    sc.paced = 1;
     sc.n_rounds = 1;
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"Hello \"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
-    h->pacer = &sc;
 
     harness_type(h, "continue");
     harness_enter(h);
@@ -1313,10 +1239,8 @@ static void test_delta_line_continuation_is_preserved(void)
      * which would print "world" as the start of the next line). */
     ASSERT_TRUE(strstr(out, "Hello \r\nworld") == NULL);
 
-    server_release(&sc);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Regression (bugs/streaming-dupes-and-cursor-move-to-top-of-terminal.md):
@@ -1334,10 +1258,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
      * STREAMING state with an empty tail ("thinking"). */
     sc.sse[0] = "";
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1419,8 +1340,7 @@ static void test_busy_frame_with_empty_tail_has_no_phantom_row(void)
     /* Teardown cancels the agent; the runtime free closes the socket
      * and releases the server's stall loop (its `sc` is on this
      * frame). Join so the thread never outlives it. */
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The dot on a TRUECOLOR terminal: the glyph's color is the pulse's,
@@ -1436,10 +1356,7 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalling round: the app sits in STREAMING */
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1484,8 +1401,7 @@ static void test_dot_pulses_on_a_truecolor_terminal(void)
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), 100);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The handoff (the Enter -> repaint lag): the beat that submits paints
@@ -1508,10 +1424,7 @@ static void test_submit_paints_the_handoff_frame(void)
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalling: the turn sits in the thinking phase */
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1546,8 +1459,7 @@ static void test_submit_paints_the_handoff_frame(void)
     free(trough);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The dot on a 16-COLOR terminal: no pulse — the bright ANSI16 green
@@ -1562,10 +1474,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     sc.n_rounds = 1;
     sc.sse[0] = "";
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1617,8 +1526,7 @@ static void test_dot_blinks_and_holds_its_column_on_16_colors(void)
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), 100);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The spinner stops the moment the round completes (DONE), and the
@@ -1635,10 +1543,7 @@ static void test_spinner_clears_when_round_completes(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1692,8 +1597,7 @@ static void test_spinner_clears_when_round_completes(void)
     free(effort);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The ramp glyphs are one display cell each in boba's width table — the
@@ -1718,10 +1622,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"streaming tail "
         "without newline yet\"}}]}\n\n";
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1773,8 +1674,7 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
     /* The app was cancelled by teardown: the runtime free tears the
      * socket down, which releases the server's stall loop. Join so
      * the thread never outlives this frame (its `sc` is on it). */
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -2381,10 +2281,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
         "\"completion_tokens\":5,\"total_tokens\":12405,"
         "\"prompt_tokens_details\":{\"cached_tokens\":8100}}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2457,8 +2354,7 @@ static void test_context_gauge_reports_usage_and_limit(void)
     ASSERT_TRUE(strstr(out, "session cache write") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The ⚡ rate is CUMULATIVE over the session, not a per-round number:
@@ -2489,10 +2385,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
         "\"completion_tokens\":100,\"total_tokens\":10100,"
         "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2566,8 +2459,7 @@ static void test_context_gauge_cache_rate_is_cumulative(void)
     ASSERT_TRUE(strstr(out, "context: session cache write 2,048 tokens") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The ↓ field appears only once a round has REPORTED output — and a
@@ -2596,10 +2488,7 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2000,"
         "\"completion_tokens\":0,\"total_tokens\":2000}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2647,8 +2536,7 @@ static void test_context_gauge_output_marker_waits_for_a_report(void)
                             "output tokens") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The output marker's color is the TIER's business. A 16-color terminal
@@ -2685,10 +2573,7 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
             "\"completion_tokens\":5,\"total_tokens\":1005,"
             "\"prompt_tokens_details\":{\"cached_tokens\":500}}}\n\n"
             "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2733,8 +2618,7 @@ static void test_output_marker_color_follows_the_terminal_tier(void)
     ASSERT_TRUE(strstr(frame, "\033[38;2;139;233;253m") != NULL);
     harness_free(h32);
 
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The status row carries NO background: the app paints chrome in
@@ -2830,10 +2714,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4611686018427387904,"
         "\"completion_tokens\":2305843009213693952}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2866,8 +2747,7 @@ static void test_context_gauge_survives_the_worst_case_counts(void)
     free(gauge);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The gauge's tier tracks how full the window is: Orange past ~85 % of a
@@ -2890,10 +2770,7 @@ static void test_context_gauge_warns_near_the_limit(void)
         "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":126000,"
         "\"completion_tokens\":1,\"total_tokens\":126001}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -2927,8 +2804,7 @@ static void test_context_gauge_warns_near_the_limit(void)
     free(hot);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -3361,15 +3237,16 @@ static void test_credits_command_output(void)
 }
 
 /* ---------------------------------------------------------------- */
-/* Routing loopback server: one connection per request, answered by  */
-/* path — so a test can script a provider's credit endpoints and its */
-/* chat stream on the SAME fixture.                                  */
+/* Routing pump: one repeating round, answered BY PATH — so a test  */
+/* can script a provider's credit endpoints and its chat stream on  */
+/* the SAME fixture (the worker thread's dispatch, inline in the     */
+/* drive's pump).                                                     */
 /* ---------------------------------------------------------------- */
 
-typedef struct
+/* The router's state. One test at a time owns it (the suite runs
+ * single-threaded, one test at a time). */
+static struct
 {
-    int port;
-    int lfd;
     /* The purse the NEXT `GET /api/v1/credits` reports (total_credits;
      * total_usage is always 0). The test MOVES it between turns, so a
      * second fetch is only observable if it actually happened. */
@@ -3383,98 +3260,92 @@ typedef struct
     int n_credits; /* GET /api/v1/credits served */
     int n_key;     /* GET /api/v1/key served */
     int n_chat;    /* chat completions served */
-    int stop;
-} CreditRouteServer;
+    /* The reply the last hook armed. The round borrows it until it is
+     * written; the next hook (or the stop) is the first moment the
+     * pump can no longer be holding it — a new request only completes
+     * after an accept reset the slot's pending bytes. */
+    char *built;
+} g_credit;
 
-static void route_send_json(int cfd, const char *body)
+/* The balance/key JSON: a computed Content-Length (the client must
+ * read the body to its last byte — the canned server's house rule). */
+static void credit_json(const char *body)
 {
-    char head[160];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: %zu\r\n\r\n",
-                      strlen(body));
-    send(cfd, head, (size_t)hl, 0);
-    send(cfd, body, strlen(body), 0);
+    free(g_credit.built);
+    g_credit.built = NULL;
+    size_t n = strlen(body) + 192;
+    g_credit.built = malloc(n);
+    if (g_credit.built)
+        snprintf(g_credit.built, n,
+                 "HTTP/1.1 200 OK\r\n"
+                 "Connection: close\r\n"
+                 "Content-Type: application/json\r\n"
+                 "Content-Length: %zu\r\n\r\n%s",
+                 strlen(body), body);
 }
 
-static void *credit_route_server_thread(void *arg)
+static void credit_route(NmTsServer *s, int round, const char *req,
+                         size_t len)
 {
-    CreditRouteServer *s = arg;
-    for (;;) {
-        fd_set r;
-        struct timeval tv = { 0, 50 * 1000 };
-        FD_ZERO(&r);
-        FD_SET(s->lfd, &r);
-        if (select(s->lfd + 1, &r, NULL, NULL, &tv) <= 0) {
-            if (s->stop)
-                return NULL;
-            continue;
-        }
-        int cfd = accept(s->lfd, NULL, NULL);
-        if (cfd < 0)
-            return NULL;
-        /* Drain the request before any reply: a server that closes
-         * with a POST's body still unread sends an RST, which can
-         * discard the reply the client has not read yet (the canned
-         * server's own house rule). A GET has no body, so the header
-         * terminator ends it; a POST ends at its JSON body's '}'. The
-         * buffer is the canned server's REQ_CAP: a chat POST carries
-         * the whole session (system prompt, skills menu, history) and
-         * runs to several KB — a short buffer truncates the drain and
-         * the close then races the client's unread reply. */
-        char req[REQ_CAP];
-        size_t got = 0;
-        int is_get = 0;
-        while (got < sizeof(req) - 1) {
-            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-            if (n <= 0)
-                break;
-            got += (size_t)n;
-            req[got] = '\0';
-            is_get = strncmp(req, "GET ", 4) == 0;
-            if (strstr(req, "\r\n\r\n") &&
-                (is_get || (got > 4 && req[got - 1] == '}')))
-                break;
-        }
-        req[got] = '\0';
-        if (strstr(req, "GET /api/v1/credits")) {
-            s->n_credits++;
-            if (s->fail_credits) {
-                static const char nf[] = "HTTP/1.1 404 Not Found\r\n"
-                                         "Connection: close\r\n"
-                                         "Content-Length: 0\r\n\r\n";
-                send(cfd, nf, sizeof(nf) - 1, 0);
-            } else {
-                char body[128];
-                snprintf(body, sizeof(body),
-                         "{\"data\":{\"total_credits\":%.2f,"
-                         "\"total_usage\":0}}",
-                         s->purse);
-                route_send_json(cfd, body);
-            }
-        } else if (strstr(req, "GET /api/v1/key")) {
-            s->n_key++;
-            route_send_json(cfd, "{\"data\":{}}");
+    (void)round;
+    (void)len;
+    if (strstr(req, "GET /api/v1/credits")) {
+        g_credit.n_credits++;
+        if (g_credit.fail_credits) {
+            free(g_credit.built);
+            g_credit.built = strdup("HTTP/1.1 404 Not Found\r\n"
+                                    "Connection: close\r\n"
+                                    "Content-Length: 0\r\n\r\n");
         } else {
-            int first = s->n_chat++ == 0;
-            sse_send_chunked(
-                cfd,
-                (first && s->tool_first)
-                    ? "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{"
-                      "\"index\":0,\"id\":\"call_c\",\"type\":\"function\","
-                      "\"function\":{\"name\":\"run_command\",\"arguments\":"
-                      "\"{\\\"cmd\\\":\\\"sleep 0.5\\\"}\"}}]}}]}\n\n"
-                      "data: [DONE]\n\n"
-                    : "data: {\"choices\":[{\"delta\":{\"content\":"
-                      "\"ok\"}}]}\n\n"
-                      "data: [DONE]\n\n",
-                NULL);
-            send(cfd, "0\r\n\r\n", 5, 0);
+            char body[128];
+            snprintf(body, sizeof(body),
+                     "{\"data\":{\"total_credits\":%.2f,"
+                     "\"total_usage\":0}}",
+                     g_credit.purse);
+            credit_json(body);
         }
-        close(cfd);
+    } else if (strstr(req, "GET /api/v1/key")) {
+        g_credit.n_key++;
+        credit_json("{\"data\":{}}");
+    } else {
+        int first = g_credit.n_chat++ == 0;
+        free(g_credit.built);
+        g_credit.built =
+            nm_ts_sse_chunked((first && g_credit.tool_first)
+                                  ? "data: {\"choices\":[{\"delta\":{"
+                                    "\"tool_calls\":[{"
+                                    "\"index\":0,\"id\":\"call_c\","
+                                    "\"type\":\"function\","
+                                    "\"function\":{\"name\":"
+                                    "\"run_command\",\"arguments\":"
+                                    "\"{\\\"cmd\\\":\\\"sleep 0.5\\\"}"
+                                    "\"}}]}}]}\n\n"
+                                    "data: [DONE]\n\n"
+                                  : "data: {\"choices\":[{\"delta\":{"
+                                    "\"content\":\"ok\"}}]}\n\n"
+                                    "data: [DONE]\n\n",
+                              0);
     }
+    nm_ts_reply_override(s, g_credit.built);
+}
+
+/* Bind the router and make it the harness's peer; the caller resets
+ * g_credit first (memset + the purse/flags it wants). */
+static NmTsServer *credit_route_start(void)
+{
+    static const NmTsRound r = {
+        .on_request = credit_route,
+        .close_after_reply = 1,
+    };
+    return pump_start(&r, 1);
+}
+
+/* Stop the router and free the last armed reply. */
+static void credit_route_stop(NmTsServer *ts)
+{
+    pump_stop(ts);
+    free(g_credit.built);
+    g_credit.built = NULL;
 }
 
 /* Regression (the purse froze at the startup fetch): the background
@@ -3490,16 +3361,13 @@ static void *credit_route_server_thread(void *arg)
  * bar follows the wire. */
 static void test_credits_status_refreshes_after_ttl(void)
 {
-    CreditRouteServer s;
-    memset(&s, 0, sizeof(s));
-    s.purse = 7.71; /* the purse the launch fetch lands */
-    s.lfd = server_bind(&s.port);
-    ASSERT_TRUE(s.lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, credit_route_server_thread, &s);
+    memset(&g_credit, 0, sizeof(g_credit));
+    g_credit.purse = 7.71; /* the purse the launch fetch lands */
+    NmTsServer *ts = credit_route_start();
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
     /* Opt out of the harness's startup stamp: this test is ABOUT the
@@ -3519,8 +3387,8 @@ static void test_credits_status_refreshes_after_ttl(void)
     ASSERT_TRUE(interest_has(
         h->app, nm_credits_fetch_source(NM_PROVIDER_OPENROUTER).handle));
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
-    ASSERT_EQ(s.n_credits, 1);
-    ASSERT_EQ(s.n_key, 1); /* openrouter's two-step chain ran */
+    ASSERT_EQ(g_credit.n_credits, 1);
+    ASSERT_EQ(g_credit.n_key, 1); /* openrouter's two-step chain ran */
 
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
@@ -3535,7 +3403,7 @@ static void test_credits_status_refreshes_after_ttl(void)
      * turn completes. Its round folds nothing but still carries a 200,
      * and the wire's purse has moved. */
     nm_test_clock_advance_ms(600 * 1000);
-    s.purse = 5.00;
+    g_credit.purse = 5.00;
     harness_type(h, "two");
     harness_enter(h);
     ASSERT_EQ(harness_drive_events(h, 5000), 0);
@@ -3544,9 +3412,9 @@ static void test_credits_status_refreshes_after_ttl(void)
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
 
     /* A SECOND fetch landed, and the status row is the new figure. */
-    ASSERT_EQ(s.n_credits, 2);
-    ASSERT_EQ(s.n_key, 2);
-    ASSERT_EQ(s.n_chat, 2); /* one POST per turn, nothing else routed */
+    ASSERT_EQ(g_credit.n_credits, 2);
+    ASSERT_EQ(g_credit.n_key, 2);
+    ASSERT_EQ(g_credit.n_chat, 2); /* one POST per turn, nothing else routed */
     frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
@@ -3557,10 +3425,8 @@ static void test_credits_status_refreshes_after_ttl(void)
     free(row);
     free(prompt);
 
-    s.stop = 1;
     harness_free(h);
-    pthread_join(th, NULL);
-    close(s.lfd);
+    credit_route_stop(ts);
 }
 
 #ifndef _WIN32
@@ -3574,17 +3440,14 @@ static void test_credits_refresh_starts_mid_turn(void)
 {
     test_unsetenv("NM_NO_UNBIDDEN_FETCH");
 
-    CreditRouteServer s;
-    memset(&s, 0, sizeof(s));
-    s.purse = 7.71;
-    s.tool_first = 1;
-    s.lfd = server_bind(&s.port);
-    ASSERT_TRUE(s.lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, credit_route_server_thread, &s);
+    memset(&g_credit, 0, sizeof(g_credit));
+    g_credit.purse = 7.71;
+    g_credit.tool_first = 1;
+    NmTsServer *ts = credit_route_start();
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -3597,18 +3460,12 @@ static void test_credits_refresh_starts_mid_turn(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the router pump's —
+         * whichever end moved is serviced — then the step, then the
+         * pump pass that step made possible. */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -3618,7 +3475,7 @@ static void test_credits_refresh_starts_mid_turn(void)
      * fetched" — due now; the clock itself must not jump, it would
      * also expire the tool's own deadline) and the wire's purse moved. */
     nm_credits_reset();
-    s.purse = 5.00;
+    g_credit.purse = 5.00;
     nm_chat_app_tick(h->app);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
     ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
@@ -3637,13 +3494,11 @@ static void test_credits_refresh_starts_mid_turn(void)
     ASSERT_EQ(harness_drive_events(h, 5000), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
-    ASSERT_EQ(s.n_credits, 1); /* the mid-turn fetch; the gate saw it fresh */
-    ASSERT_EQ(s.n_chat, 2);
+    ASSERT_EQ(g_credit.n_credits, 1); /* the mid-turn fetch; the gate saw it fresh */
+    ASSERT_EQ(g_credit.n_chat, 2);
 
-    s.stop = 1;
     harness_free(h);
-    pthread_join(th, NULL);
-    close(s.lfd);
+    credit_route_stop(ts);
 }
 #endif
 
@@ -3657,16 +3512,13 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
 {
     test_unsetenv("NM_NO_UNBIDDEN_FETCH");
 
-    CreditRouteServer s;
-    memset(&s, 0, sizeof(s));
-    s.purse = 7.71; /* what a launch fetch would have landed */
-    s.lfd = server_bind(&s.port);
-    ASSERT_TRUE(s.lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, credit_route_server_thread, &s);
+    memset(&g_credit, 0, sizeof(g_credit));
+    g_credit.purse = 7.71; /* what a launch fetch would have landed */
+    NmTsServer *ts = credit_route_start();
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -3677,7 +3529,7 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
 
     /* Nobody types. Ten minutes pass, and the wire's purse moves. */
     nm_test_clock_advance_ms(600 * 1000);
-    s.purse = 5.00;
+    g_credit.purse = 5.00;
 
     /* The deadline is due NOW: the loop wakes on it, and the tick
      * starts the fetch with no turn anywhere in sight. */
@@ -3691,9 +3543,9 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
 
     /* The bar followed the wire — without one chat round. */
-    ASSERT_EQ(s.n_credits, 1);
-    ASSERT_EQ(s.n_key, 1);
-    ASSERT_EQ(s.n_chat, 0);
+    ASSERT_EQ(g_credit.n_credits, 1);
+    ASSERT_EQ(g_credit.n_key, 1);
+    ASSERT_EQ(g_credit.n_chat, 0);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);
     char *prompt = span_bytes(nm_color_prompt(NM_COLOR_16), "\xe2\x9d\xaf ");
@@ -3706,10 +3558,8 @@ static void test_credits_idle_refresh_updates_the_bar_while_idle(void)
      * deadline never survives its own tick, so the loop cannot spin. */
     ASSERT_EQ(nm_chat_app_tick_ms(h->app), 300000);
 
-    s.stop = 1;
     harness_free(h);
-    pthread_join(th, NULL);
-    close(s.lfd);
+    credit_route_stop(ts);
 }
 
 /* A failed idle attempt must not come back as a due-now deadline:
@@ -3722,16 +3572,13 @@ static void test_credits_idle_refresh_backs_off_a_failed_fetch(void)
 {
     test_unsetenv("NM_NO_UNBIDDEN_FETCH"); /* idempotent: lifted above */
 
-    CreditRouteServer s;
-    memset(&s, 0, sizeof(s));
-    s.fail_credits = 1; /* the balance endpoint is not there today */
-    s.lfd = server_bind(&s.port);
-    ASSERT_TRUE(s.lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, credit_route_server_thread, &s);
+    memset(&g_credit, 0, sizeof(g_credit));
+    g_credit.fail_credits = 1; /* the balance endpoint is not there today */
+    NmTsServer *ts = credit_route_start();
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", s.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
     /* The session whose startup warm never landed: never fetched means
@@ -3742,9 +3589,9 @@ static void test_credits_idle_refresh_backs_off_a_failed_fetch(void)
     nm_chat_app_tick(h->app);
     ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
-    ASSERT_EQ(s.n_credits, 1);
-    ASSERT_EQ(s.n_key, 0); /* the chain died at the failed first step */
-    ASSERT_EQ(s.n_chat, 0);
+    ASSERT_EQ(g_credit.n_credits, 1);
+    ASSERT_EQ(g_credit.n_key, 0); /* the chain died at the failed first step */
+    ASSERT_EQ(g_credit.n_chat, 0);
 
     /* The fetch failed and nothing in the store moved: the backoff is
      * the app's, armed by the attempt itself. */
@@ -3756,13 +3603,11 @@ static void test_credits_idle_refresh_backs_off_a_failed_fetch(void)
     nm_chat_app_tick(h->app);
     ASSERT_TRUE(nm_credits_fetch_in_flight(NM_PROVIDER_OPENROUTER));
     ASSERT_EQ(harness_pump_credits(h, 5000, NM_PROVIDER_OPENROUTER), 0);
-    ASSERT_EQ(s.n_credits, 2);
-    ASSERT_EQ(s.n_chat, 0);
+    ASSERT_EQ(g_credit.n_credits, 2);
+    ASSERT_EQ(g_credit.n_chat, 0);
 
-    s.stop = 1;
     harness_free(h);
-    pthread_join(th, NULL);
-    close(s.lfd);
+    credit_route_stop(ts);
 }
 
 /* The composer owns the cursor's chrome offset: boba's textinput reports
@@ -3828,10 +3673,7 @@ static void test_busy_input_gathers_type_ahead(void)
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalling round: STREAMING with no payload */
     sc.stall_at_end = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -3861,8 +3703,7 @@ static void test_busy_input_gathers_type_ahead(void)
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "next");
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 static void test_quit_command_quits(void)
@@ -4189,10 +4030,7 @@ static void test_cancel_midstream_returns_to_idle(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalls: no bytes, so we can interrupt */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -4218,8 +4056,7 @@ static void test_cancel_midstream_returns_to_idle(void)
     ASSERT_TRUE(tui_runtime_should_quit(h->rt));
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Escape interrupts the turn: the second interrupt key, next to
@@ -4233,10 +4070,7 @@ static void test_escape_cancels_the_streaming_turn(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalls: no bytes, so we can interrupt */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -4262,8 +4096,7 @@ static void test_escape_cancels_the_streaming_turn(void)
                   "next one");
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Escape at the prompt is NOT an interrupt: it does not clear the
@@ -4296,17 +4129,15 @@ static void test_escape_at_the_prompt_keeps_the_text(void)
  * cancel walks back to IDLE). NULL = setup failed. The caller owns the
  * harness and joins/closes the server (one round: the thread ends by
  * itself). */
-static AppHarness *turn_to_done(struct ServerScript *sc, pthread_t *th)
+static AppHarness *turn_to_done(struct ServerScript *sc)
 {
     memset(sc, 0, sizeof(*sc));
     sc->n_rounds = 1;
     sc->sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"in one\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc->fd = server_bind(&sc->port);
-    if (sc->fd < 0)
+    if (!chat_server_start(sc))
         return NULL;
-    pthread_create(th, NULL, chat_server_thread, sc);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
@@ -4327,8 +4158,7 @@ static AppHarness *turn_to_done(struct ServerScript *sc, pthread_t *th)
 static void test_ctrl_d_quits_after_a_turn(void)
 {
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = turn_to_done(&sc, &th);
+    AppHarness *h = turn_to_done(&sc);
     ASSERT_NOT_NULL(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
@@ -4337,8 +4167,7 @@ static void test_ctrl_d_quits_after_a_turn(void)
     ASSERT_TRUE(tui_runtime_should_quit(h->rt));
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 
     /* And on a prompt that has never sent anything (the one case the
      * IDLE test did cover). */
@@ -4356,8 +4185,7 @@ static void test_ctrl_d_quits_after_a_turn(void)
 static void test_ctrl_d_deletes_at_a_nonempty_prompt_after_a_turn(void)
 {
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = turn_to_done(&sc, &th);
+    AppHarness *h = turn_to_done(&sc);
     ASSERT_NOT_NULL(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
@@ -4371,8 +4199,7 @@ static void test_ctrl_d_deletes_at_a_nonempty_prompt_after_a_turn(void)
     ASSERT_STR_EQ(tui_textinput_text(nm_chat_app_textinput(h->app)), "b");
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* P0 deadline seam in the TUI: a silent server never makes the stream
@@ -4385,10 +4212,7 @@ static void test_tick_fires_stream_inactivity_timeout(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = ""; /* stalls: no bytes at all */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -4430,8 +4254,7 @@ static void test_tick_fires_stream_inactivity_timeout(void)
 
     scratch_store_end();
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 static void test_connect_error_prints_and_returns_to_idle(void)
@@ -4592,74 +4415,28 @@ static void test_black_hole_connect_is_bounded_by_the_tick(void)
     scratch_store_end();
 }
 
-/* Raw responder thread: drain the request, write bytes verbatim (no
- * chunked/SSE machinery). Used to script wire-truth error pages
- * whose bodies end with a trailing newline — raw-mode transcript
- * correctness (no staircasing) is the property under test. */
-struct RawResponse
-{
-    int fd;   /* listen socket */
-    int port; /* filled by the test */
-    const char *response;
-};
-
-static void *raw_responder_thread(void *arg)
-{
-    struct RawResponse *rr = arg;
-    struct timeval atv = { 2, 0 };
-    fd_set arfds;
-    FD_ZERO(&arfds);
-    FD_SET(rr->fd, &arfds);
-    if (select(rr->fd + 1, &arfds, NULL, NULL, &atv) <= 0)
-        return NULL; /* cancelled before connecting: fine */
-    int cfd = accept(rr->fd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char drain[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(drain) - 1) {
-        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(drain, "\r\n\r\n") && got > 4 && drain[got - 1] == '}')
-            break;
-    }
-    size_t len = strlen(rr->response);
-    size_t off = 0;
-    while (off < len) {
-        long n = send(cfd, rr->response + off, len - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    return NULL;
-}
-
 /* Reasoning deltas ride stream 1, ahead of the answer, on their own
  * lines; the answer rides stream 0. Phase order is the deliverable
  * (the dim is step 4). Wire shape: reasoning-only chunks
  * (content:"") then content, phase-sequential. */
 static void test_reasoning_prints_before_answer(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+            "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"the answer\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -4688,6 +4465,7 @@ static void test_reasoning_prints_before_answer(void)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
 
     harness_free(h);
+    pump_stop(ts);
 }
 
 /* Regression: a provider error body that ends with a trailing
@@ -4697,20 +4475,19 @@ static void test_reasoning_prints_before_answer(void)
  * output is the bug (raw mode: the terminal does not translate). */
 static void test_error_line_endings_are_crnl(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 401 Unauthorized\r\n"
-        "Content-Type: application/json\r\n"
-        "Connection: close\r\n\r\n"
-        "{\"error\":\"missing authorization\"}\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 401 Unauthorized\r\n"
+            "Content-Type: application/json\r\n"
+            "Connection: close\r\n\r\n"
+            "{\"error\":\"missing authorization\"}\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "test-model", base);
     ASSERT_NOT_NULL(h);
     /* No key: the agent's env-var hint rides the same error line. */
@@ -4743,29 +4520,27 @@ static void test_error_line_endings_are_crnl(void)
     ASSERT_TRUE(msg < hint);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 static void test_separator_between_reasoning_and_answer(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+            "\"reasoning_content\":\"weighing options\\n\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -4782,33 +4557,31 @@ static void test_separator_between_reasoning_and_answer(void)
     ASSERT_TRUE(strstr(out, "final words\r\n\r\n\r\n") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 static void test_separator_collapses_trailing_blank_lines(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        /* Unlabeled (byte-emitted) fence, never closed. The trailing
-         * blank lines arrive as their OWN all-newline delta — the
-         * pathological "too many" source, and the split (content, then
-         * pure newlines) that the hold-back must still collapse. */
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"```\\ncode\"}}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            /* Unlabeled (byte-emitted) fence, never closed. The trailing
+             * blank lines arrive as their OWN all-newline delta — the
+             * pathological "too many" source, and the split (content, then
+             * pure newlines) that the hold-back must still collapse. */
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"```\\ncode\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\\n\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -4824,8 +4597,7 @@ static void test_separator_collapses_trailing_blank_lines(void)
     ASSERT_TRUE(strstr(out, "code\r\n\r\n\r\n") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* The "add one if missing" half: at the end of content streaming exactly
@@ -4833,21 +4605,20 @@ static void test_separator_collapses_trailing_blank_lines(void)
  * (here two) collapse; the separator contributes the one. */
 static void test_separator_blank_line_after_answer(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello world\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -4861,8 +4632,7 @@ static void test_separator_blank_line_after_answer(void)
     ASSERT_TRUE(strstr(out, "Hello world\r\n\r\n\r\n") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* A screen model for strip_frames: independent rows of bytes, no
@@ -5065,25 +4835,24 @@ static int has_blank_row(const char *from, const char *to)
  * covered: the reasoning trace's paragraphs and the answer's. */
 static void test_blank_line_inside_a_run_renders(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"weighing options\\n\\nand another\\n\"}}]}"
-        "\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"one paragraph\\n\\ntwo paragraph\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+            "\"reasoning_content\":\"weighing options\\n\\nand another\\n\"}}]}"
+            "\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"one paragraph\\n\\ntwo paragraph\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -5102,8 +4871,7 @@ static void test_blank_line_inside_a_run_renders(void)
     free(seen);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 #ifndef _WIN32
@@ -5124,10 +4892,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -5145,18 +4910,12 @@ static void test_tool_runs_async_and_spinner_ticks(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the pump's — whichever
+         * end moved is serviced — then the step, then the pump pass
+         * that step made possible (the worker's share, inline). */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -5195,8 +4954,7 @@ static void test_tool_runs_async_and_spinner_ticks(void)
     free(clean);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 #endif /* !_WIN32 */
 
@@ -5217,10 +4975,7 @@ static void test_cancel_during_tool_closes_the_block(void)
         "{\"name\":\"run_command\",\"arguments\":"
         "\"{\\\"cmd\\\":\\\"sleep 5; echo never\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -5238,18 +4993,12 @@ static void test_cancel_during_tool_closes_the_block(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the pump's — whichever
+         * end moved is serviced — then the step, then the pump pass
+         * that step made possible (the worker's share, inline). */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -5270,8 +5019,7 @@ static void test_cancel_during_tool_closes_the_block(void)
     free(clean);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Escape interrupts a RUNNING TOOL, not just a stream: the child is
@@ -5288,10 +5036,7 @@ static void test_escape_cancels_the_running_tool(void)
         "{\"name\":\"run_command\",\"arguments\":"
         "\"{\\\"cmd\\\":\\\"sleep 5; echo never\\\"}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -5309,18 +5054,12 @@ static void test_escape_cancels_the_running_tool(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the pump's — whichever
+         * end moved is serviced — then the step, then the pump pass
+         * that step made possible (the worker's share, inline). */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -5338,8 +5077,7 @@ static void test_escape_cancels_the_running_tool(void)
     free(clean);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 #endif /* !_WIN32 */
 
@@ -5363,10 +5101,7 @@ static void test_tool_round_prints_panels(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"edited the file\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -5423,8 +5158,7 @@ static void test_tool_round_prints_panels(void)
     remove(FIXTURE_PATH);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -5434,7 +5168,7 @@ static void test_tool_round_prints_panels(void)
 /* Scripts one turn whose round 1 streams a reasoning trace and then a
  * tool call, so that a second request exists to inspect; round 2
  * answers. The canned server captures only the LAST request
- * (g_request) — round 2's, the one carrying round 1's assistant
+ * (greq(sc.ts)) — round 2's, the one carrying round 1's assistant
  * message back. */
 static void script_reasoning_tool_turn(struct ServerScript *sc)
 {
@@ -5456,9 +5190,8 @@ static void script_reasoning_tool_turn(struct ServerScript *sc)
 }
 
 /* Write the read_file fixture and start the scripted server; the
- * caller owns the returned harness (and must join/close). */
-static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc,
-                                           pthread_t *th)
+ * caller owns the returned harness (and must chat_server_stop). */
+static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc)
 {
     FILE *f = fopen(FIXTURE_PATH, "wb");
     if (!f)
@@ -5467,10 +5200,8 @@ static AppHarness *run_reasoning_tool_turn(struct ServerScript *sc,
     fclose(f);
 
     script_reasoning_tool_turn(sc);
-    sc->fd = server_bind(&sc->port);
-    if (sc->fd < 0)
+    if (!chat_server_start(sc))
         return NULL;
-    pthread_create(th, NULL, chat_server_thread, sc);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc->port);
@@ -5485,8 +5216,7 @@ static void test_reasoning_not_echoed_when_off(void)
 {
     scratch_store_begin();
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    AppHarness *h = run_reasoning_tool_turn(&sc);
     ASSERT_NOT_NULL(h);
 
     store_set(NM_CFG_KEY_REASONING_ECHO, "off");
@@ -5504,12 +5234,11 @@ static void test_reasoning_not_echoed_when_off(void)
     free(clean);
 
     /* Not fed back. */
-    ASSERT_TRUE(strstr(g_request, "\"tool_calls\"") != NULL);
-    ASSERT_TRUE(strstr(g_request, "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "reasoning_content") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     remove(FIXTURE_PATH);
     scratch_store_end();
 }
@@ -5523,8 +5252,7 @@ static void test_reasoning_echoed_by_default(void)
 {
     scratch_store_begin();
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    AppHarness *h = run_reasoning_tool_turn(&sc);
     ASSERT_NOT_NULL(h);
 
     harness_type(h, "read it");
@@ -5532,13 +5260,12 @@ static void test_reasoning_echoed_by_default(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
 
-    ASSERT_TRUE(strstr(g_request, "\"tool_calls\"") != NULL);
-    ASSERT_TRUE(strstr(g_request,
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts),
                        "\"reasoning_content\":\"let me think about the edit\"") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     remove(FIXTURE_PATH);
     scratch_store_end();
 }
@@ -5552,8 +5279,7 @@ static void test_config_reasoning_echo_freezes_for_the_chat(void)
 {
     pin_cfg_paths("frozen-echo");
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    AppHarness *h = run_reasoning_tool_turn(&sc);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -5563,7 +5289,7 @@ static void test_config_reasoning_echo_freezes_for_the_chat(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     /* The tool round's trace rode back, which is what freezes it. */
-    ASSERT_TRUE(strstr(g_request, "\"reasoning_content\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"reasoning_content\"") != NULL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(nm_chat_app_agent(h->app)), 1);
 
     /* The view answers "what will the next request send", not "what
@@ -5586,8 +5312,7 @@ static void test_config_reasoning_echo_freezes_for_the_chat(void)
 
     nm_config_free(cfg);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     remove(FIXTURE_PATH);
 }
 
@@ -5601,8 +5326,7 @@ static void test_config_signature_echo_row_and_freeze(void)
 {
     pin_cfg_paths("signature-echo");
     struct ServerScript sc;
-    pthread_t th;
-    AppHarness *h = run_reasoning_tool_turn(&sc, &th);
+    AppHarness *h = run_reasoning_tool_turn(&sc);
     ASSERT_NOT_NULL(h);
     NmConfig *cfg = cfg_for(h);
 
@@ -5623,8 +5347,8 @@ static void test_config_signature_echo_row_and_freeze(void)
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_DONE);
     /* Round 1's array rode back (the tool message carries the array, and
      * nothing else: the trace echo was turned off). */
-    ASSERT_TRUE(strstr(g_request, "reasoning_details") != NULL);
-    ASSERT_TRUE(strstr(g_request, "reasoning_content") == NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "reasoning_details") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "reasoning_content") == NULL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(nm_chat_app_agent(h->app)), 1);
 
     /* The row reports the FROZEN mode from here on. */
@@ -5644,8 +5368,7 @@ static void test_config_signature_echo_row_and_freeze(void)
 
     nm_config_free(cfg);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     remove(FIXTURE_PATH);
 }
 
@@ -5715,10 +5438,7 @@ static void test_parallel_tool_calls_pair_plan_with_result(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read both\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -5764,21 +5484,20 @@ static void test_parallel_tool_calls_pair_plan_with_result(void)
     free(clean);
 
     /* Both results reach the wire in the ONE follow-up request, each as
-     * its own tool message, in call order (g_request holds the last
+     * its own tool message, in call order (greq(sc.ts) holds the last
      * round's request body). */
-    const char *tc_a = strstr(g_request, "\"tool_call_id\":\"call_a\"");
-    const char *tc_b = strstr(g_request, "\"tool_call_id\":\"call_b\"");
+    const char *tc_a = strstr(greq(sc.ts), "\"tool_call_id\":\"call_a\"");
+    const char *tc_b = strstr(greq(sc.ts), "\"tool_call_id\":\"call_b\"");
     ASSERT_NOT_NULL(tc_a);
     ASSERT_NOT_NULL(tc_b);
     ASSERT_TRUE(tc_a < tc_b);
-    ASSERT_TRUE(strstr(g_request, "alpha body") != NULL);
-    ASSERT_TRUE(strstr(g_request, "beta body") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "alpha body") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "beta body") != NULL);
 
     remove("nm-p1.txt");
     remove("nm-p2.txt");
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The real wire pattern behind the 2026-09-18 "eaten description"
@@ -5815,17 +5534,13 @@ static void test_open_json_fence_before_tool_call_commits(void)
         "data: [DONE]\n\n";
     /* Rendezvous: one delta per step (the unclosed fence's body must be
      * seen growing in the live region, not delivered in one burst). */
-    server_paced_init(&sc);
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    sc.paced = 1;
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base2[64];
     snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("ollama:local", "test-model", base2);
     ASSERT_NOT_NULL(h);
-    h->pacer = &sc;
 
     harness_type(h, "check it");
     harness_enter(h);
@@ -5864,10 +5579,8 @@ static void test_open_json_fence_before_tool_call_commits(void)
     /* The turn's answer is also present. */
     ASSERT_TRUE(strstr(out, "Done. The tool said hello.") != NULL);
 
-    server_release(&sc);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 static void test_tab_on_slash_prefix_opens_commands_popup(void)
@@ -6019,17 +5732,13 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
         "data: [DONE]\n\n";
     /* One delta per step (rendezvous), so the mid-stream loop below
      * sees the partial tail grow instead of the whole round at once. */
-    server_paced_init(&sc);
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    sc.paced = 1;
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
-    h->pacer = &sc;
 
     /* Force the geometry: narrow enough that the partial tail and the
      * completed line both wrap. */
@@ -6092,10 +5801,8 @@ static void test_streaming_multiline_no_duplicate_transcript(void)
     ASSERT_EQ(count_transcript_line(out, "## The others,"), 0u);
     ASSERT_EQ(count_transcript_line(out, "## The others"), 0u);
 
-    server_release(&sc);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Regression (the 2026-09-16 report: "boba/nevermore is making
@@ -6214,10 +5921,7 @@ static void test_submit_echoes_once(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -6235,8 +5939,7 @@ static void test_submit_echoes_once(void)
     ASSERT_EQ(count_transcript_line(out, "unique-user-line"), 0u);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The status line is live chrome (spinner + gauge + separator rule), not
@@ -6256,10 +5959,7 @@ static void test_submit_does_not_finalize_status_line(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -6303,8 +6003,7 @@ static void test_submit_does_not_finalize_status_line(void)
     ASSERT_EQ(pp[-4], '\r');
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* A provider switch resets the transcript (emits nothing) and prints a
@@ -6336,10 +6035,7 @@ static void test_provider_switch_resolves_new_provider_key(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -6351,7 +6047,6 @@ static void test_provider_switch_resolves_new_provider_key(void)
 
     /* Switch to a different keyed provider carrying a different key. */
     test_setenv("OPENROUTER_API_KEY", "sk-new-or");
-    g_request[0] = '\0';
     harness_type(h, "/provider openrouter");
     harness_enter(h);
     ASSERT_STR_EQ(nm_chat_app_provider(h->app), "openrouter");
@@ -6360,13 +6055,12 @@ static void test_provider_switch_resolves_new_provider_key(void)
     harness_type(h, "hi");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_TRUE(strstr(g_request,
+    ASSERT_TRUE(strstr(greq(sc.ts),
                        "Authorization: Bearer sk-new-or") != NULL);
-    ASSERT_TRUE(strstr(g_request, "sk-old-openrouter") == NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "sk-old-openrouter") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     test_unsetenv("OPENROUTER_API_KEY");
     test_unsetenv("OPENROUTER_API_KEY");
 }
@@ -6430,23 +6124,22 @@ static void test_fence_body_tokens_highlighted_through_app(void)
  * on their own streams. */
 static void test_reasoning_and_content_commit_in_order(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_content\":\"first thought\\n\"}}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+            "\"reasoning_content\":\"first thought\\n\"}}]}\n\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":\"final words\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6462,8 +6155,7 @@ static void test_reasoning_and_content_commit_in_order(void)
     ASSERT_TRUE(r < c);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* End-to-end: the blank line the model wrote after a table reaches the
@@ -6471,23 +6163,22 @@ static void test_reasoning_and_content_commit_in_order(void)
  * renderer draws it (the separator is content, not a dropped verdict). */
 static void test_table_blank_line_renders(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"| Region | 2025 |\\n| ------ | ---: |\\n| North | 1234 |\\n\\n"
-        "After the table.\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"| Region | 2025 |\\n| ------ | ---: |\\n| North | 1234 |\\n\\n"
+            "After the table.\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6509,8 +6200,7 @@ static void test_table_blank_line_renders(void)
     free(seen);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* End-to-end: a standalone image line followed by a BLANK line and more
@@ -6520,24 +6210,23 @@ static void test_table_blank_line_renders(void)
  * block's whole text: the marker keeps its dims, never "no source". */
 static void test_image_followed_by_a_blank_still_parses(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"Before it.\\n\\n"
-        "![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
-        "\\n\\nAfter it.\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"Before it.\\n\\n"
+            "![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
+            "\\n\\nAfter it.\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6572,8 +6261,7 @@ static void test_image_followed_by_a_blank_still_parses(void)
     free(seen);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* End-to-end: a table row immediately followed by a fence line (no blank
@@ -6583,23 +6271,22 @@ static void test_image_followed_by_a_blank_still_parses(void)
  * boba froze only the pending line there, and the fence landed first.) */
 static void test_table_then_fence_keeps_wire_order(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"| a | b |\\n| - | - |\\n| c | d |\\n```c\\ncode here\\n```\\n\\n"
-        "after the fence\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"| a | b |\\n| - | - |\\n| c | d |\\n```c\\ncode here\\n```\\n\\n"
+            "after the fence\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6623,8 +6310,7 @@ static void test_table_then_fence_keeps_wire_order(void)
     free(seen);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* End-to-end: a table streamed from a canned SSE round reaches the
@@ -6632,23 +6318,22 @@ static void test_table_then_fence_keeps_wire_order(void)
  * full chat_app stack). */
 static void test_markdown_table_reaches_transcript_aligned(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"| Region | 2025 |\\n| ------ | ---: |\\n"
-        "| North | 1234 |\\n| South | 56 |\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"| Region | 2025 |\\n| ------ | ---: |\\n"
+            "| North | 1234 |\\n| South | 56 |\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6668,8 +6353,7 @@ static void test_markdown_table_reaches_transcript_aligned(void)
         ASSERT_TRUE(*p != '\n' || (p > out && p[-1] == '\r'));
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* End-to-end: an image data URI streamed from a canned SSE round
@@ -6678,23 +6362,22 @@ static void test_markdown_table_reaches_transcript_aligned(void)
  * and the payload NEVER lands in the captured output. */
 static void test_image_data_uri_degrades_to_marker(void)
 {
-    struct RawResponse rr = {
-        0, 0,
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Connection: close\r\n\r\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":"
-        "\"![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
-        "\\n\\n\"}}]}\n\n"
-        "data: [DONE]\n\n"
+    NmTsRound rr = {
+        .close_after_reply = 1,
+        .reply =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/event-stream\r\n"
+            "Connection: close\r\n\r\n"
+            "data: {\"choices\":[{\"delta\":{\"content\":"
+            "\"![pic](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg)"
+            "\\n\\n\"}}]}\n\n"
+            "data: [DONE]\n\n"
     };
-    rr.fd = server_bind(&rr.port);
-    ASSERT_TRUE(rr.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, raw_responder_thread, &rr);
+    NmTsServer *ts = pump_start(&rr, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", rr.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -6721,8 +6404,7 @@ static void test_image_data_uri_degrades_to_marker(void)
     ASSERT_TRUE(strstr(out, "\x1b_Ga=T") == NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(rr.fd);
+    pump_stop(ts);
 }
 
 /* ---------------------------------------------------------------- */
@@ -7155,58 +6837,22 @@ static void test_model_popup_does_not_block_on_a_wire_catalog(void)
     close(lfd);
 }
 
-/* A one-shot canned catalog: answers the next connection with ONE id
- * the shipped static table does not carry. The listener is bounded so a
- * test that never drives the fetch cannot wedge this thread. */
-static void *wire_only_catalog_server_thread(void *arg)
+/* A canned catalog round's reply: 200 + JSON, computed Content-Length
+ * (the client must read the body to its last byte — the canned server's
+ * house rule). The buffer is file-scope: one catalog test runs at a
+ * time, and the round borrows it for its life. */
+static char g_catalog_reply[72 * 1024];
+
+static void catalog_json(const char *body)
 {
-    int lfd = *(int *)arg;
-    fd_set r;
-    struct timeval tv = { 2, 0 };
-    FD_ZERO(&r);
-    FD_SET(lfd, &r);
-    if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
-        return NULL;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    /* Drain the GET: headers only, to the blank line (the canned-server
-     * shape this file uses). A server that closes with its request still
-     * unread sends an RST, and an RST can discard the reply the client
-     * has not read yet — the macOS/BSD behaviour that failed the warm
-     * fixture below in CI. */
-    char req[2048];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        req[got] = '\0';
-        if (strstr(req, "\r\n\r\n"))
-            break;
-    }
-    static const char body[] = "{\"data\":[{\"id\":\"wire-only-model\"}]}";
-    char head[160];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: %zu\r\n\r\n",
-                      strlen(body));
-    /* Hold the reply briefly: the test's point is the ASYNC gap (the
-     * command must return with the fetch still in flight), and loopback
-     * is fast enough that the reply can already be sitting in the
-     * client's socket when its first step looks — under ASan (a slower,
-     * instrumented client; this thread is not instrumented) that is the
-     * COMMON case, which made the "loading the …" assertion flake in CI.
-     * The hold makes the pending state deterministic instead of a race
-     * (the same hold the big-catalog fixture below documents). */
-    usleep(200 * 1000);
-    send(cfd, head, (size_t)hl, 0);
-    send(cfd, body, strlen(body), 0);
-    close(cfd);
-    return NULL;
+    snprintf(g_catalog_reply, sizeof(g_catalog_reply),
+             "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n"
+             "\r\n"
+             "%s",
+             strlen(body), body);
 }
 
 /* /model <exact id> is a key handler too — the same UI thread the
@@ -7219,14 +6865,20 @@ static void *wire_only_catalog_server_thread(void *arg)
  * answers with it) and set it inline. */
 static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
 {
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, wire_only_catalog_server_thread, &lfd);
+    /* The canned catalog: ONE id the shipped static table does not
+     * carry. The 200 ms hold the thread needed is the pump's own
+     * determinism now — the reply arms only on a pump pass, and this
+     * test never pumps: the fetch is in flight because nothing has
+     * answered it, not because a sleep says so. */
+    catalog_json("{\"data\":[{\"id\":\"wire-only-model\"}]}");
+    static const NmTsRound rs[] = {
+        { .reply = g_catalog_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *ts = pump_start(rs, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -7240,55 +6892,7 @@ static void test_model_exact_id_never_fetches_on_the_ui_thread(void)
                        "loading the ollama:local model catalog") != NULL);
 
     harness_free(h);
-    close(lfd);
-    pthread_join(th, NULL);
-}
-
-/* A canned ollama:cloud verbose catalog: ONE id the shipped static
- * table does not carry, in the "models" array (the verbose parse reads
- * that key for the window). The
- * request is drained before the reply: the client must READ this body,
- * and a close over an unread request is an RST — which on macOS/BSD can
- * discard the reply (the gauge then stayed cold and CI went red there). */
-static void *warm_catalog_server_thread(void *arg)
-{
-    int lfd = *(int *)arg;
-    fd_set r;
-    struct timeval tv = { 2, 0 };
-    FD_ZERO(&r);
-    FD_SET(lfd, &r);
-    if (select(lfd + 1, &r, NULL, NULL, &tv) <= 0)
-        return NULL;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[2048];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        req[got] = '\0';
-        if (strstr(req, "\r\n\r\n"))
-            break;
-    }
-    static const char body[] =
-        "{\"object\":\"list\",\"data\":[{\"id\":\"wire-only-model\"}],"
-        "\"models\":[{\"slug\":\"wire-only-model\","
-        "\"display_name\":\"Wire Only\",\"context_window\":1048576,"
-        "\"input_modalities\":[\"text\"]}]}";
-    char head[160];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: %zu\r\n\r\n",
-                      strlen(body));
-    send(cfd, head, (size_t)hl, 0);
-    send(cfd, body, strlen(body), 0);
-    close(cfd);
-    return NULL;
+    pump_stop(ts);
 }
 
 /* The TUI WARMS the active provider's catalog in the BACKGROUND
@@ -7321,14 +6925,23 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
      * (test_offline_catalog_is_pinned) already ran first. */
     test_unsetenv("NM_NO_UNBIDDEN_FETCH");
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, warm_catalog_server_thread, &lfd);
+    /* The canned ollama:cloud verbose catalog: ONE id the shipped
+     * static table does not carry, in the "models" array (the verbose
+     * parse reads that key for the window). */
+    catalog_json("{\"object\":\"list\",\"data\":[{\"id\":"
+                 "\"wire-only-model\"}],"
+                 "\"models\":[{\"slug\":\"wire-only-model\","
+                 "\"display_name\":\"Wire Only\","
+                 "\"context_window\":1048576,"
+                 "\"input_modalities\":[\"text\"]}]}");
+    static const NmTsRound rs[] = {
+        { .reply = g_catalog_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *ts = pump_start(rs, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:cloud", "wire-only-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -7359,14 +6972,13 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "Wire Only") == NULL);
     ASSERT_TRUE(strstr(harness_read(h), "catalog") == NULL);
 
-    /* A second warm is a no-op (the catalog is cached; nothing refetches
-     * — the canned server accepts exactly one connection). */
+    /* A second warm is a no-op (the catalog is cached; nothing
+     * refetches). */
     nm_chat_app_warm_catalog(h->app);
     ASSERT_EQ(harness_pump_catalog(h, 50), 0);
 
     harness_free(h);
-    close(lfd);
-    pthread_join(th, NULL);
+    pump_stop(ts);
     /* Restore the suite's pin (harmless — this is the last test — but
      * the process should leave the world as it found it). */
     test_pin_offline_catalog();
@@ -7391,40 +7003,10 @@ static void test_startup_warm_fills_the_gauge_without_a_popup(void)
  * this: the warm's fetch is in flight for the first turns of a
  * session, and the turn that calls a tool in that window dies.
  *
- * The server below answers the CHAT and HOLDS the catalog request, so
+ * The script below answers the CHAT and HOLDS the catalog request, so
  * the fetch stays in flight for the whole turn — the state the stall
  * needs (the fetch's own deadline is the fake clock's, which does not
  * move here). */
-struct HeldCatalogServer
-{
-    int lfd;
-    volatile int stop; /* the test is done: leave the accept loop */
-    int chat_rounds;   /* the chat requests served */
-    int held;          /* the catalog request is being held */
-    pthread_t holder;  /* the thread holding the catalog connection */
-};
-
-/* Hold one connection open until the peer closes it. A closed peer is
- * READABLE (EOF), so poll with a timeout and read: 0 = gone. */
-static void *hold_conn_thread(void *arg)
-{
-    int cfd = (int)(intptr_t)arg;
-    for (;;) {
-        struct timeval tv = { 0, 200 * 1000 };
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(cfd, &rfds);
-        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-            continue;
-        char sink[256];
-        long n = recv(cfd, sink, sizeof(sink), 0);
-        if (n <= 0)
-            break; /* the peer closed */
-    }
-    close(cfd);
-    return NULL;
-}
-
 /* The chat's two canned rounds: the tool call, then the answer. */
 static const char *const g_held_chat_sse[2] = {
     "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
@@ -7435,74 +7017,6 @@ static const char *const g_held_chat_sse[2] = {
     "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
     "data: [DONE]\n\n"
 };
-
-/* The server: the catalog's GET is held (in its own thread, so the
- * accept loop keeps taking the chat's connections), the chat's POST is
- * answered with the scripted round. */
-static void *held_catalog_server_thread(void *arg)
-{
-    struct HeldCatalogServer *hs = arg;
-    for (;;) {
-        if (hs->stop)
-            return NULL;
-        struct timeval atv = { 0, 100 * 1000 };
-        fd_set arfds;
-        FD_ZERO(&arfds);
-        FD_SET(hs->lfd, &arfds);
-        if (select(hs->lfd + 1, &arfds, NULL, NULL, &atv) <= 0)
-            continue; /* the timeout re-checks `stop` */
-        int cfd = accept(hs->lfd, NULL, NULL);
-        if (cfd < 0)
-            continue;
-        /* Read the request head AND its body: an unread request + close
-         * sends an RST, which on macOS/BSD can discard the client's
-         * unread reply. The body length is the head's Content-Length. */
-        char req[REQ_CAP];
-        size_t got = 0;
-        size_t want = 0;
-        for (;;) {
-            struct timeval tv = { 0, 200 * 1000 };
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(cfd, &rfds);
-            if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-                break;
-            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-            if (n <= 0)
-                break;
-            got += (size_t)n;
-            req[got] = '\0';
-            const char *end = strstr(req, "\r\n\r\n");
-            if (!end)
-                continue;
-            if (!want) {
-                const char *cl = strstr(req, "Content-Length:");
-                want = cl ? (size_t)strtoul(cl + 15, NULL, 10) : 0;
-                if (!want)
-                    break; /* no body: the head is all there is */
-            }
-            if (got >= (size_t)(end - req) + 4 + want)
-                break;
-        }
-        req[got] = '\0';
-
-        if (strncmp(req, "GET ", 4) == 0) {
-            /* The catalog's request: HOLD it. The fetch stays in flight
-             * for the whole turn, so the app's primary slot is the
-             * catalog's socket while the agent is in its tool phase. */
-            pthread_create(&hs->holder, NULL, hold_conn_thread,
-                           (void *)(intptr_t)cfd);
-            hs->held = 1;
-            continue;
-        }
-        /* The chat: the scripted round (the last one repeats, so a
-         * third request would still be answered). */
-        int round = hs->chat_rounds++;
-        sse_send_chunked(cfd, g_held_chat_sse[round < 2 ? round : 1], NULL);
-        send(cfd, "0\r\n\r\n", 5, 0);
-        close(cfd);
-    }
-}
 
 /* The tool runs while the catalog fetch is in flight. */
 static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
@@ -7515,17 +7029,24 @@ static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
     fputs("the quick brown fox\n", f);
     fclose(f);
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    struct HeldCatalogServer hs;
-    memset(&hs, 0, sizeof(hs));
-    hs.lfd = lfd;
-    pthread_t th;
-    pthread_create(&th, NULL, held_catalog_server_thread, &hs);
+    /* The script: the catalog's GET is HELD - read, then PARKED (no
+     * reply, no close, the slot freed) - while the chat's POSTs get
+     * their rounds. Round 0 is the GET's (the warm fires before the
+     * turn), the last round repeats for a third chat request. */
+    char *chat_tool = nm_ts_sse_chunked(g_held_chat_sse[0], 0);
+    char *chat_done = nm_ts_sse_chunked(g_held_chat_sse[1], 0);
+    ASSERT_NOT_NULL(chat_tool);
+    ASSERT_NOT_NULL(chat_done);
+    NmTsRound rs[3] = {
+        { .action = NM_TS_HOLD },
+        { .reply = chat_tool, .close_after_reply = 1 },
+        { .reply = chat_done, .close_after_reply = 1 },
+    };
+    NmTsServer *ts = pump_start(rs, 3);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("ollama:local", "test-model", base);
     ASSERT_NOT_NULL(h);
 
@@ -7560,12 +7081,10 @@ static void test_tool_runs_while_a_catalog_fetch_is_in_flight(void)
     ASSERT_TRUE(strstr(clean, "all done") != NULL);
     free(clean);
 
-    harness_free(h); /* frees the fetch: the held connection closes */
-    hs.stop = 1;
-    pthread_join(th, NULL);
-    if (hs.held)
-        pthread_join(hs.holder, NULL);
-    close(lfd);
+    harness_free(h); /* frees the fetch: its parked connection closes */
+    pump_stop(ts);
+    free(chat_tool);
+    free(chat_done);
     remove(FIXTURE_PATH);
 }
 
@@ -7671,64 +7190,31 @@ static const char slow_catalog_body[] =
     "{\"object\":\"list\",\"data\":[{\"id\":\"glm-5.3\","
     "\"object\":\"model\",\"created\":0,\"owned_by\":\"opencode\"}]}";
 
-struct SlowCatalogServer
-{
-    int lfd;
-    volatile int first_sent; /* the head + the first chunk are out */
-    volatile int go;         /* the test released the second chunk */
-};
-
-static void *slow_catalog_server_thread(void *arg)
-{
-    struct SlowCatalogServer *ss = arg;
-    int cfd = accept(ss->lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    /* Drain the request (a GET's head is all it has). */
-    char req[2048];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        req[got] = '\0';
-        if (strstr(req, "\r\n\r\n"))
-            break;
-    }
-    char head[160];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: %zu\r\n\r\n",
-                      strlen(slow_catalog_body));
-    size_t half = strlen(slow_catalog_body) / 2;
-    send(cfd, head, (size_t)hl, 0);
-    send(cfd, slow_catalog_body, half, 0);
-    ss->first_sent = 1;
-    /* The gap: the test moves the virtual clock while the body waits. */
-    while (!ss->go)
-        usleep(1000);
-    send(cfd, slow_catalog_body + half, strlen(slow_catalog_body) - half, 0);
-    close(cfd);
-    return NULL;
-}
-
 static void test_catalog_fetch_budget_is_idle_not_total(void)
 {
     pin_cfg_paths("catidle");
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    struct SlowCatalogServer ss;
-    memset(&ss, 0, sizeof(ss));
-    ss.lfd = lfd;
-    pthread_t th;
-    pthread_create(&th, NULL, slow_catalog_server_thread, &ss);
+    /* The head + the FIRST half of the body, then the socket HOLDS (no
+     * close): the pump's own mid-body pause, where the thread slept
+     * until the test released its `go`. The second half is armed below
+     * through nm_ts_reply_override, on the same held socket. */
+    size_t bl = strlen(slow_catalog_body);
+    size_t half = bl / 2;
+    char first[512];
+    snprintf(first, sizeof(first),
+             "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n\r\n"
+             "%.*s",
+             bl, (int)half, slow_catalog_body);
+    NmTsRound rs[] = {
+        { .reply = first, .close_after_reply = 0 },
+    };
+    NmTsServer *ts = pump_start(rs, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     /* opencode:go: its live catalog slot is still clean here (the
      * tests before it read the shipped table, and the warm test that
      * commits a live one runs LAST). The active model is a STATIC row:
@@ -7742,30 +7228,31 @@ static void test_catalog_fetch_budget_is_idle_not_total(void)
     harness_enter(h);
     ASSERT_TRUE(strstr(harness_read(h), "loading the opencode:go") != NULL);
 
-    /* Pump until the server has the first half of the body out (the
-     * connect and the send need the event loop too). */
-    for (int i = 0; i < 500 && !ss.first_sent; i++) {
+    /* Pump until the request has completed and the half is out: the
+     * pass that completes the request also flushes the head, the next
+     * one flushes the half (one protocol piece per pass). */
+    for (int i = 0; i < 500 && nm_ts_requests(ts) < 1; i++) {
         if (app_waiting(h->app))
             harness_event_once(h, 10);
         tui_runtime_flush(h->rt);
-        usleep(1000);
     }
-    ASSERT_TRUE(ss.first_sent);
+    ASSERT_EQ(nm_ts_requests(ts), 1);
+    harness_event_once(h, 10); /* the half lands, and the app reads it */
 
     /* The clock jumps PAST the old total budget while the body is
      * still arriving: a slow peer is not a hung peer. */
     nm_test_clock_advance_ms(3000);
-    ss.go = 1;
 
-    /* The fetch lands: the LIVE row, and no degradation note. */
+    /* The test's release (the thread's `go`): the second half arms on
+     * the held socket, and the fetch lands. */
+    nm_ts_reply_override(ts, slow_catalog_body + half);
     ASSERT_EQ(harness_pump_catalog(h, 2000), 0);
     ASSERT_TRUE(strstr(harness_read(h),
                        "could not load the live opencode:go") == NULL);
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "glm-5.3") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(lfd);
+    pump_stop(ts);
 }
 
 /* /config lists the provider-scoped keys that are set, after the plain
@@ -8251,10 +7738,7 @@ static void test_interest_dedupes_active_exec_job(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"job up\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -8272,18 +7756,12 @@ static void test_interest_dedupes_active_exec_job(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the pump's — whichever
+         * end moved is serviced — then the step, then the pump pass
+         * that step made possible (the worker's share, inline). */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -8329,8 +7807,7 @@ static void test_interest_dedupes_active_exec_job(void)
 
     harness_free(h);
     ASSERT_EQ(nm_proc_count(), 0);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 #endif /* !_WIN32 */
 
@@ -8668,10 +8145,7 @@ static void test_exec_command_spinner_tier(void)
         "{\"name\":\"exec_command\",\"arguments\":"
         "\"{\\\"cmd\\\":\\\"sleep 30\\\",\\\"yield_time_ms\\\":5000}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -8689,18 +8163,12 @@ static void test_exec_command_spinner_tier(void)
             break;
         int fd = app_fd(h->app);
         unsigned in = app_interest(h->app);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        /* THE wait: the app's fd together with the pump's — whichever
+         * end moved is serviced — then the step, then the pump pass
+         * that step made possible (the worker's share, inline). */
+        nm_ts_wait(h->ts, fd, in, 10);
         nm_chat_app_step(h->app);
+        nm_ts_pump(h->ts);
         tui_runtime_flush(h->rt);
     }
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_RUNNING_TOOL);
@@ -8727,8 +8195,7 @@ static void test_exec_command_spinner_tier(void)
 
     harness_free(h);
     ASSERT_EQ(nm_proc_count(), 0); /* teardown reaps the survivor */
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 #endif /* !_WIN32 */
 
@@ -8897,10 +8364,7 @@ static void test_img_submit_sends_parts_and_echoes(void)
     sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"a test "
                 "image\"}}]}\n\n"
                 "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -8917,11 +8381,11 @@ static void test_img_submit_sends_parts_and_echoes(void)
 
     /* the wire: content is a parts array — the text part first, then
      * the frozen image part */
-    ASSERT_TRUE(strstr(g_request,
+    ASSERT_TRUE(strstr(greq(sc.ts),
                        "\"content\":[{\"type\":\"text\",\"text\":\"what is "
                        "this?\"},{\"type\":\"image_url\",") != NULL);
-    ASSERT_TRUE(strstr(g_request, "\"type\":\"image_url\"") != NULL);
-    ASSERT_TRUE(strstr(g_request, "\"detail\"") == NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"detail\"") == NULL);
 
     /* The tmpfile terminal never answers the profile probe; do the
      * verdict by hand and flush once more (exactly what the real
@@ -8942,7 +8406,7 @@ static void test_img_submit_sends_parts_and_echoes(void)
     ASSERT_TRUE(strstr(harness_read(h), "images: none pending") != NULL);
 
     harness_free(h);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Vision gating is a warning, never a refusal (the wire takes the
@@ -9025,10 +8489,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
     sc.sse[0] = "data: {\"choices\":[{\"delta\":{\"content\":\"a test "
                 "image\"}}]}\n\n"
                 "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9068,7 +8529,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
     harness_enter(h);
     ASSERT_EQ(nm_chat_app_state(h->app), NM_AGENT_STREAMING);
     ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_TRUE(strstr(g_request,
+    ASSERT_TRUE(strstr(greq(sc.ts),
                        "\"content\":[{\"type\":\"text\",\"text\":\"what is "
                        "this?\"},{\"type\":\"image_url\",") != NULL);
     out = harness_read(h);
@@ -9076,7 +8537,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
     ASSERT_EQ(count_image_apc(out), 2);
 
     harness_free(h);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* read_file on an image: the tool panel names it,
@@ -9102,10 +8563,7 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9133,12 +8591,11 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
     ASSERT_EQ(count_image_apc(out), 1);
     /* the fan-out rode the wire as a parts array (the synthetic user
      * message), and the answer follows the block */
-    ASSERT_TRUE(strstr(g_request, "\"type\":\"image_url\"") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "\"type\":\"image_url\"") != NULL);
     ASSERT_TRUE(strstr(out, "i see it") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The draft §4 repro: the model streams content text, THEN calls
@@ -9169,10 +8626,7 @@ static void test_tool_image_after_streamed_text_never_commits_payload(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9208,8 +8662,7 @@ static void test_tool_image_after_streamed_text_never_commits_payload(void)
     ASSERT_TRUE(strstr(out, "i see it") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The same round on a terminal that cannot take the image: nothing is
@@ -9236,10 +8689,7 @@ static void test_tool_read_file_image_degrades_to_the_panel_line(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9268,8 +8718,7 @@ static void test_tool_read_file_image_degrades_to_the_panel_line(void)
     ASSERT_TRUE(strstr(out, "i see it") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* A text-only model: the image is still attached and fanned out (the
@@ -9294,10 +8743,7 @@ static void test_tool_read_file_image_text_only_model_warns(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"blind answer\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9319,8 +8765,7 @@ static void test_tool_read_file_image_text_only_model_warns(void)
                 NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -9361,10 +8806,7 @@ static void test_recv_image_renders_through_image_block(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"now blue\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9400,14 +8842,13 @@ static void test_recv_image_renders_through_image_block(void)
     harness_type(h, "make it blue");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
-    ASSERT_TRUE(strstr(g_request,
+    ASSERT_TRUE(strstr(greq(sc.ts),
                        "\"role\":\"assistant\",\"content\":\"made it\","
                        "\"images\":[{\"type\":\"image_url\"") != NULL);
-    ASSERT_TRUE(strstr(g_request, url) != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), url) != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* The same round on a terminal without graphics: the block commits as
@@ -9432,10 +8873,7 @@ static void test_recv_image_marker_on_dumb_terminal(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = sse0;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9466,8 +8904,7 @@ static void test_recv_image_marker_on_dumb_terminal(void)
     ASSERT_TRUE(strstr(out, "made it") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -9507,10 +8944,7 @@ static void test_image_save_writes_the_received_image(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = sse0;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9564,8 +8998,7 @@ static void test_image_save_writes_the_received_image(void)
                        "image: '2' is not an image in this chat") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* With nothing received (or attached), the save says so rather than
@@ -9604,10 +9037,7 @@ static void test_session_inspects_and_saves(void)
         "think\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"hi there\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -9704,8 +9134,7 @@ static void test_session_inspects_and_saves(void)
                        "session: expected nothing, 'list', or 'save [path]'") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Nothing has been said yet: the commands say so rather than invent a
@@ -10047,52 +9476,6 @@ static void test_model_picker_grammar_errors(void)
 #define BIG_CATALOG_FILLERS 199
 static char big_catalog_body[64 * 1024];
 
-static void *big_catalog_server_thread(void *arg)
-{
-    int lfd = *(int *)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    /* Drain the GET: headers only, to the blank line. */
-    char req[2048];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        req[got] = '\0';
-        if (strstr(req, "\r\n\r\n"))
-            break;
-    }
-    char head[160];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: application/json\r\n"
-                      "Content-Length: %zu\r\n\r\n",
-                      strlen(big_catalog_body));
-    /* Hold the reply briefly. The picker's point is the ASYNC gap: /model
-     * must return with the fetch still in flight. Loopback is fast enough
-     * that the reply can already be sitting in the client's socket when
-     * its first step looks — and under ASan (a slower, instrumented
-     * client; this thread is not instrumented) that is the COMMON case,
-     * which made the "loading the …" assertion flake. The hold makes the
-     * pending state deterministic instead of a race. */
-    usleep(200 * 1000);
-    send(cfd, head, (size_t)hl, 0);
-    size_t off = 0, bl = strlen(big_catalog_body);
-    while (off < bl) {
-        long n = send(cfd, big_catalog_body + off, bl - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    close(lfd);
-    return NULL;
-}
-
 static void test_model_picker_sees_past_the_old_row_cap(void)
 {
     /* The openrouter wire shape (OPENROUTER-API.md §2/§5.1): text-only
@@ -10117,14 +9500,18 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
         "\"output_modalities\":[\"image\",\"text\"]}}]}");
     ASSERT_TRUE(off < sizeof(big_catalog_body));
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, big_catalog_server_thread, &lfd);
+    /* The canned catalog, one repeating round: the thread's 200 ms
+     * hold is the pump's determinism now — the reply arms only on a
+     * pump pass, so /model's async gap needs no sleep. */
+    catalog_json(big_catalog_body);
+    static const NmTsRound rs[] = {
+        { .reply = g_catalog_reply, .close_after_reply = 1 },
+    };
+    NmTsServer *ts = pump_start(rs, 1);
+    ASSERT_NOT_NULL(ts);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(ts));
     AppHarness *h = harness_new("openrouter", "filler-000", base);
     ASSERT_NOT_NULL(h);
 
@@ -10158,7 +9545,7 @@ static void test_model_picker_sees_past_the_old_row_cap(void)
     ASSERT_TRUE(strstr(frame, "vendor/deep-image") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
+    pump_stop(ts);
 }
 
 /* The image event may arrive with text already streaming (unobserved
@@ -10183,10 +9570,7 @@ static void test_recv_image_after_text_opens_its_own_block(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = sse0;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -10207,8 +9591,7 @@ static void test_recv_image_after_text_opens_its_own_block(void)
     ASSERT_TRUE(strstr(out, "base64,") == NULL);      /* never literal text */
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -10522,10 +9905,7 @@ static void test_load_skill_round_shows_the_body(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -10555,7 +9935,7 @@ static void test_load_skill_round_shows_the_body(void)
      * rides the CONVERSATION from the round that loaded it (round 2's
      * request is what the canned server captured, and it holds the tool
      * result). */
-    const char *menu = strstr(g_request, "<skills>");
+    const char *menu = strstr(greq(sc.ts), "<skills>");
     ASSERT_NOT_NULL(menu);
     const char *menu_end = strstr(menu, "</skills>");
     ASSERT_NOT_NULL(menu_end);
@@ -10567,12 +9947,11 @@ static void test_load_skill_round_shows_the_body(void)
     ASSERT_NOT_NULL(strstr(block, "reader"));
     ASSERT_NULL(strstr(block, "Open the fixture file."));
     free(block);
-    ASSERT_NOT_NULL(strstr(g_request, "Open the fixture file."));
-    ASSERT_NOT_NULL(strstr(g_request, "\"load_skill\""));
+    ASSERT_NOT_NULL(strstr(greq(sc.ts), "Open the fixture file."));
+    ASSERT_NOT_NULL(strstr(greq(sc.ts), "\"load_skill\""));
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
     remove(md);
     {
         char none[512];
@@ -10758,10 +10137,7 @@ static void test_served_notice_prints_and_the_key_gates_it(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"again\"}}],"
         "\"provider\":\"Azure\",\"service_tier\":\"flex\"}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -10803,8 +10179,7 @@ static void test_served_notice_prints_and_the_key_gates_it(void)
 
     nm_config_free(cfg);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* /context states what the NEXT round will carry, before the user spends:
@@ -11371,10 +10746,7 @@ static void test_mention_submit_sends_a_note(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -11402,19 +10774,19 @@ static void test_mention_submit_sends_a_note(void)
     ASSERT_EQ(harness_drive(h, 500), 0);
 
     /* The user's own line rode the wire verbatim. */
-    ASSERT_TRUE(strstr(g_request, "compare @") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "compare @") != NULL);
     /* The note names all three: a file with its size, a directory as
      * one, and the tail-trimmed directory. */
     char want[800];
     snprintf(want, sizeof(want), "%s/alpha.c (file, 7 B)", dir);
-    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), want) != NULL);
     snprintf(want, sizeof(want), "%s/my dir (directory)", dir);
-    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), want) != NULL);
     snprintf(want, sizeof(want), "%s/ (directory)", dir);
-    ASSERT_TRUE(strstr(g_request, want) != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), want) != NULL);
     /* It is harness speech, framed and reported (not silent). */
-    ASSERT_TRUE(strstr(g_request, "The user referenced: ") != NULL);
-    ASSERT_TRUE(strstr(g_request, "<system-reminder>") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "The user referenced: ") != NULL);
+    ASSERT_TRUE(strstr(greq(sc.ts), "<system-reminder>") != NULL);
     ASSERT_TRUE(strstr(harness_read(h), "reminder (mentions)") != NULL);
     /* A send retires the picker. */
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") == NULL);
@@ -11429,8 +10801,7 @@ static void test_mention_submit_sends_a_note(void)
     ASSERT_TRUE(strstr(tui_runtime_render(h->rt), "pick") != NULL);
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* ---------------------------------------------------------------- */
@@ -11521,10 +10892,7 @@ static void test_shell_line_waits_for_a_running_turn(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"one\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\" two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -11549,8 +10917,7 @@ static void test_shell_line_waits_for_a_running_turn(void)
                   "!echo typed-ahead");
 
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 }
 
 /* Esc stops a running command and nothing else (D7): the interrupt
@@ -11620,10 +10987,7 @@ static void test_shell_exchange_never_reaches_the_wire(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, &sc);
+    ASSERT_TRUE(chat_server_start(&sc) != NULL);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -11635,11 +10999,10 @@ static void test_shell_exchange_never_reaches_the_wire(void)
     harness_type(h, "two");
     harness_enter(h);
     ASSERT_EQ(harness_drive(h, 500), 0);
-    char *control = strdup(g_request);
+    char *control = strdup(greq(sc.ts));
     ASSERT_NOT_NULL(control);
     harness_free(h);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    chat_server_stop(&sc);
 
     /* The same two turns with a shell run in between. */
     struct ServerScript sc2;
@@ -11651,10 +11014,7 @@ static void test_shell_exchange_never_reaches_the_wire(void)
     sc2.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"second answer\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc2.fd = server_bind(&sc2.port);
-    ASSERT_TRUE(sc2.fd >= 0);
-    pthread_t th2;
-    pthread_create(&th2, NULL, chat_server_thread, &sc2);
+    ASSERT_TRUE(chat_server_start(&sc2) != NULL);
 
     char base2[64];
     snprintf(base2, sizeof(base2), "http://127.0.0.1:%d/v1", sc2.port);
@@ -11680,17 +11040,16 @@ static void test_shell_exchange_never_reaches_the_wire(void)
          * differs by construction; the BODY is what the session produced
          * and it must be identical byte for byte. */
         const char *sep_a = strstr(control, "\r\n\r\n");
-        const char *sep_b = strstr(g_request, "\r\n\r\n");
+        const char *sep_b = strstr(greq(sc2.ts), "\r\n\r\n");
         ASSERT_NOT_NULL(sep_a);
         ASSERT_NOT_NULL(sep_b);
         ASSERT_TRUE(strcmp(sep_a + 4, sep_b + 4) == 0);
     }
-    ASSERT_TRUE(strstr(g_request, "SENTINEL") == NULL);
+    ASSERT_TRUE(strstr(greq(sc2.ts), "SENTINEL") == NULL);
     free(control);
 
     harness_free(h2);
-    pthread_join(th2, NULL);
-    close(sc2.fd);
+    chat_server_stop(&sc2);
 }
 
 /* The pin's tripwire: file scope (a static function, not a nested one). */

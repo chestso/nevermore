@@ -41,9 +41,17 @@ typedef enum
                       * FIN-in-flight shape a stale reuse dies on */
     NM_TS_DIE,       /* close the listener too: the next dial is refused,
                       * deterministically, on every stack */
-    NM_TS_STALL      /* read the request, then nothing - no bytes, no
+    NM_TS_STALL,     /* read the request, then nothing - no bytes, no
                       * close. The silent peer a budget must outlive; the
                       * TEST moves the (virtual) clock to the verdict */
+    NM_TS_HOLD       /* read the request, then PARK the socket: no reply,
+                      * no close, and the connection slot frees for the
+                      * next dial - the held-open peer a test serves
+                      * AROUND (a catalog GET the app must keep waiting
+                      * on while the chat's POSTs get answered). A parked
+                      * socket is closed by nm_ts_stop/nm_ts_kill and is
+                      * never polled again; a test that parks more than
+                      * NM_TS_PARK_MAX just gets the extra closed. */
 } NmTsAction;
 
 typedef struct NmTsServer NmTsServer;
@@ -127,5 +135,11 @@ int nm_ts_requests(const NmTsServer *s); /* completed requests */
  * are kept). A request that only truncated into the ring is what it
  * is - the evidence buffers are capped, not the wire. */
 const char *nm_ts_request(const NmTsServer *s, int round);
+
+/* Held sockets a NM_TS_HOLD round parked: capped, because parking is a
+ * SHAPE a script asks for (a held GET beside a served chat), not a
+ * client class - a script that parks more than this just gets the
+ * extras closed. */
+#define NM_TS_PARK_MAX 4
 
 #endif /* NM_TEST_NET_SERVER_H */

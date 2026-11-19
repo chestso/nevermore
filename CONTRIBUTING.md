@@ -147,7 +147,10 @@ prerequisite (skip).
   byte is an event the test reacts to; `tests/net_server.[ch]` is that pump,
   shared by every test that needs a wire peer (`nm_ts_start`, `nm_ts_pump`,
   `nm_ts_wait`, a script of rounds with `NM_TS_SERVE`/`DROP`/`DIE`/`STALL`
-  actions and an `on_request` hook for routing). A `usleep` orchestrates by
+  actions and an `on_request` hook for routing; `NM_TS_HOLD` parks a request's
+  socket so a held peer and a served one can share one listener — the app
+  tests' "a fetch in flight while the chat runs", with no second thread).
+  A `usleep` orchestrates by
   calendar and a worker thread is a second order of interleavings the test
   has to reason about; both are how a suite grows hangs and platform flakes
   (the v0.16.0 tag run died on a `shutdown()`-on-a-listener shape that

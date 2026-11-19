@@ -50,6 +50,11 @@ struct NmTsServer
     int port;
     int lfd; /* listener; -1 once a DIE round killed it */
     int cfd; /* the one connection slot; -1 = idle */
+    /* sockets a NM_TS_HOLD round parked: read, never answered, never
+     * closed until the stop/kill - the held-open peers a script serves
+     * AROUND. */
+    int parked[NM_TS_PARK_MAX];
+    int n_parked;
     /* observed */
     int accepts;
     int requests; /* completed requests (head + Content-Length body) */
@@ -136,6 +141,11 @@ void nm_ts_kill(NmTsServer *s)
 {
     if (!s)
         return;
+    for (int i = 0; i < s->n_parked; i++) {
+        close(s->parked[i]);
+        s->parked[i] = -1;
+    }
+    s->n_parked = 0;
     if (s->cfd >= 0) {
         close(s->cfd);
         s->cfd = -1;
@@ -368,6 +378,17 @@ void nm_ts_pump(NmTsServer *s)
         }
         if (r->action == NM_TS_STALL)
             return; /* read, then nothing: the clock owns the verdict */
+        if (r->action == NM_TS_HOLD) {
+            /* Read, then PARK: no reply, no close, and the slot frees -
+             * the held-open peer a script serves AROUND. Over the cap is
+             * not a shape; the socket is just closed. */
+            if (s->n_parked < NM_TS_PARK_MAX)
+                s->parked[s->n_parked++] = s->cfd;
+            else
+                close(s->cfd);
+            s->cfd = -1;
+            return;
+        }
         /* The on_request hook may already have rewritten this round's
          * answer (nm_ts_reply_override arms its own bytes); arm the
          * script's bytes only when nothing of the previous round is

@@ -485,7 +485,7 @@ test_shell_ui_LDADD = $(BOBA_LIBS) -lpthread
 # canned SSE servers. The full source stack rides along: the app owns
 # an agent (provider + openai_client + transport) and drives the
 # transcript through boba's streaming IR (src/chat_app.c).
-test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/conf.c \
+test_chat_app_SOURCES = test_chat_app.c net_server.c fake_clock.c ../src/chat_app.c ../src/conf.c \
     ../src/spinner.c ../src/colors.c \
     ../src/markdown.c ../src/markdown_render.c ../src/highlight.c \
     ../src/image.c ../src/image_bytes.c ../src/image_codec.c ../src/size.c ../src/agent.c ../src/conversation_id.c ../src/session.c ../src/context.c ../src/reminder.c ../src/skills.c ../src/file_ledger.c ../src/tools.c ../src/tools_file.c ../src/tools_websearch.c \
@@ -500,7 +500,7 @@ test_chat_app_SOURCES = test_chat_app.c fake_clock.c ../src/chat_app.c ../src/co
     $(TEST_PROVIDER_SOURCES)
 test_chat_app_CFLAGS = $(TEST_CFLAGS) $(BOBA_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_chat_app_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
-test_chat_app_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
+test_chat_app_LDADD = $(BOBA_LIBS) $(TEST_TLS_LIBS)
 
 # Each test binary gets a matching TESTS entry so `make check` runs it.
 TESTS = $(check_PROGRAMS)
