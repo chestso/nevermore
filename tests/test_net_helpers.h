@@ -58,9 +58,13 @@ static int test_wsa_init(void)
  * transport's bounded connect walk deterministic to exercise whatever
  * the resolver's family order is (glibc ranks IPv4 first; other stacks
  * may not). Returns the listening fd with *port filled, or -1 when the
- * name resolves to a single address (nothing to walk) or the tail
- * family has no loopback to bind — both healthy boxes, which callers
- * report as "walk not exercised" rather than a failure. */
+ * name resolves to a single address (nothing to walk), a list whose
+ * first and last entries are the SAME address (nothing to walk PAST —
+ * the walk's first dial is then the listener this helper binds, and no
+ * address is ever abandoned, the shape a macOS CI VM produced in
+ * test_wire_recorder's retry case), or the tail family has no loopback
+ * to bind — all healthy boxes, which callers report as "walk not
+ * exercised" rather than a failure. */
 static int test_bind_last_localhost_addr(int *port) TEST_NET_HELPERS_UNUSED;
 static int test_bind_last_localhost_addr(int *port)
 {
@@ -71,18 +75,24 @@ static int test_bind_last_localhost_addr(int *port)
     hints.ai_protocol = IPPROTO_TCP;
     if (getaddrinfo("localhost", "0", &hints, &res) != 0 || !res)
         return -1;
-    struct sockaddr_storage last;
-    socklen_t last_len = 0;
+    struct sockaddr_storage first, last;
+    socklen_t first_len = 0, last_len = 0;
     int n = 0;
     for (ai = res; ai; ai = ai->ai_next) {
         if ((size_t)ai->ai_addrlen > sizeof(last))
             continue;
+        if (n == 0) {
+            memcpy(&first, ai->ai_addr, ai->ai_addrlen);
+            first_len = (socklen_t)ai->ai_addrlen;
+        }
         memcpy(&last, ai->ai_addr, ai->ai_addrlen);
         last_len = (socklen_t)ai->ai_addrlen;
         n++;
     }
     freeaddrinfo(res);
     if (n < 2 || last_len == 0)
+        return -1;
+    if (first_len == last_len && memcmp(&first, &last, last_len) == 0)
         return -1;
 
     int fd = socket(last.ss_family, SOCK_STREAM, IPPROTO_TCP);
