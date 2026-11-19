@@ -1,9 +1,13 @@
 /* test_openai_client.c - end-to-end wire test of the shared client
  *
- * A canned OpenAI-compatible chat/completions server on loopback,
- * driven through nm_openai_chat exactly as the ollama provider will
- * drive it: real request composition, real SSE delta parsing, real
- * on_delta callbacks. Never a real API (house rule).
+ * Canned OpenAI-compatible chat/completions peers on loopback, never a
+ * real API (house rule). The ONE-ROUND tests drive the chat seam
+ * (nm_openai_chat_begin/step) against the shared scripted pump
+ * (tests/net_server.[ch] - one thread, no timers; the blocking
+ * nm_openai_chat runs the same pump internally), with real request
+ * composition, real SSE delta parsing, real on_delta callbacks. The
+ * step-traffic and error-shape tests still drive their own bespoke
+ * peers - the pump takes them next.
  */
 
 #ifdef _WIN32
@@ -21,6 +25,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "net_server.h" /* the scripted pump: no thread, no timer */
 #include "openai_client.h"
 #include "test_net_helpers.h"
 #include "test_helpers.h"
@@ -42,53 +47,10 @@ static void test_setenv(const char *name, const char *value, int overwrite)
 /* Canned server: validates the request, streams a fixed SSE body    */
 /* ---------------------------------------------------------------- */
 
-static char last_request[65536]; /* what the client actually sent */
-static size_t last_request_len;
-
-static void *chat_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    /* Drain the whole request (head + body) — Connection: close, so
-     * the client sent everything in one or two writes. */
-    size_t got = 0;
-    while (got < sizeof(last_request) - 1) {
-        long n = recv(cfd, last_request + got, sizeof(last_request) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        /* Request complete when the body's closing brace arrives
-         * after the blank line. Cheap and reliable enough for the
-         * canned case. */
-        if (strstr(last_request, "\r\n\r\n") && last_request[got - 1] == '}')
-            break;
-    }
-    last_request[got] = '\0';
-    last_request_len = got;
-
-    /* A minimal OpenAI-style streamed completion: two content deltas
-     * then [DONE], chunked. Chunk sizes computed: 0x33, 0x35, 0xe. */
-    const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
-        "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
-    size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    return NULL;
-}
+/* What the client actually sent - still written by the bespoke
+ * error/wiretap servers (the one-round tests read the pump's capture
+ * instead; this buffer dies with them). */
+static char last_request[65536];
 
 static int server_listen(int *port)
 {
@@ -211,51 +173,137 @@ static void capture_delta(NmStreamChannel channel, const char *delta_text,
 /* Multi-chunk SSE server (chunked framing, sizes computed at runtime) */
 /* ---------------------------------------------------------------- */
 
-typedef struct
-{
-    int lfd;
-    const char *body; /* raw SSE bytes (no chunk framing) */
-} SseServer;
+/* ---------------------------------------------------------------- */
+/* The scripted pump: the canned wire peer for the one-round tests    */
+/* ---------------------------------------------------------------- */
 
-static void *sse_server_thread(void *arg)
+/* The canned OpenAI-shaped chat stream (the old chat_server_thread's
+ * bytes): two content deltas then [DONE], chunk sizes computed. */
+static const char CANNED_CHAT_SSE[] =
+    "HTTP/1.1 200 OK\r\n"
+    "Connection: close\r\n"
+    "Content-Type: text/event-stream\r\n"
+    "Transfer-Encoding: chunked\r\n\r\n"
+    "33\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}\n\n\r\n"
+    "35\r\ndata: {\"choices\":[{\"delta\":{\"content\":\", world\"}}]}\n\n\r\n"
+    "e\r\ndata: [DONE]\n\n\r\n"
+    "0\r\n\r\n";
+
+/* A chunked SSE reply around a RAW event body (`body` carries no
+ * framing): the head, one chunk with the whole body, the terminator -
+ * the chunk size computed. Returns malloc'd bytes; the take-flavoured
+ * canned round below owns and frees them. */
+static char *sse_body_reply(const char *body)
 {
-    SseServer *s = arg;
-    int cfd = accept(s->lfd, NULL, NULL);
-    if (cfd < 0)
+    size_t len = strlen(body);
+    size_t cap = 256 + len + 32;
+    char *buf = malloc(cap);
+    if (!buf)
         return NULL;
-    char drain[4096];
-    size_t got = 0;
-    while (got < sizeof(drain) - 1) {
-        long n = recv(cfd, drain + got, sizeof(drain) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(drain, "\r\n\r\n") && got > 4 && drain[got - 1] == '}')
-            break;
-    }
-    memcpy(last_request, drain, got);
-    last_request[got] = '\0';
-    last_request_len = got;
+    snprintf(buf, cap,
+             "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
+             "Content-Type: text/event-stream\r\n"
+             "Transfer-Encoding: chunked\r\n\r\n"
+             "%zx\r\n"
+             "%s\r\n"
+             "0\r\n\r\n",
+             len, body);
+    return buf;
+}
 
-    static const char head[] = "HTTP/1.1 200 OK\r\n"
-                               "Connection: close\r\n"
-                               "Content-Type: text/event-stream\r\n"
-                               "Transfer-Encoding: chunked\r\n\r\n";
-    send(cfd, head, sizeof(head) - 1, 0);
-    size_t len = strlen(s->body);
-    char hdr[32];
-    int hn = snprintf(hdr, sizeof(hdr), "%zx\r\n", len);
-    send(cfd, hdr, (size_t)hn, 0);
-    size_t off = 0;
-    while (off < len) {
-        long n = send(cfd, s->body + off, len - off, 0);
-        if (n <= 0)
+/* The chat seam's drive: begin, step, THE wait (the stream's source
+ * with its interest, and the server's fds, in one poll). The blocking
+ * nm_openai_chat runs this same pump internally; driving the seam
+ * keeps every assertion on the same wire with the peer serviced by
+ * this thread. The endpoint's base_url is the helper's to fill: the
+ * port exists only once the server starts. */
+static NmChatResult oc_chat_round(NmTsServer *s, const NmOpenaiEndpoint *ep,
+                                  const NmChatRequest *req)
+{
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
+    NmOpenaiEndpoint e = *ep;
+    e.base_url = base;
+    NmChatResult err;
+    memset(&err, 0, sizeof(err));
+    NmChatStream *h = nm_openai_chat_begin(&e, req, &err);
+    if (!h)
+        return err;
+    NmChatResult res;
+    memset(&res, 0, sizeof(res));
+    NmChatStatus st = NM_CHAT_PENDING;
+    while (st == NM_CHAT_PENDING) {
+        st = nm_openai_chat_step(h, &res);
+        if (st != NM_CHAT_PENDING)
             break;
-        off += (size_t)n;
+        NmSource src = nm_openai_stream_source(h);
+        if (src.handle >= 0 && src.flags) {
+            if (nm_ts_wait(s, src.handle, src.flags, 5000) == 0)
+                fprintf(stderr,
+                        "  (chat drive stalled: neither end moved for"
+                        " 5 s)\n");
+        } else {
+            nm_ts_pump(s); /* a phase with no fd: keep both ends moving */
+        }
     }
-    send(cfd, "\r\n0\r\n\r\n", 7, 0);
-    close(cfd);
-    return NULL;
+    nm_openai_chat_end(h);
+    return res;
+}
+
+/* One canned round against a one-reply script: the request the peer
+ * saw lands in req_out (the test's evidence buffer). `own` says the
+ * reply is malloc'd and the round's to free. */
+static NmChatResult oc_canned_core(const char *reply, int own,
+                                   const NmOpenaiEndpoint *ep,
+                                   const NmChatRequest *req,
+                                   char *req_out, size_t req_cap)
+{
+    NmChatResult none;
+    memset(&none, 0, sizeof(none));
+    if (!reply) {
+        none.status = NM_CHAT_ERR_TRANSPORT;
+        return none;
+    }
+    static NmTsRound round; /* static: the pump reads it per request */
+    round.reply = reply;
+    round.action = NM_TS_SERVE;
+    round.close_after_reply = 1;
+    round.chunk_events = 0;
+    round.on_request = NULL;
+    NmTsServer *s = nm_ts_start(&round, 1);
+    if (!s) {
+        if (own)
+            free((char *)reply);
+        none.status = NM_CHAT_ERR_TRANSPORT;
+        return none;
+    }
+    NmChatResult r = oc_chat_round(s, ep, req);
+    if (req_out && req_cap) {
+        const char *got = nm_ts_request(s, 0);
+        snprintf(req_out, req_cap, "%s", got ? got : "");
+    }
+    nm_ts_stop(s);
+    if (own)
+        free((char *)reply);
+    return r;
+}
+
+/* The same round for a static reply (no ownership) and for a built
+ * one (taken). */
+static NmChatResult oc_canned_const(const char *reply,
+                                    const NmOpenaiEndpoint *ep,
+                                    const NmChatRequest *req,
+                                    char *req_out, size_t req_cap)
+{
+    return oc_canned_core(reply, 0, ep, req, req_out, req_cap);
+}
+
+static NmChatResult oc_canned_take(char *reply, const NmOpenaiEndpoint *ep,
+                                   const NmChatRequest *req,
+                                   char *req_out, size_t req_cap)
+{
+    return oc_canned_core(reply, 1, ep, req, req_out, req_cap);
 }
 
 /* ---------------------------------------------------------------- */
@@ -267,23 +315,8 @@ static void *sse_server_thread(void *arg)
  * choices:[] chunk (OpenAI-compatible when include_usage is set). */
 static void test_usage_rides_finish_reason_chunk(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
-        "\"completion_tokens\":32,\"total_tokens\":67,"
-        "\"prompt_tokens_details\":{\"cached_tokens\":12}}}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -291,7 +324,14 @@ static void test_usage_rides_finish_reason_chunk(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
+                                        "\"completion_tokens\":32,\"total_tokens\":67,"
+                                        "\"prompt_tokens_details\":{\"cached_tokens\":12}}}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_usage, 1);
     ASSERT_EQ(cap.last_usage.prompt_tokens, 35);
@@ -302,32 +342,14 @@ static void test_usage_rides_finish_reason_chunk(void)
      * are distinct facts). */
     ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
     /* And the composed request asked for usage. */
-    ASSERT_TRUE(strstr(last_request, "\"stream_options\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"include_usage\":true") != NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "\"stream_options\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"include_usage\":true") != NULL);
 }
 
 static void test_usage_standalone_chunk(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,"
-        "\"completion_tokens\":5,\"total_tokens\":105}}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -335,7 +357,14 @@ static void test_usage_standalone_chunk(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":100,"
+                                        "\"completion_tokens\":5,\"total_tokens\":105}}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_usage, 1);
     ASSERT_EQ(cap.last_usage.prompt_tokens, 100);
@@ -343,10 +372,7 @@ static void test_usage_standalone_chunk(void)
     ASSERT_EQ(cap.last_usage.cached_tokens, -1);
     ASSERT_EQ(cap.last_usage.cache_write_tokens, -1);
     /* include_usage off => no stream_options field. */
-    ASSERT_TRUE(strstr(last_request, "stream_options") == NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "stream_options") == NULL);
 }
 
 /* The Anthropic-shaped usage object the opencode upstreams report: a
@@ -355,25 +381,8 @@ static void test_usage_standalone_chunk(void)
  * distinct facts with distinct keys — neither stands in for the other. */
 static void test_usage_cache_read_and_write_are_distinct(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10621,"
-        "\"completion_tokens\":75,"
-        "\"prompt_tokens_details\":{\"cached_tokens\":10496,"
-        "\"cache_write_tokens\":2048}}}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -381,7 +390,16 @@ static void test_usage_cache_read_and_write_are_distinct(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10621,"
+                                        "\"completion_tokens\":75,"
+                                        "\"prompt_tokens_details\":{\"cached_tokens\":10496,"
+                                        "\"cache_write_tokens\":2048}}}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_usage, 1);
     ASSERT_EQ(cap.last_usage.prompt_tokens, 10621);
@@ -389,9 +407,6 @@ static void test_usage_cache_read_and_write_are_distinct(void)
     ASSERT_EQ(cap.last_usage.cache_write_tokens, 2048);
     /* total_tokens omitted on the wire: derived from prompt+completion. */
     ASSERT_EQ(cap.last_usage.total_tokens, 10696);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* A reported 0 is a real report (a cache MISS), never confused with the
@@ -399,23 +414,8 @@ static void test_usage_cache_read_and_write_are_distinct(void)
  * denominator rests on. */
 static void test_usage_reported_zero_is_not_absent(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8936,"
-        "\"completion_tokens\":153,\"total_tokens\":9089,"
-        "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -423,7 +423,14 @@ static void test_usage_reported_zero_is_not_absent(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":8936,"
+                                        "\"completion_tokens\":153,\"total_tokens\":9089,"
+                                        "\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.last_usage.cached_tokens, 0);
     /* and the write key was absent on this shape. */
@@ -432,32 +439,13 @@ static void test_usage_reported_zero_is_not_absent(void)
     ASSERT_TRUE(cap.last_usage.cost_usd < 0);
     ASSERT_TRUE(cap.last_usage.opencode_list_cost < 0);
     ASSERT_TRUE(cap.last_usage.opencode_allowance < 0);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* OpenCode-shaped usage object: flat cost, opencode.list_cost and allowance */
 static void test_usage_credit_members_opencode(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":31,"
-        "\"completion_tokens\":4,\"cost\":0,"
-        "\"opencode\":{\"billing_source\":\"go\",\"list_cost\":0.00000705,"
-        "\"allowance\":0.00000423}}}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    ASSERT_EQ(pthread_create(&th, NULL, sse_server_thread, &s), 0);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -465,36 +453,28 @@ static void test_usage_credit_members_opencode(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":31,"
+                                        "\"completion_tokens\":4,\"cost\":0,"
+                                        "\"opencode\":{\"billing_source\":\"go\",\"list_cost\":0.00000705,"
+                                        "\"allowance\":0.00000423}}}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_usage, 1);
     ASSERT_TRUE(fabs(cap.last_usage.cost_usd - 0.0) < 1e-6);
     ASSERT_TRUE(fabs(cap.last_usage.opencode_list_cost - 0.00000705) < 1e-8);
     ASSERT_TRUE(fabs(cap.last_usage.opencode_allowance - 0.00000423) < 1e-8);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* A stream with no usage object fires nothing: the callback is not
  * invented. */
 static void test_usage_absent_fires_nothing(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -502,12 +482,14 @@ static void test_usage_absent_fires_nothing(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_usage, 0);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* A `"usage":null` chunk is a PLACEHOLDER, not a report: the DeepSeek
@@ -518,25 +500,8 @@ static void test_usage_absent_fires_nothing(void)
  * fires only for a real usage OBJECT. */
 static void test_usage_null_chunk_fires_nothing(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"},"
-        "\"finish_reason\":null}],\"usage\":null}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
-        "\"completion_tokens\":32,\"total_tokens\":67}}\n\n"
-        "data: {\"choices\":[],\"usage\":null}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 1, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -544,16 +509,22 @@ static void test_usage_null_chunk_fires_nothing(void)
         capture_delta, capture_usage, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\"},"
+                                        "\"finish_reason\":null}],\"usage\":null}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":35,"
+                                        "\"completion_tokens\":32,\"total_tokens\":67}}\n\n"
+                                        "data: {\"choices\":[],\"usage\":null}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     /* The one real object, never the two nulls around it. */
     ASSERT_EQ(cap.n_usage, 1);
     ASSERT_EQ(cap.last_usage.prompt_tokens, 35);
     ASSERT_EQ(cap.last_usage.total_tokens, 67);
     ASSERT_EQ(cap.last_usage.cached_tokens, -1);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 static void test_finish_reason_is_published(void)
@@ -562,23 +533,9 @@ static void test_finish_reason_is_published(void)
      * the agent needs it to tell a cut round (`length`) from a finished
      * one. It rides the result; the first non-empty value wins (every
      * mid-stream chunk carries `"finish_reason": null`). */
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"half \"},"
-        "\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"},"
-        "\"finish_reason\":\"length\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0,
+                            NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say a lot", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -586,32 +543,27 @@ static void test_finish_reason_is_published(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096];
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"half \"},"
+                                        "\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"an answer\"},"
+                                        "\"finish_reason\":\"length\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.finish_reason, "length");
-    pthread_join(th, NULL);
-    close(lfd);
 
     /* A stream that never reports one publishes "" — never reported, not
      * "stop" (the round is still complete: [DONE] is what ends it). */
-    lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s2 = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":null}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_create(&th, NULL, sse_server_thread, &s2);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
-                             "nevermore-test", NULL, 0, 0, NULL, 0,
-                             NULL, NULL, NULL, 0, 0 };
-    NmChatResult r2 = nm_openai_chat(&ep2, &req);
+    NmOpenaiEndpoint ep2 = ep;
+    NmChatResult r2 = oc_canned_take(sse_body_reply(
+                                         "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+                                         "\"finish_reason\":null}]}\n\n"
+                                         "data: [DONE]\n\n"),
+                                     &ep2, &req, wire, sizeof(wire));
     ASSERT_EQ(r2.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r2.finish_reason, "");
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 static void test_native_finish_reason_is_published(void)
@@ -623,24 +575,9 @@ static void test_native_finish_reason_is_published(void)
      * of a round that came back with nothing in it (the empty-answer
      * case the agent now retries). It is verbatim, first non-empty
      * value wins, like its sibling. */
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":"
-        "\"thinking\"},\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\"},"
-        "\"finish_reason\":\"error\","
-        "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0,
+                            NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -648,47 +585,37 @@ static void test_native_finish_reason_is_published(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096];
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"reasoning\":"
+                                        "\"thinking\"},\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"\"},"
+                                        "\"finish_reason\":\"error\","
+                                        "\"native_finish_reason\":\"MALFORMED_FUNCTION_CALL\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r.finish_reason, "error");
     ASSERT_STR_EQ(r.native_finish_reason, "MALFORMED_FUNCTION_CALL");
-    pthread_join(th, NULL);
-    close(lfd);
 
     /* A wire that reports no native reason publishes "" — never
      * reported, not "STOP" (a value nobody sent is not a guess). */
-    lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s2 = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_create(&th, NULL, sse_server_thread, &s2);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep2 = { base, "Bearer %s", "test-key",
-                             "nevermore-test", NULL, 0, 0, NULL, 0,
-                             NULL, NULL, NULL, 0, 0 };
-    NmChatResult r2 = nm_openai_chat(&ep2, &req);
+    NmOpenaiEndpoint ep2 = ep;
+    NmChatResult r2 = oc_canned_take(sse_body_reply(
+                                         "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"},"
+                                         "\"finish_reason\":\"stop\"}]}\n\n"
+                                         "data: [DONE]\n\n"),
+                                     &ep2, &req, wire, sizeof(wire));
     ASSERT_EQ(r2.status, NM_CHAT_OK);
     ASSERT_STR_EQ(r2.finish_reason, "stop");
     ASSERT_STR_EQ(r2.native_finish_reason, "");
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 static void test_chat_stream_end_to_end(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0, NULL,
+                            NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -696,23 +623,23 @@ static void test_chat_stream_end_to_end(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
-    pthread_join(th, NULL);
-    close(lfd);
 
-    /* Validate the request the server actually received: model,
+    /* Validate the request the peer actually received: model,
      * stream:true, system + user messages, auth header. */
-    ASSERT_TRUE(strstr(last_request, "POST /v1/chat/completions HTTP/1.1") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Host: 127.0.0.1:") != NULL);
-    ASSERT_TRUE(strstr(last_request, "Authorization: Bearer test-key") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"model\":\"gpt-oss:20b\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"stream\":true") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"role\":\"system\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "you are terse") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"role\":\"user\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "say hi") != NULL);
+    ASSERT_TRUE(strstr(wire, "POST /v1/chat/completions HTTP/1.1") != NULL);
+    ASSERT_TRUE(strstr(wire, "Host: 127.0.0.1:") != NULL);
+    ASSERT_TRUE(strstr(wire, "Authorization: Bearer test-key") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"model\":\"gpt-oss:20b\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"stream\":true") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"role\":\"system\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "you are terse") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"role\":\"user\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "say hi") != NULL);
 }
 
 /* ---------------------------------------------------------------- */
@@ -743,22 +670,14 @@ static void capture_round_seamed(char *body, size_t cap,
                                  const char *system, int cache_control,
                                  const char *session_id)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, cache_control, session_id, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL,
+                            cache_control, session_id, NULL, NULL, 0, 0 };
     Capture cap2 = { 0 };
     NmChatRequest req = { "gpt-oss:20b", msgs, n_msgs, system, NULL, -1, -1,
                           NULL, capture_delta, NULL, &cap2, NULL };
-    NmChatResult r = nm_openai_chat(&ep, &req);
-    pthread_join(th, NULL);
-    close(lfd);
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req, body, cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    copy_request(body, cap);
 }
 
 /* Drive one blocking chat against a fresh canned server and copy the
@@ -787,22 +706,14 @@ static void capture_round_extra(char *body, size_t cap, const NmMessage *msgs,
                                 size_t n_msgs, const char *system,
                                 void (*hook)(const NmProvider *, NmJson *))
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, hook, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0, NULL,
+                            hook, NULL, 0, 0 };
     Capture cap2 = { 0 };
     NmChatRequest req = { "gpt-oss:20b", msgs, n_msgs, system, NULL, -1, -1,
                           NULL, capture_delta, NULL, &cap2, NULL };
-    NmChatResult r = nm_openai_chat(&ep, &req);
-    pthread_join(th, NULL);
-    close(lfd);
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req, body, cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    copy_request(body, cap);
 }
 
 /* A provider's own field rides the seam; nevermore's fields WIN over a
@@ -845,23 +756,15 @@ static void capture_round_effort(char *body, size_t cap, NmEffortWire wire,
                                  const char *effort)
 {
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0, NULL,
+                            NULL, NULL, 0, 0 };
     ep.effort_wire = wire;
     Capture cap2 = { 0 };
     NmChatRequest req = { "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
                           capture_delta, NULL, &cap2, effort };
-    NmChatResult r = nm_openai_chat(&ep, &req);
-    pthread_join(th, NULL);
-    close(lfd);
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req, body, cap);
     ASSERT_EQ(r.status, NM_CHAT_OK);
-    copy_request(body, cap);
 }
 
 /* TOP: the level rides the top-level field, verbatim. */
@@ -1095,58 +998,6 @@ static void test_chat_prefix_stable_with_cache_fields(void)
                        "abcdef\"") != NULL);
 }
 
-/* Server that drains EXACTLY the request's Content-Length bytes: the
- * small server's "body ends with '}'" heuristic is fine for tiny
- * requests, but a big image body has braces inside it, so a chunk
- * boundary could stop the drain early. */
-static void *length_capture_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    size_t got = 0;
-    size_t want = 0;
-    while (got < sizeof(last_request) - 1) {
-        long n = recv(cfd, last_request + got, sizeof(last_request) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        last_request[got] = '\0';
-        if (!want) {
-            const char *h = strstr(last_request, "Content-Length: ");
-            const char *blank = strstr(last_request, "\r\n\r\n");
-            if (h && blank) {
-                want = (size_t)strtoul(h + 16, NULL, 10);
-                if (want + (size_t)(blank + 4 - last_request) > got)
-                    continue; /* body still arriving */
-                break;
-            }
-        }
-        if (want && got >= want + (size_t)(strstr(last_request, "\r\n\r\n") +
-                                           4 - last_request))
-            break;
-    }
-    last_request[got] = '\0';
-    last_request_len = got;
-    static const char sse[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
-    size_t off = 0;
-    while (off < sizeof(sse) - 1) {
-        long n = send(cfd, sse + off, sizeof(sse) - 1 - off, 0);
-        if (n <= 0)
-            break;
-        off += (size_t)n;
-    }
-    close(cfd);
-    return NULL;
-}
-
 /* A large payload exercises the body buffer's geometric growth and the
  * verbatim embed at a size where a copy would be noticed. */
 static void test_chat_image_large_body_growth(void)
@@ -1168,28 +1019,31 @@ static void test_chat_image_large_body_growth(void)
              b64);
     free(b64);
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, length_capture_server_thread,
-                   (void *)(intptr_t)lfd);
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    /* The answer is a bare [DONE]; the evidence buffer must hold the
+     * whole ~48 KiB request (the pump's capture cap is 64 KiB). */
+    static const char DONE_ONLY_SSE[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key",
+                            "nevermore-test", NULL, 0, 0, NULL, 0, NULL,
+                            NULL, NULL, 0, 0 };
     const char *parts[1] = { part };
     NmMessage msg = { "user", "big one", NULL, NULL, parts, 1, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = { "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL,
                           capture_delta, NULL, &cap, NULL };
-    NmChatResult r = nm_openai_chat(&ep, &req);
-    pthread_join(th, NULL);
-    close(lfd);
+    static char wire[65536]; /* the ~48 KiB request, whole */
+    NmChatResult r = oc_canned_const(DONE_ONLY_SSE, &ep, &req,
+                                     wire, sizeof(wire));
 
     ASSERT_EQ(r.status, NM_CHAT_OK);
     /* The whole part rode out, byte for byte, once. */
-    ASSERT_TRUE(strstr(last_request, part) != NULL);
-    ASSERT_TRUE(last_request_len > b64_len);
+    ASSERT_TRUE(strstr(wire, part) != NULL);
+    ASSERT_TRUE(strlen(wire) > b64_len);
     free(part);
 }
 
@@ -1202,23 +1056,8 @@ static void test_chat_image_large_body_growth(void)
  * alongside is not a content delta, and the answer streams as usual. */
 static void test_chat_image_delta_fires_whole_url(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
-        "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;"
-        "base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg\"}}]}}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -1226,7 +1065,14 @@ static void test_chat_image_delta_fires_whole_url(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"\",\"images\":"
+                                        "[{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;"
+                                        "base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg\"}}]}}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_images, 1);
     ASSERT_NOT_NULL(cap.last_image);
@@ -1236,9 +1082,6 @@ static void test_chat_image_delta_fires_whole_url(void)
     ASSERT_EQ(cap.n_deltas, 1);
     ASSERT_STR_EQ(cap.text, "done");
     free(cap.last_image);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* A bare http(s) URL is forwarded as-is: the client is a dumb parser
@@ -1246,22 +1089,8 @@ static void test_chat_image_delta_fires_whole_url(void)
  * the RECEIVER degrades it. Never a turn failure. */
 static void test_chat_image_delta_bare_url_is_forwarded(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"images\":[{\"type\":"
-        "\"image_url\",\"image_url\":{\"url\":\"https://example.com/"
-        "x.png\"}}]}}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -1269,16 +1098,19 @@ static void test_chat_image_delta_bare_url_is_forwarded(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"images\":[{\"type\":"
+                                        "\"image_url\",\"image_url\":{\"url\":\"https://example.com/"
+                                        "x.png\"}}]}}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_images, 1);
     ASSERT_NOT_NULL(cap.last_image);
     ASSERT_STR_EQ(cap.last_image, "https://example.com/x.png");
     ASSERT_EQ(cap.n_deltas, 0);
     free(cap.last_image);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* The observed wire really does send one ~1.2 MiB SSE line per image
@@ -1305,16 +1137,10 @@ static void test_chat_image_single_huge_event(void)
                       url);
     ASSERT_TRUE(bn > 0 && (size_t)bn <= body_len);
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = { lfd, body };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    /* The round reply is the built body wrapped in chunked framing; the
+     * canned round takes ownership and frees it. */
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test",
+                            NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "draw", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -1322,9 +1148,9 @@ static void test_chat_image_single_huge_event(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
-    pthread_join(th, NULL);
-    close(lfd);
+    NmChatResult r = oc_canned_take(sse_body_reply(body), &ep, &req,
+                                    NULL, 0);
+    free(body);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_images, 1);
     ASSERT_NOT_NULL(cap.last_image);
@@ -1332,7 +1158,6 @@ static void test_chat_image_single_huge_event(void)
     ASSERT_EQ(strlen(cap.last_image), url_len);
     ASSERT_STR_EQ(cap.last_image, url);
     free(cap.last_image);
-    free(body);
     free(url);
 }
 
@@ -2983,27 +2808,18 @@ static void test_wiretap_stream_records_events(void)
     test_setenv("NEVERMORE_DEBUG_WIRE", taplog_path(), 1);
     ASSERT_EQ(nm_wire_recorder_init("ollama:cloud", "gpt-oss:20b"), 1);
 
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "key", "nevermore-test",
+                            NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
         "gpt-oss:20b", &msg, 1, NULL, NULL, -1, -1, NULL, capture_delta, NULL,
         &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req, NULL, 0);
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world");
 
-    pthread_join(th, NULL);
-    close(lfd);
     nm_wire_recorder_shutdown();
 
     char *log = taplog_read();
@@ -3026,15 +2842,7 @@ static void test_wiretap_stream_records_events(void)
  * simply reflects what it was handed. */
 static void test_reasoning_content_serialized_when_attached(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = {
         "assistant", NULL,
         "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
@@ -3047,31 +2855,22 @@ static void test_reasoning_content_serialized_when_attached(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request, "\"role\":\"assistant\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire, "\"role\":\"assistant\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(wire,
                        "\"reasoning_content\":\"thinking hard\"") != NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* And with no trace attached, the field is simply absent — never an
  * empty string (the composer's default). */
 static void test_reasoning_content_omitted_when_absent(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "assistant", "answered plainly", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -3079,14 +2878,13 @@ static void test_reasoning_content_omitted_when_absent(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request, "answered plainly") != NULL);
-    ASSERT_TRUE(strstr(last_request, "reasoning_content") == NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "answered plainly") != NULL);
+    ASSERT_TRUE(strstr(wire, "reasoning_content") == NULL);
 }
 
 /* An EMPTY trace is not "absent": the composer hands the client ""
@@ -3096,15 +2894,7 @@ static void test_reasoning_content_omitted_when_absent(void)
  * `"reasoning_content":""` rather than dropping it. */
 static void test_reasoning_content_empty_string_emits_field(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = {
         "assistant", NULL,
         "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
@@ -3117,14 +2907,13 @@ static void test_reasoning_content_empty_string_emits_field(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"reasoning_content\":\"\"") != NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"reasoning_content\":\"\"") != NULL);
 }
 
 /* The client is a dumb serializer for the signature echo too: an
@@ -3134,15 +2923,7 @@ static void test_reasoning_content_empty_string_emits_field(void)
  * (nm_agent_signature_echo). */
 static void test_reasoning_details_serialized_when_attached(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = {
         "assistant", NULL,
         "[{\"id\":\"call_1\",\"type\":\"function\",\"function\":"
@@ -3158,22 +2939,21 @@ static void test_reasoning_details_serialized_when_attached(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request, "\"role\":\"assistant\"") != NULL);
-    ASSERT_TRUE(strstr(last_request, "\"tool_calls\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"role\":\"assistant\"") != NULL);
+    ASSERT_TRUE(strstr(wire, "\"tool_calls\"") != NULL);
     /* Element order and bytes survive the round trip through the
      * composer (the parse+set re-serializes deterministically). */
-    ASSERT_TRUE(strstr(last_request,
+    ASSERT_TRUE(strstr(wire,
                        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
                        "\"signature\":\"sig-1\",\"format\":"
                        "\"google-gemini-v1\"},{\"type\":"
                        "\"reasoning.encrypted\",\"data\":\"opaque\"}]") !=
                 NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* Absent and "" both omit the field: unlike the trace echo there is no
@@ -3181,15 +2961,7 @@ static void test_reasoning_details_serialized_when_attached(void)
  * invents one (strict echo-back). */
 static void test_reasoning_details_omitted_when_absent(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msgs[2] = {
         { "assistant", "answered plainly", NULL, NULL, NULL, 0, NULL,
           NULL },
@@ -3201,14 +2973,13 @@ static void test_reasoning_details_omitted_when_absent(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
 
-    ASSERT_TRUE(strstr(last_request, "answered plainly") != NULL);
-    ASSERT_TRUE(strstr(last_request, "reasoning_details") == NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "answered plainly") != NULL);
+    ASSERT_TRUE(strstr(wire, "reasoning_details") == NULL);
 }
 
 /* A malformed array is OMITTED, never a failed turn: the round still
@@ -3217,15 +2988,7 @@ static void test_reasoning_details_omitted_when_absent(void)
  * not). */
 static void test_reasoning_details_malformed_omitted(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, chat_server_thread, (void *)(intptr_t)lfd);
-
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "assistant", "hi", NULL, NULL, NULL, 0, NULL,
                       "not json" };
     Capture cap = { 0 };
@@ -3234,14 +2997,13 @@ static void test_reasoning_details_malformed_omitted(void)
         NULL, /* conversation_id */
         capture_delta, NULL, &cap, NULL
     };
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_const(CANNED_CHAT_SSE, &ep, &req,
+                                     wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_STR_EQ(cap.text, "Hello, world"); /* the round completed */
 
-    ASSERT_TRUE(strstr(last_request, "reasoning_details") == NULL);
-
-    pthread_join(th, NULL);
-    close(lfd);
+    ASSERT_TRUE(strstr(wire, "reasoning_details") == NULL);
 }
 
 /* The structured carrier: delta.reasoning_details[] accumulates ACROSS
@@ -3252,32 +3014,8 @@ static void test_reasoning_details_malformed_omitted(void)
  * chunk whose reasoning text is null (the 2026-10-27 dump's shape). */
 static void test_reasoning_details_accumulate_across_chunks(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\","
-        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
-        "\"signature\":\"sigA\",\"format\":\"google-gemini-v1\","
-        "\"text\":\"Let\"}]},\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" me\","
-        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
-        "\"signature\":\"sigB\",\"format\":\"google-gemini-v1\"}]},"
-        "\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"reasoning\":null,"
-        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
-        "\"data\":\"opaque\"}]},\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "do a thing", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -3285,7 +3023,23 @@ static void test_reasoning_details_accumulate_across_chunks(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"Let\","
+                                        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+                                        "\"signature\":\"sigA\",\"format\":\"google-gemini-v1\","
+                                        "\"text\":\"Let\"}]},\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\" me\","
+                                        "\"reasoning_details\":[{\"type\":\"reasoning.text\","
+                                        "\"signature\":\"sigB\",\"format\":\"google-gemini-v1\"}]},"
+                                        "\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"reasoning\":null,"
+                                        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+                                        "\"data\":\"opaque\"}]},\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Done\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     /* ONE callback per round, carrying the whole array. */
     ASSERT_EQ(cap.n_details, 1);
@@ -3300,9 +3054,6 @@ static void test_reasoning_details_accumulate_across_chunks(void)
     ASSERT_EQ(cap.n_reasoning, 2);
     ASSERT_STR_EQ(cap.reasoning, "Let me");
     ASSERT_STR_EQ(cap.text, "Done");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* A plain content round carries no array: no event on the channel at
@@ -3310,21 +3061,8 @@ static void test_reasoning_details_accumulate_across_chunks(void)
  * on the wire only as an echo of what the model sent). */
 static void test_reasoning_details_absent_never_fires(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "say hi", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -3332,14 +3070,16 @@ static void test_reasoning_details_absent_never_fires(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"Hi\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_details, 0);
     ASSERT_STR_EQ(cap.details, "");
     ASSERT_STR_EQ(cap.text, "Hi");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* The array can arrive on a chunk that has no reasoning TEXT at all
@@ -3347,24 +3087,8 @@ static void test_reasoning_details_absent_never_fires(void)
  * trigger, not the text. A signature alone is still captured. */
 static void test_reasoning_details_fire_without_reasoning_text(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
-        "\"data\":\"only-this\"}]},\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "go", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -3372,15 +3096,20 @@ static void test_reasoning_details_fire_without_reasoning_text(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+                                        "\"reasoning_details\":[{\"type\":\"reasoning.encrypted\","
+                                        "\"data\":\"only-this\"}]},\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_details, 1);
     ASSERT_STR_EQ(cap.details,
                   "[{\"type\":\"reasoning.encrypted\",\"data\":\"only-this\"}]");
     ASSERT_EQ(cap.n_reasoning, 0);
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* Only objects are carriers: a scalar, a string and a null in the
@@ -3388,24 +3117,8 @@ static void test_reasoning_details_fire_without_reasoning_text(void)
  * not a reasoning element the upstream can want back). */
 static void test_reasoning_details_nonobject_elements_skipped(void)
 {
-    int port;
-    int lfd = server_listen(&port);
-    ASSERT_TRUE(lfd >= 0);
-    SseServer s = {
-        lfd,
-        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
-        "\"reasoning_details\":[1,\"x\",null,{\"type\":\"reasoning.text\","
-        "\"signature\":\"s\"}]},\"finish_reason\":null}]}\n\n"
-        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
-        "\"finish_reason\":\"stop\"}]}\n\n"
-        "data: [DONE]\n\n"
-    };
-    pthread_t th;
-    pthread_create(&th, NULL, sse_server_thread, &s);
 
-    char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
-    NmOpenaiEndpoint ep = { base, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
+    NmOpenaiEndpoint ep = { NULL, "Bearer %s", "test-key", "nevermore-test", NULL, 0, 0, NULL, 0, NULL, NULL, NULL, 0, 0 };
     NmMessage msg = { "user", "go", NULL, NULL, NULL, 0, NULL, NULL };
     Capture cap = { 0 };
     NmChatRequest req = {
@@ -3413,14 +3126,19 @@ static void test_reasoning_details_nonobject_elements_skipped(void)
         capture_delta, NULL, &cap, NULL
     };
 
-    NmChatResult r = nm_openai_chat(&ep, &req);
+    char wire[4096]; /* what the peer received */
+    NmChatResult r = oc_canned_take(sse_body_reply(
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"\","
+                                        "\"reasoning_details\":[1,\"x\",null,{\"type\":\"reasoning.text\","
+                                        "\"signature\":\"s\"}]},\"finish_reason\":null}]}\n\n"
+                                        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},"
+                                        "\"finish_reason\":\"stop\"}]}\n\n"
+                                        "data: [DONE]\n\n"),
+                                    &ep, &req, wire, sizeof(wire));
     ASSERT_EQ(r.status, NM_CHAT_OK);
     ASSERT_EQ(cap.n_details, 1);
     ASSERT_STR_EQ(cap.details,
                   "[{\"type\":\"reasoning.text\",\"signature\":\"s\"}]");
-
-    pthread_join(th, NULL);
-    close(lfd);
 }
 
 /* base_url split: a bracketed IPv6 literal must survive, because

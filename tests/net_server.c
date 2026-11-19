@@ -39,8 +39,10 @@
 
 /* One captured request. Requests are evidence, not data: 16 of the
  * most recent are kept, whole head + body, truncated only if the wire
- * sent more than a buffer. */
-#define NM_TS_REQ_CAP 16384
+ * sent more than a buffer. The cap must hold the suite's largest
+ * canned request whole - the image-body growth test sends a ~48 KiB
+ * part and asserts on every byte of it. */
+#define NM_TS_REQ_CAP 65536
 #define NM_TS_REQS    16
 
 struct NmTsServer

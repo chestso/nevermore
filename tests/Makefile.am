@@ -254,7 +254,10 @@ test_wire_recorder_LDADD = $(TEST_TLS_LIBS)
 
 # End-to-end: the shared OpenAI-compatible client against a canned
 # chat/completions SSE server (request validation + delta assembly).
-test_openai_client_SOURCES = test_openai_client.c ../src/clock.c \
+# The one-round peers are the shared scripted pump (net_server.c):
+# the drives run the chat seam (chat_begin/step), one thread, no
+# timers.
+test_openai_client_SOURCES = test_openai_client.c net_server.c ../src/clock.c \
     ../src/openai_client.c ../src/json.c ../src/sse.c \
     ../src/transport.c ../src/transport_socket.c ../src/addr_cache.c ../src/conf.c ../src/wire_recorder.c $(TEST_TLS_SOURCE) \
     ../src/nevermore.c ../src/authinfo.c ../src/conversation_id.c \
