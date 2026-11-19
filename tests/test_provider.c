@@ -1788,9 +1788,6 @@ static void test_openrouter_round_reports_the_served_meta(void)
 
     /* A `provider` that is an OBJECT is not a report. */
     Capture cap3 = { 0 };
-    NmChatRequest req = { "~openai/gpt-astra-latest", &msg, 1, NULL, NULL,
-                          -1, -1, NULL,
-                          capture_delta, NULL, &cap3, NULL };
     r = openrouter_served_round(
         "~openai/gpt-astra-latest", &msg, 1, &cap3, object_provider_events,
         sizeof(object_provider_events) / sizeof(object_provider_events[0]));
