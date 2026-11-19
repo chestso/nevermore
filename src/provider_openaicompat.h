@@ -128,9 +128,6 @@ extern const NmOpenaiCompat nm_opencode_compat;
 extern const NmOpenaiCompat nm_opencode_zen_compat;
 
 /* The shared vtable slots. */
-NmChatResult nm_openaicompat_chat(const NmProvider *p,
-                                  const NmChatRequest *req,
-                                  const char *base_url, const char *api_key);
 NmChatStream *nm_openaicompat_chat_begin(const NmProvider *p,
                                          const NmChatRequest *req,
                                          const char *base_url,

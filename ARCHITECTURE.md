@@ -123,14 +123,16 @@ the discipline**. Adding a provider touches, in one change:
 A provider on the shared OpenAI-compatible wire (all six) also registers an
 `NmOpenaiCompat` descriptor in `provider_openaicompat.c`: its endpoint builders,
 static table and a row mapper for one catalog entry. Its vtable's chat and
-catalog slots point at the shared functions. A provider that diverges beyond the
-descriptor keeps its own slots (Ollama's catalog machine, below). This is
+catalog slots point at the shared functions, and chat is event-driven only
+(`chat_begin` + `chat_step`, the drive the agent uses) — a blocking chat entry
+point is deliberately absent. A provider that diverges beyond the descriptor
+keeps its own slots (Ollama's catalog machine, below). This is
 deliberately **not** a registry-level base class: the vtable stays flat, and a
 descriptor that needs a callback per slot is the sign that the provider does not
 belong in it.
 
-`provider_openaicompat.c` owns the endpoint pair (chat and chat_begin from one
-build site), a process-lifetime live-catalog cache indexed by `NmProviderId`
+`provider_openaicompat.c` owns the chat endpoint's one build site
+(chat_begin), a process-lifetime live-catalog cache indexed by `NmProviderId`
 (two tiers of one service never share a cache), the async fetch seam, and the
 merge loop. The merge loop is the only place that copies an id or label, presets
 a field, or commits a cache, so a provider cannot silently drop a field the

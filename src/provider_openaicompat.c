@@ -114,28 +114,6 @@ static void openaicompat_preset(const NmProvider *p, const char *base_url,
     ep->provider = p;
 }
 
-NmChatResult nm_openaicompat_chat(const NmProvider *p,
-                                  const NmChatRequest *req,
-                                  const char *base_url, const char *api_key)
-{
-    const NmOpenaiCompat *c = openaicompat_of(p);
-    if (!c) {
-        /* Mis-wired vtable: a provider points here without a descriptor.
-         * The always-set message contract still holds. */
-        NmChatResult r;
-        memset(&r, 0, sizeof(r));
-        r.status = NM_CHAT_ERR_TRANSPORT;
-        snprintf(r.message, sizeof(r.message), "%s",
-                 "provider has no OpenAI-compatible descriptor");
-        return r;
-    }
-    NmExtraHeader hdrs[NM_EXTRA_HEADERS_MAX];
-    NmOpenaiEndpoint ep;
-    openaicompat_preset(p, base_url, &ep);
-    c->chat_endpoint(p, req, api_key, hdrs, &ep);
-    return nm_openai_chat(&ep, req);
-}
-
 NmChatStream *nm_openaicompat_chat_begin(const NmProvider *p,
                                          const NmChatRequest *req,
                                          const char *base_url,

@@ -26,7 +26,6 @@ const struct NmProvider nm_opencode_zen_provider = {
     "opencode:zen",
     "https://opencode.ai/zen/v1",
     "opencode.ai",
-    nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,

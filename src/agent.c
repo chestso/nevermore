@@ -6,7 +6,7 @@
  *
  * Phase 3 runs the turn to completion (blocking, ask mode). The
  * structure is feed/emit shaped for phase 4: the streaming step is
- * one provider->chat call driving on_delta, the tool step is
+ * one chat_step call driving on_delta, the tool step is
  * execute->append->re-request — boba lifts each step into a
  * socket-readable callback without touching the seams.
  *

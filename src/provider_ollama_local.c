@@ -36,7 +36,6 @@ const struct NmProvider nm_ollama_local_provider = {
     "ollama:local",
     "http://localhost:11434/v1",
     NULL, /* no authinfo machine: the daemon is keyless */
-    nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,

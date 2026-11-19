@@ -711,7 +711,6 @@ const struct NmProvider nm_opencode_provider = {
     "opencode:go", /* Go is the working tier; the noun carries it */
     OPENCODE_GO_DEFAULT,
     "opencode.ai", /* one authinfo line covers both tiers */
-    nm_openaicompat_chat,
     nm_openaicompat_chat_begin,
     nm_openai_chat_step,
     nm_openai_stream_fd,

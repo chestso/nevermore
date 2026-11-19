@@ -517,13 +517,9 @@ struct NmProvider
      * the daemon is keyless by construction). */
     const char *authinfo_machine;
 
-    /* Streaming chat completion. Blocking; on_delta fires from inside. */
-    NmChatResult (*chat)(const NmProvider *p, const NmChatRequest *req,
-                         const char *base_url, const char *api_key);
-
-    /* Event-driven split of chat (phase 4): begin opens a connection
-     * and puts the request on the wire, then the caller drives the
-     * stream from its event loop:
+    /* Streaming chat completion, event-driven: begin opens a
+     * connection and puts the request on the wire, then the caller
+     * drives the stream from its event loop:
      *
      *   fd = chat_stream_fd(h)          // -1 while none open
      *   interest = chat_stream_interest(h)  // NM_INTEREST_* bits
@@ -539,10 +535,7 @@ struct NmProvider
      * transport seam (non-blocking connect; the TLS handshake is
      * the documented sub-second blocking deferral inside the first
      * step). chat_step drives the connect/send phases first, then
-     * the SSE response; on_delta fires from inside chat_step exactly
-     * as it did from chat. The blocking chat() is implemented as
-     * begin + step-pump over this seam, so both paths share one
-     * implementation. */
+     * the SSE response; on_delta fires from inside chat_step. */
     NmChatStream *(*chat_begin)(const NmProvider *p, const NmChatRequest *req,
                                 const char *base_url, const char *api_key,
                                 NmChatResult *err);
