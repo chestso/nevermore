@@ -28,6 +28,7 @@
 
 #include "agent.h"
 #include "conf.h"
+#include "net_server.h" /* the scripted pump: one thread, no timers */
 #include "image_bytes.h"
 #include "proc.h"
 #include "transport.h"
@@ -131,28 +132,52 @@ static unsigned agent_interest(NmAgent *a)
 static char g_requests[MAX_ROUNDS][REQ_CAP];
 static int g_n_requests;
 
+/* A test's script: the RAW SSE events per round (the module's builder
+ * wraps them in chunked framing). The port/fd/hold_ms fields exist for
+ * the job-drain pair's worker thread - the one deliberate exception. */
 struct ServerScript
 {
     const char *sse[MAX_ROUNDS];
     int n_rounds;
     int port;
     int fd;
-    /* Hold the round OPEN this long before the chunked terminator: the
-     * client is streaming (waits for more bytes) while the loop keeps
-     * running, which is what lets a test observe the pump's work — e.g.
-     * a background job drained mid-round. Without it every round ends
-     * in the same millisecond it was scripted. */
     int hold_ms;
 };
 
-static void *agent_server_thread(void *arg)
+/* The job-drain pair's worker thread - the file's ONE deliberate
+ * exception (see the tests' own comment). It serves the held round
+ * while the ask-mode blocking pump sits in nm_agent_turn, which no
+ * single thread can serve itself. */
+static int ag_thread_server_bind(int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
+        return -1;
+    socklen_t l = sizeof(a);
+    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(a.sin_port);
+    if (listen(fd, 8) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static void *ag_thread_server(void *arg)
 {
     struct ServerScript *sc = arg;
     for (int round = 0; round < sc->n_rounds; round++) {
         int cfd = accept(sc->fd, NULL, NULL);
         if (cfd < 0)
             return NULL;
-        /* Drain the request; capture it. */
         char req[REQ_CAP];
         size_t got = 0;
         while (got < sizeof(req) - 1) {
@@ -163,29 +188,15 @@ static void *agent_server_thread(void *arg)
             if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
                 break;
         }
-        req[got] = '\0';
         if (got == 0) {
-            /* A connection that closed before any request bytes
-             * landed — a cancelled turn whose queued-but-never-
-             * sent request died with the teardown. It must NOT
-             * consume a script round: on Linux a client-closed
-             * connection is still delivered from the backlog, on
-             * macOS/BSD it is silently dropped, so scripting a
-             * round for it makes alignment OS-dependent (this was
-             * the macOS CI red in test_agent_cancel...). Skip it
-             * and hold this round for the next real request. */
             close(cfd);
-            round--;
+            round--; /* an empty close consumes no round */
             continue;
         }
-        if (got < REQ_CAP) {
-            snprintf(g_requests[round], REQ_CAP, "%s", req);
-            if (round + 1 > g_n_requests)
-                g_n_requests = round + 1;
-        }
+        snprintf(g_requests[round], REQ_CAP, "%s", req);
+        if (round + 1 > g_n_requests)
+            g_n_requests = round + 1;
 
-        /* Stream the scripted SSE body, chunked; one event per
-         * chunk. */
         const char *body = sc->sse[round];
         char head[128];
         int hl = snprintf(head, sizeof(head),
@@ -223,97 +234,82 @@ static void *agent_server_thread(void *arg)
     return NULL;
 }
 
-/* One-shot stall responder (the P0 deadline test): accept once, drain
- * the request, then sit silent — no bytes, no terminal chunk — until
- * the peer tears down. A closed peer is READABLE (EOF), so the loop
- * drains and exits on recv <= 0 (never a select-only hot spin). */
-static void *agent_stall_server_thread(void *arg)
+/* The one-round error replies (the old one-shot threads' shapes): a
+ * 401, a 400 context overflow, and the keep-alive comment stream. */
+static const char AGENT_401_REPLY[] =
+    "HTTP/1.1 401 Unauthorized\r\n"
+    "Content-Type: application/json\r\n"
+    "Connection: close\r\n\r\n"
+    "{\"error\":{\"message\":\"invalid api key\",\"code\":\"bad_key\""
+    "}}";
+
+/* The scripted pump for this file (tests/net_server.[ch]): each
+ * round's RAW SSE events are wrapped in chunked framing by the
+ * module's builder (the head, one computed chunk per event, the
+ * terminator), and every round closes after its reply - the agent
+ * dials fresh per round, exactly as the thread served it. The file
+ * scope is the tests' own: one server at a time, serially. */
+static NmTsRound ag_rounds[MAX_ROUNDS];
+static char *ag_replies[MAX_ROUNDS];
+
+static NmTsServer *ag_start(const char *const *sse, int n_rounds)
 {
-    struct ServerScript *sc = arg;
-    int cfd = accept(sc->fd, NULL, NULL);
-    if (cfd < 0)
+    if (n_rounds < 1 || n_rounds > MAX_ROUNDS)
         return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
+    for (int i = 0; i < n_rounds; i++) {
+        ag_replies[i] = nm_ts_sse_chunked(sse[i], 0);
+        ag_rounds[i].reply = ag_replies[i];
+        ag_rounds[i].action = NM_TS_SERVE;
+        ag_rounds[i].close_after_reply = 1;
+        ag_rounds[i].chunk_events = 0;
+        ag_rounds[i].on_request = NULL;
     }
-    while (1) {
-        struct timeval tv = { 0, 200 * 1000 };
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(cfd, &rfds);
-        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-            continue; /* keep stalling until the peer closes */
-        char sink[256];
-        long n = recv(cfd, sink, sizeof(sink), 0);
-        if (n <= 0)
-            break; /* the client tore the stream down */
-    }
-    close(cfd);
-    return NULL;
+    return nm_ts_start(ag_rounds, n_rounds);
 }
 
-/* One-shot 401 responder (error-message tests): accept once, drain
- * the request, answer 401 with a JSON error body, close. */
-static void *auth_401_server_thread(void *arg)
+/* Copy the pump's captures into this file's evidence globals, so the
+ * assertions read them as they read the thread's drains. Called after
+ * the drive, before the stop. */
+static void ag_take(NmTsServer *s)
 {
-    struct ServerScript *sc = arg;
-    int cfd = accept(sc->fd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
+    g_n_requests = nm_ts_requests(s);
+    if (g_n_requests > MAX_ROUNDS)
+        g_n_requests = MAX_ROUNDS;
+    for (int i = 0; i < g_n_requests; i++) {
+        const char *got = nm_ts_request(s, i);
+        snprintf(g_requests[i], REQ_CAP, "%s", got ? got : "");
     }
-    if (got == 0) {
-        /* Client tore down before sending (cancel race): no round. */
-        close(cfd);
-        return NULL;
-    }
-    static const char resp[] =
-        "HTTP/1.1 401 Unauthorized\r\n"
-        "Content-Type: application/json\r\n"
-        "Connection: close\r\n\r\n"
-        "{\"error\":{\"message\":\"invalid api key\",\"code\":\"bad_key\""
-        "}}";
-    send(cfd, resp, sizeof(resp) - 1, 0);
-    close(cfd);
-    return NULL;
 }
 
-static int server_bind(int *port)
+/* Drive one turn to completion the way boba will: THE wait (the
+ * agent's source with its interest, and the peer's fds, in one poll -
+ * the peer is serviced by this thread), step, repeat. Bounded spins;
+ * no blocking read anywhere. */
+static int agent_drive(NmTsServer *s, NmAgent *agent, int max_spins)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0) {
-        close(fd);
-        return -1;
+    for (int spin = 0; spin < max_spins; spin++) {
+        NmSource src = nm_agent_source(agent);
+        if (src.handle >= 0 && src.flags)
+            nm_ts_wait(s, src.handle, src.flags, 20);
+        else
+            nm_ts_pump(s); /* between rounds: the peer keeps moving */
+        if (nm_agent_step(agent) != 0)
+            return -1; /* fatal step error */
+        if (nm_agent_state(agent) == NM_AGENT_DONE)
+            return 0;
+        if (nm_agent_state(agent) == NM_AGENT_ERROR)
+            return -1;
     }
-    *port = ntohs(a.sin_port);
-    if (listen(fd, 8) < 0) {
-        close(fd);
-        return -1;
+    return -1; /* spin budget exhausted: hung */
+}
+
+static void ag_stop(NmTsServer *s, int n_rounds)
+{
+    nm_ts_stop(s);
+    for (int i = 0; i < n_rounds; i++) {
+        free(ag_replies[i]);
+        ag_replies[i] = NULL;
     }
-    return fd;
 }
 
 /* ---------------------------------------------------------------- */
@@ -536,14 +532,12 @@ static void test_agent_tool_round_then_answer(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"edited \"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"it done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -554,7 +548,9 @@ static void test_agent_tool_round_then_answer(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "change quick to slow in the fixture", NULL, 0);
+    int rc = nm_agent_start(agent, "change quick to slow in the fixture", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
 
     /* The turn completes with a final answer. */
     ASSERT_EQ(rc, 0);
@@ -585,8 +581,7 @@ static void test_agent_tool_round_then_answer(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -600,14 +595,12 @@ static void test_agent_plain_answer_no_tools(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"just an answer\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -615,7 +608,9 @@ static void test_agent_plain_answer_no_tools(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "say something", NULL, 0);
+    int rc = nm_agent_start(agent, "say something", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "just an answer");
@@ -625,8 +620,7 @@ static void test_agent_plain_answer_no_tools(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The sampling knobs reach the WIRE. Unset, neither field is composed
@@ -646,14 +640,12 @@ static void test_agent_sampling_knobs_ride_the_request(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -663,14 +655,18 @@ static void test_agent_sampling_knobs_ride_the_request(void)
     nm_agent_on_delta(agent, cap_delta);
 
     /* Round 1: no key set anywhere. */
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
 
     /* Round 2: both knobs through the store's own validated write (a
      * trailing zero is normalized exactly as the file and env layers
      * normalize it). */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_TEMPERATURE, "0.30"), 0);
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_MAX_TOKENS, "256"), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
 
     /* Capture the bodies, THEN restore the store: a failed assert must
      * not leak the knobs into the next test's requests. */
@@ -689,8 +685,7 @@ static void test_agent_sampling_knobs_ride_the_request(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The catalog's tool-use claim gates the toolset (NmModel.tools): a
@@ -714,13 +709,12 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = sse;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
@@ -730,7 +724,9 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "draw the stormy ocean", NULL, 0);
+    int rc = nm_agent_start(agent, "draw the stormy ocean", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_n_requests, 1);
@@ -741,8 +737,7 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
                        "\"model\":\"google/gemini-3.1-flash-lite-image\"") !=
                 NULL);
     nm_agent_free(agent);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 
     /* (b) A model the catalog says nothing about (tools == 0) keeps
      * the toolset: the default behavior, so a catalog without the
@@ -751,16 +746,18 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = sse;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     agent = nm_agent_new(p, "~openai/gpt-astra-latest", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    rc = nm_agent_turn(agent, "say hi", NULL, 0);
+    rc = nm_agent_start(agent, "say hi", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(g_n_requests, 1);
     ASSERT_TRUE(strstr(g_requests[0], "\"tools\":[") != NULL);
@@ -768,8 +765,7 @@ static void test_agent_omits_tools_when_the_catalog_says_so(void)
     ASSERT_TRUE(strstr(g_requests[0], "\"tool_choice\":\"auto\"") != NULL);
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The connect-walk notice reaches the agent's callback and names the
@@ -844,14 +840,11 @@ static void test_agent_connect_notice_names_the_family(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"walked\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://localhost:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://localhost:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -860,7 +853,9 @@ static void test_agent_connect_notice_names_the_family(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_notice(agent, cap_notice);
 
-    int rc = nm_agent_turn(agent, "say something", NULL, 0);
+    int rc = nm_agent_start(agent, "say something", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(g_text, "walked");
 
@@ -873,8 +868,7 @@ static void test_agent_connect_notice_names_the_family(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A VOID round, as the wire spells it: the 2026-10-27 dump's round 72,
@@ -924,14 +918,12 @@ static void test_agent_void_round_ends_the_turn(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1; /* the void round only: none is asked again */
     sc.sse[0] = VOID_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -942,7 +934,9 @@ static void test_agent_void_round_ends_the_turn(void)
     nm_agent_on_state(agent, cap_state);
     nm_agent_on_warning(agent, cap_warning);
 
-    int rc = nm_agent_turn(agent, "do a thing", NULL, 0);
+    int rc = nm_agent_start(agent, "do a thing", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
 
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
@@ -981,8 +975,7 @@ static void test_agent_void_round_ends_the_turn(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The system message on the wire carries the AGENTS.md context: a
@@ -1024,14 +1017,12 @@ static void test_agent_system_message_carries_agents_md(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     /* The agent discovers AGENTS.md from the cwd at construction, so
@@ -1050,7 +1041,9 @@ static void test_agent_system_message_carries_agents_md(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "what is the rule?", NULL, 0);
+    int rc = nm_agent_start(agent, "what is the rule?", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     /* Restore best-effort (glibc's chdir is warn_unused_result; the
      * cwd was valid a moment ago, and a test has nothing to do about a
      * failure here anyway). Consume the result into a sink — a (void)
@@ -1074,8 +1067,7 @@ static void test_agent_system_message_carries_agents_md(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(agents);
     remove(marker);
     remove(proj);
@@ -1137,13 +1129,12 @@ static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1153,7 +1144,9 @@ static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    int rc = nm_agent_turn(agent, "where am I?", NULL, 0);
+    int rc = nm_agent_start(agent, "where am I?", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
 
     /* Restore cwd + PATH best-effort. */
 #ifdef _WIN32
@@ -1177,8 +1170,7 @@ static void test_agent_env_git_stage_lands_in_the_system_prompt(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A non-git working directory spawns no stage at all: the agent builds
@@ -1210,14 +1202,12 @@ static void test_agent_unknown_tool_reports_error_result(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -1228,7 +1218,9 @@ static void test_agent_unknown_tool_reports_error_result(void)
 
     /* The unknown tool becomes an error result the model can adapt
      * to; the loop continues and the second round answers. */
-    int rc = nm_agent_turn(agent, "call a bogus tool", NULL, 0);
+    int rc = nm_agent_start(agent, "call a bogus tool", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(g_text, "recovered");
     ASSERT_EQ(g_tool_starts, 1);
@@ -1238,68 +1230,12 @@ static void test_agent_unknown_tool_reports_error_result(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* ---------------------------------------------------------------- */
 /* Step API (phase 4: boba drives the agent from callbacks)         */
 /* ---------------------------------------------------------------- */
-
-/* Wait up to `timeout_ms` for a source, the way the real loop does: a
- * Windows process job's readiness object is a waitable event, not a
- * socket, so it cannot go through select(). */
-static void wait_source(const NmSource *s, int timeout_ms)
-{
-#ifdef _WIN32
-    if (s->kind == NM_SRC_HANDLE) {
-        WaitForSingleObject((HANDLE)s->handle, (DWORD)timeout_ms);
-        return;
-    }
-    fd_set r, w;
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    FD_ZERO(&r);
-    FD_ZERO(&w);
-    if (s->flags & NM_INTEREST_READ)
-        FD_SET((SOCKET)s->handle, &r);
-    if (s->flags & NM_INTEREST_WRITE)
-        FD_SET((SOCKET)s->handle, &w);
-    select(0, (s->flags & NM_INTEREST_READ) ? &r : NULL,
-           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#else
-    fd_set r, w;
-    struct timeval tv = { timeout_ms / 1000, (timeout_ms % 1000) * 1000 };
-    FD_ZERO(&r);
-    FD_ZERO(&w);
-    int fd = (int)s->handle;
-    if (s->flags & NM_INTEREST_READ)
-        FD_SET(fd, &r);
-    if (s->flags & NM_INTEREST_WRITE)
-        FD_SET(fd, &w);
-    select(fd + 1, (s->flags & NM_INTEREST_READ) ? &r : NULL,
-           (s->flags & NM_INTEREST_WRITE) ? &w : NULL, NULL, &tv);
-#endif
-}
-
-/* Drive one turn to completion the way boba will: wait on the agent's
- * source, step, repeat. Bounded spins; no blocking read anywhere. */
-static int agent_drive(NmAgent *agent, int max_spins)
-{
-    for (int spin = 0; spin < max_spins; spin++) {
-        NmSource src = nm_agent_source(agent);
-        if (src.handle >= 0 && src.flags)
-            wait_source(&src, 10);
-        else
-            usleep(10 * 1000); /* between rounds: brief yield */
-        if (nm_agent_step(agent) != 0)
-            return -1; /* fatal step error */
-        if (nm_agent_state(agent) == NM_AGENT_DONE)
-            return 0;
-        if (nm_agent_state(agent) == NM_AGENT_ERROR)
-            return -1;
-    }
-    return -1; /* spin budget exhausted: hung */
-}
 
 static void test_agent_step_driven_full_loop(void)
 {
@@ -1320,14 +1256,12 @@ static void test_agent_step_driven_full_loop(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"stepped \"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"edit ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1345,7 +1279,8 @@ static void test_agent_step_driven_full_loop(void)
     ASSERT_TRUE(agent_fd(agent) >= 0);
 
     /* Drive the whole tool-round -> answer cycle step-wise. */
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
 
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "stepped edit ok");
@@ -1364,8 +1299,7 @@ static void test_agent_step_driven_full_loop(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -1393,14 +1327,12 @@ static void test_agent_announces_each_tool_as_it_runs(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"both done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1412,7 +1344,8 @@ static void test_agent_announces_each_tool_as_it_runs(void)
     nm_agent_on_state(agent, cap_state);
 
     ASSERT_EQ(nm_agent_start(agent, "look around", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
 
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_tool_starts, 2);
@@ -1426,8 +1359,7 @@ static void test_agent_announces_each_tool_as_it_runs(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -1454,14 +1386,12 @@ static void test_agent_run_command_is_async(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1482,17 +1412,8 @@ static void test_agent_run_command_is_async(void)
     while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
         int fd = agent_fd(agent);
         unsigned in = agent_interest(agent);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        if (fd >= 0 && in)
+            nm_ts_wait(s, fd, in, 10); /* THE wait: the peer is serviced by this thread */
         if (nm_agent_step(agent) != 0)
             break;
     }
@@ -1506,15 +1427,15 @@ static void test_agent_run_command_is_async(void)
     ASSERT_TRUE((agent_interest(agent) & NM_INTEREST_READ) != 0);
 
     /* Finish the turn. */
-    ASSERT_EQ(agent_drive(agent, 5000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 5000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_tool_seq, "SE");
     ASSERT_TRUE(strstr(g_tool_output, "hi-async") != NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The blocking pump (ask mode) drives the same async path: it must wait
@@ -1536,14 +1457,12 @@ static void test_agent_turn_runs_async_command(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1554,7 +1473,9 @@ static void test_agent_turn_runs_async_command(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "poke the shell", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_start(agent, "poke the shell", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 5000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "done");
     ASSERT_STR_EQ(g_tool_seq, "SE");
@@ -1562,8 +1483,7 @@ static void test_agent_turn_runs_async_command(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A background job that prints far more than a pipe buffer holds
@@ -1606,16 +1526,23 @@ static void test_agent_turn_drains_a_background_job(void)
                                 sizeof(err));
     ASSERT_NOT_NULL(job);
 
+    /* THE DOCUMENTED THREAD EXCEPTION: this test's subject is ask
+     * mode's own BLOCKING pump (nm_agent_turn waits on the stream PLUS
+     * every registered job, and the drain it does mid-round is the
+     * assertion). A peer cannot be serviced from the same thread that
+     * sits inside a blocking production call, and the fork alternative
+     * would orphan the Windows half of the coverage - so the peer
+     * stays a worker thread here, and ONLY here. */
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.hold_ms = 2000; /* the round stays open while the child prints */
     sc.sse[0] = HELD_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
+    sc.fd = ag_thread_server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
 
     pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    pthread_create(&th, NULL, ag_thread_server, &sc);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1659,11 +1586,11 @@ static void test_agent_turn_reaps_an_exited_background_job(void)
     sc.n_rounds = 1;
     sc.hold_ms = 2000;
     sc.sse[0] = HELD_ROUND_SSE;
-    sc.fd = server_bind(&sc.port);
+    sc.fd = ag_thread_server_bind(&sc.port);
     ASSERT_TRUE(sc.fd >= 0);
 
     pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    pthread_create(&th, NULL, ag_thread_server, &sc);
 
     char base[64];
     snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
@@ -1712,14 +1639,12 @@ static void test_agent_exec_command_yields_job(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"job up\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1738,17 +1663,8 @@ static void test_agent_exec_command_yields_job(void)
     while (nm_agent_state(agent) == NM_AGENT_STREAMING && spins++ < 2000) {
         int fd = agent_fd(agent);
         unsigned in = agent_interest(agent);
-        if (fd >= 0 && in) {
-            fd_set r, w;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_ZERO(&w);
-            if (in & NM_INTEREST_READ)
-                FD_SET(fd, &r);
-            if (in & NM_INTEREST_WRITE)
-                FD_SET(fd, &w);
-            select(fd + 1, &r, &w, NULL, &tv);
-        }
+        if (fd >= 0 && in)
+            nm_ts_wait(s, fd, in, 10); /* THE wait: the peer is serviced by this thread */
         if (nm_agent_step(agent) != 0)
             break;
     }
@@ -1768,7 +1684,8 @@ static void test_agent_exec_command_yields_job(void)
 #endif
 
     /* Finish the round: the window closes, the job id is reported. */
-    ASSERT_EQ(agent_drive(agent, 20000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 20000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "job up");
     ASSERT_STR_EQ(g_tool_seq, "SE");
@@ -1788,8 +1705,7 @@ static void test_agent_exec_command_yields_job(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* Reasoning (opt-in echo-back): collected on the reasoning channel,
@@ -1818,14 +1734,12 @@ static void test_agent_reasoning_collected_and_echoed(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1843,7 +1757,9 @@ static void test_agent_reasoning_collected_and_echoed(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
 
-    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    int rc = nm_agent_start(agent, "read the fixture", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all done"); /* answer only */
@@ -1864,8 +1780,7 @@ static void test_agent_reasoning_collected_and_echoed(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -1895,14 +1810,12 @@ static void test_agent_reasoning_not_echoed_when_off(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1917,7 +1830,9 @@ static void test_agent_reasoning_not_echoed_when_off(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
-    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    int rc = nm_agent_start(agent, "read the fixture", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
@@ -1938,8 +1853,7 @@ static void test_agent_reasoning_not_echoed_when_off(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -1969,14 +1883,12 @@ static void test_agent_reasoning_echoed_by_default(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -1993,7 +1905,9 @@ static void test_agent_reasoning_echoed_by_default(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
-    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    int rc = nm_agent_start(agent, "read the fixture", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
@@ -2008,8 +1922,7 @@ static void test_agent_reasoning_echoed_by_default(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -2040,14 +1953,12 @@ static void test_agent_reasoning_echo_default_on_the_wire_that_needs_it(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("opencode:go");
     ASSERT_NOT_NULL(p);
 
@@ -2064,7 +1975,9 @@ static void test_agent_reasoning_echo_default_on_the_wire_that_needs_it(void)
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0);
 
-    int rc = nm_agent_turn(agent, "read the fixture", NULL, 0);
+    int rc = nm_agent_start(agent, "read the fixture", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all done");
@@ -2078,8 +1991,7 @@ static void test_agent_reasoning_echo_default_on_the_wire_that_needs_it(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -2147,14 +2059,12 @@ static void test_agent_reasoning_echo_tools_scope(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2168,9 +2078,13 @@ static void test_agent_reasoning_echo_tools_scope(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first question", NULL, 0), 0);
+    nm_agent_start(agent, "first question", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
     ASSERT_EQ(g_n_requests, 3);
@@ -2191,8 +2105,7 @@ static void test_agent_reasoning_echo_tools_scope(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2231,14 +2144,12 @@ static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2252,7 +2163,9 @@ static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture twice", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture twice", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all done");
 
@@ -2272,8 +2185,7 @@ static void test_agent_reasoning_echo_tools_covers_traceless_round(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2305,14 +2217,12 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
         "\"reasoning_content\":\"trace three\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"answer three\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2324,7 +2234,9 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
     nm_agent_on_state(agent, cap_state);
 
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
-    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    nm_agent_start(agent, "one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     /* Request 1 had no history to replay, so no trace went out. */
     ASSERT_TRUE(strstr(g_requests[0], "reasoning_content") == NULL);
@@ -2333,7 +2245,9 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
     /* Off now — and it applies: nothing on the wire is pinned yet. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_OFF);
-    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    nm_agent_start(agent, "two", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_TRUE(strstr(g_requests[1], "answer one") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "reasoning_content") == NULL);
     ASSERT_TRUE(strstr(g_requests[1], "trace one") == NULL);
@@ -2343,7 +2257,9 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
      * is not latched; `tools` simply has no eligible message yet. */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "tools");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TOOLS);
-    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
+    nm_agent_start(agent, "three", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_TRUE(strstr(g_requests[2], "answer two") != NULL);
     ASSERT_TRUE(strstr(g_requests[2], "reasoning_content") == NULL);
@@ -2352,8 +2268,7 @@ static void test_agent_reasoning_mode_change_before_send_applies(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2388,14 +2303,12 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
         "\"reasoning_content\":\"trace three\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"answer three\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2407,11 +2320,15 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
     nm_agent_on_state(agent, cap_state);
 
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all");
-    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    nm_agent_start(agent, "one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 0); /* nothing sent yet */
 
     /* Turn 2 replays turn 1's trace: the mode freezes here. */
-    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    nm_agent_start(agent, "two", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_TRUE(strstr(g_requests[1], "\"reasoning_content\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[1], "trace one") != NULL);
     ASSERT_EQ(nm_agent_reasoning_echo_frozen(agent), 1);
@@ -2420,7 +2337,9 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
      * prefix — the frozen mode is what the next request uses. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"), 0);
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_ALL);
-    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
+    nm_agent_start(agent, "three", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_TRUE(strstr(g_requests[2], "trace one") != NULL);
     ASSERT_TRUE(strstr(g_requests[2], "trace two") != NULL);
@@ -2429,8 +2348,7 @@ static void test_agent_reasoning_echo_freezes_once_sent(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2482,14 +2400,12 @@ static void test_agent_reasoning_echo_turn_scope(void)
         "\"reasoning_content\":\"answer trace two\"}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2503,9 +2419,13 @@ static void test_agent_reasoning_echo_turn_scope(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
     ASSERT_EQ(nm_agent_reasoning_echo(agent), NM_REASONING_ECHO_TURN);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_n_requests, 4);
 
@@ -2552,8 +2472,7 @@ static void test_agent_reasoning_echo_turn_scope(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2609,14 +2528,12 @@ static void test_agent_reasoning_echo_turn_boundary_is_real_message(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"nudged and done\"}}]}\n"
         "\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2633,7 +2550,9 @@ static void test_agent_reasoning_echo_turn_boundary_is_real_message(void)
      * INTO the middle of this turn. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROUNDS, "3"), 0);
 
-    ASSERT_EQ(nm_agent_turn(agent, "loop with a nudge", NULL, 0), 0);
+    nm_agent_start(agent, "loop with a nudge", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "nudged and done");
     ASSERT_EQ(g_n_requests, 3);
@@ -2654,8 +2573,7 @@ static void test_agent_reasoning_echo_turn_boundary_is_real_message(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     remove(img);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
@@ -2686,14 +2604,12 @@ static void test_agent_reasoning_echo_turn_interrupted_turn(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2711,13 +2627,8 @@ static void test_agent_reasoning_echo_turn_interrupted_turn(void)
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
         int fd = agent_fd(agent);
-        if (fd >= 0) {
-            fd_set r;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_SET(fd, &r);
-            select(fd + 1, &r, NULL, NULL, &tv);
-        }
+        if (fd >= 0)
+            nm_ts_wait(s, fd, agent_interest(agent), 10); /* THE wait */
         ASSERT_EQ(nm_agent_step(agent), 0);
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
@@ -2728,7 +2639,8 @@ static void test_agent_reasoning_echo_turn_interrupted_turn(void)
      * request strips their trace and keeps the presence placeholder —
      * exactly the shape of an ordinary old turn. Nothing special. */
     ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
     ASSERT_EQ(g_n_requests, 2);
@@ -2739,8 +2651,7 @@ static void test_agent_reasoning_echo_turn_interrupted_turn(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2775,14 +2686,12 @@ static void test_agent_reasoning_echo_turn_freezes_once_sent(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2794,7 +2703,9 @@ static void test_agent_reasoning_echo_turn_freezes_once_sent(void)
     nm_agent_on_state(agent, cap_state);
 
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "turn");
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     /* Request 2 replayed the active call with its real trace: frozen. */
     ASSERT_TRUE(strstr(g_requests[1], "latch trace") != NULL);
@@ -2804,7 +2715,9 @@ static void test_agent_reasoning_echo_turn_freezes_once_sent(void)
     /* The store now says `all`: inert — the frozen mode decides. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "all"),
               0);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_TRUE(strstr(g_text, "answer two") != NULL);
     /* The old turn stays stripped (mode still `turn`), the new mode
@@ -2818,8 +2731,7 @@ static void test_agent_reasoning_echo_turn_freezes_once_sent(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -2864,14 +2776,12 @@ static void test_agent_signature_echo_turn_scope(void)
     sc.sse[3] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"answer two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2888,9 +2798,13 @@ static void test_agent_signature_echo_turn_scope(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off");
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TURN);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_n_requests, 4);
 
@@ -2915,8 +2829,7 @@ static void test_agent_signature_echo_turn_scope(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
@@ -2959,14 +2872,12 @@ static void test_agent_signature_echoed_under_tools(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"both read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -2984,7 +2895,9 @@ static void test_agent_signature_echoed_under_tools(void)
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
               0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_TOOLS);
-    ASSERT_EQ(nm_agent_turn(agent, "read it twice", NULL, 0), 0);
+    nm_agent_start(agent, "read it twice", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "both read");
     ASSERT_EQ(g_n_requests, 3);
@@ -3005,8 +2918,7 @@ static void test_agent_signature_echoed_under_tools(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
@@ -3034,14 +2946,12 @@ static void test_agent_signature_not_echoed_when_off(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3055,7 +2965,9 @@ static void test_agent_signature_not_echoed_when_off(void)
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
               0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_OFF);
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
     ASSERT_EQ(g_n_requests, 2);
@@ -3077,8 +2989,7 @@ static void test_agent_signature_not_echoed_when_off(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
@@ -3106,14 +3017,12 @@ static void test_agent_signature_echoed_by_default(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3128,7 +3037,9 @@ static void test_agent_signature_echoed_by_default(void)
     ASSERT_EQ(nm_config_source(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO),
               NM_CFG_DEFAULT);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
     /* The tool message goes back with the round's own array — the
@@ -3140,8 +3051,7 @@ static void test_agent_signature_echoed_by_default(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -3172,14 +3082,12 @@ static void test_agent_signature_tools_scope(void)
         sc.sse[2] =
             "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
             "data: [DONE]\n\n";
-        sc.fd = server_bind(&sc.port);
-        ASSERT_TRUE(sc.fd >= 0);
-
-        pthread_t th;
-        pthread_create(&th, NULL, agent_server_thread, &sc);
+        NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+        ASSERT_NOT_NULL(s);
 
         char base[64];
-        snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+        snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+                 nm_ts_port(s));
         const NmProvider *p = nm_provider_by_name("ollama:local");
         ASSERT_NOT_NULL(p);
 
@@ -3193,9 +3101,13 @@ static void test_agent_signature_tools_scope(void)
         ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO,
                                         arm ? "all" : "tools"),
                   0);
-        ASSERT_EQ(nm_agent_turn(agent, "first question", NULL, 0), 0);
+        nm_agent_start(agent, "first question", NULL, 0);
+        ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+        ag_take(s);
         ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-        ASSERT_EQ(nm_agent_turn(agent, "now read it", NULL, 0), 0);
+        nm_agent_start(agent, "now read it", NULL, 0);
+        ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+        ag_take(s);
         ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
         ASSERT_EQ(g_n_requests, 3);
 
@@ -3207,8 +3119,7 @@ static void test_agent_signature_tools_scope(void)
 
         nm_agent_free(agent);
         nm_toolset_free(tools);
-        pthread_join(th, NULL);
-        close(sc.fd);
+        ag_stop(s, sc.n_rounds);
         remove(FIXTURE);
         nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
     }
@@ -3245,14 +3156,12 @@ static void test_agent_signature_freezes_once_sent(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3269,7 +3178,9 @@ static void test_agent_signature_freezes_once_sent(void)
      * test is about the signature's. */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
               0);
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
     ASSERT_TRUE(strstr(g_requests[1], "sig-one") != NULL);
     /* The trace echo was never involved: its latch is its own. */
@@ -3281,15 +3192,16 @@ static void test_agent_signature_freezes_once_sent(void)
               0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_ALL);
     ASSERT_EQ(nm_agent_signature_echo_next(agent), NM_REASONING_ECHO_OFF);
-    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_agent_start(agent, "and again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_TRUE(strstr(g_requests[2], "sig-one") != NULL);
     ASSERT_TRUE(strstr(g_requests[2], "sig-two") != NULL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
@@ -3342,14 +3254,12 @@ static void test_agent_signature_replay_is_byte_stable(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"stable\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3362,7 +3272,9 @@ static void test_agent_signature_replay_is_byte_stable(void)
 
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
               0);
-    ASSERT_EQ(nm_agent_turn(agent, "read twice", NULL, 0), 0);
+    nm_agent_start(agent, "read twice", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "stable");
     ASSERT_EQ(g_n_requests, 3);
@@ -3381,8 +3293,7 @@ static void test_agent_signature_replay_is_byte_stable(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
@@ -3411,14 +3322,12 @@ static void test_agent_signature_echo_independent_of_reasoning_echo(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3433,7 +3342,9 @@ static void test_agent_signature_echo_independent_of_reasoning_echo(void)
               0);
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "tools"),
               0);
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
 
     /* The tool message carries the array and not the trace. */
     ASSERT_TRUE(strstr(g_requests[1], "sig-ind") != NULL);
@@ -3445,8 +3356,7 @@ static void test_agent_signature_echo_independent_of_reasoning_echo(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
@@ -3477,14 +3387,12 @@ static void test_agent_signature_echo_default_on_the_wire_that_needs_it(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
@@ -3505,7 +3413,9 @@ static void test_agent_signature_echo_default_on_the_wire_that_needs_it(void)
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_REASONING_ECHO, "off"),
               0);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "read");
 
@@ -3520,8 +3430,7 @@ static void test_agent_signature_echo_default_on_the_wire_that_needs_it(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REASONING_ECHO);
 }
@@ -3548,14 +3457,12 @@ static void test_agent_signature_echo_user_overrides_the_default(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
@@ -3570,15 +3477,16 @@ static void test_agent_signature_echo_user_overrides_the_default(void)
               0);
     ASSERT_EQ(nm_agent_signature_echo(agent), NM_REASONING_ECHO_OFF);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_TRUE(strstr(g_requests[1], "sig-prov") == NULL);
     ASSERT_EQ(nm_agent_signature_echo_frozen(agent), 0);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
@@ -3613,14 +3521,12 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"all read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3635,7 +3541,9 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
      * and the wire stays clean (replay has its own pins below). */
     ASSERT_EQ(nm_config_runtime_set(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO, "off"),
               0);
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "all read");
 
@@ -3665,8 +3573,7 @@ static void test_agent_reasoning_details_kept_on_the_tool_message(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_SIGNATURE_ECHO);
 }
@@ -3697,14 +3604,12 @@ static void test_agent_cancel_then_next_turn_works(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3726,7 +3631,8 @@ static void test_agent_cancel_then_next_turn_works(void)
 
     /* Turn 2 on the same agent + session: full tool loop works. */
     ASSERT_EQ(nm_agent_start(agent, "change quick to fast", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
     ASSERT_EQ(g_tool_starts, 1);
@@ -3747,8 +3653,7 @@ static void test_agent_cancel_then_next_turn_works(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
 }
 
@@ -3818,14 +3723,12 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -3843,13 +3746,8 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
         int fd = agent_fd(agent);
-        if (fd >= 0) {
-            fd_set r;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_SET(fd, &r);
-            select(fd + 1, &r, NULL, NULL, &tv);
-        }
+        if (fd >= 0)
+            nm_ts_wait(s, fd, agent_interest(agent), 10); /* THE wait */
         ASSERT_EQ(nm_agent_step(agent), 0);
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
@@ -3868,7 +3766,8 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
     /* Turn 2 on the same session: the request must be well-formed —
      * the cancelled call has a tool reply. */
     ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
 
@@ -3883,8 +3782,7 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* One-shot oversize responder: accept once, capture the request,
@@ -3892,42 +3790,6 @@ static void test_agent_cancel_mid_tool_phase_closes_group(void)
  * large"), close. The whole session rides the request, so the
  * provider reports the overflow rather than nevermore silently
  * capping. */
-static void *context_400_server_thread(void *arg)
-{
-    struct ServerScript *sc = arg;
-    int cfd = accept(sc->fd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    req[got] = '\0';
-    if (got == 0) {
-        close(cfd);
-        return NULL;
-    }
-    snprintf(g_requests[0], REQ_CAP, "%s", req);
-    if (g_n_requests < 1)
-        g_n_requests = 1;
-    static const char resp[] =
-        "HTTP/1.1 400 Bad Request\r\n"
-        "Content-Type: application/json\r\n"
-        "Connection: close\r\n\r\n"
-        "{\"error\":{\"message\":\"This model's maximum context length "
-        "is 128000 tokens, however your messages resulted in 999999 "
-        "tokens\",\"type\":\"invalid_request_error\"}}";
-    send(cfd, resp, sizeof(resp) - 1, 0);
-    close(cfd);
-    return NULL;
-}
-
 /* The user-facing failure string (what the TUI prints): the agent
  * must surface the result's always-set message — "transport/parse
  * error" guess strings are gone. A 401 also hints the env var. */
@@ -3938,16 +3800,15 @@ static void test_agent_error_message_is_informative(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
-    sc.sse[0] = NULL; /* no SSE round: the server answers 401 */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
+    sc.sse[0] = NULL; /* no SSE round: the round answers 401 */
 
-    /* One-shot server: drain the request, answer 401 + a JSON body. */
-    pthread_t th;
-    pthread_create(&th, NULL, auth_401_server_thread, &sc);
-
+    static const NmTsRound rs[] = {
+        { .reply = AGENT_401_REPLY, .close_after_reply = 1 },
+    };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -3956,7 +3817,8 @@ static void test_agent_error_message_is_informative(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "hello", NULL, 0);
+    int rc = nm_agent_start(agent, "hello", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -3968,8 +3830,7 @@ static void test_agent_error_message_is_informative(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    nm_ts_stop(s);
 }
 
 /* Context-usage gauge: a round carrying a usage object populates the
@@ -3988,13 +3849,12 @@ static void test_agent_context_usage_accessors(void)
         "\"completion_tokens\":5,\"total_tokens\":1239,"
         "\"prompt_tokens_details\":{\"cached_tokens\":900}}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:cloud");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -4012,7 +3872,9 @@ static void test_agent_context_usage_accessors(void)
     nm_agent_set_model(agent, "gemma4:31b");
     ASSERT_EQ(nm_agent_context_limit(agent), 262144);
 
-    int rc = nm_agent_turn(agent, "hi", NULL, 0);
+    int rc = nm_agent_start(agent, "hi", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
@@ -4020,8 +3882,7 @@ static void test_agent_context_usage_accessors(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The gauge never regresses to "unknown" mid-conversation: a round whose
@@ -4049,23 +3910,26 @@ static void test_agent_context_usage_survives_null_usage_round(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"},"
         "\"finish_reason\":\"stop\"}],\"usage\":null}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    nm_agent_start(agent, "one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
 
-    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    nm_agent_start(agent, "two", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     /* Still turn 1's report: a placeholder is not a report. */
     ASSERT_TRUE(nm_agent_context_has_usage(agent));
     ASSERT_EQ(nm_agent_context_used_tokens(agent), 1234);
@@ -4081,8 +3945,7 @@ static void test_agent_context_usage_survives_null_usage_round(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* Session accounting accumulates over COMPLETED rounds, and the cache
@@ -4119,13 +3982,12 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
         "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":12191,"
         "\"completion_tokens\":253,\"total_tokens\":12444}}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -4143,13 +4005,17 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), -1);
     ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), -1);
 
-    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    nm_agent_start(agent, "one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_session_rounds(agent), 1);
     ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936);
     ASSERT_EQ(nm_agent_session_cache_read_tokens(agent), 0);
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936);
 
-    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    nm_agent_start(agent, "two", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_session_rounds(agent), 2);
     ASSERT_EQ(nm_agent_session_input_tokens(agent), 8936 + 11322);
     ASSERT_EQ(nm_agent_session_output_tokens(agent), 153 + 164);
@@ -4157,7 +4023,9 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
     ASSERT_EQ(nm_agent_session_cache_base_tokens(agent), 8936 + 11322);
     ASSERT_EQ(nm_agent_session_cache_write_tokens(agent), 2048);
 
-    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
+    nm_agent_start(agent, "three", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_session_rounds(agent), 3);
     /* Input/output grew; the cache operands did NOT (round 3 omitted the
      * key — excluded from the rate, not counted as a miss). */
@@ -4172,8 +4040,7 @@ static void test_agent_session_accounting_accumulates_and_pairs(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A context overflow is the provider's HTTP error (400), surfaced
@@ -4186,15 +4053,23 @@ static void test_agent_context_overflow_reports_provider_error(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
-    sc.sse[0] = NULL; /* no SSE: the server answers 400 */
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
+    sc.sse[0] = NULL; /* no SSE: the round answers 400 */
 
-    pthread_t th;
-    pthread_create(&th, NULL, context_400_server_thread, &sc);
-
+    static const char CTX_400_REPLY[] =
+        "HTTP/1.1 400 Bad Request\r\n"
+        "Content-Type: application/json\r\n"
+        "Connection: close\r\n\r\n"
+        "{\"error\":{\"message\":\"This model's maximum context length "
+        "is 128000 tokens, however your messages resulted in 999999 "
+        "tokens\",\"type\":\"invalid_request_error\","
+        "\"code\":\"context_length_exceeded\"}}";
+    static const NmTsRound rs[] = {
+        { .reply = CTX_400_REPLY, .close_after_reply = 1 },
+    };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -4203,7 +4078,8 @@ static void test_agent_context_overflow_reports_provider_error(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "a very long conversation", NULL, 0);
+    int rc = nm_agent_start(agent, "a very long conversation", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
 
@@ -4215,13 +4091,13 @@ static void test_agent_context_overflow_reports_provider_error(void)
 
     /* Nothing was silently dropped to fit: the user's message rode the
      * request that overflowed. */
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 1);
     ASSERT_TRUE(strstr(g_requests[0], "a very long conversation") != NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    nm_ts_stop(s);
 }
 
 static void test_agent_error_message_hints_env_var(void)
@@ -4232,13 +4108,13 @@ static void test_agent_error_message_hints_env_var(void)
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
     sc.sse[0] = NULL;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, auth_401_server_thread, &sc);
-
+    static const NmTsRound rs[] = {
+        { .reply = AGENT_401_REPLY, .close_after_reply = 1 },
+    };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4248,7 +4124,8 @@ static void test_agent_error_message_hints_env_var(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    int rc = nm_agent_turn(agent, "hello", NULL, 0);
+    int rc = nm_agent_start(agent, "hello", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -4257,8 +4134,7 @@ static void test_agent_error_message_hints_env_var(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    nm_ts_stop(s);
 }
 
 static void test_agent_set_model_changes_wire_model(void)
@@ -4271,14 +4147,12 @@ static void test_agent_set_model_changes_wire_model(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4289,15 +4163,16 @@ static void test_agent_set_model_changes_wire_model(void)
     /* Change the model on a live agent; the next turn rides the new
      * id and the session survives. */
     nm_agent_set_model(agent, "second-model");
-    ASSERT_EQ(nm_agent_turn(agent, "hello", NULL, 0), 0);
+    nm_agent_start(agent, "hello", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 1);
     ASSERT_TRUE(strstr(g_requests[0], "\"model\":\"second-model\"") != NULL);
     ASSERT_TRUE(strstr(g_requests[0], "first-model") == NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* Tool-round cap: with max_rounds = 1, a turn whose only round is a
@@ -4315,14 +4190,12 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
         "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
         "{\"name\":\"no_such_tool\",\"arguments\":\"{}\"}}]}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
 
     NmToolset *tools = nm_toolset_new_defaults();
@@ -4339,7 +4212,9 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_ROUNDS, "1");
     ASSERT_EQ(nm_agent_max_rounds(agent), 1);
 
-    int rc = nm_agent_turn(agent, "keep calling tools", NULL, 0);
+    int rc = nm_agent_start(agent, "keep calling tools", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, -1);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_ERROR);
     const char *err = nm_agent_last_error(agent);
@@ -4354,8 +4229,7 @@ static void test_agent_max_rounds_caps_tool_rounds(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* ---------------------------------------------------------------- */
@@ -4372,14 +4246,14 @@ static void test_agent_stream_stall_times_out(void)
     struct ServerScript sc;
     memset(&sc, 0, sizeof(sc));
     sc.n_rounds = 1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_stall_server_thread, &sc);
+    /* A silent peer: the round reads the request and answers nothing
+     * - the budget is the only way out. */
+    static const NmTsRound rs[] = { { .action = NM_TS_STALL } };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -4426,8 +4300,7 @@ static void test_agent_stream_stall_times_out(void)
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_TIMEOUT); /* restore default */
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    nm_ts_stop(s);
 }
 
 /* A stub's successful result, in the contract's one shape (tools.h):
@@ -4514,14 +4387,12 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"stub ok\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -4540,13 +4411,8 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
         int fd = agent_fd(agent);
-        if (fd >= 0) {
-            fd_set r;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_SET(fd, &r);
-            select(fd + 1, &r, NULL, NULL, &tv);
-        }
+        if (fd >= 0)
+            nm_ts_wait(s, fd, agent_interest(agent), 10); /* THE wait */
         ASSERT_EQ(nm_agent_step(agent), 0);
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
@@ -4559,15 +4425,15 @@ static void test_agent_next_timeout_ms_reports_tool_deadline(void)
     ASSERT_TRUE(g_stub_deadline_queries > 0);
 
     /* Let the stub finish and the answer round complete. */
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "stub ok");
     ASSERT_EQ(nm_agent_next_timeout_ms(agent), -1); /* idle */
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A tool call that streamed no argument deltas has a NULL args_json.
@@ -4622,14 +4488,12 @@ static void test_agent_begin_gets_empty_object_for_missing_args(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"na done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -4642,7 +4506,8 @@ static void test_agent_begin_gets_empty_object_for_missing_args(void)
     nm_agent_on_state(agent, cap_state);
 
     ASSERT_EQ(nm_agent_start(agent, "call it", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_noargs_begun, 1);
     ASSERT_NOT_NULL(g_noargs_seen);
@@ -4650,8 +4515,7 @@ static void test_agent_begin_gets_empty_object_for_missing_args(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* ---------------------------------------------------------------- */
@@ -4724,14 +4588,12 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"looks like a test "
         "image\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -4770,7 +4632,9 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
     remove(img_path); /* capture, not reference: the bytes are already ours */
 
     size_t ids[1] = { 0 };
-    int rc = nm_agent_turn(agent, "what is in this image?", ids, 1);
+    int rc = nm_agent_start(agent, "what is in this image?", ids, 1);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_n_requests, 2);
@@ -4849,14 +4713,12 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
@@ -4869,8 +4731,12 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
 
     /* The clause is in the system message, exactly once per round. */
@@ -4890,8 +4756,7 @@ static void test_agent_vision_model_prompt_declares_the_capability(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The agent NEVER takes the blocking catalog drive (BUG 1, 2026-10-09).
@@ -4970,11 +4835,8 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"done\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     /* The local tier's loopback wire surface with the catalog seam
      * replaced: the blocking drive counts (and claims text-only / no
@@ -4985,13 +4847,16 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
     p.models_cached = stub_cached_models_read;
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(&p, "stub-vision", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
 
     /* Construction and both rounds read the CACHED catalog only. */
@@ -5007,8 +4872,7 @@ static void test_agent_never_takes_the_blocking_catalog_drive(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The context window is a CATALOG fact, resolved at the point of use:
@@ -5158,14 +5022,12 @@ static void test_agent_effort_rides_the_request(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     /* OpenRouter's builder sets the TOP shape; the stub catalog
      * supplies the vocab. (Ollama:local would send nothing by design.) */
@@ -5178,19 +5040,22 @@ static void test_agent_effort_rides_the_request(void)
     nm_agent_on_delta(agent, cap_delta);
 
     ASSERT_EQ(nm_agent_set_effort(agent, "high"), 1);
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 1);
     ASSERT_TRUE(strstr(g_requests[0], "\"reasoning_effort\":\"high\"") != NULL);
 
     ASSERT_EQ(nm_agent_set_effort(agent, NULL), 1);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "reasoning_effort") == NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 static void test_agent_context_limit_follows_a_warmed_catalog(void)
@@ -5244,14 +5109,12 @@ static void test_agent_vision_clause_follows_a_warmed_catalog(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     struct NmProvider p = nm_ollama_local_provider;
     p.models = stub_blocking_models_drive;
@@ -5267,8 +5130,12 @@ static void test_agent_vision_clause_follows_a_warmed_catalog(void)
     /* The async fetch lands before the first turn. */
     g_stub_catalog = stub_see_models;
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
 
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
@@ -5289,8 +5156,7 @@ static void test_agent_vision_clause_follows_a_warmed_catalog(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The other side of the same gate: the live catalog can also TAKE the
@@ -5309,14 +5175,12 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
     sc.sse[0] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"blind\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
@@ -5329,7 +5193,9 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
 
     g_stub_catalog = stub_textonly_models;
 
-    ASSERT_EQ(nm_agent_turn(agent, "look", NULL, 0), 0);
+    nm_agent_start(agent, "look", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 1);
 
     /* The harness clause is there (it is unconditional); the capability
@@ -5339,8 +5205,7 @@ static void test_agent_vision_clause_absent_for_a_text_only_warm_catalog(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A model change re-resolves the clause. The switch is the second
@@ -5367,14 +5232,12 @@ static void test_agent_vision_clause_follows_a_model_switch(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"three\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
@@ -5385,18 +5248,24 @@ static void test_agent_vision_clause_follows_a_model_switch(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
 
     /* To the text-only model: the claim goes. */
     nm_agent_set_model(agent, "stub-blind");
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
     ASSERT_EQ(count_substr(g_requests[1], "An image reaches you"), 1);
 
     /* And back: the original prompt, byte for byte. */
     nm_agent_set_model(agent, "stub-see");
-    ASSERT_EQ(nm_agent_turn(agent, "third", NULL, 0), 0);
+    nm_agent_start(agent, "third", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_EQ(count_substr(g_requests[2], "You can see images"), 1);
     const char *s0 = strstr(g_requests[0], "\"role\":\"system\"");
@@ -5409,8 +5278,7 @@ static void test_agent_vision_clause_follows_a_model_switch(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A re-set of the CURRENT id is not a change: even with the cache moved
@@ -5428,14 +5296,12 @@ static void test_agent_model_reset_is_not_a_change(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
@@ -5446,13 +5312,17 @@ static void test_agent_model_reset_is_not_a_change(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
 
     /* The catalog moves; the user re-sets the model they are already on. */
     g_stub_catalog = stub_textonly_models;
     nm_agent_set_model(agent, "stub-see");
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 1);
 
@@ -5466,8 +5336,7 @@ static void test_agent_model_reset_is_not_a_change(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* `/model ! <id>` sets an id the catalog cannot confirm (a local daemon
@@ -5486,14 +5355,12 @@ static void test_agent_vision_clause_drops_for_an_unknown_model(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"two\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
 
     struct NmProvider p = nm_ollama_local_provider;
     p.models_cached = stub_catalog_read;
@@ -5504,20 +5371,23 @@ static void test_agent_vision_clause_drops_for_an_unknown_model(void)
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(count_substr(g_requests[0], "You can see images"), 1);
 
     /* The exact-set escape hatch: the cache does not carry this id. */
     nm_agent_set_model(agent, "private-daemon-model");
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_substr(g_requests[1], "You can see images"), 0);
     ASSERT_EQ(count_substr(g_requests[1], "An image reaches you"), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* ---------------------------------------------------------------- */
@@ -5594,14 +5464,12 @@ static void test_agent_read_file_image_fans_out(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -5612,7 +5480,9 @@ static void test_agent_read_file_image_fans_out(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "look at this image", NULL, 0), 0);
+    nm_agent_start(agent, "look at this image", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "i see it");
 
@@ -5658,8 +5528,7 @@ static void test_agent_read_file_image_fans_out(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(img);
 }
 
@@ -5693,14 +5562,12 @@ static void test_agent_parallel_read_file_images_one_message(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"both seen\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -5711,7 +5578,9 @@ static void test_agent_parallel_read_file_images_one_message(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "look at both", NULL, 0), 0);
+    nm_agent_start(agent, "look at both", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_tool_seq, "SESE"); /* paired, sequential */
     ASSERT_EQ(g_end_image_id, 1);      /* the last attached id */
@@ -5741,8 +5610,7 @@ static void test_agent_parallel_read_file_images_one_message(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(img_a);
     remove(img_b);
 }
@@ -5772,14 +5640,12 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after cancel\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -5795,13 +5661,8 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
     for (int i = 0; i < 2000 && nm_agent_state(agent) == NM_AGENT_STREAMING;
          i++) {
         int fd = agent_fd(agent);
-        if (fd >= 0) {
-            fd_set r;
-            struct timeval tv = { 0, 10 * 1000 };
-            FD_ZERO(&r);
-            FD_SET(fd, &r);
-            select(fd + 1, &r, NULL, NULL, &tv);
-        }
+        if (fd >= 0)
+            nm_ts_wait(s, fd, agent_interest(agent), 10); /* THE wait */
         ASSERT_EQ(nm_agent_step(agent), 0);
     }
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_RUNNING_TOOL);
@@ -5820,7 +5681,8 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
     /* The next turn is well-formed: the cancelled call has a synthetic
      * reply, and the image is NOT fanned out (no parts array). */
     ASSERT_EQ(nm_agent_start(agent, "carry on", NULL, 0), 0);
-    ASSERT_EQ(agent_drive(agent, 2000), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "after cancel");
 
@@ -5831,8 +5693,7 @@ static void test_agent_cancel_drops_pending_image_fanout(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(img);
 }
 
@@ -5888,14 +5749,10 @@ static void test_agent_reasoning_details_kept_on_answer_and_image_rounds(
     sc.n_rounds = 2;
     sc.sse[0] = sse0;
     sc.sse[1] = sse1;
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
-
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -5905,8 +5762,10 @@ static void test_agent_reasoning_details_kept_on_answer_and_image_rounds(
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "answer one", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_start(agent, "answer one", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ASSERT_EQ(nm_agent_start(agent, "draw one", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_EQ(g_img_count, 1);
 
@@ -5932,8 +5791,7 @@ static void test_agent_reasoning_details_kept_on_answer_and_image_rounds(
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A generated image arrives whole on NM_STREAM_IMAGE, attaches VERBATIM
@@ -5964,14 +5822,12 @@ static void test_agent_imagegen_round_replays_message_level(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"now blue\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -5981,7 +5837,9 @@ static void test_agent_imagegen_round_replays_message_level(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
+    nm_agent_start(agent, "draw one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "made it");
 
@@ -6003,7 +5861,9 @@ static void test_agent_imagegen_round_replays_message_level(void)
     /* The editing round: the assistant message replays with a plain
      * string content AND the message-level images array (the probed
      * shape), the part embedded verbatim. */
-    ASSERT_EQ(nm_agent_turn(agent, "make it blue", NULL, 0), 0);
+    nm_agent_start(agent, "make it blue", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1],
                        "\"role\":\"assistant\",\"content\":\"made it\","
@@ -6026,8 +5886,7 @@ static void test_agent_imagegen_round_replays_message_level(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A bare http(s) image URL is not fetched by design: it degrades to a
@@ -6047,14 +5906,12 @@ static void test_agent_imagegen_remote_url_is_a_notice(void)
         "x.png\"}}]}}]}\n\n"
         "data: {\"choices\":[{\"delta\":{\"content\":\"tried\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -6064,7 +5921,9 @@ static void test_agent_imagegen_remote_url_is_a_notice(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_notice(agent, cap_notice);
 
-    ASSERT_EQ(nm_agent_turn(agent, "draw", NULL, 0), 0);
+    nm_agent_start(agent, "draw", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "tried");
 
@@ -6079,97 +5938,7 @@ static void test_agent_imagegen_remote_url_is_a_notice(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
-}
-
-/* Round 1 sends the image event then STALLS (no [DONE]); the test
- * cancels mid-stream. Round 2 answers plainly. */
-static void *imagegen_stall_server_thread(void *arg)
-{
-    struct ServerScript *sc = arg;
-    /* Round 1: image event, then hold the connection open. */
-    int cfd = accept(sc->fd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    req[got] = '\0';
-    snprintf(g_requests[0], REQ_CAP, "%s", req);
-    g_n_requests = 1;
-
-    const char *body = sc->sse[0];
-    char head[128];
-    int hl = snprintf(head, sizeof(head),
-                      "HTTP/1.1 200 OK\r\n"
-                      "Connection: close\r\n"
-                      "Content-Type: text/event-stream\r\n"
-                      "Transfer-Encoding: chunked\r\n\r\n");
-    send(cfd, head, (size_t)hl, 0);
-    size_t bl = strlen(body);
-    char chunk[REQ_CAP];
-    int cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
-    memcpy(chunk + cl, body, bl);
-    cl += (int)bl;
-    memcpy(chunk + cl, "\r\n", 2);
-    cl += 2;
-    send(cfd, chunk, (size_t)cl, 0);
-
-    /* Stall: a closed peer is READABLE (EOF) — drain, never spin. */
-    for (;;) {
-        struct timeval tv = { 0, 200 * 1000 };
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(cfd, &rfds);
-        if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-            continue;
-        char sink[256];
-        long n = recv(cfd, sink, sizeof(sink), 0);
-        if (n <= 0)
-            break; /* the cancel tore the stream down */
-    }
-    close(cfd);
-
-    /* Round 2: the plain answer to the next turn. */
-    cfd = accept(sc->fd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    req[got] = '\0';
-    if (got == 0) {
-        close(cfd);
-        return NULL;
-    }
-    snprintf(g_requests[1], REQ_CAP, "%s", req);
-    g_n_requests = 2;
-    body = sc->sse[1];
-    send(cfd, head, (size_t)hl, 0);
-    bl = strlen(body);
-    cl = snprintf(chunk, sizeof(chunk), "%zx\r\n", bl);
-    memcpy(chunk + cl, body, bl);
-    cl += (int)bl;
-    memcpy(chunk + cl, "\r\n", 2);
-    cl += 2;
-    send(cfd, chunk, (size_t)cl, 0);
-    send(cfd, "0\r\n\r\n", 5, 0);
-    close(cfd);
-    return NULL;
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A cancel MID-IMAGE: the image was displayed (the event fired) but the
@@ -6196,14 +5965,35 @@ static void test_agent_imagegen_cancel_mid_image_drops_it(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"after\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, imagegen_stall_server_thread, &sc);
+    /* Round 1: the image event in ONE chunk, then the socket HOLDS -
+     * no terminator, no close (the old thread's stall) - so the round
+     * is still open when the test cancels. Round 2: the plain answer,
+     * a normal closing round. */
+    static char img_reply[2048];
+    snprintf(img_reply, sizeof(img_reply),
+             "HTTP/1.1 200 OK\r\n"
+             "Connection: close\r\n"
+             "Content-Type: text/event-stream\r\n"
+             "Transfer-Encoding: chunked\r\n\r\n"
+             "%zx\r\n%s\r\n",
+             strlen(sse0), sse0);
+    char *answer_reply = nm_ts_sse_chunked(sc.sse[1], 0);
+    static NmTsRound rs[2];
+    rs[0].reply = img_reply;
+    rs[0].action = NM_TS_SERVE;
+    rs[0].close_after_reply = 0; /* the hold */
+    rs[0].chunk_events = 0;
+    rs[0].on_request = NULL;
+    rs[1].reply = answer_reply;
+    rs[1].action = NM_TS_SERVE;
+    rs[1].close_after_reply = 1;
+    rs[1].chunk_events = 0;
+    rs[1].on_request = NULL;
+    NmTsServer *s = nm_ts_start(rs, 2);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -6214,14 +6004,15 @@ static void test_agent_imagegen_cancel_mid_image_drops_it(void)
     nm_agent_on_state(agent, cap_state);
 
     ASSERT_EQ(nm_agent_start(agent, "draw", NULL, 0), 0);
-    /* Drive until the image event landed: bounded passes, each waiting
-     * on the fd for real (the wait is I/O, not time). */
+    /* Drive until the image event landed: THE wait covers the agent's
+     * source and the peer's fds, one pump per wake (the peer is
+     * serviced by this thread). */
     for (int i = 0; i < 400 && g_img_count == 0; i++) {
         NmSource src = nm_agent_source(agent);
         if (src.handle >= 0 && src.flags)
-            wait_source(&src, 50);
+            nm_ts_wait(s, src.handle, src.flags, 50);
         else
-            usleep(10 * 1000);
+            nm_ts_pump(s);
         if (nm_agent_step(agent) != 0)
             break;
     }
@@ -6236,74 +6027,50 @@ static void test_agent_imagegen_cancel_mid_image_drops_it(void)
     ASSERT_EQ(nm_agent_image_count(agent), 1u);
 
     /* ...but the round produced NO assistant message: the next turn's
-     * request carries no "images" array anywhere. */
-    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
+     * request carries no "images" array anywhere. The step drive is
+     * the turn's own pump spelled out (the request shape is the
+     * subject, not the wrapper). */
+    ASSERT_EQ(nm_agent_start(agent, "again", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
     ASSERT_STR_EQ(g_text, "after");
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "\"images\"") == NULL);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    nm_ts_stop(s);
+    free(answer_reply);
 }
 
 /* The inactivity deadline counts wire BYTES (IMAGEGEN keep-alives):
  * a stream that produces only comment lines for LONGER than the budget
  * is alive, not stalled — the turn must not time out. The counter-proof
  * (silence times out) is test_agent_stream_stall_times_out. */
-static void *keepalive_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    int cfd = accept(lfd, NULL, NULL);
-    if (cfd < 0)
-        return NULL;
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-    static const char head[] =
-        "HTTP/1.1 200 OK\r\n"
-        "Connection: close\r\n"
-        "Content-Type: text/event-stream\r\n"
-        "Transfer-Encoding: chunked\r\n\r\n";
-    static const char comment[] = "e\r\n: keep-alive\n\n\r\n";
-    static const char answer[] =
-        "37\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"survived\"}}]}"
-        "\n\n\r\n"
-        "e\r\ndata: [DONE]\n\n\r\n"
-        "0\r\n\r\n";
-    send(cfd, head, sizeof(head) - 1, 0);
-    /* ~900 ms of comment-only traffic against the test's 300 ms
-     * budget: a delta-clocked deadline would kill it four times over. */
-    for (int i = 0; i < 15; i++) {
-        usleep(60 * 1000);
-        if (send(cfd, comment, sizeof(comment) - 1, 0) <= 0)
-            break;
-    }
-    send(cfd, answer, sizeof(answer) - 1, 0);
-    close(cfd);
-    return NULL;
-}
-
 static void test_agent_keepalive_comments_reset_the_deadline(void)
 {
     reset_capture();
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, keepalive_server_thread, (void *)(intptr_t)lfd);
-
+    /* The comment keep-alive stream: one comment chunk, then the
+     * answer - the deadline resets on the comment's bytes, so a
+     * comment-clocked budget survives the whole round. */
+    static const char KA_REPLY[] =
+        "HTTP/1.1 200 OK\r\n"
+        "Connection: close\r\n"
+        "Content-Type: text/event-stream\r\n"
+        "Transfer-Encoding: chunked\r\n\r\n"
+        "e\r\n: keep-alive\n\n\r\n"
+        "37\r\ndata: {\"choices\":[{\"delta\":{\"content\":\"survived\"}}]}"
+        "\n\n\r\n"
+        "e\r\ndata: [DONE]\n\n\r\n"
+        "0\r\n\r\n";
+    static const NmTsRound rs[] = {
+        { .reply = KA_REPLY, .close_after_reply = 1 },
+    };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -6322,15 +6089,20 @@ static void test_agent_keepalive_comments_reset_the_deadline(void)
      * open). */
     nm_config_runtime_set(g_cfg, NM_CFG_KEY_TIMEOUT, "600");
 
-    ASSERT_EQ(nm_agent_turn(agent, "draw something slow", NULL, 0), 0);
+    /* The step drive (the turn's own pump spelled out): the comments
+     * land as the peer is serviced by THIS thread, and the deadline
+     * resets on their bytes exactly as the turn's would. The
+     * starved-thread race the old 10x margin hedged is gone with the
+     * thread. */
+    ASSERT_EQ(nm_agent_start(agent, "draw something slow", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
     ASSERT_STR_EQ(g_text, "survived");
 
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_TIMEOUT); /* restore default */
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(lfd);
+    nm_ts_stop(s);
 }
 
 /* The offline-catalog tripwire: agent construction resolves the active
@@ -6450,13 +6222,12 @@ static void test_agent_reminder_nests_in_a_partial_read(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6465,7 +6236,9 @@ static void test_agent_reminder_nests_in_a_partial_read(void)
     nm_agent_on_tool(agent, cap_tool_body);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the big file", NULL, 0), 0);
+    nm_agent_start(agent, "read the big file", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
 
     /* The reminder is nested in the result the model receives (round 2
@@ -6488,8 +6261,7 @@ static void test_agent_reminder_nests_in_a_partial_read(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(BIG_FIXTURE);
 }
 
@@ -6523,13 +6295,12 @@ static void test_agent_reminder_escapes_forged_tags(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6538,7 +6309,9 @@ static void test_agent_reminder_escapes_forged_tags(void)
     nm_agent_on_tool(agent, cap_tool);
     nm_agent_on_warning(agent, cap_warning);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the file", NULL, 0), 0);
+    nm_agent_start(agent, "read the file", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
 
     /* The escaped form is what the model (and the panel) sees; the
@@ -6557,8 +6330,7 @@ static void test_agent_reminder_escapes_forged_tags(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FORGERY_FIXTURE);
 }
 
@@ -6584,13 +6356,12 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
             "\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":223000,"
             "\"completion_tokens\":5,\"total_tokens\":223005}}\n\n"
             "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:cloud");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "gemma4:31b", tools, NULL);
@@ -6600,12 +6371,16 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
 
     /* Turn 1: the gauge has no usage yet when the turn starts, so no
      * reminder; the round reports 223000. */
-    ASSERT_EQ(nm_agent_turn(agent, "first", NULL, 0), 0);
+    nm_agent_start(agent, "first", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 0);
     ASSERT_EQ(nm_agent_context_tier(agent), 1);
 
     /* Turn 2: the crossing fires, once. */
-    ASSERT_EQ(nm_agent_turn(agent, "second", NULL, 0), 0);
+    nm_agent_start(agent, "second", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 1);
     ASSERT_STR_EQ(g_reminder_names, "context-pressure,");
     ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
@@ -6621,14 +6396,15 @@ static void test_agent_reminder_user_channel_is_edge_triggered(void)
     /* Turn 3: the tier still holds, so no second reminder — the
      * message list only grows (one framed block in the whole
      * conversation, re-sent verbatim: the prefix is untouched). */
-    ASSERT_EQ(nm_agent_turn(agent, "third", NULL, 0), 0);
+    nm_agent_start(agent, "third", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 1);
     ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The gate: `reminders = off` silences the nudges but NOT the trust
@@ -6656,13 +6432,12 @@ static void test_agent_reminders_gate_off(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6673,7 +6448,9 @@ static void test_agent_reminders_gate_off(void)
     nm_agent_on_warning(agent, cap_warning);
 
     ASSERT_FALSE(nm_agent_reminders(agent));
-    ASSERT_EQ(nm_agent_turn(agent, "read the file", NULL, 0), 0);
+    nm_agent_start(agent, "read the file", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 0);
     ASSERT_EQ(g_reminder_calls, 0);
     /* The escape still ran, and the user was still warned. */
@@ -6682,8 +6459,7 @@ static void test_agent_reminders_gate_off(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FORGERY_FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_REMINDERS);
 }
@@ -6710,13 +6486,12 @@ static void test_agent_round_budget_reminder(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6724,7 +6499,9 @@ static void test_agent_round_budget_reminder(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    nm_agent_start(agent, "read the fixture", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     /* Round 1 is not the last allowed one (0 + 1 < 2): no nudge yet. */
     ASSERT_EQ(count_framed_reminders(g_requests[0]), 0);
@@ -6736,8 +6513,7 @@ static void test_agent_round_budget_reminder(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(FIXTURE);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_ROUNDS);
 }
@@ -6763,13 +6539,12 @@ static void test_agent_output_cut_reminder(void)
                 "\"finish_reason\":\"stop\"}]}\n\n"
                 "data: [DONE]\n\n";
     sc.sse[2] = sc.sse[1];
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6778,13 +6553,17 @@ static void test_agent_output_cut_reminder(void)
     nm_agent_on_reminder(agent, cap_reminder);
 
     /* Turn 1: the cut happens inside the round; nothing to say yet. */
-    ASSERT_EQ(nm_agent_turn(agent, "write me a long thing", NULL, 0), 0);
+    nm_agent_start(agent, "write me a long thing", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 0);
     ASSERT_EQ(count_framed_reminders(g_requests[0]), 0);
 
     /* Turn 2: the note rides this turn's FIRST request, so the model
      * reads it before it answers — and the user sees it. */
-    ASSERT_EQ(nm_agent_turn(agent, "carry on", NULL, 0), 0);
+    nm_agent_start(agent, "carry on", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 1);
     ASSERT_STR_EQ(g_reminder_names, "output-cut,");
     ASSERT_EQ(g_reminder_channels[0], NM_REMINDER_CHANNEL_USER);
@@ -6795,14 +6574,15 @@ static void test_agent_output_cut_reminder(void)
     /* Turn 3: the same cut, already reported — no second note (the note
      * itself is carried verbatim in the session, so the prefix is
      * untouched). */
-    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_agent_start(agent, "and again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_reminder_calls, 1);
     ASSERT_EQ(count_framed_reminders(g_requests[2]), 1);
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The boundary for EXTERNAL content: a tool whose output came from
@@ -6848,13 +6628,12 @@ static void test_agent_reminder_web_untrusted(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"noted\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     nm_toolset_add(tools, &stub_external_tool);
@@ -6864,7 +6643,9 @@ static void test_agent_reminder_web_untrusted(void)
     nm_agent_on_tool(agent, cap_tool_body);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "look this up", NULL, 0), 0);
+    nm_agent_start(agent, "look this up", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     /* Round 2 carries round 1's result, the boundary included. */
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
@@ -6884,8 +6665,7 @@ static void test_agent_reminder_web_untrusted(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A fixture the two read-finding tests own: one writes it empty, the
@@ -6916,13 +6696,12 @@ static void test_agent_reminder_empty_file(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"empty\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6930,7 +6709,9 @@ static void test_agent_reminder_empty_file(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the empty file", NULL, 0), 0);
+    nm_agent_start(agent, "read the empty file", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
     ASSERT_TRUE(strstr(g_requests[1], "EXISTS and is empty") != NULL);
@@ -6944,8 +6725,7 @@ static void test_agent_reminder_empty_file(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(READ_FIXTURE);
 }
 
@@ -6973,13 +6753,12 @@ static void test_agent_reminder_offset_past_eof(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"shorter\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -6987,7 +6766,9 @@ static void test_agent_reminder_offset_past_eof(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read line 9", NULL, 0), 0);
+    nm_agent_start(agent, "read line 9", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "past the last line") != NULL);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
@@ -6999,8 +6780,7 @@ static void test_agent_reminder_offset_past_eof(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(READ_FIXTURE);
 }
 
@@ -7051,13 +6831,12 @@ static void test_agent_file_ledger_skips_a_repeat_read(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"read\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -7066,7 +6845,9 @@ static void test_agent_file_ledger_skips_a_repeat_read(void)
     nm_agent_on_tool(agent, cap_tool_body);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read it twice", NULL, 0), 0);
+    nm_agent_start(agent, "read it twice", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
 
     /* Round 3's request carries both results: the first read's content
@@ -7085,8 +6866,7 @@ static void test_agent_file_ledger_skips_a_repeat_read(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(READ_FIXTURE);
 }
 
@@ -7120,13 +6900,12 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
                 "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
                 "data: [DONE]\n\n";
     }
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     NmToolset *tools = nm_toolset_new_defaults();
     NmAgent *agent = nm_agent_new(p, "test-model", tools, NULL);
@@ -7134,7 +6913,9 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read it", NULL, 0), 0);
+    nm_agent_start(agent, "read it", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(g_reminder_calls, 0); /* the first read has nothing to say */
 
@@ -7144,7 +6925,9 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
     fputs("alpha\nbeta\ngamma\n", f);
     fclose(f);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read it again", NULL, 0), 0);
+    nm_agent_start(agent, "read it again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 4);
     /* The new content is in the request (the tool returned it), and the
      * model is told the earlier read is stale — one note, not a
@@ -7159,8 +6942,7 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(READ_FIXTURE);
 }
 
@@ -7193,13 +6975,12 @@ static void test_agent_reminder_image_not_seen(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"blind\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("opencode:go");
     NmToolset *tools = nm_toolset_new_defaults();
     /* glm-5.2: the shipped catalog says text-only (vision 0), and the
@@ -7210,7 +6991,9 @@ static void test_agent_reminder_image_not_seen(void)
     nm_agent_on_tool(agent, cap_tool_body);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "look at this", NULL, 0), 0);
+    nm_agent_start(agent, "look at this", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 1);
     ASSERT_TRUE(strstr(g_requests[1], "cannot accept images") != NULL);
@@ -7223,8 +7006,7 @@ static void test_agent_reminder_image_not_seen(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(img);
 }
 
@@ -7257,13 +7039,12 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"i see it\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     NmToolset *tools = nm_toolset_new_defaults();
     /* ~openai/gpt-astra-latest: the shipped catalog says vision (the
@@ -7273,7 +7054,9 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_reminder(agent, cap_reminder);
 
-    ASSERT_EQ(nm_agent_turn(agent, "look at this", NULL, 0), 0);
+    nm_agent_start(agent, "look at this", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 2);
     ASSERT_TRUE(strstr(g_requests[1], "[image] nm-agent-img-seen.png") != NULL);
     ASSERT_EQ(count_framed_reminders(g_requests[1]), 0);
@@ -7281,73 +7064,8 @@ static void test_agent_reminder_image_not_seen_needs_a_text_only_catalog(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
     remove(img);
-}
-
-static void *agent_two_round_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    static const char tool_body[] =
-        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
-        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
-        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
-        "\\\",\\\"limit\\\":1}\"}}]}}]}\n\ndata: [DONE]\n\n";
-    static const char final_body[] =
-        "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"},"
-        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
-    for (int round = 0; round < 2; round++) {
-        int cfd = accept(lfd, NULL, NULL);
-        if (cfd < 0)
-            break;
-        char req[REQ_CAP];
-        size_t got = 0;
-        while (got < sizeof(req) - 1) {
-            long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-            if (n <= 0)
-                break;
-            got += (size_t)n;
-            if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-                break;
-        }
-        if (got == 0) {
-            /* A connection that carried no request bytes must not
-             * consume a script round (agent_server_thread's rule: a
-             * client-closed connection is delivered on Linux and
-             * dropped on macOS/BSD). */
-            close(cfd);
-            round--;
-            continue;
-        }
-        const char *body = round == 0 ? tool_body : final_body;
-        char resp[2048];
-        size_t n = (size_t)snprintf(resp, sizeof(resp),
-                                    "HTTP/1.1 200 OK\r\n"
-                                    "Connection: close\r\n"
-                                    "Content-Type: text/event-stream\r\n"
-                                    "Transfer-Encoding: chunked\r\n\r\n");
-        n += (size_t)snprintf(resp + n, sizeof(resp) - n, "%zx\r\n",
-                              strlen(body));
-        memcpy(resp + n, body, strlen(body));
-        n += strlen(body);
-        n += (size_t)snprintf(resp + n, sizeof(resp) - n, "\r\n0\r\n\r\n");
-        send(cfd, resp, n, 0);
-        for (;;) {
-            struct timeval tv = { 0, 50 * 1000 };
-            fd_set rfds;
-            FD_ZERO(&rfds);
-            FD_SET(cfd, &rfds);
-            if (select(cfd + 1, &rfds, NULL, NULL, &tv) <= 0)
-                break;
-            char sink[64];
-            if (recv(cfd, sink, sizeof(sink), 0) <= 0)
-                break; /* peer gone */
-        }
-        close(cfd);
-    }
-    close(lfd);
-    return NULL;
 }
 
 static int g_fold_fires;
@@ -7375,14 +7093,21 @@ static void test_agent_credit_fold_fires_per_round(void)
     g_fold_last_http_status = 0;
     memset(&g_fold_last_meta, 0, sizeof(g_fold_last_meta));
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_two_round_thread, (void *)(intptr_t)lfd);
-
+    /* Two rounds: a tool call, then the answer (the old
+     * agent_two_round_thread's script) - the fold hook fires on every
+     * completed round, 200s included. */
+    static const char *const SSE_ROUNDS[] = {
+        "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,"
+        "\"id\":\"call_1\",\"type\":\"function\",\"function\":"
+        "{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"" FIXTURE
+        "\\\",\\\"limit\\\":1}\"}}]}}]}\n\ndata: [DONE]\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"read it\"},"
+        "\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n",
+    };
+    NmTsServer *s = ag_start(SSE_ROUNDS, 2);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmToolset *tools = nm_toolset_new_defaults();
@@ -7391,7 +7116,9 @@ static void test_agent_credit_fold_fires_per_round(void)
     nm_agent_set_endpoint(agent, base, "sk-or-test");
     nm_agent_on_credit_fold(agent, cap_credit_fold);
 
-    ASSERT_EQ(nm_agent_turn(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(nm_agent_start(agent, "read the fixture", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_fold_fires, 2);
     ASSERT_EQ(g_fold_last_http_status, 200);
 
@@ -7402,53 +7129,7 @@ static void test_agent_credit_fold_fires_per_round(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-}
-
-static void *agent_402_server_thread(void *arg)
-{
-    int lfd = (int)(intptr_t)arg;
-    struct sockaddr_in sin;
-    socklen_t slen = sizeof(sin);
-    int cfd = accept(lfd, (struct sockaddr *)&sin, &slen);
-    if (cfd < 0) {
-        close(lfd);
-        return NULL;
-    }
-    /* Drain the WHOLE request before the reply (the one-shot 401
-     * responder's own rule): the old single recv could return with the
-     * POST's body still in flight, and a close over an unread request
-     * sends an RST that can discard the 402 the client has not read
-     * yet — the turn then dies as a transport error, the fold hook
-     * never fires, and the test fails. Wine's segmentation hit that
-     * race every run; loopback Linux never did. */
-    char req[REQ_CAP];
-    size_t got = 0;
-    while (got < sizeof(req) - 1) {
-        long n = recv(cfd, req + got, sizeof(req) - 1 - got, 0);
-        if (n <= 0)
-            break;
-        got += (size_t)n;
-        if (strstr(req, "\r\n\r\n") && got > 4 && req[got - 1] == '}')
-            break;
-    }
-
-    const char body[] =
-        "{\"error\":{\"message\":\"You're out of credits.\","
-        "\"type\":\"billing_error\",\"code\":null}}";
-    char resp[1024];
-    int n = snprintf(resp, sizeof(resp),
-                     "HTTP/1.1 402 Payment Required\r\n"
-                     "Connection: close\r\n"
-                     "Content-Type: application/json\r\n"
-                     "Content-Length: %zu\r\n"
-                     "\r\n"
-                     "%s",
-                     strlen(body), body);
-    send(cfd, resp, (size_t)n, 0);
-    close(cfd);
-    close(lfd);
-    return NULL;
+    ag_stop(s, 2);
 }
 
 static void test_agent_credit_fold_fires_on_credit_refusal(void)
@@ -7457,14 +7138,27 @@ static void test_agent_credit_fold_fires_on_credit_refusal(void)
     g_fold_last_http_status = 0;
     memset(&g_fold_last_meta, 0, sizeof(g_fold_last_meta));
 
-    int port;
-    int lfd = server_bind(&port);
-    ASSERT_TRUE(lfd >= 0);
-    pthread_t th;
-    pthread_create(&th, NULL, agent_402_server_thread, (void *)(intptr_t)lfd);
-
+    /* The 402 refusal (the old one-shot thread's shape): the fold
+     * hook fires on the refusal's own status. */
+    static const char CREDIT_402_BODY[] =
+        "{\"error\":{\"message\":\"You're out of credits.\","
+        "\"type\":\"billing_error\",\"code\":null}}";
+    static char CREDIT_402_REPLY[512];
+    snprintf(CREDIT_402_REPLY, sizeof(CREDIT_402_REPLY),
+             "HTTP/1.1 402 Payment Required\r\n"
+             "Connection: close\r\n"
+             "Content-Type: application/json\r\n"
+             "Content-Length: %zu\r\n"
+             "\r\n"
+             "%s",
+             strlen(CREDIT_402_BODY), CREDIT_402_BODY);
+    static const NmTsRound rs[] = {
+        { .reply = CREDIT_402_REPLY, .close_after_reply = 1 },
+    };
+    NmTsServer *s = nm_ts_start(rs, 1);
+    ASSERT_NOT_NULL(s);
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmToolset *tools = nm_toolset_new_defaults();
@@ -7473,8 +7167,9 @@ static void test_agent_credit_fold_fires_on_credit_refusal(void)
     nm_agent_set_endpoint(agent, base, "sk-or-test");
     nm_agent_on_credit_fold(agent, cap_credit_fold);
 
-    /* Turn fails with 402 */
-    ASSERT_EQ(nm_agent_turn(agent, "hi", NULL, 0), -1);
+    /* The drive fails with 402 (the turn's own pump, spelled out). */
+    ASSERT_EQ(nm_agent_start(agent, "hi", NULL, 0), 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), -1);
     /* The fold hook fires on 402 refusal */
     ASSERT_EQ(g_fold_fires, 1);
     ASSERT_EQ(g_fold_last_http_status, 402);
@@ -7487,7 +7182,7 @@ static void test_agent_credit_fold_fires_on_credit_refusal(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
+    nm_ts_stop(s);
 }
 
 /* The age rule on the wire: the window is the store's `image_live`
@@ -7518,14 +7213,12 @@ static void test_agent_image_live_window(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"three\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -7546,9 +7239,15 @@ static void test_agent_image_live_window(void)
      * image; the second carries the marker — byte-identical to the
      * third's, which is what the prefix cache needs. */
     size_t ids[1] = { 0 };
-    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_agent_start(agent, "look", ids, 1);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "and again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
     ASSERT_EQ(count_substr(g_requests[0], "\"type\":\"image_url\""), 1);
     ASSERT_EQ(count_substr(g_requests[1], "\"type\":\"image_url\""), 0);
@@ -7564,8 +7263,7 @@ static void test_agent_image_live_window(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* `image_live = off`: every request carries the image, byte for byte —
@@ -7590,14 +7288,12 @@ static void test_agent_image_live_off_keeps_the_image(void)
         sc.sse[i] =
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
             "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -7618,9 +7314,15 @@ static void test_agent_image_live_off_keeps_the_image(void)
     ASSERT_NOT_NULL(img);
 
     size_t ids[1] = { 0 };
-    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_agent_start(agent, "look", ids, 1);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "and again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_IMAGE_LIVE);
 
     ASSERT_EQ(g_n_requests, 3);
@@ -7632,8 +7334,7 @@ static void test_agent_image_live_off_keeps_the_image(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* A window of TWO: the image rides two requests, then the marker. */
@@ -7656,14 +7357,12 @@ static void test_agent_image_live_window_of_two(void)
         sc.sse[i] =
             "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"
             "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -7684,9 +7383,15 @@ static void test_agent_image_live_window_of_two(void)
     ASSERT_NOT_NULL(img);
 
     size_t ids[1] = { 0 };
-    ASSERT_EQ(nm_agent_turn(agent, "look", ids, 1), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "again", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "and again", NULL, 0), 0);
+    nm_agent_start(agent, "look", ids, 1);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "and again", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     nm_config_runtime_clear(g_cfg, NM_CFG_KEY_IMAGE_LIVE);
 
     ASSERT_EQ(g_n_requests, 3);
@@ -7697,8 +7402,7 @@ static void test_agent_image_live_window_of_two(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The ASSISTANT path: a generated image rides the message-level
@@ -7731,14 +7435,12 @@ static void test_agent_imagegen_aged_image_drops_the_array(void)
     sc.sse[2] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"still blue\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("ollama:local");
     ASSERT_NOT_NULL(p);
 
@@ -7748,9 +7450,15 @@ static void test_agent_imagegen_aged_image_drops_the_array(void)
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_state(agent, cap_state);
 
-    ASSERT_EQ(nm_agent_turn(agent, "draw one", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "make it blue", NULL, 0), 0);
-    ASSERT_EQ(nm_agent_turn(agent, "keep it blue", NULL, 0), 0);
+    nm_agent_start(agent, "draw one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "make it blue", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
+    nm_agent_start(agent, "keep it blue", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(g_n_requests, 3);
 
     const NmImage *img = nm_agent_image(agent, 0);
@@ -7771,8 +7479,7 @@ static void test_agent_imagegen_aged_image_drops_the_array(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The request carries the mode-composed id while the CATALOG readers
@@ -7792,14 +7499,12 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     sc.sse[1] =
         "data: {\"choices\":[{\"delta\":{\"content\":\"second\"}}]}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
 
@@ -7814,7 +7519,9 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     NmAgent *agent = nm_agent_new(p, "openai/gpt-4o-mini", NULL, NULL);
     ASSERT_NOT_NULL(agent);
     nm_agent_set_endpoint(agent, base, "sk-or-test");
-    int rc = nm_agent_turn(agent, "hi", NULL, 0);
+    int rc = nm_agent_start(agent, "hi", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(strstr(g_requests[0],
                        "\"model\":\"openai/gpt-4o-mini:floor\"") != NULL);
@@ -7830,7 +7537,9 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     ASSERT_NOT_NULL(typed);
     ASSERT_EQ(nm_agent_context_limit(typed), 128000);
     nm_agent_set_endpoint(typed, base, "sk-or-test");
-    rc = nm_agent_turn(typed, "hi", NULL, 0);
+    rc = nm_agent_start(typed, "hi", NULL, 0);
+    rc = agent_drive(s, agent, 2000);
+    ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(strstr(g_requests[1],
                        "\"model\":\"openai/gpt-4o-mini:floor\"") != NULL);
@@ -7839,8 +7548,7 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     nm_config_shadow_reset(g_cfg, "routing.openrouter");
     ASSERT_NULL(nm_config_scoped_for(g_cfg, NM_CFG_KEY_ROUTING, "openrouter",
                                      NULL));
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The served line's shapes (D6): a reported tier, an UNREPORTED one (a
@@ -7923,14 +7631,12 @@ static void test_agent_served_notice_fire_rule(void)
         "data: {\"choices\":[{\"delta\":{\"content\":\"d\"}}],"
         "\"provider\":\"OpenAI\",\"service_tier\":\"flex\"}\n\n"
         "data: [DONE]\n\n";
-    sc.fd = server_bind(&sc.port);
-    ASSERT_TRUE(sc.fd >= 0);
-
-    pthread_t th;
-    pthread_create(&th, NULL, agent_server_thread, &sc);
+    NmTsServer *s = ag_start(sc.sse, sc.n_rounds);
+    ASSERT_NOT_NULL(s);
 
     char base[64];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1",
+             nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("openrouter");
     ASSERT_NOT_NULL(p);
     NmAgent *agent = nm_agent_new(p, "openai/gpt-4o-mini", NULL, NULL);
@@ -7938,13 +7644,21 @@ static void test_agent_served_notice_fire_rule(void)
     nm_agent_set_endpoint(agent, base, "sk-or-test");
     nm_agent_on_round_meta(agent, cap_served_meta);
 
-    ASSERT_EQ(nm_agent_turn(agent, "one", NULL, 0), 0);
+    nm_agent_start(agent, "one", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "two", NULL, 0), 0);
+    nm_agent_start(agent, "two", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "three", NULL, 0), 0);
+    nm_agent_start(agent, "three", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
-    ASSERT_EQ(nm_agent_turn(agent, "four", NULL, 0), 0);
+    nm_agent_start(agent, "four", NULL, 0);
+    ASSERT_EQ(agent_drive(s, agent, 2000), 0);
+    ag_take(s);
     ASSERT_EQ(nm_agent_state(agent), NM_AGENT_DONE);
 
     /* Three lines from four rounds: the repeated Azure/default round is
@@ -7964,8 +7678,7 @@ static void test_agent_served_notice_fire_rule(void)
     ASSERT_STR_EQ(meta.source, "openrouter");
 
     nm_agent_free(agent);
-    pthread_join(th, NULL);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The pin's tripwire: file scope (a static function, not a nested one). */

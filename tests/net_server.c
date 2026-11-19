@@ -155,6 +155,35 @@ void nm_ts_stop(NmTsServer *s)
     free(s);
 }
 
+char *nm_ts_sse_chunked(const char *events, int hold_tail)
+{
+    size_t cap = strlen(events) + 512;
+    char *buf = malloc(cap);
+    if (!buf)
+        return NULL;
+    size_t off = (size_t)snprintf(buf, cap,
+                                  "HTTP/1.1 200 OK\r\n"
+                                  "Connection: close\r\n"
+                                  "Content-Type: text/event-stream\r\n"
+                                  "Transfer-Encoding: chunked\r\n\r\n");
+    const char *p = events;
+    while (*p) {
+        const char *ev = strstr(p, "\n\n");
+        size_t elen = ev ? (size_t)(ev - p) + 2 : strlen(p);
+        off += (size_t)snprintf(buf + off, cap - off, "%zx\r\n", elen);
+        memcpy(buf + off, p, elen);
+        off += elen;
+        off += (size_t)snprintf(buf + off, cap - off, "\r\n");
+        p += elen;
+        if (!ev)
+            break;
+    }
+    if (!hold_tail)
+        off += (size_t)snprintf(buf + off, cap - off, "0\r\n\r\n");
+    buf[off] = '\0';
+    return buf;
+}
+
 int nm_ts_port(const NmTsServer *s)
 {
     return s->port;

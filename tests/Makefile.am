@@ -344,7 +344,7 @@ test_proc_CFLAGS = $(TEST_CFLAGS)
 
 # Agent: the full stream -> tool -> stream loop against a canned
 # loopback SSE server (the openai vtable with a test endpoint).
-test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
+test_agent_SOURCES = test_agent.c net_server.c ../src/clock.c ../src/agent.c ../src/conversation_id.c ../src/session.c \
     ../src/image_bytes.c ../src/size.c \
     ../src/context.c ../src/reminder.c \
     ../src/skills.c \
@@ -358,6 +358,9 @@ test_agent_SOURCES = test_agent.c ../src/clock.c ../src/agent.c ../src/conversat
     $(TEST_PROVIDER_SOURCES)
 test_agent_CFLAGS = $(TEST_CFLAGS) $(TEST_TLS_CFLAGS_EXTRA)
 test_agent_LDFLAGS = $(TEST_TLS_LDFLAGS_EXTRA)
+# -lpthread stays: the job-drain pair keeps its one deliberate worker
+# thread (the ask-mode blocking pump cannot be served from its own
+# thread - see the tests' own comment).
 test_agent_LDADD = $(BOBA_LIBS) -lpthread $(TEST_TLS_LIBS)
 
 # Spinner: pure model — the spinner OBJECT (one phase per object, a

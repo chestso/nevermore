@@ -109,6 +109,15 @@ void nm_ts_stop(NmTsServer *s);
  * borrowed, not copied, so keep it alive until the round is written. */
 void nm_ts_reply_override(NmTsServer *s, const char *reply);
 
+/* A chunked SSE reply built from RAW events (each a complete
+ * "data: ...\n\n" line pair): the 200 head, one computed chunk per
+ * event, and the terminator. hold_tail omits the terminator - the
+ * round's socket then stays open with nothing more coming (pair it
+ * with close_after_reply = 0), the shape a silence-budget test needs.
+ * Returns malloc'd bytes; the caller frees when the server is done
+ * (the round borrows the string for its life). */
+char *nm_ts_sse_chunked(const char *events, int hold_tail);
+
 int nm_ts_port(const NmTsServer *s);     /* the bound port */
 int nm_ts_accepts(const NmTsServer *s);  /* connections taken */
 int nm_ts_requests(const NmTsServer *s); /* completed requests */
