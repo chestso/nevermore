@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "addr_cache.h"
 #include "json.h"
 #include "net_server.h" /* the scripted pump: no thread, no timer */
 #include "test_net_helpers.h"
@@ -395,16 +396,39 @@ static void test_error_line_shape(void)
 /* The bounded connect walk's line: one "connect-retry" per abandoned
  * address, carrying the walk's shape (host, port, attempt, length) and
  * the connection id (the walk lives on the connection, so the retry
- * correlates with the connect/error line that follows). */
+ * correlates with the connect/error line that follows).
+ *
+ * The walk dials the list the resolver gave it, so the list is SEEDED
+ * in the address cache instead of asked for. Binding "whatever
+ * localhost resolves to last" makes the premise depend on the
+ * resolver: a macOS CI VM answered in one order for the helper's
+ * lookup and another for the walk's, so the walk's first dial hit the
+ * listener and no address was ever abandoned. The cache is the walk's
+ * one input (addr_cache.h) and its entries carry their own port, so
+ * the two addresses stored here are exactly the two dials made:
+ * nothing listens on the IPv6 loopback at this port, so that attempt
+ * is refused and the bound IPv4 one answers. No config store is
+ * installed in this binary, so no family latch reorders the list. */
 static void test_connect_retry_line_shape(void)
 {
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; connect-retry line not exercised\n");
-        return;
-    }
+    int lfd = test_bind_loopback(8, &port); /* the IPv4 loopback */
+    ASSERT_TRUE(lfd >= 0);
+
+    struct sockaddr_storage list[2];
+    unsigned lens[2];
+    memset(list, 0, sizeof(list));
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&list[0];
+    v6->sin6_family = AF_INET6;
+    v6->sin6_addr = in6addr_loopback;
+    v6->sin6_port = htons((unsigned short)port);
+    lens[0] = (unsigned)sizeof(*v6);
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&list[1];
+    v4->sin_family = AF_INET;
+    v4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    v4->sin_port = htons((unsigned short)port);
+    lens[1] = (unsigned)sizeof(*v4);
+    nm_addr_cache_put("localhost", port, list, lens, 2);
 
     log_reset();
     test_setenv("NEVERMORE_DEBUG_WIRE", log_path(), 1);
@@ -412,7 +436,7 @@ static void test_connect_retry_line_shape(void)
 
     NmConnectInfo ci = { 0 };
     NmConnection *c = nm_connect("localhost", port, NM_TRANSPORT_PLAIN, &ci);
-    ASSERT_NOT_NULL(c); /* the listener on the last address answers */
+    ASSERT_NOT_NULL(c); /* the listener on the second address answers */
     nm_connection_close(c);
     nm_wire_recorder_shutdown();
     close(lfd);

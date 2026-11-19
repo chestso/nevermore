@@ -61,8 +61,8 @@ static int test_wsa_init(void)
  * name resolves to a single address (nothing to walk), a list whose
  * first and last entries are the SAME address (nothing to walk PAST —
  * the walk's first dial is then the listener this helper binds, and no
- * address is ever abandoned, the shape a macOS CI VM produced in
- * test_wire_recorder's retry case), or the tail family has no loopback
+ * address is ever abandoned — the shape a macOS CI VM produced), or the
+ * tail family has no loopback
  * to bind — all healthy boxes, which callers report as "walk not
  * exercised" rather than a failure. */
 static int test_bind_last_localhost_addr(int *port) TEST_NET_HELPERS_UNUSED;
