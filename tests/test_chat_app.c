@@ -8416,8 +8416,8 @@ static void test_img_submit_sends_parts_and_echoes(void)
  * carries text-only ids; the offline pin keeps the lookup static. */
 static void test_img_text_only_model_warns(void)
 {
-    /* glm-5.2: the shipped (models.dev) table says text-only. */
-    AppHarness *h = harness_new("opencode:go", "glm-5.2", NULL);
+    /* glm-5.3: the shipped (models.dev) table says text-only. */
+    AppHarness *h = harness_new("opencode:go", "glm-5.3", NULL);
     ASSERT_NOT_NULL(h);
 
     const char *path = chat_png_fixture("chat-img-warn.png");
@@ -8425,7 +8425,7 @@ static void test_img_text_only_model_warns(void)
     const char *out = harness_read(h);
     /* attached all the same — the warning is a note, not a refusal */
     ASSERT_TRUE(strstr(out, "image: chat-img-warn.png — PNG 64x32") != NULL);
-    ASSERT_TRUE(strstr(out, "note: glm-5.2 is text-only — the "
+    ASSERT_TRUE(strstr(out, "note: glm-5.3 is text-only — the "
                             "provider strips image content") != NULL);
 
     /* the /model twin: the conversation already carries an image, and

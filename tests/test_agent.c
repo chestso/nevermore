@@ -6934,7 +6934,7 @@ static void test_agent_file_ledger_reports_a_changed_file(void)
 /* A picture the ACTIVE model cannot see: read_file attaches the image,
  * the provider strips it, and without the note the model reasons about
  * a picture it never received. The catalog says text-only
- * (opencode:go's glm-5.2), so the fact is stated. */
+ * (opencode:go's glm-5.3), so the fact is stated. */
 static void test_agent_reminder_image_not_seen(void)
 {
     reset_capture();
@@ -6968,9 +6968,9 @@ static void test_agent_reminder_image_not_seen(void)
              nm_ts_port(s));
     const NmProvider *p = nm_provider_by_name("opencode:go");
     NmToolset *tools = nm_toolset_new_defaults();
-    /* glm-5.2: the shipped catalog says text-only (vision 0), and the
+    /* glm-5.3: the shipped catalog says text-only (vision 0), and the
      * offline pin keeps the lookup static. */
-    NmAgent *agent = nm_agent_new(p, "glm-5.2", tools, NULL);
+    NmAgent *agent = nm_agent_new(p, "glm-5.3", tools, NULL);
     nm_agent_set_endpoint(agent, base, NULL);
     nm_agent_on_delta(agent, cap_delta);
     nm_agent_on_tool(agent, cap_tool_body);
