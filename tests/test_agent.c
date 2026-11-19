@@ -4689,7 +4689,7 @@ static void test_agent_image_turn_parts_and_prefix_stability(void)
 
     nm_agent_free(agent);
     nm_toolset_free(tools);
-    close(sc.fd);
+    ag_stop(s, sc.n_rounds);
 }
 
 /* The image-capability clause: a model the catalog says can see gets a
@@ -7538,7 +7538,7 @@ static void test_openrouter_round_carries_the_mode_composed_id(void)
     ASSERT_EQ(nm_agent_context_limit(typed), 128000);
     nm_agent_set_endpoint(typed, base, "sk-or-test");
     rc = nm_agent_start(typed, "hi", NULL, 0);
-    rc = agent_drive(s, agent, 2000);
+    rc = agent_drive(s, typed, 2000);
     ag_take(s);
     ASSERT_EQ(rc, 0);
     ASSERT_TRUE(strstr(g_requests[1],
