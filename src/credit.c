@@ -15,16 +15,6 @@
 #include <string.h>
 #include <time.h>
 
-#ifdef _WIN32
-#include <winsock2.h>
-#define nm_usleep(us) Sleep((DWORD)((us) / 1000))
-#else
-#include <sys/select.h>
-#include <sys/time.h>
-#include <unistd.h>
-#define nm_usleep(us) usleep(us)
-#endif
-
 /* ------------------------------------------------------------------ */
 /* In-memory store                                                    */
 /* ------------------------------------------------------------------ */
@@ -1364,39 +1354,4 @@ int nm_credits_fetch_in_flight(NmProviderId id)
     if ((int)id < 0 || id >= NM_PROVIDER_COUNT)
         return 0;
     return g_credits[id].fetch_in_flight;
-}
-
-int nm_credits_refresh_sync(NmProviderId id, const char *base_url,
-                            const char *api_key)
-{
-    if (!nm_credits_fetch_begin(id, base_url, api_key))
-        return 0;
-
-    for (;;) {
-        NmCatalogStatus st = nm_credits_fetch_step(id);
-        if (st == NM_CATALOG_OK)
-            return 1;
-        if (st == NM_CATALOG_ERR)
-            return 0;
-
-        NmSource src = nm_credits_fetch_source(id);
-        if (src.handle < 0) {
-            nm_usleep(5000);
-            continue;
-        }
-#ifdef _WIN32
-        /* Transport handles socket waits via nm_connection_step */
-        Sleep(5);
-#else
-        fd_set rfds, wfds;
-        FD_ZERO(&rfds);
-        FD_ZERO(&wfds);
-        if (src.flags & NM_INTEREST_READ)
-            FD_SET((int)src.handle, &rfds);
-        if (src.flags & NM_INTEREST_WRITE)
-            FD_SET((int)src.handle, &wfds);
-        struct timeval tv = { 0, 10000 };
-        select((int)src.handle + 1, &rfds, &wfds, NULL, &tv);
-#endif
-    }
 }

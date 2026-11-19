@@ -702,10 +702,9 @@ static NmTsServer *cr_start(const NmTsRound *rs, int n)
     return s;
 }
 
-/* The refresh's own seam, driven the way nm_credits_refresh_sync drives
- * it (begin, step, wait on the fetch's source) - with the peer served
- * by the same poll instead of a second thread. Returns 1 on OK, 0 on
- * error or latch, exactly like the blocking refresh. */
+/* The out-of-band fetch seam (begin, step, wait on the fetch's
+ * source) - with the peer served by the same poll instead of a
+ * second thread. Returns 1 on OK, 0 on error or latch. */
 static int credits_refresh(NmTsServer *s, NmProviderId id,
                            const char *base, const char *key)
 {

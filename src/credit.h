@@ -219,11 +219,6 @@ void nm_credits_fetch_end(NmProviderId id);
 /* Whether an out-of-band fetch is currently in flight for `id`. */
 int nm_credits_fetch_in_flight(NmProviderId id);
 
-/* Synchronous blocking refresh of `id`'s credits (pumps the async seam).
- * Returns 1 on success, 0 on failure or rate-limit latch. */
-int nm_credits_refresh_sync(NmProviderId id, const char *base_url,
-                            const char *api_key);
-
 #ifdef __cplusplus
 }
 #endif
