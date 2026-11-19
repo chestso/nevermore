@@ -283,4 +283,42 @@ static long test_send_reply(int cfd, const char *reply)
     return r;
 }
 
+/* Bind a BLOCKING loopback listener on an ephemeral port: every canned
+ * server's one-liner, from the pump (which sets its own fds nonblocking
+ * afterwards) to the TLS and wire harnesses (whose accept threads keep
+ * the fd blocking). `backlog` is the CALLER'S platform truth, never a
+ * hidden constant: a test that lets two connections pend at once needs
+ * the queue to hold them, and a one-deep queue is a platform trap
+ * (Linux rounds the backlog up, macOS/BSD SILENTLY DROP the extra SYN,
+ * Windows refuses it outright — CONTRIBUTING's listen rule says 8).
+ * Returns the fd or -1, fills *port. */
+static int test_bind_loopback(int backlog, int *port) TEST_NET_HELPERS_UNUSED;
+static int test_bind_loopback(int backlog, int *port)
+{
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
+        close(fd);
+        return -1;
+    }
+    struct sockaddr_in got;
+    socklen_t gl = sizeof(got);
+    if (getsockname(fd, (struct sockaddr *)&got, &gl) < 0) {
+        close(fd);
+        return -1;
+    }
+    *port = ntohs(got.sin_port);
+    if (listen(fd, backlog) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 #endif /* TEST_NET_HELPERS_H */

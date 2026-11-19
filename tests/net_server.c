@@ -28,12 +28,10 @@
 #include <ws2tcpip.h>
 #define ts_poll(fds, n, ms) WSAPoll((fds), (ULONG)(n), (ms))
 #else
-#include <arpa/inet.h>
-#include <fcntl.h>
-#include <netinet/in.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <unistd.h>
+#include <fcntl.h>      /* ts_nonblock */
+#include <poll.h>       /* ts_poll */
+#include <sys/socket.h> /* accept, recv, send */
+#include <unistd.h>     /* close */
 #define ts_poll(fds, n, ms) poll((fds), (n), (ms))
 #endif
 
@@ -88,28 +86,11 @@ static void ts_nonblock(int fd)
 
 static int ts_bind(int *port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0) {
-        close(fd);
-        return -1;
-    }
-    struct sockaddr_in got;
-    socklen_t gl = sizeof(got);
-    if (getsockname(fd, (struct sockaddr *)&got, &gl) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(got.sin_port);
-    if (listen(fd, 4) < 0) {
-        close(fd);
-        return -1;
-    }
-    ts_nonblock(fd);
+    /* The shared bind (tests/test_net_helpers.h), backlog 8 per the
+     * house listen rule; the pump's own fds go nonblocking after. */
+    int fd = test_bind_loopback(8, port);
+    if (fd >= 0)
+        ts_nonblock(fd);
     return fd;
 }
 

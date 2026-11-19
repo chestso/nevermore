@@ -148,27 +148,12 @@ struct ServerScript
  * exception (see the tests' own comment). It serves the held round
  * while the ask-mode blocking pump sits in nm_agent_turn, which no
  * single thread can serve itself. */
+/* The shared bind (tests/test_net_helpers.h), the exception pair's
+ * own BLOCKING listener: their worker thread accepts on it while the
+ * ask-mode pump blocks in nm_agent_turn. */
 static int ag_thread_server_bind(int *port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    if (getsockname(fd, (struct sockaddr *)&a, &l) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(a.sin_port);
-    if (listen(fd, 8) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
+    return test_bind_loopback(8, port);
 }
 
 static void *ag_thread_server(void *arg)

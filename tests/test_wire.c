@@ -134,36 +134,15 @@ static void *verbatim_server_thread(void *arg)
     return NULL;
 }
 
-/* Bind an ephemeral port and listen; returns the listen fd. */
+/* Bind the canned server's listener. Backlog 8, not 1: a test may have
+ * TWO connections pending at once (nm_source_wait_any's set case dials
+ * a second one while the first is unaccepted), and a 1-deep queue is a
+ * platform truth, not a constant — Linux rounds the backlog up,
+ * macOS/BSD SILENTLY DROP the extra SYN (the connect hangs to the OS
+ * timeout) and Windows refuses it outright. */
 static int server_bind(int *port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    struct sockaddr_in got;
-    socklen_t gl = sizeof(got);
-    if (getsockname(fd, (struct sockaddr *)&got, &gl) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(got.sin_port);
-    /* Backlog 8, not 1: a test may have TWO connections pending at once
-     * (nm_source_wait_any's set case dials a second one while the first
-     * is unaccepted), and a 1-deep queue is a platform truth, not a
-     * constant — Linux rounds the backlog up, macOS/BSD SILENTLY DROP
-     * the extra SYN (the connect hangs to the OS timeout) and Windows
-     * refuses it outright.  test_agent/test_chat_app's helpers already
-     * carry the same number. */
-    if (listen(fd, 8) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
+    return test_bind_loopback(8, port);
 }
 
 /* ---------------------------------------------------------------- */

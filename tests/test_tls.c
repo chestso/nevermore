@@ -122,18 +122,8 @@ static void tls_resolve_fixtures(void)
 
 static int tls_server_start(void)
 {
-    tls_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(tls_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    getsockname(tls_listen_fd, (struct sockaddr *)&a, &l);
-    tls_port = ntohs(a.sin_port);
-    if (listen(tls_listen_fd, 1) < 0)
+    tls_listen_fd = test_bind_loopback(1, &tls_port);
+    if (tls_listen_fd < 0)
         return -1;
     tls_server_accepts = 0;
     tls_server_exchanges = 0;
@@ -468,23 +458,10 @@ static int closed_peer_port;
 
 static int closed_peer_start(void)
 {
-    closed_peer_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (closed_peer_listen_fd < 0)
-        return -1;
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(closed_peer_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    if (getsockname(closed_peer_listen_fd, (struct sockaddr *)&a, &l) < 0)
-        return -1;
-    closed_peer_port = ntohs(a.sin_port);
     /* backlog 8: macOS/BSD drop a second SYN while one is unaccepted
      * (CONTRIBUTING's listen trap). */
-    if (listen(closed_peer_listen_fd, 8) < 0)
+    closed_peer_listen_fd = test_bind_loopback(8, &closed_peer_port);
+    if (closed_peer_listen_fd < 0)
         return -1;
     return 0;
 }
@@ -1325,30 +1302,6 @@ static void test_tls_survives_a_closed_peer(void)
  * handshake ran inside one step before this change.
  */
 
-static int stub_server_bind(int *port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    struct sockaddr_in got;
-    socklen_t gl = sizeof(got);
-    if (getsockname(fd, (struct sockaddr *)&got, &gl) < 0) {
-        close(fd);
-        return -1;
-    }
-    *port = ntohs(got.sin_port);
-    if (listen(fd, 1) < 0) {
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
 static void *stub_server_thread(void *arg)
 {
     int listen_fd = *(int *)arg;
@@ -1397,7 +1350,7 @@ static void test_tls_handshake_on_loop_owned_socket(void)
     if (!nm_tls_backend())
         return; /* no backend compiled in: nothing to prove */
     int port = 0;
-    int listen_fd = stub_server_bind(&port);
+    int listen_fd = test_bind_loopback(1, &port);
     ASSERT_TRUE(listen_fd >= 0);
 
     pthread_t th;
@@ -1592,21 +1545,8 @@ static int silent_listen_fd = -1;
 
 static int silent_server_start(void)
 {
-    silent_listen_fd = socket(AF_INET, SOCK_STREAM, 0);
+    silent_listen_fd = test_bind_loopback(1, &silent_port);
     if (silent_listen_fd < 0)
-        return -1;
-    struct sockaddr_in a;
-    memset(&a, 0, sizeof(a));
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    a.sin_port = 0;
-    if (bind(silent_listen_fd, (struct sockaddr *)&a, sizeof(a)) < 0)
-        return -1;
-    socklen_t l = sizeof(a);
-    if (getsockname(silent_listen_fd, (struct sockaddr *)&a, &l) < 0)
-        return -1;
-    silent_port = ntohs(a.sin_port);
-    if (listen(silent_listen_fd, 1) < 0)
         return -1;
     return 0;
 }

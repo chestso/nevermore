@@ -213,7 +213,9 @@ prerequisite (skip).
   legitimate runtime (MSYS2 is slow).
 - **Accept loops are bounded** (unbounded `accept()` blocks `pthread_join`).
 - **Listen backlog is a platform trap:** Linux rounds it up, macOS/BSD drop a
-  second SYN while one is unaccepted, Windows refuses. Listen with backlog 8. A
+  second SYN while one is unaccepted, Windows refuses. Listen with backlog 8,
+  bound through `test_bind_loopback` (tests/test_net_helpers.h — the backlog
+  is the caller's argument, never a hidden constant). A
   client-closed connection is delivered from the backlog on Linux (EOF accept)
   but dropped on macOS/BSD, so skip 0-byte connections without consuming a
   script round.
