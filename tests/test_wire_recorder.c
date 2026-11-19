@@ -201,10 +201,17 @@ static void test_banner_and_redaction(void)
                                "\"C:\\\\Users\"}",
                                43),
               NM_TRANSPORT_OK);
-    /* One thread, both ends: the step SENDS, then the pump answers
-     * (the head pass, then the body pass) before the read pulls what
-     * landed (the SSE body is recorded by openai_client, not the raw
-     * transport — here the head line is the recorded artifact). */
+    /* One thread owns both ends, in the order the old accept-thread
+     * guaranteed: the peer's connection is ACCEPTED before the send
+     * (nm_ts_wait with no client fd waits on the listener alone - the
+     * dial's handshake completed, so it wakes at once, and the pump
+     * takes the connection), then the step SENDS onto a live socket
+     * pair, then two pump passes answer the head and the body and
+     * close - and the read pulls what landed (the SSE body is
+     * recorded by openai_client, not the raw transport - here the
+     * head line is the recorded artifact). */
+    nm_ts_wait(s, -1, 0, 5000);
+    nm_ts_pump(s);
     ASSERT_EQ(nm_connection_step(c), NM_TRANSPORT_OK);
     nm_ts_pump(s);
     nm_ts_pump(s);
@@ -283,8 +290,11 @@ static void test_response_headers_and_trailers_recorded(void)
     ASSERT_EQ(nm_request_queue(c, "POST", "/v1/chat/completions", NULL, 0,
                                NULL, 0),
               NM_TRANSPORT_OK);
-    /* Both ends in one thread: the step sends, the two pump passes
-     * answer the whole reply and close, the drain pulls it. */
+    /* Both ends in one thread, accepted-before-sent like the banner
+     * test above: the pump takes the connection, the step sends, two
+     * pump passes answer head and body and close, the drain pulls it. */
+    nm_ts_wait(s, -1, 0, 5000);
+    nm_ts_pump(s);
     ASSERT_EQ(nm_connection_step(c), NM_TRANSPORT_OK);
     nm_ts_pump(s);
     nm_ts_pump(s);
