@@ -138,7 +138,7 @@ jobs:
           # posts its own prose that way. The app's shell mode is what
           # wants the terminal reading.
           # A floating master would let boba churn break this repo's CI
-          # mid-work. v0.11.2 is the boba release that carries all of the
+          # mid-work. v0.11.3 is the boba release that carries all of the
           # above, the byte path the shell stream relies on (a character
           # cut across two messages is completed, not mangled, and the
           # transcript closes every committed write at default, so a
@@ -164,10 +164,12 @@ jobs:
           # PROBES for the API — a pin behind this fails every job there,
           # with the fix named — and `TUI_STREAM_TERMINAL` and
           # `tui_runtime_input_timeout_ms` are the names it asks for. A tag
-          # and not a SHA, so `git describe` reads v0.11.2 off the
+          # and not a SHA, so `git describe` reads v0.11.3 off the
           # checkout and the packaged binaries print exactly the version
-          # the mac/windows asserts compare against.
-          ref: v0.11.2
+          # the mac/windows asserts compare against. v0.11.3 also inserts
+          # a bracketed paste in one edit instead of one per cluster, so a
+          # long multiline prompt paste lands without hanging the UI.
+          ref: v0.11.3
           path: boba
           fetch-depth: 0
 
