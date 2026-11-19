@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 387 models.
+/* openrouter: 388 models.
  * Source: GET https://openrouter.ai/api/v1/models?limit=1000
  */
 static const NmModel nm_catalog_openrouter[] = {
@@ -99,6 +99,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "google/gemini-4-argon", "Google: Gemini 4 Argon", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-4-carbon", "Google: Gemini 4 Carbon", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-4-hydrogen", "Google: Gemini 4 Hydrogen", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
+    { "google/gemini-4-neon", "Google: Gemini 4 Neon", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "google/gemini-nano-banana-2.1", "Google: Nano Banana 2.1", 1, 1, 65536, 1, "none|minimal|low|medium|high|xhigh|max", "minimal" },
     { "google/gemini-omni-1.1-flash", "Google: Gemini Omni 1.1 Flash", 1, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", "low" },
     { "google/gemini-omni-1.2-flash", "Google: Gemini Omni 1.2 Flash", 1, 0, 131072, -1, "none|minimal|low|medium|high|xhigh|max", "low" },
@@ -439,7 +440,7 @@ static const NmModel nm_catalog_ollama[] = {
     { 0 }
 };
 
-/* opencode-go: 32 models.
+/* opencode-go: 31 models.
  * Source: https://models.opencode.ai/api.json (entry opencode-go, sibling opencode) x GET https://opencode.ai/zen/go/v1/models
  */
 static const NmModel nm_catalog_opencode_go[] = {
@@ -448,7 +449,6 @@ static const NmModel nm_catalog_opencode_go[] = {
     { "deepseek-v4-pro", "DeepSeek V4 Pro", 0, 0, 1000000, 1, "high|max", NULL },
     { "deepseek-v4.1-flash", "DeepSeek V4.1 Flash 1017", 1, 0, 1000000, 1, "low|high|max", NULL },
     { "gemini-4-argon", "Gemini 4 Argon", 1, 0, 1048576, 1, "low|medium|high", NULL },
-    { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1, "high|max", NULL },
     { "glm-5.3", "GLM-5.3", 0, 0, 1000000, 1, "low|high|max", NULL },
     { "glm-5.3-flash", "GLM-5.3-Flash", 1, 0, 1000000, 1, "low|high|max", NULL },
     { "gpt-5.6-luna", "GPT-5.6 Luna", 1, 0, 1050000, 1, "none|low|medium|high|xhigh|max", NULL },
@@ -478,7 +478,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { 0 }
 };
 
-/* opencode-zen: 87 models.
+/* opencode-zen: 84 models.
  * Source: https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models
  */
 static const NmModel nm_catalog_opencode_zen[] = {
@@ -511,9 +511,7 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "gemini-4-argon", "Gemini 4 Argon", 1, 0, 1048576, 1, "low|medium|high", NULL },
     { "gemini-4-carbon", "Gemini 4 Carbon", 1, 0, 1048576, 1, "low|medium|high", NULL },
     { "gemini-4-hydrogen", "Gemini 4 Hydrogen", 1, 0, 1048576, 1, "low|medium|high|xhigh", NULL },
-    { "glm-5", "GLM-5", 0, 0, 204800, 1, NULL, NULL },
-    { "glm-5.1", "GLM-5.1", 0, 0, 204800, 1, NULL, NULL },
-    { "glm-5.2", "GLM-5.2", 0, 0, 1000000, 1, "high|max", NULL },
+    { "gemini-4-neon", "Gemini 4 Neon", 1, 0, 1048576, 1, "low|medium|high|xhigh", NULL },
     { "glm-5.3", "GLM-5.3", 0, 0, 1000000, 1, "low|high|max", NULL },
     { "glm-5.3-flash", "GLM-5.3-Flash", 1, 0, 1000000, 1, "low|high|max", NULL },
     { "gpt-5", "GPT-5", 1, 0, 400000, 1, "minimal|low|medium|high", NULL },
@@ -549,8 +547,6 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "hy4-flash-free", "Hy4 flash Free", 1, 0, 1048576, 1, "none|high", NULL },
     { "iceman-free", "Iceman Free", 0, 0, 262144, 1, NULL, NULL },
     { "inkling-2-small-free", "Inkling 2 Small Free", 1, 0, 1048576, 1, "none|minimal|low|medium|high|max", NULL },
-    { "kimi-k2.5", "Kimi K2.5", 1, 0, 262144, 1, NULL, NULL },
-    { "kimi-k2.6", "Kimi K2.6", 1, 0, 262144, 1, NULL, NULL },
     { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 262144, 1, NULL, NULL },
     { "kimi-k3", "Kimi K3", 1, 0, 1048576, 1, "low|high|max", NULL },
     { "longcat-2.5-free", "LongCat 2.5 Free", 1, 0, 1000000, 1, NULL, NULL },
@@ -569,6 +565,7 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "qwen3.6-plus", "Qwen3.6 Plus", 1, 0, 262144, 1, NULL, NULL },
     { "qwen3.8-flash", "Qwen3.8 Flash", 1, 0, 1000000, 1, "low|medium|xhigh", NULL },
     { "qwen3.8-max", "Qwen3.8 Max", 1, 0, 262144, 1, "low|medium|xhigh", NULL },
+    { "tidepool-alpha-free", "Tidepool Alpha Free", 0, 0, 1048576, 1, "minimal|low|medium|high|xhigh|max", NULL },
     { 0 }
 };
 
