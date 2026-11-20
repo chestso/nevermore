@@ -172,6 +172,12 @@ prerequisite (skip).
   make the gap:** a reply already in the socket reports READY, not FETCHING, so
   hold it ~200 ms. An ASan client against an uninstrumented server thread
   inverts the race.
+- **A pump's `send` is not the peer's readability.** A loopback send is queued,
+  not instantly visible to the peer's `recv`: a case that reads immediately
+  after `nm_ts_pump` can see `NM_READ_WOULD_BLOCK` with the reply already
+  written (deterministic on Linux, a timing accident on Windows). Treating that
+  as EOF loses the body. Wait on the interest the transport declared
+  (`nm_ts_wait`) and read again; only `0`/`-1` ends the body.
 - **Stall loops must drain-recv.** A closed peer is readable (EOF), so a
   select-only loop hot-spins. Poll with a timeout plus `recv`, and `n <= 0`
   means the peer is gone.
