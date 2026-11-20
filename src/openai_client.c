@@ -1454,7 +1454,11 @@ NmChatStream *nm_openai_chat_begin(const NmOpenaiEndpoint *ep,
                                             hs.n, body, strlen(body));
     request_headers_free(&hs);
     free(body);
-    if (rs != NM_TRANSPORT_OK) {
+    /* PENDING is progress, not failure: a connected socket's request is
+     * drained by the queue itself, so this can only come back when the
+     * send buffer had no room (a real event to wait for) or a stale
+     * reuse redialled — the stream's steps drive both. */
+    if (rs != NM_TRANSPORT_OK && rs != NM_TRANSPORT_PENDING) {
         if (err) {
             err->status = NM_CHAT_ERR_TRANSPORT;
             snprintf(err->message, sizeof(err->message),
@@ -1969,7 +1973,9 @@ static NmFetchStream *fetch_begin_common(const char *base_url,
     NmTransportStatus rs =
         nm_request_queue(conn, method, path, hs.hdrs, hs.n, body, body_len);
     request_headers_free(&hs);
-    if (rs != NM_TRANSPORT_OK) {
+    /* PENDING is progress (a full send buffer, or a redial in flight):
+     * nm_fetch_step drives it, like the connect/send phases. */
+    if (rs != NM_TRANSPORT_OK && rs != NM_TRANSPORT_PENDING) {
         nm_connection_release(conn);
         for (size_t i = 0; i < f->n_keep; i++)
             free(f->keep[i]);

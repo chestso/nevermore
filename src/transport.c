@@ -889,6 +889,25 @@ NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
     conn->xchg++;
     nm_wire_tap_request(conn, method, path, headers, n_headers, body,
                         body_len);
+    /* A CONNECTED socket is fed here, never by a readiness event. A
+     * queue that leaves `SENDING` with the request still unsent tells
+     * the loop to wait for writability — and on Windows that wait can
+     * never end: WSAEventSelect's FD_WRITE is EDGE-triggered (the
+     * socket's FIRST connect, or a send that hit WSAEWOULDBLOCK and
+     * later succeeded), so a pooled socket that connected rounds ago
+     * signals nothing, and nothing was sent so FD_READ cannot fire
+     * either. The round then sat until its inactivity deadline aborted
+     * it (`no response for 10000 ms`) — the first request after every
+     * tool phase, i.e. the first one on a reused connection. POSIX's
+     * level-triggered poll masked it: a writable socket is ready at
+     * once. The blocking drive has always worked this way
+     * (nm_socket_request_send is queue + drain); this is the same rule
+     * for the step drive, so `PENDING` from here means exactly what it
+     * means elsewhere: a real would-block (room is a genuine event), or
+     * a stale-reuse redial in flight. A fresh dial is not drained: its
+     * phase is CONNECTING/HANDSHAKE and the step machine owns it. */
+    if (conn->phase == NM_CONN_SENDING)
+        st = nm_connection_step(conn);
     return st;
 }
 

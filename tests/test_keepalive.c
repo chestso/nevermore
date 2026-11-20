@@ -227,6 +227,64 @@ static void test_reuse_records_one_conn_and_rising_xchg(void)
     ka_stop(s);
 }
 
+static void test_connected_queue_drains_before_the_wait(void)
+{
+    /* The invariant the step drives ride: a queue on a CONNECTED (here:
+     * pooled) socket puts the request ON THE WIRE in the same call, so
+     * the loop is asked for the RESPONSE (READ) and never for
+     * writability. WinSock's FD_WRITE is edge-triggered — the socket's
+     * first connect, or a send that hit WSAEWOULDBLOCK and later
+     * succeeded — so an already-connected pooled socket signals nothing:
+     * a request left queued-unsent there stalls the round to its
+     * inactivity deadline (`no response for 10000 ms`), which is what
+     * every tool round's second request did. POSIX's level-triggered
+     * poll masked it, and so would a select-based test that stepped
+     * after the queue; this asserts the transport fact itself. */
+    static const NmTsRound rs[] = { { .reply = RESP_200_CL } };
+    NmTsServer *s = ka_start(rs, 1);
+    ASSERT_NOT_NULL(s);
+
+    char base[64];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d/v1", nm_ts_port(s));
+    keepalive_on();
+
+    /* Exchange 1: dials, completes, and goes back to the pool. */
+    ASSERT_EQ(fetch_run(s, base, "/models"), 0);
+    ASSERT_EQ(nm_ts_accepts(s), 1);
+
+    /* Exchange 2 straight from the pool: acquire, queue, and read the
+     * connection BEFORE any step. */
+    NmConnectInfo ci;
+    NmConnection *c = nm_connection_acquire("127.0.0.1", nm_ts_port(s),
+                                            NM_TRANSPORT_PLAIN, &ci);
+    ASSERT_NOT_NULL(c);
+    ASSERT_EQ(nm_request_queue(c, "GET", "/models", NULL, 0, NULL, 0),
+              NM_TRANSPORT_OK);
+    NmSource src = nm_connection_interest(c);
+    ASSERT_EQ(src.handle, (intptr_t)nm_connection_fd(c));
+    ASSERT_EQ(src.flags, NM_INTEREST_READ); /* the send drained in the queue */
+    ASSERT_EQ(nm_ts_accepts(s), 1);         /* and no redial was needed */
+
+    /* The server finds those bytes without another client step, and the
+     * response drains on the declared READ interest alone. */
+    nm_ts_pump(s);
+    ASSERT_EQ(nm_ts_requests(s), 2);
+    nm_ts_pump(s); /* the reply; no client step drove either pass */
+    char buf[64];
+    size_t got = 0;
+    for (;;) {
+        long n = nm_read_body(c, buf, sizeof(buf));
+        if (n <= 0)
+            break;
+        got += (size_t)n;
+    }
+    ASSERT_EQ(got, 2);
+
+    nm_connection_release(c); /* shelves the reusable one */
+    keepalive_off();
+    ka_stop(s);
+}
+
 static void test_peer_close_is_never_reused(void)
 {
     /* The response says close: the verdict forbids, the release
@@ -537,6 +595,7 @@ int main(void)
     RUN_TEST(test_keepalive_pin_is_set);
     RUN_TEST(test_reuse_across_two_fetches);
     RUN_TEST(test_reuse_records_one_conn_and_rising_xchg);
+    RUN_TEST(test_connected_queue_drains_before_the_wait);
     RUN_TEST(test_peer_close_is_never_reused);
     RUN_TEST(test_http10_without_keepalive_is_never_reused);
     RUN_TEST(test_midstream_drop_is_never_reused);

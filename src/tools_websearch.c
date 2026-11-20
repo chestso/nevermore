@@ -702,7 +702,9 @@ static NmToolExec *ws_begin(const NmTool *tool, const char *args_json,
     NmTransportStatus ts =
         nm_request_queue(e->conn, "GET", path, NULL, 0, NULL, 0);
     free(url); /* the borrowed path was copied into the request buffer */
-    if (ts != NM_TRANSPORT_OK) {
+    /* PENDING is progress: the send buffer had no room, or a stale reuse
+     * redialled. ws_step drives both, and its deadline bounds the tail. */
+    if (ts != NM_TRANSPORT_OK && ts != NM_TRANSPORT_PENDING) {
         ws_fail(e, "web_search: could not queue the SearXNG request");
         return e;
     }

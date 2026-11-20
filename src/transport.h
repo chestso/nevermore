@@ -364,11 +364,22 @@ NmTransportStatus nm_connection_step(NmConnection *conn);
  * ready (or when nm_connection_wait_ms says the deadline is due). */
 #define NM_TRANSPORT_PENDING 100
 
-/* Queue a request on the connection WITHOUT sending: serialize
- * into the owned request buffer (grown geometrically, reused across
- * requests) and flip the phase to SENDING. The request is drained
- * by nm_connection_step() — one implementation, two drives: the
- * blocking nm_request() pumps the same drain. */
+/* Queue a request on the connection: serialize into the owned request
+ * buffer (grown geometrically, reused across requests), then SEND when
+ * the socket is already connected. Returns OK once the bytes are on the
+ * wire (the response head is NOT read: nm_read_body() steps pull it),
+ * PENDING when the send buffer had no room or a stale-reuse redial is
+ * dialling (`nm_connection_step` drives both), or an ERR_* with the
+ * reason on the connection.
+ *
+ * The drain belongs here because a queued-but-unsent request is a wait
+ * no readiness model owes the loop: POSIX's level-triggered poll sees a
+ * writable socket at once, and WinSock's FD_WRITE is EDGE-triggered (the
+ * first connect, or a send that hit WSAEWOULDBLOCK and later succeeded),
+ * so an already-connected pooled socket signals nothing at all. One
+ * implementation, two drives: the blocking nm_request() pumps the same
+ * drain. A connection still CONNECTING/HANDSHAKE is NOT drained here —
+ * the phase machine owns that order. */
 NmTransportStatus nm_request_queue(NmConnection *conn, const char *method,
                                    const char *path,
                                    const NmRequestHeader *headers,
