@@ -458,6 +458,26 @@ AGENTS.md has the rest of the release rules.
 
 ## Cross-platform lessons
 
+- **A readiness event is not a level fact.** POSIX's `poll` answers "writable
+  now" every time it is asked; WinSock's `FD_WRITE` is edge-triggered (the
+  socket's first connect, or a send that hit `WSAEWOULDBLOCK` and a later send
+  succeeded) and `FD_READ` is recorded on arrival, so both are answers to
+  *transitions*. MEASURED on this box (boba's `tests/test_runtime.c`, the two
+  Windows socket-source cases): associating an already-connected socket with
+  `FD_WRITE` does record the event then, and a READ recorded under a retired
+  slot's event survives re-association — so boba's rebind answers a declared
+  interest. Do not lean on that: the app must still not leave work that a step
+  could do now (a queued request) waiting for the loop. `nm_request_queue`
+  drains a connected socket for exactly this reason.
+- **The symptom shape.** A stalled round that a *timeout* ends
+  (`timed out: no response for 10000 ms`) and that a fresh dial clears
+  afterwards is a wakeup problem, not a peer problem: the first round of a turn
+  dials (its connect completion is a real event) and every later round rides the
+  pool. Fastest attribution: `keepalive = off` in the shadow config (each round
+  then dials) — if the stalls vanish, look at the pooled path before the
+  provider. `NEVERMORE_DEBUG_WIRE=1` says whether the request anchor is the last
+  line of the round.
+
 - **Never hand-edit `Makefile.in` or trust a stale `build/`.** CI checkouts are
   fresh. After `.am` changes run `autoreconf -i` in the source tree and re-run
   `../configure` in `build/`. A stale source file in the build dir also shadows

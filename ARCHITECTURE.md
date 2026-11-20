@@ -391,6 +391,19 @@ permanent at the end of a turn (FD_CLOSE is consumed once); POSIX's
 level-triggered poll only masks it. The one PENDING whose wakeup is not the fd
 is the post-`[DONE]` tail below.
 
+**A queued request is on the wire before the loop is asked to wait.** `PENDING`
+from `nm_request_queue` means a real would-block (room is a genuine event) or a
+stale-reuse redial in flight, never "the request is still in the buffer". A
+queue that leaves `SENDING` with nothing sent is a wait no readiness model owes
+the loop — POSIX's level-triggered poll happens to answer it, and Windows'
+`WSAEventSelect` happens to answer a *declared* interest at association
+(measured: FD_WRITE on a connected socket, FD_READ for bytes that arrived under
+a retired slot's event) — but the request itself can arrive before the loop's
+next binding, and there is no reason to spend a round trip on the question. The
+blocking drive has always worked this way (`nm_socket_request_send` is queue +
+drain); this is the same rule for the step drive, which is what makes the pool's
+`acquire + queue` sequence leave `READING` behind it.
+
 **Provider response metadata is a per-round fact** with its own seam
 (`NmRoundMeta` in `NmChatResult.meta`): the upstream that served
 the round and the tier it was billed at (OpenRouter's chunk-level `provider`
