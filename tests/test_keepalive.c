@@ -266,14 +266,27 @@ static void test_connected_queue_drains_before_the_wait(void)
     ASSERT_EQ(nm_ts_accepts(s), 1);         /* and no redial was needed */
 
     /* The server finds those bytes without another client step, and the
-     * response drains on the declared READ interest alone. */
+     * response drains on the declared READ interest alone. A read that
+     * arrives before the reply byte is a WOULD_BLOCK, not the end of the
+     * body: the loop waits on the ONE interest the queue declared and
+     * reads again (the shape every production drive has). */
     nm_ts_pump(s);
     ASSERT_EQ(nm_ts_requests(s), 2);
-    nm_ts_pump(s); /* the reply; no client step drove either pass */
+    nm_ts_pump(s); /* the reply's head, then its body, one piece per pass */
     char buf[64];
     size_t got = 0;
     for (;;) {
         long n = nm_read_body(c, buf, sizeof(buf));
+        if (n == NM_READ_WOULD_BLOCK) {
+            NmSource i = nm_connection_interest(c);
+            ASSERT_EQ(i.flags, NM_INTEREST_READ);
+            if (nm_ts_wait(s, i.handle, i.flags, 5000) == 0) {
+                fprintf(stderr, "  (queue case stalled: no reply byte "
+                                "for 5 s)\n");
+                break;
+            }
+            continue;
+        }
         if (n <= 0)
             break;
         got += (size_t)n;
