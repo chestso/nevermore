@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 388 models.
+/* openrouter: 384 models.
  * Source: GET https://openrouter.ai/api/v1/models?limit=1000
  */
 static const NmModel nm_catalog_openrouter[] = {
@@ -58,7 +58,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "cohere/command-r-08-2024", "Cohere: Command R (08-2024)", 0, 0, 128000, 1, NULL, NULL },
     { "cohere/command-r-plus-08-2024", "Cohere: Command R+ (08-2024)", 0, 0, 128000, 1, NULL, NULL },
     { "cohere/command-r7b-12-2024", "Cohere: Command R7B (12-2024)", 0, 0, 128000, 1, NULL, NULL },
-    { "cohere/north-mini-code:free", "Cohere: North Mini Code (free)", 0, 0, 256000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "deepseek/deepseek-chat", "DeepSeek: DeepSeek V3", 0, 0, 163840, 1, NULL, NULL },
     { "deepseek/deepseek-chat-v3-0324", "DeepSeek: DeepSeek V3 0324", 0, 0, 163840, 1, NULL, NULL },
     { "deepseek/deepseek-chat-v3.1", "DeepSeek: DeepSeek V3.1", 0, 0, 163840, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -73,7 +72,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "deepseek/deepseek-v4-pro-0813", "DeepSeek: DeepSeek V4 Pro 0813", 0, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "deepseek/deepseek-v4.1-flash", "DeepSeek: DeepSeek V4.1 Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "deepseek/deepseek-v4.1-flash-1017", "DeepSeek: DeepSeek V4.1 Flash 1017", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "dots-studio/dots-3-note-preview:free", "Dots Studio: Dots3-Note Preview (free)", 1, 0, 512000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "elorian/glimpse", "Elorian: Glimpse", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "fireworks/ember-1", "Fireworks: Ember-1", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "max" },
     { "google/gemini-2.5-flash", "Google: Gemini 2.5 Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -127,10 +125,8 @@ static const NmModel nm_catalog_openrouter[] = {
     { "liquid/lfm-3-1.7b", "LiquidAI: LFM3-1.7B", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "liquid/lfm-3-1.7b:free", "LiquidAI: LFM3-1.7B (free)", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "mancer/weaver", "Mancer: Weaver (alpha)", 0, 0, 8000, -1, NULL, NULL },
-    { "meituan/longcat-2.0", "Meituan: LongCat 2.0", 0, 0, 1048756, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "meta-llama/llama-3.1-70b-instruct", "Meta: Llama 3.1 70B Instruct", 0, 0, 131072, 1, NULL, NULL },
     { "meta-llama/llama-3.1-8b-instruct", "Meta: Llama 3.1 8B Instruct", 0, 0, 131072, 1, NULL, NULL },
-    { "meta-llama/llama-3.2-1b-instruct", "Meta: Llama 3.2 1B Instruct", 0, 0, 60000, -1, NULL, NULL },
     { "meta-llama/llama-3.2-3b-instruct", "Meta: Llama 3.2 3B Instruct", 0, 0, 131072, -1, NULL, NULL },
     { "meta-llama/llama-3.3-70b-instruct", "Meta: Llama 3.3 70B Instruct", 0, 0, 131072, 1, NULL, NULL },
     { "meta-llama/llama-4-maverick", "Meta: Llama 4 Maverick", 1, 0, 524288, 1, NULL, NULL },
@@ -169,6 +165,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "mistralai/mistral-small-3.1-24b-instruct", "Mistral: Mistral Small 3.1 24B", 1, 0, 128000, 1, NULL, NULL },
     { "mistralai/mistral-small-3.2-24b-instruct", "Mistral: Mistral Small 3.2 24B", 1, 0, 256000, 1, NULL, NULL },
     { "mistralai/mixtral-8x22b-instruct", "Mistral: Mixtral 8x22B Instruct", 0, 0, 65536, 1, NULL, NULL },
+    { "mistralai/pixtral-large-2502", "Mistral: Pixtral Large 2502", 1, 0, 128000, -1, NULL, NULL },
     { "mistralai/voxtral-small-24b-2507", "Mistral: Voxtral Small 24B 2507", 0, 0, 32768, 1, NULL, NULL },
     { "moondream/moondream3-preview", "Moondream: Moondream 3 Preview", 1, 0, 32000, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "moondream/moondream3.1-9b-a2b", "Moondream: Moondream 3.1", 1, 0, 32000, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -318,6 +315,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "qwen/qwen3.8-max-prime", "Qwen: Qwen3.8 Max Prime", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "xhigh" },
     { "qwen/qwen3.8-omni-flash", "Qwen: Qwen3.8 Omni Flash", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "qwen/qwen4-max", "Qwen: Qwen4 Max", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "radixark/daisyrose-27b", "RadixArk: DaisyRose 27B", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "xhigh" },
     { "recursive/flint-v1.0:free", "Recursive: Flint (free)", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "reflection/beam-1.0-501b-a23b", "Reflection: Beam 1.0 501B A23B", 0, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "max" },
     { "rekaai/reka-edge", "Reka Edge", 1, 0, 16384, 1, NULL, NULL },
@@ -339,7 +337,6 @@ static const NmModel nm_catalog_openrouter[] = {
     { "tencent/hy-mt2-30b-a3b", "Tencent: Hy-MT2-30B-A3B", 0, 0, 8192, -1, NULL, NULL },
     { "tencent/hy-mt2-7b", "Tencent: Hy-MT2-7B", 0, 0, 8192, -1, NULL, NULL },
     { "tencent/hy3", "Tencent: Hy3", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "tencent/hy3-preview", "Tencent: Hy3 preview", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "tencent/hy4", "Tencent: Hy4", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "tencent/hy4-flash", "Tencent: Hy4 flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "tencent/hy4-preview", "Tencent: Hy4 preview", 0, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
@@ -347,8 +344,8 @@ static const NmModel nm_catalog_openrouter[] = {
     { "thedrummer/skyfall-36b-v2", "TheDrummer: Skyfall 36B V2", 0, 0, 32768, -1, NULL, NULL },
     { "thedrummer/unslopnemo-12b", "TheDrummer: UnslopNemo 12B", 0, 0, 1024000, -1, NULL, NULL },
     { "thinkingmachines/inkling", "Thinking Machines: Inkling", 1, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "thinkingmachines/inkling-2-mini", "Thinking Machines: Inkling 2 Mini", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "thinkingmachines/inkling-2-small", "Thinking Machines: Inkling 2 Small", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "thinkingmachines/inkling-2-small:free", "Thinking Machines: Inkling 2 Small (free)", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "thinkingmachines/inkling-small", "Thinking Machines: Inkling Small", 1, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "typesafe/jev-router", "TypeSafe: Jev Router", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "unbiased/pareto-26.10", "Pareto 26.10", 1, 0, 1048576, 1, NULL, NULL },
@@ -358,17 +355,16 @@ static const NmModel nm_catalog_openrouter[] = {
     { "upstage/solar-mini4", "Upstage: Solar Mini 4", 0, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "upstage/solar-pro4", "Upstage: Solar Pro 4", 0, 0, 524288, 1, "none|minimal|low|medium|high|xhigh|max", "medium" },
     { "writer/palmyra-x5", "Writer: Palmyra X5", 0, 0, 1040000, -1, NULL, NULL },
-    { "x-ai/grok-4.20", "SpaceXAI: Grok 4.20", 1, 0, 2000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "x-ai/grok-4.20-multi-agent", "SpaceXAI: Grok 4.20 Multi-Agent", 1, 0, 2000000, -1, "none|minimal|low|medium|high|xhigh|max", "medium" },
-    { "x-ai/grok-4.3", "SpaceXAI: Grok 4.3", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "low" },
-    { "x-ai/grok-4.5", "SpaceXAI: Grok 4.5", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "x-ai/grok-4.6", "SpaceXAI: Grok 4.6", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "x-ai/grok-4.7", "SpaceXAI: Grok 4.7", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
-    { "x-ai/grok-build-0.1", "SpaceXAI: Grok Build 0.1", 1, 0, 256000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "x-ai/grok-4.20", "SpaceXSI: Grok 4.20", 1, 0, 2000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "x-ai/grok-4.20-multi-agent", "SpaceXSI: Grok 4.20 Multi-Agent", 1, 0, 2000000, -1, "none|minimal|low|medium|high|xhigh|max", "medium" },
+    { "x-ai/grok-4.3", "SpaceXSI: Grok 4.3", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", "low" },
+    { "x-ai/grok-4.5", "SpaceXSI: Grok 4.5", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "x-ai/grok-4.6", "SpaceXSI: Grok 4.6", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
+    { "x-ai/grok-4.7", "SpaceXSI: Grok 4.7", 1, 0, 500000, 1, "none|minimal|low|medium|high|xhigh|max", "high" },
     { "xiaomi/mimo-v2.5", "Xiaomi: MiMo-V2.5", 1, 0, 1000000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "xiaomi/mimo-v2.5-pro", "Xiaomi: MiMo-V2.5-Pro", 0, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "xiaomi/mimo-v2.6-flash", "Xiaomi: MiMo-V2.6-Flash", 1, 0, 1050000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "xiaomi/mimo-v2.6-pro", "Xiaomi: MiMo-V2.6-Pro", 1, 0, 1050000, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "xiaomi/mimo-v2.6-flash", "Xiaomi: MiMo-V2.6-Flash", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "xiaomi/mimo-v2.6-pro", "Xiaomi: MiMo-V2.6-Pro", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "xiaomi/mimo-v2.6-pro-ultraspeed", "Xiaomi: MiMo-V2.6-Pro-UltraSpeed", 1, 0, 1048576, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5", "Z.ai: GLM 4.5", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5-air", "Z.ai: GLM 4.5 Air", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -409,7 +405,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { 0 }
 };
 
-/* ollama: 24 models.
+/* ollama: 25 models.
  * Source: GET https://ollama.com/v1/models?verbose=true
  */
 static const NmModel nm_catalog_ollama[] = {
@@ -424,6 +420,7 @@ static const NmModel nm_catalog_ollama[] = {
     { "glm-5.3-flash", "glm-5.3-flash", 1, 0, 1048576, 0, "low|high|max", "max" },
     { "gpt-oss:120b", "gpt-oss:120b", 0, 0, 131072, 0, "low|medium|high", "medium" },
     { "gpt-oss:20b", "gpt-oss:20b", 0, 0, 131072, 0, "low|medium|high", "medium" },
+    { "hy4", "hy4", 1, 0, 1048576, 0, "none|medium", "medium" },
     { "inkling-2-small", "inkling-2-small", 1, 0, 1048576, 0, "none|low|medium|high|max", "high" },
     { "kimi-k2.6", "kimi-k2.6", 1, 0, 262144, 0, "none|medium", "medium" },
     { "kimi-k2.7-code", "kimi-k2.7-code", 1, 0, 262144, 0, "none|medium", "medium" },
@@ -478,7 +475,7 @@ static const NmModel nm_catalog_opencode_go[] = {
     { 0 }
 };
 
-/* opencode-zen: 84 models.
+/* opencode-zen: 83 models.
  * Source: https://models.opencode.ai/api.json (entry opencode, sibling opencode-go) x GET https://opencode.ai/zen/v1/models
  */
 static const NmModel nm_catalog_opencode_zen[] = {
@@ -546,7 +543,6 @@ static const NmModel nm_catalog_opencode_zen[] = {
     { "grok-build-0.1", "Grok Build 0.1", 1, 0, 256000, 1, NULL, NULL },
     { "hy4-flash-free", "Hy4 flash Free", 1, 0, 1048576, 1, "none|high", NULL },
     { "iceman-free", "Iceman Free", 0, 0, 262144, 1, NULL, NULL },
-    { "inkling-2-small-free", "Inkling 2 Small Free", 1, 0, 1048576, 1, "none|minimal|low|medium|high|max", NULL },
     { "kimi-k2.7-code", "Kimi K2.7 Code", 1, 0, 262144, 1, NULL, NULL },
     { "kimi-k3", "Kimi K3", 1, 0, 1048576, 1, "low|high|max", NULL },
     { "longcat-2.5-free", "LongCat 2.5 Free", 1, 0, 1000000, 1, NULL, NULL },
