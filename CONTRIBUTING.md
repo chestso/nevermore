@@ -468,14 +468,14 @@ AGENTS.md has the rest of the release rules.
   now" every time it is asked; WinSock's `FD_WRITE` is edge-triggered (the
   socket's first connect, or a send that hit `WSAEWOULDBLOCK` and a later send
   succeeded) and `FD_READ` is recorded on arrival, so both are answers to
-  *transitions*. MEASURED on this box (boba's `tests/test_runtime.c`, the two
+  _transitions_. MEASURED on this box (boba's `tests/test_runtime.c`, the two
   Windows socket-source cases): associating an already-connected socket with
   `FD_WRITE` does record the event then, and a READ recorded under a retired
   slot's event survives re-association — so boba's rebind answers a declared
   interest. Do not lean on that: the app must still not leave work that a step
   could do now (a queued request) waiting for the loop. `nm_request_queue`
   drains a connected socket for exactly this reason.
-- **The symptom shape.** A stalled round that a *timeout* ends
+- **The symptom shape.** A stalled round that a _timeout_ ends
   (`timed out: no response for 10000 ms`) and that a fresh dial clears
   afterwards is a wakeup problem, not a peer problem: the first round of a turn
   dials (its connect completion is a real event) and every later round rides the

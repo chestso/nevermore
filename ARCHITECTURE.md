@@ -396,7 +396,7 @@ from `nm_request_queue` means a real would-block (room is a genuine event) or a
 stale-reuse redial in flight, never "the request is still in the buffer". A
 queue that leaves `SENDING` with nothing sent is a wait no readiness model owes
 the loop — POSIX's level-triggered poll happens to answer it, and Windows'
-`WSAEventSelect` happens to answer a *declared* interest at association
+`WSAEventSelect` happens to answer a _declared_ interest at association
 (measured: FD_WRITE on a connected socket, FD_READ for bytes that arrived under
 a retired slot's event) — but the request itself can arrive before the loop's
 next binding, and there is no reason to spend a round trip on the question. The
@@ -1094,11 +1094,11 @@ Two halves, one sniffer.
   frame the spinner hands over), then the gauge fields (counts, output count,
   cache rate; one segment each so each carries its own color:
   `nm_color_gauge_output` for the output, the tier's color for counts and rate),
-  then the reasoning effort, always (a diamond + a clipped token, left and
+  then the reasoning effort, always (a star + a clipped token, left and
   fixed like the gauge; the token is the effective effort — the set level,
   else the catalog default, else `-` — and provenance rides the mark and
-  its color: filled `◆` in the identity's Foreground when `/effort` set
-  it, hollow `◇` in the gauge's Comment when it is the model's default),
+  its color: filled `✦` in the identity's Foreground when `/effort` set
+  it, hollow `✧` in the gauge's Comment when it is the model's default),
   all left and fixed chrome that is never cut; then up to three **credit cells**
   (see below); then a `─` fill (priority 1) and the right-aligned identity
   (priority 2). The ladder is a declaration, not app arithmetic: the identity

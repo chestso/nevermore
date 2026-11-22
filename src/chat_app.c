@@ -4444,14 +4444,14 @@ static void effort_command(NmChatApp *app, const char *arg)
                 sys_line(app, "  (default: %s)", def);
         }
         /* The row spelling the status bar carries, with its
-         * provenance spelled out: ◆ when /effort set it, ◇ when it
+         * provenance spelled out: ✦ when /effort set it, ✧ when it
          * is the model's default (or `-` when neither names one). */
         int is_set;
         const char *effective = effort_effective(app->agent, &is_set);
         {
             char row_text[32];
             snprintf(row_text, sizeof(row_text), "%s%s ",
-                     is_set ? "\xe2\x97\x86" : "\xe2\x97\x87",
+                     is_set ? "\xe2\x9c\xa6" : "\xe2\x9c\xa7",
                      (effective && *effective) ? effort_row_token(effective)
                                                : "-");
             sys_line(app, "  row: %s(%s)", row_text,
@@ -5786,22 +5786,22 @@ static void compose_status(NmChatApp *app)
     if (g.rate[0])
         segs[n++] = status_segment(g.rate, TUI_SEGMENT_LEFT, 0, 0, 0, tier);
 
-    /* The reasoning effort, always: a diamond + the clipped token.
-     * The token is the effective effort — the set level, else the
+    /* The reasoning effort, always: a four-pointed star + the clipped
+     * token. The token is the effective effort — the set level, else the
      * catalog default the request will run at, else `-` when neither
      * names one — so an unset effort still shows what it will do.
      * Provenance rides the mark AND its color, because the token
      * alone cannot say it: a level set by /effort is the filled
-     * ◆ (U+25C6) in the identity's Foreground (a hard user fact),
+     * ✦ (U+2726) in the identity's Foreground (a hard user fact),
      * an unset one — the model's default, or `-` — is the hollow
-     * ◇ (U+25C7) in the gauge's Comment (muted chrome, not a
-     * choice). Both diamonds are one column under every width
+     * ✧ (U+2727) in the gauge's Comment (muted chrome, not a
+     * choice). Both stars are one column under every width
      * model — no VS15, the ↓ precedent. Priority 0 like the rest
      * of the chrome, never a window-pressure color. */
     int effort_set;
     const char *effort = effort_effective(app->agent, &effort_set);
     snprintf(effort_text, sizeof(effort_text), "%s%s ",
-             effort_set ? "\xe2\x97\x86" : "\xe2\x97\x87",
+             effort_set ? "\xe2\x9c\xa6" : "\xe2\x9c\xa7",
              (effort && *effort) ? effort_row_token(effort) : "-");
     segs[n++] = status_segment(
         effort_text, TUI_SEGMENT_LEFT, 0, 0, 0,
