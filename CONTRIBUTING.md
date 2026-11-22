@@ -158,7 +158,20 @@ prerequisite (skip).
   the timing shapes deterministic — the die case closes the listener in the
   harness's own thread, before the client's connect step, so the refused
   redial is the same on every stack. If a case cannot be written as a pump,
-  the case is dropped, not threaded.
+  the case is dropped, not threaded. Three exceptions are DELIBERATE and say
+  why in the file: ask mode's job-drain pair in `test_agent` (the client
+  blocks inside `nm_agent_turn`, so no test thread is left to pump), and
+  `test_tls` / `test_wire` (a blocking client — a handshake in a forked child,
+  `nm_read_body` — needs a thread of its own). Each keeps `-lpthread`.
+- **A blocking wrapper keeps its own test.** `nm_toolset_execute` is covered
+  through `test_tools`' synchronous-pump cases and `nm_openai_chat` through
+  `test_openai_client`'s one-shot; a file that migrates to the async seam must
+  leave those wrappers tested, not orphaned.
+- **The capture store dies with the server.** `nm_ts_request()` returns a
+  pointer into the server's own store, which `nm_ts_stop` frees: read or copy
+  the evidence BEFORE every stop, never after. The wire recorder's path read
+  and the provider's wire read were both this use-after-free; glibc tolerates
+  it, macOS ASan aborts.
 - **A canned server that serves one request and closes MUST say `Connection:
   close`.** Under a keep-alive pool a reply without the header is an invitation
   to reuse, and the next exchange on that socket races the server's FIN — a
@@ -185,6 +198,12 @@ prerequisite (skip).
   app's collector has bytes (`nm_chat_app_tail_len`) or its state changes,
   bounded. **Poll a file's content, not its existence** (`> file` truncates
   first): wait until it parses (`wait_for_pid_file`).
+- **A waitable HANDLE's event is one-shot.** A job's loop handle on Windows is
+  an AUTO-RESET event: the wait that returned has already consumed it, so
+  re-probing the handle reports "not ready" and the wakeup is gone — a
+  background job then never drains (a harness that re-probed lost every job
+  wakeup on Windows). Dispatch on the slot the wait named, and re-probe only
+  sockets, where `select()` is level-triggered.
 - **A test never sleeps a deadline out; it moves the clock.** Pick by what is
   waited for:
   - a deadline: virtual time. `src/clock.c` is its own TU, so link
@@ -501,6 +520,11 @@ AGENTS.md has the rest of the release rules.
   the use-after-free; macOS ASan aborts).
 - **macOS:** Secure Transport deprecation warnings are expected. Don't "fix"
   them by switching frameworks.
+- **macOS proves the `SIGPIPE` guard through the plain-socket case only.**
+  `tests/test_tls.c`'s closed-peer TLS variant needs that file's in-process TLS
+  server, which exists only for the two Linux backends, so the library's own
+  record write is proved by construction there, not by the test. The plain fd
+  mechanism (`sigpipe.h`) is the same guard the test does run.
 - **Wine is not CI, and a pre-flight that reuses its output lies** (a leftover
   tree can hold a binary the sources no longer build). The cross trees are wiped
   per run and the roster is the harness's `TESTS`, never a listing of `.exe`
