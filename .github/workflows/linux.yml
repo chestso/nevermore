@@ -234,21 +234,25 @@ jobs:
           # Pinned: tests/e2e_portty drives the BUILT binary through
           # coffer's `coffer` CLI, so a coffer change to the script
           # vocabulary or the grid/scrollback queries can break this
-          # repo's e2e. v0.13.0 is the latest coffer release, and it
+          # repo's e2e. v0.17.0 is the latest coffer release, and it
           # carries the inspector as the `coffer` binary (it was
           # `contrib/cfr-debug` before) with the vocabulary the harness
           # needs: wait-for, await-exit/assert-exit, the unified-buffer
           # search. Its script command table is unchanged from the
           # commit this pin replaced -- v0.12.0 added the Lottie
           # sampling work and the CLI's --feed/kitty-keyboard
-          # introspection, and v0.13.0 adds DECSCUSR cursor styling and
-          # xterm OSC 10/11/12 dynamic colors under them, both
-          # additive. A TAG and not a SHA, so the pin reads as the
+          # introspection, v0.13.0 added DECSCUSR cursor styling and
+          # xterm OSC 10/11/12 dynamic colors, and v0.14.0 through
+          # v0.17.0 are engine work behind the same commands (the
+          # unified row coordinate, the ConPTY bundle and byte-bounded
+          # scrollback, the OSC 4/104 palette, the DECRQM and
+          # tertiary-DA replies) plus new CLI options beside them. A
+          # TAG and not a SHA, so the pin reads as the
           # release it is. The same tag lives in macos.yml; Windows
           # does not build coffer yet (its e2e reports SKIP). The
           # coffer release must be PUBLISHED before nevermore, or CI
           # cannot fetch it.
-          ref: v0.13.0
+          ref: v0.17.0
           path: coffer
           fetch-depth: 0
 
