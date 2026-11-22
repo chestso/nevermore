@@ -1674,10 +1674,12 @@ static void test_streaming_frame_shows_tail_and_spinner(void)
  * regression that widened the arrow would leave the gauge's bytes
  * unchanged and shift every cell after it.
  *
- * Measured against all three models EXPLICITLY, never the ambient one: a
+ * Measured against every model EXPLICITLY, never the ambient one: a
  * dev box and a CI runner resolve the ambient model differently, so the
  * zero-suffix call would be a coin flip (the same reason the ⚡ test names
- * its model). */
+ * its model). KITTY is in the set since boba v0.11.5 installs it under
+ * TERM=xterm-kitty; it differs from the others only for selector
+ * clusters, and the marker here has no selector. */
 static void test_output_marker_is_one_cell_under_every_model(void)
 {
     ASSERT_EQ(
@@ -1687,26 +1689,20 @@ static void test_output_marker_is_one_cell_under_every_model(void)
         1);
     ASSERT_EQ(
         tui_utf8_display_width_model("\xe2\x86\x93", TUI_WIDTH_MODEL_UTS51), 1);
+    ASSERT_EQ(
+        tui_utf8_display_width_model("\xe2\x86\x93", TUI_WIDTH_MODEL_KITTY), 1);
     /* And the ⚡ cluster it sits beside is the contrast that makes the
      * point: two cells under the grid rule without its selector. */
     ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1", TUI_WIDTH_MODEL_GRID),
               2);
     /* Reasoning effort markers: ✦ U+2726 and ✧ U+2727 are one cell under
      * every width model. */
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa6", TUI_WIDTH_MODEL_GRID), 1);
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa6", TUI_WIDTH_MODEL_WCWIDTH),
-        1);
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa6", TUI_WIDTH_MODEL_UTS51), 1);
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa7", TUI_WIDTH_MODEL_GRID), 1);
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa7", TUI_WIDTH_MODEL_WCWIDTH),
-        1);
-    ASSERT_EQ(
-        tui_utf8_display_width_model("\xe2\x9c\xa7", TUI_WIDTH_MODEL_UTS51), 1);
+    for (int m = TUI_WIDTH_MODEL_GRID; m <= TUI_WIDTH_MODEL_KITTY; m++) {
+        ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9c\xa6", (TuiWidthModel)m),
+                  1);
+        ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9c\xa7", (TuiWidthModel)m),
+                  1);
+    }
 }
 
 /* The idle frame carries the gauge, the rule and the identity (Q4) and it
@@ -2319,12 +2315,22 @@ static void test_context_gauge_reports_usage_and_limit(void)
      * cells wide). The zero-suffix call answers with whatever model is
      * in force — the process's, on a dev box, and the runner's, in CI —
      * so the assert would be a coin flip. The _model form is the same
-     * measurement under a named rule. */
+     * measurement under a named rule. KITTY is measured beside it: the
+     * rule kitty actually draws with resolves the selector against the
+     * Emoji property, and ⚡ carries it, so the cluster is one cell
+     * there too — the same answer as UTS #51 for this marker, arrived
+     * at by a broader test. */
     ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1\xef\xb8\x8e",
                                            TUI_WIDTH_MODEL_UTS51),
               1);
     ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1",
                                            TUI_WIDTH_MODEL_UTS51),
+              2);
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1\xef\xb8\x8e",
+                                           TUI_WIDTH_MODEL_KITTY),
+              1);
+    ASSERT_EQ(tui_utf8_display_width_model("\xe2\x9a\xa1",
+                                           TUI_WIDTH_MODEL_KITTY),
               2);
     const char *frame = tui_runtime_render(h->rt);
     ASSERT_NOT_NULL(frame);

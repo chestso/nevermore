@@ -5601,9 +5601,10 @@ typedef struct
  * the compact form and the spelled-out one cannot disagree. It is omitted
  * until a round reports output, never a fabricated 0; a REPORTED 0 prints
  * "↓0", because a real report is not an unknown. U+2193 is one cell under
- * every width model (grid, wcwidth, uts51 — test_chat_app pins it), so it
- * needs no presentation selector: adding one would change nothing under
- * any of the three and would be a second spelling of the same marker.
+ * every width model (grid, wcwidth, uts51, kitty — test_chat_app pins it),
+ * so it needs no presentation selector: it has no base to select from,
+ * and adding one would change nothing under any of the rules and would be
+ * a second spelling of the same marker.
  *
  * The ⚡ rate is cache_read / cache_base (see nm_agent_session_*): reads
  * over the input of the rounds that reported a read count, so a round that
@@ -5619,11 +5620,14 @@ typedef struct
  *
  * The WIDTH of the cluster is the TERMINAL's rule, not a constant —
  * boba's width model, which the startup banner names. Under UTS #51
- * (portty, kitty) the cluster is the one-cell text glyph; under the grid
- * rule (xterm) the selector picks the glyph but not the cell count, and
- * the base's two cells stand. Both agree with what those terminals draw,
- * so the row reserves exactly the columns the terminal draws — as long as
- * the model is the terminal's, which is why the banner states it. */
+ * (portty) the cluster is the one-cell text glyph; under the grid rule
+ * (xterm) the selector picks the glyph but not the cell count, and the
+ * base's two cells stand. Kitty's own rule (KITTY, selected under
+ * TERM=xterm-kitty) also narrows the cluster to one cell, by the Emoji
+ * property rather than UTS #51's fixed list. Every rule agrees with what
+ * its terminal draws, so the row reserves exactly the columns the
+ * terminal draws — as long as the model is the terminal's, which is why
+ * the banner states it. */
 static void compose_gauge(const NmChatApp *app, NmGaugeFields *f)
 {
     /* Sized for the worst a long can print (19 digits + '.' +
