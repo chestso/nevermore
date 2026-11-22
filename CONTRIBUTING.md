@@ -35,8 +35,8 @@ Commit style is `scope: lowercase summary`, one behavior per commit (see
 
 ## Make targets
 
-- `make check`: the full suite. `make check-wire` runs just the wire tests
-  (dummy localhost servers, one scripted round per connection).
+- `make check`: the full suite (dummy loopback servers, one scripted round
+  per request).
 - `make format`: clang-format (C), shfmt (scripts), black (Python), dprint
   (Markdown). `make format-check` is the dry run plus
   `scripts/check-md-quotes.py`, which catches an inline code span broken across
@@ -47,20 +47,16 @@ Commit style is `scope: lowercase summary`, one behavior per commit (see
   binary must not depend on a third-party document and the suite never hits the
   network. Commit the result. `make catalogs-check` compares instead of writing.
 - `make bear`: `compile_commands.json` for clangd.
-- `make regen-icon`: re-render `icons/nevermore.ico` from `icons/nevermore.svg`
-  (`rsvg-convert` per size, then `icotool`). The SVG is the source; commit the
-  regenerated `.ico`.
+- `make regen-icon`: re-render `icons/nevermore.ico` from `icons/nevermore.svg`.
+  The SVG is the source; commit the regenerated `.ico`.
 - `make dist-portable`: macOS/Windows only, a self-contained ZIP (binary,
   runtime libraries the OS lacks, docs, `README-PORTABLE.txt`). Run it from a
   build dir configured `--enable-release`, because a sanitized binary is not
-  portable. **The dependency must be release-built too:** boba defaults to
-  ASan+UBSan on macOS and Linux, and an unsanitized nevermore cannot resolve the
-  sanitizer symbols in its archive (`ld: symbol(s) not found`). CI therefore
-  builds boba `--enable-release` and installs it once per job: the sanitized
-  tests and the ZIP's release build link the same archive, so there is no
-  second boba build anywhere. `DIST_TARGET=windows` packs a tree cross-built by
-  the wine pre-flight. Linux is deliberately not packaged; `make dist` is its
-  artifact.
+  portable. **The dependency must be release-built too:** a release nevermore
+  cannot resolve the sanitizer symbols in boba's default ASan+UBSan archive
+  (`ld: symbol(s) not found`), so CI installs one release boba per job.
+  `DIST_TARGET=windows` packs a tree cross-built by the wine pre-flight. Linux
+  is deliberately not packaged; `make dist` is its artifact.
 
 `make -j` does **not** rebuild test binaries. Use `make -C build/tests test_x`
 or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
@@ -71,21 +67,18 @@ or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
   `proc_w32.c`), and our Windows token is `w32`, never `win` (see
   ARCHITECTURE.md, Naming). Guards: `ls src/nm_*` prints nothing, and a new
   header is checked against `ls src/*.h` and the platform's include dir.
-- **Time values are milliseconds, everywhere.** Every time-valued config key
-  (`timeout`, `connect_timeout`, `handshake_timeout`, `searxng_timeout`,
-  `run_command_timeout`, `poll_timeout`, `credits_ttl`) is a positive decimal
-  in ms, and its env spelling ends in `_MS` (`off`, where a key takes it,
-  disables). A key documented in any other unit is a bug: `credits_ttl` was
-  documented in seconds while being resolved through the ms family's helper,
-  and a value written under one story silently meant the other.
+- **Time values are milliseconds, everywhere.** Every time-valued key
+  (README's Configuration table owns the set) is a positive decimal in ms, and
+  its env spelling ends in `_MS` (`off`, where a key takes it, disables). A key
+  documented in another unit is a bug: one shipped a seconds story over the ms
+  resolver, so the written value silently meant the other.
 - **Warnings: fix the smell, accept the noise.** A warning that names a real
   hole is fixed at its root (a buffer sized for the worst its type can produce,
   never for the values seen). A genuine false positive, or an OS-native
   deprecation notice (Secure Transport, by design), is noise we accept: no
   pragma, no blanket attribute, no reshaping a helper to hide it from the
   analyzer. Nothing passes `-Werror`. Optimizer-only warnings show up in the
-  local `-O3` release build. [AGENTS.md](AGENTS.md) has the rules for automated
-  agents.
+  local `-O3` release build.
 - **A column is DISPLAY columns, never bytes.** A row that aligns fields pads
   through `columns.h` (`nm_columns_needed` / `nm_columns_pad`), which measures
   with boba's `tui_utf8_display_width`: a printf field width counts bytes, so
@@ -104,10 +97,9 @@ or `make check`. A stale-binary tell is a FAIL line number pointing at old text.
 
 ## Writing tests
 
-`tests/test_helpers.h` provides `RUN_TEST` / `TEST_SUMMARY` / `ASSERT__`.
-`ASSERT__` uses a bare `return;`, so it works only in void functions; check
-setup in `main` with plain `if`/`return 1`. Exit code 77 marks a missing
-prerequisite (skip).
+`tests/test_helpers.h` owns the harness macros. `ASSERT__` uses a bare
+`return;`, so it works only in void functions; check setup in `main` with
+plain `if`/`return 1`. Exit code 77 marks a missing prerequisite (skip).
 
 ### Isolation: pin everything the machine could vary
 
@@ -138,8 +130,8 @@ prerequisite (skip).
 
 ### Servers, sockets and timing
 
-- **Never hit real APIs.** Canned SSE servers on loopback, one scripted round
-  per connection. A test binary that takes minutes is a bug: it waits on a round
+- **Never hit real APIs.** Canned servers on loopback, one scripted round per
+  request. A test binary that takes minutes is a bug: it waits on a round
   the code will never ask for, or on a deadline.
 - **One thread, one poll, no timers: the harness is a reactor, not a
   schedule.** A canned server is a scripted pump — nonblocking accept, drain,
@@ -183,8 +175,8 @@ prerequisite (skip).
 - **Drain the request.** An unread request plus close is an RST, which on
   macOS/BSD can discard the client's unread reply. **Async-gap assertions must
   make the gap:** a reply already in the socket reports READY, not FETCHING, so
-  hold it ~200 ms. An ASan client against an uninstrumented server thread
-  inverts the race.
+  arm it only when the test drives (the pump's `chunk_events`, never a sleep).
+  An ASan client against an uninstrumented server thread inverts the race.
 - **A pump's `send` is not the peer's readability.** A loopback send is queued,
   not instantly visible to the peer's `recv`: a case that reads immediately
   after `nm_ts_pump` can see `NM_READ_WOULD_BLOCK` with the reply already
@@ -211,8 +203,8 @@ prerequisite (skip).
     by it. No test hook in production.
   - a child's own I/O: real readiness (`drive_virtual`, `source_ready`); only a
     quiet source advances the clock (`want_output`).
-  - a paced canned server: rendezvous (`server_paced_init` / `server_ack`), not
-    a guessed sleep.
+  - a paced canned server: `chunk_events` on the round (one `data:` event per
+    pump pass), not a guessed sleep.
   - the child's cadence is the property (`run_command`'s deadline reset): real
     time and a small budget knob. A frozen clock spins the blocking `nm_connect`
     walk, so `test_wire` links the real clock.
@@ -298,7 +290,8 @@ prerequisite (skip).
 - **The E2E harness drives the binary:** `tests/e2e_portty/` (see its README)
   runs `src/nevermore` through coffer's `coffer` PTY inspector CLI with
   `tools/fake-ollama`. It is part of `make check` and skips (77) when python3,
-  `coffer` or the binary is absent, so a tests-only build skips it. Two traps:
+  `coffer` (or one of the commands the scenario uses) or the binary is absent,
+  so a tests-only build skips it. Two traps:
   - **A backgrounded helper must not inherit the harness's stdin:** a job
     reading it can be stopped by SIGTTIN, silently (`kill -0` still says alive).
     Give it `</dev/null`.
@@ -315,52 +308,47 @@ prerequisite (skip).
   installs: nevermore links whichever is **installed**, so install the ASan lib
   for nevermore's ASan suite and restore the release lib after. boba's real gate
   is its ASan tree (a release tree compiles `assert()` out).
-- **boba, the CI build is release:** every workflow builds boba
-  `--enable-release` and never runs its `make check` — the dependency's suite is
-  boba's own CI, and a copy here would gate this repo on boba's schedule. Read a
-  green run accordingly: CI covers nevermore against a boba whose `assert()`s are
-  compiled out. The ASan tree belongs to the dev box (the wine pre-flight builds
-  the same release boba the runners do; see the stale-install bullet above).
+- **boba, the CI build is release:** every workflow installs it
+  `--enable-release` and never runs its `make check` (that suite is boba's own
+  CI). Read a green run as nevermore against a boba whose `assert()`s are
+  compiled out; the ASan tree is the dev box's (the wine pre-flight builds the
+  same release boba the runners do).
 - **boba, the pin:** all three workflow files (linux, macOS, Windows-MSYS2)
   carry the same boba ref, so bump them together. Push the boba commit
   **before** the nevermore commit that bumps the pin, or CI's checkout fails. A
   pin left behind a consumed API fails differently (missing symbols at link).
-  Both symptoms mean "check the pin". Pin the ref in **one** `env:` block per
-  file so checkout and cache key cannot drift.
+  Both symptoms mean "check the pin". The ref is a literal `ref:` at each
+  checkout (linux.yml's two jobs repeat it; the wine script parses
+  windows.yml's), so bump every occurrence together.
 - **boba, the version is in the compile, not the pin.** boba bakes its version
-  at its own configure time from `git describe --tags`, so a pin names a tree
-  and nothing else. A pair of freshly built trees also reports old versions
-  until both are re-configured (trust a rebuilt binary, not the banner). Hence:
-  **no CI cache for a dependency whose version a shipped binary prints** (v0.2.0
-  shipped a Windows `.exe` reading `boba 0.3.0.5-7d0101b` beside a macOS ZIP
-  reading `boba 0.4.0`, from a stale cache), and both packaged binaries are
-  asserted against what the checkout describes as.
+  at its own configure time from `git describe`, so a pin names a tree and
+  nothing else; a pair of freshly built trees reports old versions until both
+  are re-configured (trust a rebuilt binary, not the banner). Hence **no CI
+  cache for a dependency whose version a shipped binary prints** (a stale cache
+  once shipped a Windows `.exe` reading `boba 0.3.0.5-7d0101b` beside a macOS
+  ZIP reading `boba 0.4.0`), and both packaged binaries are asserted against
+  what the checkout describes.
 - **stb** is gitignored, not committed. `scripts/fetch-stb.sh` pins the upstream
   commit and `configure` fetches a missing header, so a first configure (and CI)
   needs network.
-- **The mbedTLS floor is the distro package (2.28), not 3.0** (Ubuntu 24.04
-  ships 2.28.8, so a 3.0 gate makes auto-detect fall through to OpenSSL).
+- **The mbedTLS floor is the distro package (2.28; Ubuntu 24.04 ships
+  2.28.8), not 3.0** — a 3.0 gate makes auto-detect fall through to OpenSSL.
   `linux.yml` is a two-job matrix (openssl, mbedtls; explicit `--with-tls=`,
-  `fail-fast: false`), and test_tls's loopback server is backend-neutral, so the
-  mbedTLS job tests the handshake. mbedTLS 3.x notes: it is a **three-way
-  split** (`mbedtls.pc` hides `mbedx509`/`mbedcrypto` in `Requires.private`, so
-  configure names all three or the link dies "DSO missing");
-  `mbedtls_ssl_conf_rng` needs a seeded `mbedtls_ctr_drbg_context` third, never
-  NULL; and `mbedtls_pk_parse_keyfile` gained `f_rng` + `p_rng` arguments, which
-  only test_tls's server half notices (guard that call on
-  `MBEDTLS_VERSION_NUMBER` and include `<mbedtls/version.h>`, since an `#if` on
-  an undefined macro is silently false). Both legs run locally:
-  `../configure --with-tls=mbedtls` or `--with-tls=openssl` in a second build
-  tree, then `make && make check`.
+  `fail-fast: false`), so both backends are compiled and tested; both legs also
+  run locally in a second build tree. mbedTLS 3.x: configure must name all three
+  libs (`mbedtls.pc` hides `mbedx509`/`mbedcrypto` in `Requires.private`, so a
+  bare `mbedtls` link dies "DSO missing"), and test_tls's server half guards the
+  changed RNG/key-parse call signatures on `MBEDTLS_VERSION_NUMBER` (include
+  `<mbedtls/version.h>`: an `#if` on an undefined macro is silently false).
 - **clang's UBSan checks function-pointer calls; gcc's does not.** A callback
   cast to the wrong function type is UB that gcc, ASan and every platform
-  tolerate, while clang 19's `-fsanitize=function` catches it. Fix the type,
-  never the cast.
+  tolerate, while clang's UBSan catches it (its `undefined` group includes
+  `function`). Fix the type, never the cast.
 
 ## Pre-flight before pushing
 
-CI runs three workflows (linux, macOS, Windows-MSYS2) and a round trip is ~4
-minutes, so catch failures locally.
+CI runs three workflows (linux, macOS, Windows-MSYS2); a round trip costs
+minutes (macOS is the longest leg), so catch failures locally.
 
 - **Linux** is the dev box. Build from scratch when touching `configure` or
   `Makefile.am` (a stale build dir masks missing sources). **The macOS job
@@ -379,7 +367,7 @@ minutes, so catch failures locally.
 - **macOS:** `scripts/zig-macos-check.sh` uses `build-macos-zig/`
   (`--host=aarch64-apple-darwin`, `CC="zig cc -target aarch64-macos"`, SDK shim
   in `~/.cache/nevermore-zig-macos-sdk`). `make compile-check` compiles the
-  app's TUs **and every test program's objects** (~280). It is compile-only by
+  app's TUs **and every test program's objects**. It is compile-only by
   design: a macOS link needs a real SDK.
 - **Windows:** `scripts/w32-wine-check.sh` uses `build-w32/`
   (`--host=x86_64-w64-mingw32`, a Windows boba cross-built into
@@ -391,7 +379,7 @@ minutes, so catch failures locally.
   `--enable-release` tree in `build-w32-rel/`,
   `make dist-portable DIST_TARGET=windows`, then the extracted `.exe` under wine
   with the MinGW bin dir off `PATH`). Wine is not MSYS2 UCRT64: pre-flight, not
-  guarantee (it still catches ~90% in seconds).
+  guarantee.
 - **Wine's Schannel does real cryptography**, so `test_tls.exe` under wine is
   the Windows success-path proof, not a rehearsal: with a live peer the file's
   `NM_LIVE_TLS=1` probe completes a full handshake (measured 2026-10-17: the
@@ -442,9 +430,9 @@ minutes, so catch failures locally.
   configure-time one and distcleancheck fails on the leftover nested tarball
   (remove with `chmod -R u+w`). distcleancheck reds are real (`EXTRA_DIST` /
   `CLEANFILES`).
-- **When CI fails anyway:** the mac and windows workflows upload
-  `build/tests/*.log` as artifacts (`test-suite.log` has the assertion and ASan
-  detail the console omits):
+- **When CI fails anyway:** every workflow uploads its test logs on failure
+  (`test-logs-*`: `build/tests/*.log`, `test-progress.log`, `core*`;
+  `test-suite.log` has the assertion detail the console omits):
   `gh api repos/chestso/nevermore/actions/artifacts/<id>/zip`. Also
   `gh run list`, `gh run watch <id> --exit-status`,
   `gh run view <id> --log-failed`.
@@ -455,18 +443,17 @@ A tag is the whole trigger.
 `git tag -a v0.1.0 -m "v0.1.0" && git push origin v0.1.0` runs `release.yml`
 (the only workflow with a `tags:` trigger), which calls the three platform
 workflows through `workflow_call` and publishes the macOS ZIP, the Windows ZIP
-and the source tarball. It also checks that the tarball's `version` stamp agrees
-with the tag. Notes go on afterwards with `gh release edit`, **one line per
+and the source tarball. It also checks that every artifact is stamped with the
+tag's own version. Notes go on afterwards with `gh release edit`, **one line per
 paragraph and per bullet** (a release body renders newlines as hard breaks).
-AGENTS.md has the rest of the release rules.
+Codeberg mirrors master and tags but has no CI and no release automation, so a
+tag there never releases.
 
 - **One tag, one run.** Platform workflows carry no `tags:` trigger; adding one
   silently doubles every release's CI.
 - **The tested binary and the shipped one differ.** Tests gate the sanitized
-  build, the ZIP carries `--enable-release`, and boba — the dependency — is
-  built release in every job, so the ZIP links it without a second build. All of
-  it is built in the same job, so a packaging failure is red on every push, not
-  first at release time.
+  build; the ZIP is `--enable-release` with a release boba, built in the same
+  job, so a packaging failure is red on every push, not first at release time.
 - **Green master before the tag.** A red required job skips the release job, and
   no release appears. Move the tag to the fixed commit only after master is
   green.
@@ -484,16 +471,10 @@ AGENTS.md has the rest of the release rules.
 ## Cross-platform lessons
 
 - **A readiness event is not a level fact.** POSIX's `poll` answers "writable
-  now" every time it is asked; WinSock's `FD_WRITE` is edge-triggered (the
-  socket's first connect, or a send that hit `WSAEWOULDBLOCK` and a later send
-  succeeded) and `FD_READ` is recorded on arrival, so both are answers to
-  _transitions_. MEASURED on this box (boba's `tests/test_runtime.c`, the two
-  Windows socket-source cases): associating an already-connected socket with
-  `FD_WRITE` does record the event then, and a READ recorded under a retired
-  slot's event survives re-association — so boba's rebind answers a declared
-  interest. Do not lean on that: the app must still not leave work that a step
-  could do now (a queued request) waiting for the loop. `nm_request_queue`
-  drains a connected socket for exactly this reason.
+  now"; WinSock's `FD_WRITE`/`FD_READ` answer _transitions_. The app must never
+  leave work a step could do now (a queued request) waiting for the loop —
+  `nm_request_queue` drains the connected socket for exactly this reason.
+  ARCHITECTURE's queued-request note owns the measured detail.
 - **The symptom shape.** A stalled round that a _timeout_ ends
   (`timed out: no response for 10000 ms`) and that a fresh dial clears
   afterwards is a wakeup problem, not a peer problem: the first round of a turn
@@ -502,7 +483,6 @@ AGENTS.md has the rest of the release rules.
   then dials) — if the stalls vanish, look at the pooled path before the
   provider. `NEVERMORE_DEBUG_WIRE=1` says whether the request anchor is the last
   line of the round.
-
 - **Never hand-edit `Makefile.in` or trust a stale `build/`.** CI checkouts are
   fresh. After `.am` changes run `autoreconf -i` in the source tree and re-run
   `../configure` in `build/`. A stale source file in the build dir also shadows
@@ -558,20 +538,19 @@ AGENTS.md has the rest of the release rules.
     compiled by `src/Makefile.am`'s windres rule. The `.rc` includes the
     generated `nevermore_version.h` and derives the VERSIONINFO quad from it;
     never hand-write it. `tests/test_version.c` pins the fields.
-  - MSYS2 CI runs ASan, which rejects some things glibc tolerates: "works on
-    Linux" is not clean.
+  - **MinGW has no sanitizer runtime,** so the Windows tested build is
+    uninstrumented: the memory gate is the Linux and macOS sanitized runs.
+    Green on Windows says nothing about a heap error glibc happened to tolerate.
   - **The MSYS2 prefix stays POSIX (`$HOME/.local`):** `PKG_CONFIG_PATH` splits
     on `:`, so a `C:/…` entry reads as two bogus dirs and configure reports boba
-    missing. `actions/cache` runs on the host, so its `path:` names the
-    host-side mapping while msys2 steps keep the POSIX prefix.
+    missing.
   - **Compile in the build step, run in the run step:**
     `config.status --recheck` never descends into `tests/`, so in-step test
     builds are serial minutes.
-  - **The test binaries link `fake_clock.c`, so a timer-driven path needs the
-    drive to advance it.** A loop that waits on a real handle hides a frozen
-    clock (the I/O dispatches); a run whose last look is a POLL does not, and
-    hangs for the whole budget. `shell_drive` spends each wait on the fake
-    clock for exactly this reason.
+  - **A test that links `fake_clock.c` must advance it on every wait.** A loop
+    that waits on a real handle hides a frozen clock (the I/O dispatches); a run
+    whose last look is a POLL does not, and hangs for the whole budget.
+    `shell_drive` spends each wait on the fake clock for exactly this reason.
 
 ## C gotchas
 
@@ -603,17 +582,17 @@ AGENTS.md has the rest of the release rules.
   ISIG on and a foreground group** — an interrupt landing between `fork` and
   the child's `TIOCSCTTY`, or inside a raw-mode program, is silently dropped.
   `kill(-pgid, SIGINT)` reaches the same processes and cannot be lost.
-- **A lone Esc is a timing question, and boba owns the clock** (boba
-  `v0.11.1`): the parser parks an `ESC` byte until the next byte decides
-  whether it was the Escape key or the start of a sequence, and the runtime
-  flushes a parked one as `TUI_KEY_ESCAPE` after `TUI_ESC_TIMEOUT_MS` (50 ms)
-  of quiet. Before that release a lone Esc produced no key at all and the
-  NEXT key read as Alt+key, so a stale `libboba` still loses both ladders —
-  the shell's stop and the round cancel — while every unit test passes,
-  because those drive Esc through `tui_msg_key(TUI_KEY_ESCAPE, …)`.
-  `configure` probes `tui_runtime_input_timeout_ms`; a green `make check` is
-  not the proof of this half, a tmux `!sleep 30` + Esc is.
-- **A tick ETA is a deadline, and 0 means due now** (boba `v0.11.2`): the
+- **A lone Esc is a timing question, and boba owns the clock** (`v0.11.1` or
+  newer): the parser parks an `ESC` byte until the next byte decides whether it
+  was the Escape key or the start of a sequence, and the runtime flushes a
+  parked one as `TUI_KEY_ESCAPE` after `TUI_ESC_TIMEOUT_MS` (50 ms) of quiet.
+  Before that release a lone Esc produced no key at all and the NEXT key read as
+  Alt+key, so a stale `libboba` still loses both ladders — the shell's stop and
+  the round cancel — while every unit test passes, because those drive Esc
+  through `tui_msg_key(TUI_KEY_ESCAPE, …)`. `configure` probes
+  `tui_runtime_input_timeout_ms`; a green `make check` is not the proof of this
+  half, a tmux `!sleep 30` + Esc is.
+- **A tick ETA is a deadline, and 0 means due now** (`v0.11.2` or newer): the
   runtime re-asks `get_tick_timeout_ms` after every wake and dispatches
   `on_tick` once the named time has passed, so a timer reports the time LEFT,
   rounded up by `nm_until_ms` (0 only when the deadline has passed). An early
@@ -629,8 +608,8 @@ AGENTS.md has the rest of the release rules.
 - **`nm_source_items()` sets `*n = 0` / NULL before the first fetch:** call
   `fetch_begin` first. Borrowed boba payloads (a tab-completion prefix, a
   popup's `selected_text`, textinput text) must be copied before the next call.
-- **boba `history_add` prepends** (a newest-first array); the file round-trip is
-  identity (oldest-first on disk).
+- **boba `tui_textinput_history_add` prepends** (index 0 is the newest; the
+  persisted file is oldest-first and reads back to the same ring).
 - **netrc grammar:** `default` is the one valueless key (it opens a machine-less
   entry). Every other key eats exactly one token, so treating `default` like
   them swallows the next key and loses the entry.
@@ -643,19 +622,16 @@ AGENTS.md has the rest of the release rules.
 
 The suite never needs a network. For a manual or visual pass:
 
-- **Fake SSE server:** `tools/fake-ollama/fake_ollama.py` (stdlib) with
-  `-p ollama:local`. `--scenario table-fence` exercises reasoning, table, fence
-  and prose in one turn. Bind both `127.0.0.1` and `::1` (`--both`), since
-  `localhost` can resolve to `::1` first. Drive the TUI with tmux `send-keys` +
-  `capture-pane` (recipe in the tool's README).
+- **Fake SSE server:** `tools/fake-ollama/fake_ollama.py` with `-p ollama:local`
+  (its README has the tmux recipe; `--scenario table-fence` and `--both` cover
+  the two shapes).
 - **`tools/wire-replay`** replays a recorded dump byte-exact. It matches on
   method + path + exact body, so a dump only matches the revision and session
   that produced it. A mismatch is a 503 plus a byte-offset diff, which is the
   diagnostic.
-- **Image tiers use portty's script system:** `portty -S FILE -- sleep 5` runs
-  one command per frame; `emit` feeds the VT engine, `dump-sixel` reads image
-  state back, `screendump` / `renderdump` write PNGs. Escape payloads are `\xNN`
-  per byte (the parser has no `\"` case; it leaks a stray `\`).
+- **Image tiers go through portty's script system** (`-S FILE`); escape
+  payloads are `\xNN` per byte, and the parser has no `\"` case — it leaks a
+  stray `\`.
 - **Let the app settle first** (~2 s before the first keystroke): the
   terminal-profile round trip is still in flight, so `nm_image_supported` says
   unresolved and the attach declines. That is not a bug.
