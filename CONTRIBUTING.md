@@ -224,6 +224,11 @@ plain `if`/`return 1`. Exit code 77 marks a missing prerequisite (skip).
     drive it as the loop does (`harness_drive_events`).
 - **Bound drive loops by wall clock,** not iteration count: a ready-fd pass
   costs microseconds, so 400 iterations can end before a 250 ms budget.
+- **Readiness before a signal, too.** A test that signals a child waits for the
+  child's OWN output proving it is ready — `trap '' INT; echo trapped`, then
+  wait on "trapped" before the group SIGINT — and takes a post-signal positive
+  event (the next loop tick) rather than a guessed settle window. A cold runner
+  that misses a guessed delay kills the child before the trap installs.
 - **Timing margins are generous both ways:** an inactivity budget sits below the
   traffic it must outlive and ~10x above its cadence. The watchdog
   (`NM_TEST_TIMEOUT`, 60 s) is a hang detector, so keep it >= 5x the worst
@@ -236,6 +241,22 @@ plain `if`/`return 1`. Exit code 77 marks a missing prerequisite (skip).
   client-closed connection is delivered from the backlog on Linux (EOF accept)
   but dropped on macOS/BSD, so skip 0-byte connections without consuming a
   script round.
+- **A threaded canned server gets the exchange BEFORE the close.** A test that
+  closes a freshly connected socket without sending a request races the
+  server's `accept`: on macOS/BSD the client-closed connection is dropped from
+  the backlog (above), so a not-yet-accepted connection vanishes and `accept`
+  blocks forever — the `pthread_join` hangs to the watchdog. Complete one
+  request/response first (the reply is the positive event that the accept
+  happened), then close. `test_wire`'s walk cases do this (`walk_exchange`).
+- **A connect-walk test seeds the address cache, not the resolver.** Binding
+  "whatever localhost resolves to last" makes the premise depend on the
+  resolver answering the helper's lookup and the walk's own identically; a
+  macOS VM answered in different orders, so the walk's first dial hit the
+  listener and no address was ever abandoned. Plant the list with
+  `nm_addr_cache_put` (the walk's one input, addr_cache.h) — a dead address
+  first, the listener last — so the hop is mandatory on every box.
+  `test_wire`'s `seed_walk_listener` and the recorder's retry case are the
+  shape.
 - **Windows blackholes loopback connects** (WinNAT: SYN dropped, no RST, ~20 s),
   and bind-then-close is not a guaranteed refusal. Use `127.0.0.1:1` for
   "nothing is listening".
