@@ -993,9 +993,16 @@ Two halves, one sniffer.
   for kitty (`f=100`) and iTerm2, an INDEXED8 quantization for sixel. A terminal
   **stretches** the payload to the reserved cells (kitty and coffer/portty
   alike; it does not letterbox), so a payload already at that pixel size renders
-  **1:1** instead of upscaling the source — the chafa rule. The source's own
-  pixels are smaller than the ceiled cell box, and that gap was the stretch this
-  removes. The prep is display-local and the wire bytes are never touched.
+  **1:1** instead of upscaling the source — the chafa rule. The cell figures
+  the box is built from are **device pixels**: `CSI 16 t` reports the physical
+  cell on kitty, foot, wezterm and portty alike — the graphics-terminal
+  convention — so the cell box and the canvas are device-resolution and the
+  payload renders 1:1 on a scaled display instead of half-size and upscaled.
+  (`OSC 1337 ReportCellSize` is the one report in other units, iTerm2's points
+  plus a device-px-per-point scale; the cell-size query the profile reads is
+  device pixels.) The source's own pixels are smaller than the ceiled cell box,
+  and that gap was the stretch this removes. The prep is display-local and the
+  wire bytes are never touched.
   `nm_image_decode_rgba` checks the decoded pixel count (`NM_IMAGE_MAX_PIXELS`,
   32 MP) from the sniffer's dims **before** stb allocates, since the wire cap
   bounds bytes, not a decompression bomb. Failure degrades to the marker with
