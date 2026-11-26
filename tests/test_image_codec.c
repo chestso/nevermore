@@ -370,6 +370,68 @@ static void test_codec_scale_up_corners(void)
     ASSERT_EQ(br[2], 120);
 }
 
+/* Fit-pad: a source that already fits is copied 1:1 at the top-left,
+ * and the rest of the canvas is transparent (the cell-box sliver). */
+static void test_codec_fit_pad_copies_and_pads(void)
+{
+    unsigned char src[2 * 2 * 4];
+    for (int i = 0; i < 16; i++)
+        src[i] = (unsigned char)(i * 7 + 1);
+    unsigned char dst[4 * 3 * 4];
+    memset(dst, 0xAA, sizeof(dst));
+    ASSERT_EQ(nm_image_fit_pad_rgba(src, 2, 2, dst, 4, 3), 0);
+    /* the placed 2x2 is the source, row by row at the wider stride */
+    for (int y = 0; y < 2; y++)
+        ASSERT_EQ(memcmp(dst + y * 4 * 4, src + y * 2 * 4, 2 * 4), 0);
+    /* everything else is transparent: the right sliver and bottom row */
+    for (int y = 0; y < 3; y++)
+        for (int x = 0; x < 4; x++) {
+            if (x < 2 && y < 2)
+                continue;
+            ASSERT_EQ(dst[(y * 4 + x) * 4 + 3], 0);
+        }
+}
+
+/* Fit-pad: a wider source shrinks BY WIDTH (aspect kept), top-left,
+ * and the unused bottom row stays transparent. */
+static void test_codec_fit_pad_shrinks_by_width(void)
+{
+    /* 4x4: left half red (200,0,0), right half blue (0,0,200) */
+    unsigned char src[4 * 4 * 4];
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++) {
+            unsigned char *p = src + (y * 4 + x) * 4;
+            p[0] = x < 2 ? 200 : 0;
+            p[1] = 0;
+            p[2] = x < 2 ? 0 : 200;
+            p[3] = 255;
+        }
+    unsigned char dst[2 * 3 * 4];
+    ASSERT_EQ(nm_image_fit_pad_rgba(src, 4, 4, dst, 2, 3), 0);
+    /* the placed 2x2 is the box-average: red | blue */
+    ASSERT_EQ(dst[0], 200);
+    ASSERT_EQ(dst[2], 0);
+    ASSERT_EQ(dst[4], 0);
+    ASSERT_EQ(dst[6], 200);
+    ASSERT_EQ(dst[3], 255);
+    /* the bottom row (y=2) is padding */
+    for (int x = 0; x < 2; x++)
+        ASSERT_EQ(dst[(2 * 2 + x) * 4 + 3], 0);
+}
+
+/* Fit-pad: an exact fit is a straight copy; bad dims refuse. */
+static void test_codec_fit_pad_exact_and_invalid(void)
+{
+    unsigned char src[2 * 2 * 4], dst[2 * 2 * 4];
+    for (int i = 0; i < 16; i++)
+        src[i] = (unsigned char)(i * 5);
+    ASSERT_EQ(nm_image_fit_pad_rgba(src, 2, 2, dst, 2, 2), 0);
+    ASSERT_EQ(memcmp(src, dst, sizeof(src)), 0);
+    ASSERT_EQ(nm_image_fit_pad_rgba(src, 2, 2, dst, 0, 2), -1);
+    ASSERT_EQ(nm_image_fit_pad_rgba(src, 0, 2, dst, 2, 2), -1);
+    ASSERT_EQ(nm_image_fit_pad_rgba(NULL, 2, 2, dst, 2, 2), -1);
+}
+
 /* Median cut separates two distinct colors into two entries, the
  * palette in the spec's 0-100 range. */
 static void test_codec_quantize_two_colors(void)
@@ -475,6 +537,9 @@ int main(void)
     RUN_TEST(test_codec_scale_same_size_copies);
     RUN_TEST(test_codec_scale_box_averages);
     RUN_TEST(test_codec_scale_up_corners);
+    RUN_TEST(test_codec_fit_pad_copies_and_pads);
+    RUN_TEST(test_codec_fit_pad_shrinks_by_width);
+    RUN_TEST(test_codec_fit_pad_exact_and_invalid);
     RUN_TEST(test_codec_quantize_two_colors);
     RUN_TEST(test_codec_quantize_transparent);
     RUN_TEST(test_codec_quantize_gradient_bounded);

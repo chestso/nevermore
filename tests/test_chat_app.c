@@ -8226,32 +8226,21 @@ static void test_exec_command_spinner_tier(void)
 /* Images: /image, the pending set, the echo                         */
 /* ---------------------------------------------------------------- */
 
-/* A 64x32 PNG header (the sniffer reads headers only, no decoder). */
+/* A REAL 64x32 RGBA PNG (four quadrants: red | green / blue | white),
+ * 126 bytes. The display prep decodes it, so the attach/recv/imagegen
+ * paths render a cell-box payload; the wire bytes stay these. */
 static const unsigned char CHAT_PNG[] = {
-    0x89,
-    'P',
-    'N',
-    'G',
-    0x0d,
-    0x0a,
-    0x1a,
-    0x0a, /* signature */
-    0x00,
-    0x00,
-    0x00,
-    0x0d,
-    'I',
-    'H',
-    'D',
-    'R', /* IHDR      */
-    0x00,
-    0x00,
-    0x00,
-    0x40, /* width 64  */
-    0x00,
-    0x00,
-    0x00,
-    0x20, /* height 32 */
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x20,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0xa2, 0x9d, 0x7e, 0x84, 0x00, 0x00, 0x00,
+    0x45, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0xed, 0xd0, 0x01, 0x0d, 0x00,
+    0x00, 0x08, 0x02, 0x30, 0xfa, 0x97, 0xd6, 0x18, 0xb8, 0x79, 0x18, 0x01,
+    0x78, 0x26, 0x99, 0xe6, 0x0e, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x07, 0x50,
+    0xfe, 0x5f, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x10, 0x60, 0x01, 0xd7, 0xb6,
+    0xed, 0x1e, 0x38, 0xca, 0x7d, 0x99, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
 };
 
 /* Write the PNG header into the scratch cwd and hand back its path
@@ -8287,14 +8276,14 @@ static void test_image_command_attaches_lists_and_drops(void)
     chat_img_cmd(h, path);
     const char *out = harness_read(h);
     /* the attach line: alt, format, dims, size */
-    ASSERT_TRUE(strstr(out, "image: chat-img.png — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "image: chat-img.png — PNG 64x32, 126 B") != NULL);
 
     /* bare /image lists the pending set, numbered (the -n argument) */
     harness_type(h, "/image");
     harness_enter(h);
     out = harness_read(h);
     ASSERT_TRUE(strstr(out, "images: 1 pending") != NULL);
-    ASSERT_TRUE(strstr(out, "1  chat-img.png — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "1  chat-img.png — PNG 64x32, 126 B") != NULL);
 
     /* /image -1 drops it (and says what went) */
     harness_type(h, "/image -1");
@@ -8364,13 +8353,13 @@ static void test_image_subcommands_are_whole_words(void)
     const char *path = chat_png_fixture("save.png");
     chat_img_cmd(h, path);
     const char *out = harness_read(h);
-    ASSERT_TRUE(strstr(out, "image: save.png — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "image: save.png — PNG 64x32, 126 B") != NULL);
     /* It is PENDING (the attach side), not a save. */
     harness_type(h, "/image");
     harness_enter(h);
     out = harness_read(h);
     ASSERT_TRUE(strstr(out, "images: 1 pending") != NULL);
-    ASSERT_TRUE(strstr(out, "1  save.png — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "1  save.png — PNG 64x32, 126 B") != NULL);
     ASSERT_TRUE(strstr(out, "saved image") == NULL);
 
     harness_free(h);
@@ -8529,7 +8518,7 @@ static void test_img_attach_shows_the_image_when_supported(void)
     const char *out = harness_read(h);
     /* the attach line, then the image itself — not its marker */
     const char *named = strstr(out, "image: chat-img-attach.png — PNG 64x32");
-    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=70,v=40");
     ASSERT_TRUE(named != NULL);
     ASSERT_TRUE(apc != NULL);
     ASSERT_TRUE(named < apc); /* the image lands BELOW the line naming it */
@@ -8607,7 +8596,7 @@ static void test_tool_read_file_image_renders_under_the_panel(void)
     const char *out = harness_read(h);
     /* the panel names the image (alt · format · dims · size) ... */
     const char *named = strstr(out, "[image] nm-chat-tool-img.png — PNG 64x32");
-    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=70,v=40");
     ASSERT_NOT_NULL(named);
     ASSERT_NOT_NULL(apc);
     ASSERT_TRUE(named < apc); /* the image lands under its own panel */
@@ -8672,7 +8661,7 @@ static void test_tool_image_after_streamed_text_never_commits_payload(void)
     const char *text = strstr(out, "Let me read that.");
     ASSERT_NOT_NULL(text);
     /* ... the image rendered exactly once, BELOW that text ... */
-    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=70,v=40");
     ASSERT_NOT_NULL(apc);
     ASSERT_TRUE(text < apc);
     ASSERT_EQ(count_image_apc(out), 1);
@@ -8850,13 +8839,13 @@ static void test_recv_image_renders_through_image_block(void)
 
     const char *out = harness_read(h);
     /* ONE transmission (the block commits once), before the answer. */
-    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=64,v=32");
+    const char *apc = strstr(out, "\x1b_Ga=T,f=100,s=70,v=40");
     ASSERT_NOT_NULL(apc);
     ASSERT_EQ(count_image_apc(out), 1);
     ASSERT_TRUE(apc < strstr(out, "made it"));
     /* The caption a rendered picture needs (a picture carries no text
      * of its own): the id /image save takes, and the facts. */
-    ASSERT_TRUE(strstr(out, "image #1 — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "image #1 — PNG 64x32, 126 B") != NULL);
     /* the payload is never the transcript's text */
     ASSERT_TRUE(strstr(out, "base64,") == NULL);
 
@@ -8991,7 +8980,7 @@ static void test_image_save_writes_the_received_image(void)
     harness_enter(h);
     const char *out = harness_read(h);
     ASSERT_TRUE(strstr(out, "images: 1 in this conversation") != NULL);
-    ASSERT_TRUE(strstr(out, "#1  image — PNG 64x32, 24 B") != NULL);
+    ASSERT_TRUE(strstr(out, "#1  image — PNG 64x32, 126 B") != NULL);
 
     /* Bare /image save writes the newest image under the deterministic
      * name (ask mode's shape) and says what it wrote. */

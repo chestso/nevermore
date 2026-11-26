@@ -6,15 +6,14 @@
  * local paths - the two sources whose bytes are already ours; remote
  * URLs degrade by design), sniffing
  * dimensions from the container headers, choosing the transport from
- * the terminal profile, sizing the display in cells, and - when the
- * terminal cannot take the source container - TRANSCODING it to one it
- * can (JPEG -> PNG for kitty's f=100) through image_codec.
- *
- * No pixel decode happens for a container the terminal already takes
- * (kitty takes PNG via f=100; iTerm2 decodes its own PNG/JPEG/GIF);
- * only the kitty-vs-JPEG lane decodes, and the derived PNG is
- * display-local, freed with the render (the wire bytes are never
- * touched).
+ * the terminal profile, sizing the display in cells, and PREPARING the
+ * display payload: every raster lane decodes the source once and
+ * rebuilds it at the exact cell-box pixel rect (fit-width, top-left,
+ * transparent sliver) through image_codec — a PNG for kitty/iTerm2, an
+ * INDEXED8 quantization for sixel. A terminal scales the payload to the
+ * reserved cells, so a payload already at that pixel size renders 1:1
+ * (the chafa rule) instead of stretching the source. The prep is
+ * display-local; the wire bytes are never touched.
  *
  * The state is a ONE-SLOT cache reached through
  * TuiTranscriptConfig.user_data (NmMarkdownRenderState.img): boba
@@ -36,7 +35,7 @@
 #include "image_bytes.h"
 #include "image_codec.h"
 
-/* There is NO display-side size cap (revised D7, see the plan's D16):
+/* There is NO display-side size cap:
  * the WIRE cap (NM_IMAGE_MAX_WIRE_BYTES, image_bytes.h) is the ONE
  * cap, and it sits where the bytes are actually committed — the
  * attach. An image that is in the conversation has already paid for
@@ -69,24 +68,22 @@ typedef struct NmImageSlot
     int disp_cols, disp_rows; /* the committed display size (cells) */
     char reason[48];          /* degradation reason (empty = rendered)     */
 
-    /* The DISPLAY payload when a transcode was needed (D6): a PNG
-     * derived from the source by image_codec, owned by the slot and
-     * reused across images (grown geometrically like `data`). enc ==
-     * NULL means the source rides as-is; otherwise the spec takes
-     * `enc`/`enc_len` and render_format (the wire bytes are never
-     * touched — the derived payload is display-local).
-     *
-     * The sixel lane reuses the SAME buffer for its own derived
-     * payload: one palette index per pixel (pix_w * pix_h bytes), with
-     * the palette below. */
+    /* The DISPLAY payload: the cell-box raster derived from the source
+     * by image_codec, owned by the slot and reused across images (grown
+     * geometrically like `data`). Every raster lane fills it — a PNG
+     * (kitty, iTerm2) or one palette index per pixel (sixel, pix_w *
+     * pix_h bytes) with the palette below. The spec takes `enc`/
+     * `enc_len` and render_format; the source bytes in `data` are the
+     * wire's and never ride to the terminal. */
     unsigned char *enc;
     size_t enc_cap, enc_len;
     int render_format; /* the format handed to boba (an NmImageFormat) */
 
-    /* The sixel lane's payload geometry + palette. pix_w/pix_h are the
-     * DERIVED payload's pixel dims (the cell-aligned rect the terminal
-     * will occupy), which differ from the source's w/h; the spec's
-     * src_w/src_h take them. ncolors is 0 for every other lane. */
+    /* The DERIVED payload's pixel dims — the cell-box rect the terminal
+     * will occupy (disp_cols*cell_w × disp_rows*cell_h, band-aligned for
+     * sixel), which differ from the source's w/h; the spec's src_w/src_h
+     * take them. ncolors is the sixel palette's entry count, 0 for the
+     * PNG lanes. */
     int pix_w, pix_h;
     int ncolors;
     unsigned char palette[NM_IMAGE_SIXEL_MAX_COLORS * 3];
@@ -117,8 +114,8 @@ int nm_image_supported(const TuiTerminalProfile *p, int format);
 
 /* TuiTranscriptConfig.measure_image: parse the unit's image line,
  * load the source bytes, sniff the dimensions, pick the tier from the
- * profile (transcoding a JPEG to PNG when the terminal needs it) and
- * compute the display cells. Fills the slot (user_data:
+ * profile, compute the display cells and prepare the cell-box payload
+ * (decode + fit-pad + encode). Fills the slot (user_data:
  * NmMarkdownRenderState). Returns 1 with *out_rows >= 1 when the unit
  * will render as an image, 0 to degrade to the render_block marker
  * (the slot still carries what it learned - dims, format, reason -

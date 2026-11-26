@@ -30,10 +30,13 @@
 
 /* ---------------------------------------------------------------- */
 /* Fixtures: minimal container headers (the sniffer reads headers
- * only — no decoder exists on purpose). 64x32 in every format.      */
+ * only). 64x32 in every format. The PNG/JPEG/GIF STUBS below satisfy
+ * the sniffer but NOT the decoder — they exercise the "undecodable
+ * source" rung. FIX_PNG_REAL / FIX_JPEG_REAL are real blobs the
+ * decoder reads, for the display-prep paths.                          */
 /* ---------------------------------------------------------------- */
 
-/* PNG: signature + IHDR chunk header + 32-bit w/h. */
+/* PNG stub: signature + IHDR chunk header + 32-bit w/h (no IDAT). */
 static const unsigned char FIX_PNG[] = {
     0x89,
     'P',
@@ -62,6 +65,29 @@ static const unsigned char FIX_PNG[] = {
 };
 #define FIX_PNG_B64 "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAg"
 #define FIX_PNG_URI "data:image/png;base64," FIX_PNG_B64
+
+/* A REAL 64x32 RGBA PNG, four quadrants: red | green / blue | white,
+ * fully opaque. The decoder reads it, so the display prep (decode →
+ * fit-pad → encode) can be exercised for real and the placed pixels
+ * checked against these quadrants. */
+static const unsigned char FIX_PNG_REAL[] = {
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x20,
+    0x08, 0x06, 0x00, 0x00, 0x00, 0xa2, 0x9d, 0x7e, 0x84, 0x00, 0x00, 0x00,
+    0x45, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0xed, 0xd0, 0x01, 0x0d, 0x00,
+    0x00, 0x08, 0x02, 0x30, 0xfa, 0x97, 0xd6, 0x18, 0xb8, 0x79, 0x18, 0x01,
+    0x78, 0x26, 0x99, 0xe6, 0x0e, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x78, 0x07, 0x50,
+    0xfe, 0x5f, 0x0f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xf0, 0x10, 0x60, 0x01, 0xd7, 0xb6,
+    0xed, 0x1e, 0x38, 0xca, 0x7d, 0x99, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae, 0x42, 0x60, 0x82
+};
+#define FIX_PNG_REAL_B64                                                           \
+    "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAARUlEQVR42u3QAQ0AAAgCMPqX1hi4" \
+    "eRgBeCaZ5g4UAAAAAAAAAAAAAAAAAAAAeAdQ/l8PAAAAAAAAAAAAAAAAAAAA8BBgAde27R44"     \
+    "yn2ZAAAAAElFTkSuQmCC"
+#define FIX_PNG_REAL_URI "data:image/png;base64," FIX_PNG_REAL_B64
 
 /* JPEG: SOI + SOF0 (len, precision, height, width). */
 static const unsigned char FIX_JPEG[] = {
@@ -117,6 +143,17 @@ static const unsigned char FIX_GIF[] = {
 };
 #define FIX_GIF_B64 "R0lGODlhQAAgAA=="
 #define FIX_GIF_URI "data:image/gif;base64," FIX_GIF_B64
+
+/* A REAL 64x32 GIF, the same four quadrants (palette-indexed). The
+ * decoder reads it, so GIF rides every raster lane through the prep
+ * (the former kitty GIF deferral is lifted: decode → PNG carries it). */
+#define FIX_GIF_REAL_B64                                                            \
+    "R0lGODdhQAAgAIEAAP///wD/AP8AAAAA/ywAAAAAQAAgAEAIxAAFCBxIsKDBgwQDKFzIsKHDhwwRS" \
+    "pxYEKLFiw0HaNzIsaPHjxwBiBxJsqTJkyRBqlzZEaXLlyUpypSIsabFmTgr2tzJkKVPlTCDuvxJt"  \
+    "KXQoyRzKhXAs2mApTmd8oSKU+pOqjOt2izKdQDSrwC6FgWLVCxRskfN/kQrFKtMrTXdUoSLUe5Eu"  \
+    "hft0sQLUS9Cvn39GgT8UPBgwg0N60S8UK1PtkEds4QMU/JKyi8tA8WMUjNIzp09ewR9UvRo0iVNG"  \
+    "0U9MiAAOw=="
+#define FIX_GIF_REAL_URI "data:image/gif;base64," FIX_GIF_REAL_B64
 
 /* WebP: RIFF + "WEBP" form + the first chunk's canvas size. Three
  * header shapes, all 64x32 — VP8X (extended), VP8 (lossy), VP8L
@@ -279,18 +316,44 @@ static void test_measure_data_uri_png_kitty(void)
     M m;
     m_init(&m);
     m_profile(&m, 1, 0, 10, 20);
-    ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
-    ASSERT_EQ(m.rs.img.len, sizeof(FIX_PNG));
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
+    ASSERT_EQ(m.rs.img.len, sizeof(FIX_PNG_REAL));
     ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_PNG);
     ASSERT_EQ(m.rs.img.w, 64);
     ASSERT_EQ(m.rs.img.h, 32);
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
-    /* cells 10x20: natural cols = ceil(64/10) = 7; rows =
-     * ceil(32*7*10 / (64*20)) = ceil(2240/1280) = 2 */
+    /* cells 10x20: cols = ceil(64/10) = 7, rows = ceil(32/20) = 2 — the
+     * image's OWN extent in cells, not the aspect of the ceiled width */
     ASSERT_EQ(m.rs.img.disp_cols, 7);
     ASSERT_EQ(m.rs.img.disp_rows, 2);
     ASSERT_EQ(m.rows, 2);
     ASSERT_STR_EQ(m.rs.img.reason, "");
+
+    /* the display payload is a PNG at the EXACT cell box (70x40), the
+     * source fit 1:1 at the top-left, the sliver transparent — so the
+     * terminal's scale-to-cells is an identity (the chafa rule) */
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
+    ASSERT_EQ(m.rs.img.pix_w, 70);
+    ASSERT_EQ(m.rs.img.pix_h, 40);
+    ASSERT_TRUE(m.rs.img.enc_len > 0);
+    int dw = 0, dh = 0;
+    unsigned char *rgba = NULL;
+    ASSERT_EQ(nm_image_decode_rgba(m.rs.img.enc, m.rs.img.enc_len, &dw, &dh,
+                                   &rgba),
+              NM_CODEC_OK);
+    ASSERT_EQ(dw, 70);
+    ASSERT_EQ(dh, 40);
+    /* the four quadrants land 1:1 (red | green / blue | white) */
+    ASSERT_EQ(rgba[(0 * 70 + 0) * 4 + 0], 255);   /* red */
+    ASSERT_EQ(rgba[(0 * 70 + 40) * 4 + 1], 255);  /* green */
+    ASSERT_EQ(rgba[(20 * 70 + 0) * 4 + 2], 255);  /* blue */
+    ASSERT_EQ(rgba[(20 * 70 + 40) * 4 + 0], 255); /* white */
+    ASSERT_EQ(rgba[(20 * 70 + 40) * 4 + 1], 255);
+    /* the right sliver (x>=64) and bottom sliver (y>=32) are transparent */
+    ASSERT_EQ(rgba[(0 * 70 + 64) * 4 + 3], 0);
+    ASSERT_EQ(rgba[(32 * 70 + 0) * 4 + 3], 0);
+    ASSERT_EQ(rgba[(39 * 70 + 69) * 4 + 3], 0);
+    free(rgba);
     nm_markdown_render_state_free(&m.rs);
 }
 
@@ -320,30 +383,36 @@ static void test_measure_format_tier_matrix(void)
     ASSERT_EQ(m.rs.img.w, 16);
     ASSERT_EQ(m.rs.img.h, 16);
 
-    /* kitty + JPEG + iTerm2 (WezTerm): iTerm2 takes the source NATIVELY,
-     * so no decode happens — the natural transport wins (a PNG is not
-     * re-encoded either) */
+    /* kitty + JPEG + iTerm2 (WezTerm): kitty wins the capability
+     * priority, and the prep decodes the JPEG to the cell-box PNG like
+     * any other lane (the transport choice is no longer container-led) */
     m_profile(&m, 1, 1, 10, 20);
     ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
-    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
-    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_JPEG);
-    ASSERT_EQ(m.rs.img.enc_len, 0u);
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
+    ASSERT_TRUE(m.rs.img.enc_len > 0);
 
-    /* iTerm2 + PNG (no kitty) */
+    /* iTerm2 + PNG (no kitty): the prep builds the cell-box PNG */
     m_profile(&m, 0, 1, 10, 20);
-    ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
+    ASSERT_TRUE(m.rs.img.enc_len > 0);
 
-    /* iTerm2 + GIF */
+    /* iTerm2 + GIF: decodes through the same prep */
     m_profile(&m, 0, 1, 10, 20);
-    ASSERT_TRUE(measure_src(&m, FIX_GIF_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_GIF_REAL_URI));
     ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_GIF);
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_ITERM2);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
 
-    /* kitty alone + GIF: PNG-only, and GIF -> PNG is deferred (D12) */
+    /* kitty + GIF: the former deferral is lifted — decode → PNG
+     * carries it, so it renders like any wire container */
     m_profile(&m, 1, 0, 10, 20);
-    ASSERT_FALSE(measure_src(&m, FIX_GIF_URI));
-    ASSERT_STR_EQ(m.rs.img.reason, "format not supported here");
+    ASSERT_TRUE(measure_src(&m, FIX_GIF_REAL_URI));
+    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
+    ASSERT_EQ(m.rs.img.render_format, NM_IMAGE_FMT_PNG);
+    ASSERT_STR_EQ(m.rs.img.reason, "");
 
     /* no graphics at all */
     m_profile(&m, 0, 0, 10, 20);
@@ -362,9 +431,10 @@ static void test_measure_format_tier_matrix(void)
     nm_markdown_render_state_free(&m.rs);
 }
 
-/* The sixel lane: a real container decodes, resamples to the
- * cell-aligned pixel rect, and quantizes to INDEXED8 + a palette. */
-static void test_measure_sixel_scales_to_cell_rect(void)
+/* The sixel lane: a real container decodes, fit-pads to the
+ * cell-aligned pixel rect (1:1 top-left, transparent sliver), and
+ * quantizes to INDEXED8 + a palette. */
+static void test_measure_sixel_pads_to_cell_rect(void)
 {
     M m;
     m_init(&m);
@@ -372,7 +442,8 @@ static void test_measure_sixel_scales_to_cell_rect(void)
     m.profile.sixel = 1;
 
     /* a REAL 16x16 JPEG: 2 cols at 10x20 cells → 20x18 px (the largest
-     * multiple of 6 that fits one 20px row) */
+     * multiple of 6 that fits one 20px row); the 16x16 image sits 1:1
+     * at the top-left, the 4px right / 2px bottom sliver transparent */
     ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
     ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_SIXEL);
     ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_JPEG); /* the SOURCE */
@@ -390,6 +461,16 @@ static void test_measure_sixel_scales_to_cell_rect(void)
                     m.rs.img.enc[i] < m.rs.img.ncolors);
     for (int i = 0; i < m.rs.img.ncolors * 3; i++)
         ASSERT_TRUE(m.rs.img.palette[i] <= 100);
+    /* the sliver (x>=16 or y>=16) is transparent; the placed image is
+     * opaque (the JPEG quadrants carry alpha 255) */
+    for (int y = 0; y < 18; y++)
+        for (int x = 0; x < 20; x++) {
+            unsigned char idx = m.rs.img.enc[y * 20 + x];
+            if (x >= 16 || y >= 16)
+                ASSERT_EQ(idx, NM_IMAGE_TRANSPARENT_INDEX);
+            else
+                ASSERT_TRUE(idx < m.rs.img.ncolors);
+        }
     ASSERT_TRUE(m.rows >= 1);
 
     /* a sixel image whose cell height is unknown cannot be aligned, so
@@ -405,8 +486,8 @@ static void test_measure_sixel_scales_to_cell_rect(void)
     ASSERT_FALSE(measure_src(&m, FIX_JPEG_REAL_URI));
     ASSERT_STR_EQ(m.rs.img.reason, "cell size unknown");
 
-    /* kitty + sixel: the native transport wins — a JPEG on kitty takes
-     * the PNG-transcode lane (D6), never the sixel lane */
+    /* kitty + sixel: kitty wins the capability priority — a JPEG on
+     * kitty takes the PNG prep lane, never the sixel lane */
     m_profile(&m, 1, 0, 10, 20);
     m.profile.sixel = 1;
     ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
@@ -426,10 +507,10 @@ static void test_supported_matches_the_tier_table(void)
     M m;
     m_init(&m);
 
-    m_profile(&m, 1, 0, 10, 20); /* kitty: PNG direct, JPEG transcoded */
+    m_profile(&m, 1, 0, 10, 20); /* kitty: every wire container */
     ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_PNG));
     ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_JPEG));
-    ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF)); /* D12 */
+    ASSERT_TRUE(nm_image_supported(&m.profile, NM_IMAGE_FMT_GIF));
     ASSERT_FALSE(nm_image_supported(&m.profile, NM_IMAGE_FMT_UNKNOWN));
 
     m_profile(&m, 0, 1, 10, 20); /* iTerm2: every container */
@@ -473,19 +554,31 @@ static void test_measure_display_math(void)
     M m;
     m_init(&m);
 
-    /* unknown cell size: 1:1 aspect (distortion <= 1 cell, framing
-     * exact); cols = ceil(64/10) = 7, rows = ceil(32*7/64) = 4 */
+    /* unknown cell size: 1:1 aspect fallback (10x10); cols =
+     * ceil(64/10) = 7, rows = ceil(32/10) = 4 */
     m_profile(&m, 1, 0, 0, 0);
-    ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
     ASSERT_EQ(m.rs.img.disp_cols, 7);
     ASSERT_EQ(m.rs.img.disp_rows, 4);
 
-    /* width clamp: a 4-column budget shrinks the reservation */
+    /* width clamp: a 4-column budget shrinks the reservation; the
+     * height follows the fit width (32*40/64 = 20 → one 20px row) */
     m_profile(&m, 1, 0, 10, 20);
     m.rs.width = 4;
-    ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
     ASSERT_EQ(m.rs.img.disp_cols, 4);
     ASSERT_EQ(m.rs.img.disp_rows, 1);
+
+    /* rows are the image's OWN height in cells, not the aspect of the
+     * ceiled width: 64x32 at 9x16 cells is 8 cols (72px) but still 2
+     * rows (32/16), where the old width-aspect formula ceil'd to 3 */
+    m_profile(&m, 1, 0, 9, 16);
+    m.rs.width = 80;
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
+    ASSERT_EQ(m.rs.img.disp_cols, 8);
+    ASSERT_EQ(m.rs.img.disp_rows, 2);
+    ASSERT_EQ(m.rs.img.pix_w, 72);
+    ASSERT_EQ(m.rs.img.pix_h, 32);
     nm_markdown_render_state_free(&m.rs);
 }
 
@@ -521,11 +614,14 @@ static void test_measure_remote_and_malformed(void)
     nm_markdown_render_state_free(&m.rs);
 }
 
-/* A payload over the former display cap is NOT refused: the bytes are
- * already in the conversation (the attach cap is what let them in), so
- * it renders like any other image and the slot's size is the payload's
- * own (revised D7/D16). */
-static void test_measure_large_data_uri_renders(void)
+/* A payload over the former display cap is NOT refused for its SIZE:
+ * the bytes are already in the conversation (the attach cap is what
+ * let them in), so the loader keeps the WHOLE payload and the slot's
+ * size is the payload's own. This blob is a real PNG
+ * header plus padding, so it sniffs 64x32 but does not DECODE — it
+ * degrades at the prep's "undecodable" rung, never at a size gate, and
+ * the marker still names the full payload size. */
+static void test_measure_large_data_uri_loads_full(void)
 {
     M m;
     m_init(&m);
@@ -547,11 +643,11 @@ static void test_measure_large_data_uri_renders(void)
     size_t decoded = b64_len / 4 * 3;
     free(src);
 
-    ASSERT_TRUE(ok);
+    ASSERT_FALSE(ok); /* undecodable, NOT oversize */
+    ASSERT_STR_EQ(m.rs.img.reason, "undecodable source");
     ASSERT_EQ(m.rs.img.format, NM_IMAGE_FMT_PNG);
     ASSERT_EQ(m.rs.img.w, 64);
     ASSERT_EQ(m.rs.img.h, 32);
-    ASSERT_EQ(m.rs.img.transport, TUI_IMAGE_KITTY);
     /* the WHOLE payload decoded: the slot's len — and so the marker's
      * size — is the payload's, never a probe head's */
     ASSERT_EQ(m.rs.img.len, decoded);
@@ -609,7 +705,7 @@ static void test_measure_local_file(void)
              (long)getpid());
     FILE *f = fopen(path, "wb");
     ASSERT_NOT_NULL(f);
-    fwrite(FIX_PNG, 1, sizeof(FIX_PNG), f);
+    fwrite(FIX_PNG_REAL, 1, sizeof(FIX_PNG_REAL), f);
     fclose(f);
 
     m_profile(&m, 1, 0, 10, 20);
@@ -631,7 +727,7 @@ static void test_slot_reuse_grows_once(void)
     M m;
     m_init(&m);
     m_profile(&m, 0, 1, 10, 20);
-    ASSERT_TRUE(measure_src(&m, FIX_PNG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_PNG_REAL_URI));
     size_t cap1 = m.rs.img.cap;
     unsigned char *p1 = m.rs.img.data;
     ASSERT_TRUE(cap1 > 0);
@@ -640,7 +736,7 @@ static void test_slot_reuse_grows_once(void)
     /* a second image on the SAME render state (the slot is the app's,
      * not the unit's): same cap, same pointer */
     m.blk.image_id = 2;
-    ASSERT_TRUE(measure_src(&m, FIX_JPEG_URI));
+    ASSERT_TRUE(measure_src(&m, FIX_JPEG_REAL_URI));
     ASSERT_EQ(m.rs.img.cap, cap1);
     ASSERT_TRUE(m.rs.img.data == p1);
     ASSERT_EQ(m.rs.img.image_id, 2);
@@ -786,22 +882,46 @@ static void test_integration_kitty_commits_apc(void)
     IH *h = ih_new(1);
     ASSERT_NOT_NULL(h);
 
-    char line[256];
-    snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_PNG_URI);
+    char line[512];
+    snprintf(line, sizeof(line), "![pic](%s)\n\n", FIX_PNG_REAL_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_send(h, tui_msg_stream_delta(0, "after\n\n", 7));
     ih_flush(h);
 
     ASSERT_EQ(tui_transcript_commit_count(h->t), 1u);
     const char *out = ih_read(h);
-    /* the golden transport bytes: kitty APC (a=T transmit-and-display,
-     * s/v source pixels), 7 cols x 2 rows, id 1 */
-    char golden[160];
-    snprintf(golden, sizeof(golden),
-             "\x1b_Ga=T,f=100,s=64,v=32,c=7,r=2,i=1,q=2,C=1;%s"
-             "\x1b\\\r\n\r\n",
-             FIX_PNG_B64);
-    ASSERT_TRUE(strstr(out, golden) != NULL);
+    /* the golden transport head: kitty APC (a=T transmit-and-display),
+     * the CELL BOX 7 cols x 2 rows at 10x20 cells = 70x40 px, id 1 */
+    ASSERT_TRUE(strstr(out,
+                       "\x1b_Ga=T,f=100,s=70,v=40,c=7,r=2,i=1,q=2,C=1;") !=
+                NULL);
+    /* the payload is the DERIVED cell-box PNG, never the source bytes */
+    ASSERT_TRUE(strstr(out, FIX_PNG_REAL_B64) == NULL);
+
+    /* decode the committed payload: 70x40, the source 1:1 at top-left,
+     * the sliver transparent — the terminal's scale-to-cells is then an
+     * identity (the chafa rule, end to end through boba's framing) */
+    const char *semi = strchr(strstr(out, "\x1b_Ga=T,f=100"), ';');
+    const char *st = strstr(semi, "\x1b\\");
+    ASSERT_NOT_NULL(semi);
+    ASSERT_NOT_NULL(st);
+    size_t b64_len = (size_t)(st - semi - 1);
+    unsigned char *png = malloc(b64_len + 1);
+    ASSERT_NOT_NULL(png);
+    long n = nm_image_b64_decode(semi + 1, b64_len, png, b64_len + 1);
+    ASSERT_TRUE(n > 0);
+    int dw = 0, dh = 0;
+    unsigned char *rgba = NULL;
+    ASSERT_EQ(nm_image_decode_rgba(png, (size_t)n, &dw, &dh, &rgba),
+              NM_CODEC_OK);
+    free(png);
+    ASSERT_EQ(dw, 70);
+    ASSERT_EQ(dh, 40);
+    ASSERT_EQ(rgba[(0 * 70 + 0) * 4 + 0], 255); /* red quadrant, 1:1 */
+    ASSERT_EQ(rgba[(0 * 70 + 64) * 4 + 3], 0);  /* right sliver */
+    ASSERT_EQ(rgba[(32 * 70 + 0) * 4 + 3], 0);  /* bottom sliver */
+    free(rgba);
+
     /* the following unit lands below the image's rows */
     const char *img = strstr(out, "\x1b_G");
     const char *after = strstr(out, "after");
@@ -823,7 +943,7 @@ static void test_integration_image_then_text_still_renders(void)
 
     char line[2048];
     snprintf(line, sizeof(line),
-             "![pic](%s)\nthe sentence the model wrote\n", FIX_PNG_URI);
+             "![pic](%s)\nthe sentence the model wrote\n", FIX_PNG_REAL_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
     ih_end(h);
@@ -959,9 +1079,10 @@ static void test_integration_iterm2_row_closes_without_terminator(void)
     ih_free(h);
 }
 
-/* On iTerm2 the source JPEG rides NATIVELY (no decode): the 1337
- * payload is the source bytes verbatim. */
-static void test_integration_iterm2_carries_jpeg_source(void)
+/* On iTerm2 the display payload is the DERIVED cell-box PNG (the prep
+ * every raster lane runs), never the source JPEG bytes: the 1337
+ * payload leads with the PNG magic's base64. */
+static void test_integration_iterm2_carries_derived_png(void)
 {
     IH *h = ih_new_prof(0, 1);
     ASSERT_NOT_NULL(h);
@@ -974,7 +1095,8 @@ static void test_integration_iterm2_carries_jpeg_source(void)
 
     const char *out = ih_read(h);
     ASSERT_TRUE(strstr(out, "1337;File=inline=1") != NULL);
-    ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) != NULL); /* the SOURCE */
+    ASSERT_TRUE(strstr(out, "iVBORw0K") != NULL);        /* the derived PNG */
+    ASSERT_TRUE(strstr(out, FIX_JPEG_REAL_B64) == NULL); /* not the source */
     ASSERT_TRUE(strstr(out, "\x1b_G") == NULL);
 
     ih_free(h);
@@ -1068,15 +1190,15 @@ static void test_integration_live_placeholder_not_payload(void)
     /* the image line completes but its blank terminator has not
      * arrived: the block is LIVE and the region is the one-row
      * placeholder, never the payload */
-    char line[128];
-    snprintf(line, sizeof(line), "![pic](%s)\n", FIX_PNG_URI);
+    char line[512];
+    snprintf(line, sizeof(line), "![pic](%s)\n", FIX_PNG_REAL_URI);
     ih_send(h, tui_msg_stream_delta(0, line, strlen(line)));
     ih_flush(h);
 
     const char *v = ih_view(h);
     ASSERT_TRUE(strstr(v, "pic") != NULL);
     ASSERT_TRUE(strstr(v, "so far") != NULL);
-    ASSERT_TRUE(strstr(v, FIX_PNG_B64) == NULL);
+    ASSERT_TRUE(strstr(v, FIX_PNG_REAL_B64) == NULL);
 
     /* the blank line arrives — the block carries it and stays live —
      * and stream end commits the image (the profile is kitty) */
@@ -1507,11 +1629,11 @@ int main(void)
     RUN_TEST(test_image_ref_parses);
     RUN_TEST(test_measure_data_uri_png_kitty);
     RUN_TEST(test_measure_format_tier_matrix);
-    RUN_TEST(test_measure_sixel_scales_to_cell_rect);
+    RUN_TEST(test_measure_sixel_pads_to_cell_rect);
     RUN_TEST(test_supported_matches_the_tier_table);
     RUN_TEST(test_measure_display_math);
     RUN_TEST(test_measure_remote_and_malformed);
-    RUN_TEST(test_measure_large_data_uri_renders);
+    RUN_TEST(test_measure_large_data_uri_loads_full);
     RUN_TEST(test_measure_local_file);
     RUN_TEST(test_measure_local_file_over_wire_cap_marker);
     RUN_TEST(test_slot_reuse_grows_once);
@@ -1525,7 +1647,7 @@ int main(void)
     RUN_TEST(test_integration_kitty_commits_apc);
     RUN_TEST(test_integration_image_then_text_still_renders);
     RUN_TEST(test_integration_kitty_transcodes_jpeg);
-    RUN_TEST(test_integration_iterm2_carries_jpeg_source);
+    RUN_TEST(test_integration_iterm2_carries_derived_png);
     RUN_TEST(test_integration_sixel_commits_dcs);
     RUN_TEST(test_integration_sixel_row_closes_without_terminator);
     RUN_TEST(test_integration_iterm2_row_closes_without_terminator);

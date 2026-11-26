@@ -96,6 +96,20 @@ long nm_png_encode(const unsigned char *rgba, int w, int h,
 void nm_image_scale_rgba(const unsigned char *src, int sw, int sh,
                          unsigned char *dst, int dw, int dh);
 
+/* Fit the source into a dw×dh canvas BY WIDTH, top-left aligned, and
+ * pad the remainder with transparent pixels: the image keeps its
+ * aspect (height = sh*fit_w/sw), shrinks only when it is wider than the
+ * canvas, and is copied 1:1 when it already fits. `dst` is dw*dh*4
+ * bytes, caller-owned; every byte outside the placed image is zeroed.
+ *
+ * This is the display tier's cell-box prep: a terminal scales the
+ * payload to the reserved cell rect, so a payload already AT that
+ * rect's pixel size renders 1:1 (the chafa rule) instead of stretching
+ * the source. 0 ok; -1 on a non-positive dimension or OOM (dst is then
+ * left zeroed). */
+int nm_image_fit_pad_rgba(const unsigned char *src, int sw, int sh,
+                          unsigned char *dst, int dw, int dh);
+
 /* Median-cut quantize a tightly packed RGBA image to at most
  * `max_colors` entries (clamped to NM_IMAGE_SIXEL_MAX_COLORS), writing
  * one index per pixel into `indices` (w*h bytes) and the palette's RGB

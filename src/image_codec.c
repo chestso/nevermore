@@ -200,6 +200,41 @@ void nm_image_scale_rgba(const unsigned char *src, int sw, int sh,
         scale_bilinear(src, sw, sh, dst, dw, dh);
 }
 
+int nm_image_fit_pad_rgba(const unsigned char *src, int sw, int sh,
+                          unsigned char *dst, int dw, int dh)
+{
+    if (!src || !dst || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0)
+        return -1;
+    memset(dst, 0, (size_t)dw * (size_t)dh * 4);
+
+    /* Fit by width: never wider than the canvas, never upscaled. */
+    int fit_w = sw < dw ? sw : dw;
+    long fit_h = (long)sh * fit_w / sw;
+    if (fit_h > dh)
+        fit_h = dh;
+    if (fit_h < 1)
+        fit_h = 1;
+
+    if (fit_w == sw && fit_h == sh) {
+        /* 1:1: copy row by row (the canvas stride is the wider one). */
+        for (int y = 0; y < sh; y++)
+            memcpy(dst + (size_t)y * dw * 4, src + (size_t)y * sw * 4,
+                   (size_t)sw * 4);
+        return 0;
+    }
+
+    /* Resample into a tight fit rect, then place it top-left. */
+    unsigned char *tmp = malloc((size_t)fit_w * (size_t)fit_h * 4);
+    if (!tmp)
+        return -1;
+    nm_image_scale_rgba(src, sw, sh, tmp, fit_w, (int)fit_h);
+    for (int y = 0; y < fit_h; y++)
+        memcpy(dst + (size_t)y * dw * 4, tmp + (size_t)y * fit_w * 4,
+               (size_t)fit_w * 4);
+    free(tmp);
+    return 0;
+}
+
 /* ---------------------------------------------------------------- */
 /* Quantize (median cut + Floyd-Steinberg)                            */
 /* ---------------------------------------------------------------- */

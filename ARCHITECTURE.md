@@ -986,15 +986,20 @@ Two halves, one sniffer.
   open the attach path. `read_file` uses the wider set to name an image it can
   see but not attach (container, dims, size, the attachable set).
 - **Pixels** (`image_codec.{h,c}`, pure C, the only TU including vendored stb):
-  the transcode lane. kitty's `f=100` is PNG-only, so a JPEG (Gemini returns
-  them) needs decode and PNG re-encode. The tier table picks a native transport
-  first (kitty for PNG, iTerm2 for any container it decodes), so a decode runs
-  only where nothing else can carry the source. The derived PNG is display-local
-  and the wire bytes are never touched. `nm_image_decode_rgba` checks the
-  decoded pixel count (`NM_IMAGE_MAX_PIXELS`, 32 MP) from the sniffer's dims
-  **before** stb allocates, since the wire cap bounds bytes, not a decompression
-  bomb. Failure degrades to the marker with the existing `undecodable source`
-  reason.
+  the display prep. Every raster lane decodes the source once and rebuilds it
+  at the **exact cell-box pixel rect** (`disp_cols*cell_w × disp_rows*cell_h`):
+  the image fit-width at the top-left, the leftover sliver transparent
+  (`nm_image_fit_pad_rgba`), then encoded to the transport's payload — a PNG
+  for kitty (`f=100`) and iTerm2, an INDEXED8 quantization for sixel. A terminal
+  **stretches** the payload to the reserved cells (kitty and coffer/portty
+  alike; it does not letterbox), so a payload already at that pixel size renders
+  **1:1** instead of upscaling the source — the chafa rule. The source's own
+  pixels are smaller than the ceiled cell box, and that gap was the stretch this
+  removes. The prep is display-local and the wire bytes are never touched.
+  `nm_image_decode_rgba` checks the decoded pixel count (`NM_IMAGE_MAX_PIXELS`,
+  32 MP) from the sniffer's dims **before** stb allocates, since the wire cap
+  bounds bytes, not a decompression bomb. Failure degrades to the marker with
+  the existing `undecodable source` reason.
 - **Display** (`image.c`): boba transports, the profile ladder, the one-slot
   cache. It stores `NmImageFormat`; boba's `TuiImageFormat` appears only at the
   spec it fills. `nm_image_supported` is the tier table's front door, shared by

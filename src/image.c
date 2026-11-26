@@ -1,9 +1,10 @@
 /* image.c - the transcript IMAGE tier's policy half.
  * See image.h. Character-level scans only, no regex. Header-only
- * sniffing for every container the terminal already takes (PNG via
- * kitty's f=100, any of them via iTerm2); the ONE decode is the
- * kitty-vs-JPEG lane, where a JPEG is transcoded to PNG through
- * image_codec (the vendored stb).
+ * sniffing for the container facts (format, dims); the ONE decode is
+ * the display prep, which every raster lane runs: the source becomes
+ * a payload sized exactly to the reserved cell rect (image_codec), so
+ * the terminal's scale-to-cells is an identity and the picture renders
+ * 1:1 (the chafa rule). The wire bytes are never touched.
  */
 
 #include "image.h"
@@ -25,9 +26,9 @@
 
 /* boba's vocabulary at the boba boundary: the slot holds nevermore's
  * NmImageFormat (the shared codec's), and the ONE place boba's enum
- * appears is the spec it fills. The mapping is total over the formats
- * the sniffer can return, and render is only reached for a unit that
- * measure accepted (so the format is always one of the three). */
+ * appears is the spec it fills. The display prep only ever produces
+ * PNG (kitty, iTerm2) or INDEXED8 (sixel); the mapping stays total over
+ * the wire formats so a stray value cannot reach boba undefined. */
 static TuiImageFormat to_tui_format(int format)
 {
     switch (format) {
@@ -219,30 +220,36 @@ static int image_load(NmImageSlot *s, const char *src, size_t src_len)
 /* Policy: transport + display cells                                 */
 /* ---------------------------------------------------------------- */
 
-/* Display sizing (D9/D10): fit width, natural height, cell aspect
- * from the probe (1:1 when unknown), no height cap — the terminal
- * keeps every row by design, a tall screenshot scrolling is correct. */
+/* Display sizing: fit width, natural height, no height cap —
+ * the terminal keeps every row by design, a tall screenshot scrolling
+ * is correct. The cell count is the image's OWN pixel extent ceiled to
+ * whole cells (cols from the fit width, rows from the fit height), not
+ * the aspect of the ceiled width: the latter over-reserves a row when
+ * the width ceil adds pixels, and the display payload is built to THIS
+ * rect (image_prepare_*), so the reservation and the pixels agree. */
 static void compute_display(NmImageSlot *s, const NmMarkdownRenderState *rs,
                             const TuiTerminalProfile *p)
 {
     int cell_w = p->cell_w_px > 0 ? p->cell_w_px : 10;
     int cell_h = p->cell_h_px > 0 ? p->cell_h_px : cell_w;
     int avail = (rs && rs->width > 0) ? rs->width : 80;
-    int cols = (s->w + cell_w - 1) / cell_w;
-    if (cols > avail)
-        cols = avail;
+    /* fit width in pixels (never upscale), then ceil to whole cells */
+    long avail_px = (long)avail * cell_w;
+    long fit_w = s->w < avail_px ? s->w : avail_px;
+    long cols = (fit_w + cell_w - 1) / cell_w;
     if (cols < 1)
         cols = 1;
-    /* rows = ceil(src_h * cols * cell_w / (src_w * cell_h)), in long
-     * so pathological dims cannot wrap */
-    long a = (long)s->h * cols * cell_w;
-    long b = (long)s->w * cell_h;
-    long rows = (a + b - 1) / b;
+    if (cols > avail)
+        cols = avail;
+    /* the image's height at that width, in cells; long so pathological
+     * dims cannot wrap */
+    long fit_h = (long)s->h * fit_w / s->w;
+    long rows = (fit_h + cell_h - 1) / cell_h;
     if (rows < 1)
         rows = 1;
     if (rows > 100000)
         rows = 100000; /* sanity bound: int stays int */
-    s->disp_cols = cols;
+    s->disp_cols = (int)cols;
     s->disp_rows = (int)rows;
 }
 
@@ -250,29 +257,23 @@ static void compute_display(NmImageSlot *s, const NmMarkdownRenderState *rs,
 /* Callbacks                                                         */
 /* ---------------------------------------------------------------- */
 
-/* The tier table (D5). A transport that takes the source container
- * NATIVELY is chosen first — kitty f=100 for PNG, iTerm2 1337 for any
- * container it decodes — so a decode runs only where nothing else can
- * carry the source: a kitty-only terminal and a JPEG (kitty's f=100 is
- * PNG-only; kitty/graphics.c takes PNG + raw pixels, and a JPEG rides
- * neither), or a sixel terminal with no native transport (which needs a
- * decode, a resample and a quantize). kitty still wins the PNG case
- * (WezTerm answers both). A GIF on kitty is the deferred case (D12): no
- * tier, so it keeps its marker. An unresolved profile answers no tier —
- * the capabilities are all zero before the verdict, and the UI's attach
- * gate reads the same answer.
+/* The tier table. Every wire container (PNG/JPEG/GIF) decodes to
+ * the display canvas, so the transport choice is capability PRIORITY,
+ * not container: kitty first (its f=100 PNG payload), then iTerm2, then
+ * sixel. The source container only gates "is this a wire image at all"
+ * (UNKNOWN has no tier); the prep turns any of them into the payload
+ * the chosen transport carries. An unresolved profile answers no tier
+ * — the capabilities are all zero before the verdict, and the UI's
+ * attach gate reads the same answer.
  *
  * `reason` is the marker's line when there is no tier: the terminal's
- * own words for why. It is set as soon as a capability exists, so a
- * terminal with graphics that cannot take THIS container reads "format
- * not supported here", and a sixel terminal whose cell size the probe
- * never got reads "cell size unknown" (the row count would be the
- * terminal's guess, not ours). */
+ * own words for why. A sixel terminal whose cell size the probe never
+ * got reads "cell size unknown" (the band-aligned rect needs the cell
+ * height); a graphics terminal facing a non-container reads "format
+ * not supported here". */
 typedef struct
 {
     int transport;      /* TuiImageTransport, -1 = no tier */
-    int payload_format; /* what the spec hands boba (an NmImageFormat) */
-    int transcode;      /* 1 = decode + re-encode to payload_format */
     const char *reason; /* why there is no tier (transport < 0) */
 } NmImageTier;
 
@@ -280,44 +281,31 @@ static void pick_tier(const TuiTerminalProfile *p, int src_format,
                       NmImageTier *out)
 {
     out->transport = -1;
-    out->payload_format = src_format;
-    out->transcode = 0;
     out->reason = "no graphics support";
     if (!p || !p->resolved)
         return;
     if (!p->kitty_graphics && !p->iterm2_images && !p->sixel)
         return; /* the reason stands */
-    /* graphics, but not for this container — unless a rung takes it */
     out->reason = "format not supported here";
-    if (p->kitty_graphics && src_format == NM_IMAGE_FMT_PNG) {
+    if (src_format == NM_IMAGE_FMT_UNKNOWN)
+        return;
+    if (p->kitty_graphics) {
         out->transport = (int)TUI_IMAGE_KITTY;
         return;
     }
-    if (p->iterm2_images && src_format != NM_IMAGE_FMT_UNKNOWN) {
+    if (p->iterm2_images) {
         out->transport = (int)TUI_IMAGE_ITERM2;
         return;
     }
-    if (p->kitty_graphics && src_format == NM_IMAGE_FMT_JPEG) {
-        out->transport = (int)TUI_IMAGE_KITTY;
-        out->payload_format = NM_IMAGE_FMT_PNG; /* the transcode target */
-        out->transcode = 1;
+    /* sixel LAST: it needs a resolved CELL SIZE — the band-aligned
+     * payload height (and so the terminal's row count) is ours to make
+     * exact, which needs the cell height. A cell under 6px is absurd
+     * and the alignment rule assumes cell_h > 5. */
+    if (p->cell_w_px <= 0 || p->cell_h_px < 6) {
+        out->reason = "cell size unknown";
         return;
     }
-    /* sixel LAST: it loses to a native transport wherever one answers
-     * (kitty and iTerm2 carry the source container; sixel needs a
-     * decode, a resample and a quantize). It needs a wire container to
-     * decode and a resolved CELL SIZE — the terminal derives its row
-     * count from the payload's pixel height (ceil(pix_h/cell_h)) and
-     * pix_h is ours to make exact, which needs the cell height. A cell
-     * under 6px is absurd and the alignment rule assumes cell_h > 5. */
-    if (p->sixel && src_format != NM_IMAGE_FMT_UNKNOWN) {
-        if (p->cell_w_px <= 0 || p->cell_h_px < 6) {
-            out->reason = "cell size unknown";
-            return;
-        }
-        out->transport = (int)TUI_IMAGE_SIXEL;
-        out->payload_format = NM_IMAGE_FMT_INDEXED8;
-    }
+    out->transport = (int)TUI_IMAGE_SIXEL;
 }
 
 int nm_image_supported(const TuiTerminalProfile *p, int format)
@@ -327,96 +315,121 @@ int nm_image_supported(const TuiTerminalProfile *p, int format)
     return tier.transport >= 0;
 }
 
-/* Decode the source and re-encode it as PNG into the slot (the kitty
- * JPEG lane). 0 ok; -1 with the slot's reason set, which the marker
- * then prints. The RGBA stb hands back is ONE allocation per image
- * event, freed here (not a per-token churn); the derived PNG persists
- * in the slot for render_image (D6). */
-static int image_transcode(NmImageSlot *s)
+/* The display prep every raster lane runs (kitty and iTerm2 carry a
+ * PNG; sixel quantizes the same canvas below). Decode the source and
+ * build a PNG at the EXACT cell-box pixel rect — disp_cols*cell_w ×
+ * disp_rows*cell_h — with the image fit-width at the top-left and the
+ * sliver transparent. A terminal scales the payload to the reserved
+ * cells, so a payload already at that pixel size renders 1:1 instead
+ * of stretching the source (the chafa rule; the source's own pixels
+ * are smaller than the ceiled cell box, and that gap was the stretch).
+ * Display-local: the wire bytes are never touched. 0 ok; -1 with the
+ * slot's reason set, which the marker then prints. */
+static int image_prepare_png(NmImageSlot *s, const TuiTerminalProfile *p)
 {
+    int cell_w = p->cell_w_px > 0 ? p->cell_w_px : 10;
+    int cell_h = p->cell_h_px > 0 ? p->cell_h_px : cell_w;
+    int pix_w = s->disp_cols * cell_w;
+    int pix_h = s->disp_rows * cell_h;
+
     int dw = 0, dh = 0;
-    unsigned char *rgba = NULL;
-    NmCodecStatus st = nm_image_decode_rgba(s->data, s->len, &dw, &dh, &rgba);
-    if (st != NM_CODEC_OK) {
-        /* D9: the tier took the container, these bytes did not decode
+    unsigned char *src = NULL;
+    if (nm_image_decode_rgba(s->data, s->len, &dw, &dh, &src) != NM_CODEC_OK) {
+        /* the tier took the container, these bytes did not decode
          * (corrupt, truncated, or past the pixel screen) — the same
-         * rung a corrupt PNG already gets. */
+         * rung a corrupt PNG always got. */
         slot_reason(s, "undecodable source");
         return -1;
     }
-    size_t bound = nm_png_encode_bound(dw, dh);
-    if (bound == 0 || slot_reserve_enc(s, bound) != 0) {
-        free(rgba);
+    unsigned char *canvas = malloc((size_t)pix_w * (size_t)pix_h * 4);
+    if (!canvas) {
+        free(src);
         slot_reason(s, "no memory");
         return -1;
     }
-    long n = nm_png_encode(rgba, dw, dh, s->enc, s->enc_cap);
-    free(rgba);
+    int rc = nm_image_fit_pad_rgba(src, dw, dh, canvas, pix_w, pix_h);
+    free(src);
+    if (rc != 0) {
+        free(canvas);
+        slot_reason(s, "no memory");
+        return -1;
+    }
+    size_t bound = nm_png_encode_bound(pix_w, pix_h);
+    if (bound == 0 || slot_reserve_enc(s, bound) != 0) {
+        free(canvas);
+        slot_reason(s, "no memory");
+        return -1;
+    }
+    long n = nm_png_encode(canvas, pix_w, pix_h, s->enc, s->enc_cap);
+    free(canvas);
     if (n <= 0) {
         slot_reason(s, "no memory");
         return -1;
     }
     s->enc_len = (size_t)n;
-    /* the display size is the SOURCE's — the PNG has the same pixels */
-    if (s->w <= 0 || s->h <= 0) {
-        s->w = dw;
-        s->h = dh;
-    }
+    s->render_format = NM_IMAGE_FMT_PNG;
+    s->pix_w = pix_w;
+    s->pix_h = pix_h;
     return 0;
 }
 
-/* The sixel lane's pixel prep: decode the source, resample it to the
- * cell-aligned pixel rect the terminal will occupy, and quantize it to
- * an INDEXED8 payload + palette (all display-local; the wire bytes are
- * never touched). 0 ok; -1 with the slot's reason set, which the marker
- * then prints.
- *
- * The rect is the load-bearing part: the terminal derives its row count
- * from the payload's pixel height, ceil(pix_h/cell_h), and moves the
- * text cursor to the image's LAST row (VT340 ch14). pix_h =
- * 6*floor(disp_rows * cell_h / 6) — the largest band-aligned height that
- * fits the reserved rows — makes that exactly disp_rows for any cell
- * taller than 5px (the tier's gate), and pix_w = disp_cols * cell_w is a
- * whole number of columns. The image is at most 5px short of the full
- * rows: a transparent sliver. */
-static int image_sixel_prepare(NmImageSlot *s, const TuiTerminalProfile *p)
+/* The sixel lane's prep: the SAME fit-pad canvas as the PNG lane, then
+ * quantized to an INDEXED8 payload + palette. The rect is band-aligned:
+ * the terminal derives its row count from the payload's pixel height,
+ * ceil(pix_h/cell_h), and moves the text cursor to the image's LAST row
+ * (VT340 ch14). pix_h = 6*floor(disp_rows*cell_h/6) — the largest
+ * band-aligned height that fits the reserved rows — makes that exactly
+ * disp_rows for any cell taller than 5px (the tier's gate); the rows
+ * are bumped if the alignment would shorten the rect below the image.
+ * pix_w = disp_cols*cell_w is a whole number of columns. The sliver the
+ * image does not fill is transparent, never a stretch. */
+static int image_prepare_sixel(NmImageSlot *s, const TuiTerminalProfile *p)
 {
     int pix_w = s->disp_cols * p->cell_w_px;
     int pix_h = 6 * ((s->disp_rows * p->cell_h_px) / 6);
+    /* the band-aligned height must still hold the fit-width image */
+    long fit_w = s->w < pix_w ? s->w : pix_w;
+    long fit_h = (long)s->h * fit_w / s->w;
+    while (pix_h < fit_h && s->disp_rows < 100000) {
+        s->disp_rows++;
+        pix_h = 6 * ((s->disp_rows * p->cell_h_px) / 6);
+    }
 
     int dw = 0, dh = 0;
     unsigned char *src = NULL;
     if (nm_image_decode_rgba(s->data, s->len, &dw, &dh, &src) != NM_CODEC_OK) {
-        /* D9: the tier took the container, these bytes did not decode
-         * (corrupt, truncated, or past the pixel screen) — the same rung
-         * a corrupt PNG already gets. */
         slot_reason(s, "undecodable source");
         return -1;
     }
     size_t npix = (size_t)pix_w * (size_t)pix_h;
-    unsigned char *rgba = malloc(npix * 4);
-    if (!rgba) {
+    unsigned char *canvas = malloc(npix * 4);
+    if (!canvas) {
         free(src);
         slot_reason(s, "no memory");
         return -1;
     }
-    nm_image_scale_rgba(src, dw, dh, rgba, pix_w, pix_h);
+    int rc = nm_image_fit_pad_rgba(src, dw, dh, canvas, pix_w, pix_h);
     free(src);
-
-    if (slot_reserve_enc(s, npix) != 0) {
-        free(rgba);
+    if (rc != 0) {
+        free(canvas);
         slot_reason(s, "no memory");
         return -1;
     }
-    int n = nm_image_quantize(rgba, pix_w, pix_h, s->enc, s->palette,
+    if (slot_reserve_enc(s, npix) != 0) {
+        free(canvas);
+        slot_reason(s, "no memory");
+        return -1;
+    }
+    int n = nm_image_quantize(canvas, pix_w, pix_h, s->enc, s->palette,
                               NM_IMAGE_SIXEL_MAX_COLORS);
-    free(rgba);
+    free(canvas);
     if (n <= 0) {
         slot_reason(s, "no memory");
         return -1;
     }
     s->enc_len = npix;
     s->ncolors = n;
+    s->render_format = NM_IMAGE_FMT_INDEXED8;
     s->pix_w = pix_w;
     s->pix_h = pix_h;
     return 0;
@@ -462,9 +475,9 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
     if (s->reason[0] != '\0')
         return 0; /* the load itself failed; the reason is the marker's */
     /* no size gate: a load that reached here holds the payload, and the
-     * wire cap already bounded it (revised D7) */
+     * wire cap already bounded it */
 
-    /* tier (D5): the one table, shared with the UI's "if supported"
+    /* tier: the one table, shared with the UI's "if supported"
      * attach gate (nm_image_supported). */
     NmImageTier tier;
     pick_tier(profile, s->format, &tier);
@@ -473,16 +486,15 @@ int nm_image_measure(const TuiBlock *blk, const char *text, size_t len,
         return 0;
     }
     s->transport = tier.transport;
-    s->render_format = tier.payload_format;
-    /* the display size is the SOURCE's aspect — for the sixel lane it
-     * also fixes the derived payload's pixel rect, so it comes first */
+    /* the display size comes first: the prep builds the payload to THIS
+     * rect, so the reservation and the pixels agree */
     compute_display(s, rs, profile);
 
     if (tier.transport == (int)TUI_IMAGE_SIXEL) {
-        if (image_sixel_prepare(s, profile) != 0)
+        if (image_prepare_sixel(s, profile) != 0)
             return 0; /* the reason the prep set is the marker's */
-    } else if (tier.transcode && image_transcode(s) != 0) {
-        return 0; /* the reason transcode set is the marker's */
+    } else if (image_prepare_png(s, profile) != 0) {
+        return 0; /* kitty and iTerm2 both carry the derived PNG */
     }
 
     if (out_rows) {
@@ -510,23 +522,16 @@ void nm_image_render(const TuiBlock *blk, const char *text, size_t len,
     NmImageSlot *s = &rs->img;
     if (s->image_id != blk->image_id || s->transport < 0)
         return; /* stale slot: the marker path owns the fallback */
-    /* the payload is the derived one when a prep happened (the PNG for
-     * the kitty-JPEG lane, the INDEXED8 pixels for sixel), the source
-     * bytes otherwise (D6) */
-    const unsigned char *payload = s->enc_len ? s->enc : s->data;
-    size_t payload_len = s->enc_len ? s->enc_len : s->len;
-    if (!payload || payload_len == 0)
+    /* the payload is always the derived one: the cell-box PNG (kitty,
+     * iTerm2) or the INDEXED8 pixels (sixel). The source bytes never
+     * ride to the terminal — they are the wire's, not the display's. */
+    if (!s->enc || s->enc_len == 0)
         return;
-
-    /* the spec's pixel dims: the payload's own for sixel (the scaled
-     * rect), the source's for every other lane */
-    int src_w = s->pix_w > 0 ? s->pix_w : s->w;
-    int src_h = s->pix_h > 0 ? s->pix_h : s->h;
 
     TuiImageSpec spec;
     tui_image_spec_init(&spec, (TuiImageTransport)s->transport,
-                        to_tui_format(s->render_format), payload, payload_len,
-                        src_w, src_h, s->disp_cols, s->disp_rows,
+                        to_tui_format(s->render_format), s->enc, s->enc_len,
+                        s->pix_w, s->pix_h, s->disp_cols, s->disp_rows,
                         blk->image_id);
     if (s->ncolors > 0) {
         spec.palette = s->palette;
