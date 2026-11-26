@@ -195,7 +195,7 @@ jobs:
           # nothing else), so the status row's columns there are measured
           # with kitty's own rule; test_chat_app pins the identity and
           # effort markers under it beside grid, wcwidth and uts51.
-          ref: v0.11.5
+          ref: v0.11.6
           path: boba
           fetch-depth: 0
 
@@ -318,7 +318,7 @@ jobs:
           # boba.pc is a hard error, so a tarball job cannot skip the
           # dependency it does not compile. The tag is the one the linux
           # build job's note explains.
-          ref: v0.11.5
+          ref: v0.11.6
           path: boba
           fetch-depth: 0
 
