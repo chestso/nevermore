@@ -4401,13 +4401,21 @@ static void test_write_stdin_unknown_job(void)
     nm_toolset_free(ts);
 }
 
-/* write_stdin polls a background job that has printed since the last
- * report — the "read the output" half of the pair. */
+/* write_stdin reports a background job's output since the last report —
+ * the "read the output" half of the pair. The child prints "first", then
+ * BLOCKS on stdin; the poll feeds the line it waits on, and it prints
+ * "second" and exits. Blocking is what makes the first report
+ * deterministic: the exec's yield window must close on a LIVE job, and a
+ * child that exits on its own timer raced that window on a cold runner —
+ * `sleep 0.4` finished before the window closed, the exec step saw the
+ * exit first and reported "Process exited with code 0" with no job id
+ * (the macOS `sid > 0` flake). A stdin-blocked child cannot exit before
+ * the input arrives, so the window always closes on a running job. */
 static void test_write_stdin_reads_progress(void)
 {
     NmToolset *ts = nm_toolset_new_defaults();
-    char *args = exec_args("printf 'first\\n'; sleep 0.4; printf 'second\\n'",
-                           300);
+    char *args =
+        exec_args("printf 'first\\n'; read x; printf 'second\\n'", 300);
     NmToolResult r = exec_virtual("exec_command", args, 1);
     free(args);
     ASSERT_EQ(r.status, NM_TOOL_OK);
@@ -4416,15 +4424,16 @@ static void test_write_stdin_reads_progress(void)
     ASSERT_NOT_NULL(strstr(r.output, "first"));
     nm_tool_result_free(&r);
 
-    /* Poll with no input: the second line arrives, and with it the exit.
-     * The assertion IS the exit, so the drive is the frozen-clock one
-     * (exec_virtual_done, real readiness only): this binary's clock is
-     * the fake one, so a virtual-time drive closes the poll's window on
-     * the first quiet pass after the child speaks — and a loaded box can
-     * lose the exit to that window (the 2026-10-13 flake). Nothing may
-     * cut this call short but the child itself. */
+    /* The poll carries the line the child waits on; it prints "second"
+     * and exits. The assertion IS the exit, so the drive is the
+     * frozen-clock one (exec_virtual_done, real readiness only): this
+     * binary's clock is the fake one, so a virtual-time drive closes the
+     * poll's window on the first quiet pass after the child speaks — and
+     * a loaded box can lose the exit to that window (the 2026-10-13
+     * flake). Nothing may cut this call short but the child itself. */
     NmJson *jp = nm_json_new_object();
     nm_json_set(jp, "job_id", nm_json_new_number(sid));
+    nm_json_set(jp, "input", nm_json_new_string("go\n"));
     nm_json_set(jp, "yield_time_ms", nm_json_new_number(300));
     args = args_dump(jp);
     r = exec_virtual_done("write_stdin", args);
