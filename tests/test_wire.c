@@ -31,6 +31,7 @@
 #include "conf.h"
 #include "transport.h"
 #include "transport_internal.h" /* nm_connection_reusable */
+#include "addr_cache.h"         /* nm_addr_cache_put: seed the walk's list */
 #include "wire_recorder.h"
 #include "test_net_helpers.h"
 #include "test_keepalive_pin.h"
@@ -1423,6 +1424,65 @@ static void test_wire_long_request_line_and_header(void)
 static const char CANNED_OK[] = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
                                 "Content-Length: 5\r\n\r\nhello";
 
+/* The walk's premise, SEEDed not resolved (the recorder case's shape,
+ * test_wire_recorder.c's test_connect_retry_line_shape): a fixed
+ * [IPv6, IPv4] list planted in the address cache, listener on the IPv4
+ * loopback. The cache is the walk's one input (addr_cache.h), so the
+ * two addresses stored here are exactly the two dials made — nothing
+ * listens on the IPv6 loopback at this port, so that attempt is refused
+ * (or its socket fails on an IPv6-less box; the walk still fires the
+ * notice) and the bound IPv4 one answers.
+ *
+ * Why not "bind whatever localhost resolves to last": that made the
+ * premise depend on the resolver answering the helper's lookup and the
+ * walk's own identically. A macOS CI VM answered in different orders,
+ * so the walk's first dial hit the listener and no address was ever
+ * abandoned (the notice flake). Seeding removes the second resolve.
+ * Returns the listener fd, fills *port; -1 only if the bind fails. */
+static int seed_walk_listener(int *port)
+{
+    int lfd = test_bind_loopback(8, port); /* the IPv4 loopback */
+    if (lfd < 0)
+        return -1;
+    struct sockaddr_storage list[2];
+    unsigned lens[2];
+    memset(list, 0, sizeof(list));
+    struct sockaddr_in6 *v6 = (struct sockaddr_in6 *)&list[0];
+    v6->sin6_family = AF_INET6;
+    v6->sin6_addr = in6addr_loopback;
+    v6->sin6_port = htons((unsigned short)*port);
+    lens[0] = (unsigned)sizeof(*v6);
+    struct sockaddr_in *v4 = (struct sockaddr_in *)&list[1];
+    v4->sin_family = AF_INET;
+    v4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    v4->sin_port = htons((unsigned short)*port);
+    lens[1] = (unsigned)sizeof(*v4);
+    nm_addr_cache_put("localhost", *port, list, lens, 2);
+    return lfd;
+}
+
+/* Complete one request/response exchange on a freshly connected walk
+ * socket BEFORE the caller closes it. The reply is the positive event
+ * that the server thread has ACCEPTED: closing right after connect
+ * races the accept, and on macOS/BSD a client-closed connection is
+ * dropped from the backlog rather than delivered as an EOF accept
+ * (CONTRIBUTING's listen rule) — a not-yet-accepted connection vanishes
+ * and accept() blocks forever, which hung the notice case's
+ * pthread_join to the watchdog (the 2026-11-26 macOS stack: main in
+ * join, one_shot_server in accept). The exchange keeps the connection
+ * open until the server has it. Returns 0 on a clean "hello". */
+static int walk_exchange(NmConnection *c)
+{
+    if (nm_request(c, "GET", "/", NULL, 0, NULL, 0) != NM_TRANSPORT_OK)
+        return -1;
+    char buf[64];
+    long n = nm_read_body(c, buf, sizeof(buf));
+    if (n != 5)
+        return -1;
+    buf[n] = '\0';
+    return strcmp(buf, "hello") == 0 ? 0 : -1;
+}
+
 /* One accept, one drain, one canned answer — and a count of how many
  * connections the client actually dialled. The listener stays open
  * (the caller closes it) so the backlog is inspectable afterwards:
@@ -1474,12 +1534,8 @@ static int no_extra_connection(int lfd)
 static void test_blocking_connect_walks_to_reachable_address(void)
 {
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; blocking walk not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1516,12 +1572,8 @@ static void test_blocking_connect_walks_to_reachable_address(void)
 static void test_async_connect_walks_to_reachable_address(void)
 {
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; async walk not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1607,11 +1659,9 @@ static void test_connect_budget_bounds_a_black_hole(void)
 }
 
 /* The walk's notice: fired once per address abandoned in favour of the
- * next one. A multi-homed name ("localhost") with a listener on only
- * one of its addresses makes at least one hop mandatory on any
- * resolver that returns both (the universal case for "localhost");
- * where the resolver hands back a single address there is no hop to
- * report, and the test says so instead of failing a healthy box. */
+ * next one. The seeded list (seed_walk_listener) puts a dead IPv6
+ * address first and the listener last, so at least one hop is mandatory
+ * on every box — no resolver order to depend on, no healthy-box skip. */
 static int g_notice_count;
 static int g_notice_last_idx;
 static int g_notice_last_n;
@@ -1633,16 +1683,11 @@ static void test_notice_cb(void *ud, const char *host, int port, int idx,
 
 static void test_connect_walk_notice_reports_the_next_address(void)
 {
+    knobs_clear_skip_families();
+    knobs_clear_family_policy();
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (lfd < 0) {
-        /* Single-address resolver or no loopback of the tail family:
-         * there is no hop to make, so the notice cannot be exercised
-         * on this host. A healthy box, not a failure. */
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; walk notice not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1662,6 +1707,10 @@ static void test_connect_walk_notice_reports_the_next_address(void)
     ASSERT_NOT_NULL(c);
 
     nm_transport_set_connect_notice(NULL, NULL);
+    /* The exchange BEFORE the close: the reply proves the server
+     * accepted, so the close cannot drop a still-unaccepted connection
+     * from the backlog (the macOS hang — see walk_exchange). */
+    ASSERT_EQ(walk_exchange(c), 0);
     nm_connection_close(c);
     pthread_join(th, NULL);
 
@@ -1754,59 +1803,21 @@ static void test_async_black_hole_reports_a_deadline(void)
 /* The family latch: a hint, never a veto                            */
 /* ---------------------------------------------------------------- */
 
-/* The family of `localhost`'s FIRST resolved address — resolved the way
- * the walk resolves (same hints, same order), so it is the address the
- * resolver would dial first. 0 when the box hands back a single
- * address (there is then no alternative family to prefer). */
-static int first_localhost_family(void)
-{
-    struct addrinfo hints, *res = NULL, *ai;
-    memset(&hints, 0, sizeof(hints));
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    hints.ai_protocol = IPPROTO_TCP;
-    if (getaddrinfo("localhost", "0", &hints, &res) != 0 || !res)
-        return 0;
-    int fam = res->ai_family == AF_INET6
-                  ? NM_FAMILY_V6
-                  : (res->ai_family == AF_INET ? NM_FAMILY_V4 : 0);
-    int n = 0;
-    for (ai = res; ai; ai = ai->ai_next)
-        n++;
-    freeaddrinfo(res);
-    return n >= 2 ? fam : 0;
-}
-
-/* The family of the address a bound listener sits on (0 = nothing
- * bound). */
-static int listener_family(int lfd)
-{
-    struct sockaddr_storage a;
-    socklen_t len = sizeof(a);
-    if (lfd < 0 || getsockname(lfd, (struct sockaddr *)&a, &len) != 0)
-        return 0;
-    if (a.ss_family == AF_INET6)
-        return NM_FAMILY_V6;
-    if (a.ss_family == AF_INET)
-        return NM_FAMILY_V4;
-    return 0;
-}
-
 /* A localhost port with nothing listening on it: bind a listener, then
  * close it (a listening socket that never accepted releases its port at
  * once). */
 static int closed_localhost_port(void)
 {
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
+    int lfd = test_bind_loopback(8, &port);
     if (lfd < 0)
         return 0;
     close(lfd);
     return port;
 }
 
-/* The walk PREFERS the un-latched family: with the FIRST localhost
- * address's family latched and the listener on the LAST address, the
+/* The walk PREFERS the un-latched family: with the FIRST (dead IPv6)
+ * address's family latched and the listener on the IPv4 tail, the
  * latched address is never dialled — the connect lands on attempt 0, so
  * the notice (fired only when an address is abandoned) stays silent.
  * That is the latch's whole point: the budget is not paid on the family
@@ -1815,14 +1826,9 @@ static void test_family_skip_prefers_the_unlatched_family(void)
 {
     knobs_clear_skip_families();
     knobs_clear_family_policy();
-    int first = first_localhost_family();
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (!first || lfd < 0 || listener_family(lfd) == first) {
-        fprintf(stderr, "  note: 'localhost' has no second address "
-                        "family; latch preference not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1830,7 +1836,7 @@ static void test_family_skip_prefers_the_unlatched_family(void)
     pthread_create(&th, NULL, one_shot_server, &sc);
 
     knobs_set_family_policy(1);
-    knobs_set_skip_families(first);
+    knobs_set_skip_families(NM_FAMILY_V6); /* the first (dead) address */
     g_notice_count = 0;
     nm_transport_set_connect_notice(test_notice_cb, NULL);
 
@@ -1842,6 +1848,7 @@ static void test_family_skip_prefers_the_unlatched_family(void)
      * family, dialled because the latch moved the other one behind it. */
     ASSERT_EQ(g_notice_count, 0);
 
+    ASSERT_EQ(walk_exchange(c), 0); /* accept before close (the hang) */
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(lfd);
@@ -1860,13 +1867,8 @@ static void test_family_skip_never_makes_a_name_unreachable(void)
     knobs_clear_skip_families();
     knobs_clear_family_policy();
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    int latched = listener_family(lfd);
-    if (!latched) {
-        fprintf(stderr, "  note: 'localhost' has no second address to "
-                        "walk to; latch fallback not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1874,7 +1876,7 @@ static void test_family_skip_never_makes_a_name_unreachable(void)
     pthread_create(&th, NULL, one_shot_server, &sc);
 
     knobs_set_family_policy(1);
-    knobs_set_skip_families(latched);
+    knobs_set_skip_families(NM_FAMILY_V4); /* the LISTENER's family */
     g_notice_count = 0;
     g_notice_last_family = 0;
     nm_transport_set_connect_notice(test_notice_cb, NULL);
@@ -1890,8 +1892,10 @@ static void test_family_skip_never_makes_a_name_unreachable(void)
     ASSERT_EQ(g_notice_count, 1);
     ASSERT_EQ(g_notice_last_idx, 0);
     ASSERT_EQ(g_notice_last_n, 2);
-    ASSERT_TRUE(g_notice_last_family != 0 && g_notice_last_family != latched);
+    ASSERT_TRUE(g_notice_last_family != 0 &&
+                g_notice_last_family != NM_FAMILY_V4);
 
+    ASSERT_EQ(walk_exchange(c), 0); /* accept before close (the hang) */
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(lfd);
@@ -1908,14 +1912,9 @@ static void test_family_skip_policy_off_is_inert(void)
 {
     knobs_clear_skip_families();
     knobs_clear_family_policy();
-    int first = first_localhost_family();
     int port = 0;
-    int lfd = test_bind_last_localhost_addr(&port);
-    if (!first || lfd < 0 || listener_family(lfd) == first) {
-        fprintf(stderr, "  note: 'localhost' has no second address "
-                        "family; latch inertness not exercised\n");
-        return;
-    }
+    int lfd = seed_walk_listener(&port);
+    ASSERT_TRUE(lfd >= 0);
 
     struct ServerCase sc = { CANNED_OK, 0, port, lfd };
     sc.len = strlen(sc.response);
@@ -1923,7 +1922,7 @@ static void test_family_skip_policy_off_is_inert(void)
     pthread_create(&th, NULL, one_shot_server, &sc);
 
     knobs_set_family_policy(0);
-    knobs_set_skip_families(first);
+    knobs_set_skip_families(NM_FAMILY_V6); /* the first (dead) address */
     g_notice_count = 0;
     nm_transport_set_connect_notice(test_notice_cb, NULL);
 
@@ -1932,10 +1931,11 @@ static void test_family_skip_policy_off_is_inert(void)
     nm_transport_set_connect_notice(NULL, NULL);
     ASSERT_NOT_NULL(c);
     /* The policy is off, so the latch did not move anything: the
-     * resolver's first address was dialled first and abandoned. */
+     * seeded first address was dialled first and abandoned. */
     ASSERT_EQ(g_notice_count, 1);
-    ASSERT_EQ(nm_connection_skipped_families(), first); /* still stored */
+    ASSERT_EQ(nm_connection_skipped_families(), NM_FAMILY_V6); /* stored */
 
+    ASSERT_EQ(walk_exchange(c), 0); /* accept before close (the hang) */
     nm_connection_close(c);
     pthread_join(th, NULL);
     close(lfd);
