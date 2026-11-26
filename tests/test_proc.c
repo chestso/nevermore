@@ -939,9 +939,16 @@ static void test_interrupt_is_a_polite_sigint(void)
     nm_proc_reset();
     char err[128];
     int id = -1;
-    NmProc *p = nm_proc_start("sleep 30", NULL, NULL, &id, err, sizeof(err));
+    /* "ready" is the child's OWN readiness (the TEST_ECHO_THEN_LONG
+     * shape): the shell has run and is exec'ing the sleep. A guessed
+     * delay raced that exec on a cold runner. Whether the signal lands
+     * on the shell a moment before the exec or on the sleep after it,
+     * the default disposition answers 130 either way. */
+    NmProc *p = nm_proc_start("echo ready; exec sleep 30", NULL, NULL, &id,
+                              err, sizeof(err));
     ASSERT_NOT_NULL(p);
-    tsleep(100); /* let the shell exec the sleep */
+    ASSERT_EQ(pump_until(p, done_printed, 5000), 0);
+    nm_proc_take_output(p); /* consume "ready" */
     nm_proc_interrupt(p);
     ASSERT_EQ(pump_until(p, done_exited, 5000), 0);
     ASSERT_EQ(nm_proc_exit(p), 128 + 2); /* SIGINT */
@@ -951,12 +958,23 @@ static void test_interrupt_is_a_polite_sigint(void)
      * which is exactly what a person sees when a script traps INT. */
     nm_proc_reset();
     NmProc *stubborn = nm_proc_start(
-        "trap '' INT; while :; do sleep 0.2; done", NULL, NULL, &id, err,
-        sizeof(err));
+        "trap '' INT; echo trapped; while :; do sleep 0.2; echo tick; done",
+        NULL, NULL, &id, err, sizeof(err));
     ASSERT_NOT_NULL(stubborn);
-    tsleep(100); /* let the trap install before the signal lands */
+    /* "trapped" is printed AFTER the trap installs — readiness from the
+     * child, not a guessed delay. A cold runner that missed the old
+     * 100 ms window killed the shell before it could ignore INT (the
+     * 2026-11-22 macOS red: nm_proc_live(stubborn) == 0). */
+    ASSERT_EQ(pump_until(stubborn, done_printed, 5000), 0);
+    nm_proc_take_output(stubborn); /* consume "trapped" */
     nm_proc_interrupt(stubborn);
-    tsleep(400);
+    /* A post-signal loop tick is the positive event that the shell
+     * ignored INT and kept looping — not the old 400 ms window. The
+     * signal kills the current `sleep` child; the shell survives and
+     * prints the next tick. Were the shell to die of INT, no tick would
+     * come and this wait would fail loudly instead of asserting a dead
+     * child. */
+    ASSERT_EQ(pump_until(stubborn, done_printed, 5000), 0);
     nm_proc_drain(stubborn);
     ASSERT_EQ(nm_proc_live(stubborn), 1);
     nm_proc_close(stubborn);
