@@ -14,7 +14,7 @@
 
 #include "provider.h"
 
-/* openrouter: 379 models.
+/* openrouter: 381 models.
  * Source: GET https://openrouter.ai/api/v1/models?limit=1000
  */
 static const NmModel nm_catalog_openrouter[] = {
@@ -168,6 +168,8 @@ static const NmModel nm_catalog_openrouter[] = {
     { "mistralai/voxtral-small-24b-2507", "Mistral: Voxtral Small 24B 2507", 0, 0, 32768, 1, NULL, NULL },
     { "moondream/moondream3-preview", "Moondream: Moondream 3 Preview", 1, 0, 32000, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "moondream/moondream3.1-9b-a2b", "Moondream: Moondream 3.1", 1, 0, 32000, -1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "moonshotai/kimi-k2", "MoonshotAI: Kimi K2 0711", 0, 0, 131072, 1, NULL, NULL },
+    { "moonshotai/kimi-k2-0905", "MoonshotAI: Kimi K2 0905", 0, 0, 262144, 1, NULL, NULL },
     { "moonshotai/kimi-k2.5", "MoonshotAI: Kimi K2.5", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "moonshotai/kimi-k2.6", "MoonshotAI: Kimi K2.6", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "moonshotai/kimi-k2.7-code", "MoonshotAI: Kimi K2.7 Code", 1, 0, 262144, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
@@ -364,7 +366,7 @@ static const NmModel nm_catalog_openrouter[] = {
     { "z-ai/glm-4.5", "Z.ai: GLM 4.5", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5-air", "Z.ai: GLM 4.5 Air", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.5v", "Z.ai: GLM 4.5V", 1, 0, 65536, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
-    { "z-ai/glm-4.6", "Z.ai: GLM 4.6", 0, 0, 204800, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
+    { "z-ai/glm-4.6", "Z.ai: GLM 4.6", 0, 0, 202752, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.6v", "Z.ai: GLM 4.6V", 1, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.7", "Z.ai: GLM 4.7", 0, 0, 204800, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
     { "z-ai/glm-4.7-flash", "Z.ai: GLM 4.7 Flash", 0, 0, 131072, 1, "none|minimal|low|medium|high|xhigh|max", NULL },
