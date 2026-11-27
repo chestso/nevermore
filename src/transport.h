@@ -1,8 +1,8 @@
 /* transport.h - pluggable HTTP(S) transport
  *
- * No libcurl, ever. Plain HTTP is a hand-rolled HTTP/1.1 client over
- * BSD sockets / Winsock. TLS is delegated to an OS-native or optional
- * backend selected at configure time:
+ * Minimal dependencies: plain HTTP is a hand-rolled HTTP/1.1 client
+ * over BSD sockets / Winsock. TLS is delegated to an OS-native or
+ * optional backend selected at configure time:
  *
  *   Windows  Schannel          (NM_TLS_SCHANNEL)
  *   macOS    Secure Transport  (NM_TLS_SECTRANSPORT)

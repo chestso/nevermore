@@ -1,9 +1,9 @@
 /* transport.c - transport public API over sockets/TLS
  *
- * Hand-rolled HTTP/1.1: no libcurl. Plain HTTP talks straight over
- * BSD sockets / Winsock; TLS is delegated to the backend chosen at
- * configure time (see transport.h). Chunked transfer decoding lives
- * in transport_socket.c alongside the response reader.
+ * Hand-rolled HTTP/1.1 to keep dependencies minimal. Plain HTTP talks
+ * straight over BSD sockets / Winsock; TLS is delegated to the backend
+ * chosen at configure time (see transport.h). Chunked transfer decoding
+ * lives in transport_socket.c alongside the response reader.
  */
 
 #include <stdarg.h>

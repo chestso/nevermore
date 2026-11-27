@@ -13,7 +13,8 @@ sixel image attach) and degrades gracefully elsewhere.
 - **Providers:** Ollama (`ollama:local`, `ollama:cloud`),
   OpenRouter, OpenCode (`opencode:go`, `opencode:zen`). The colon keeps the
   service and its endpoint tier distinct.
-- **Transport:** hand-rolled HTTP/1.1 + SSE with the OS's own TLS. No libcurl.
+- **Transport:** hand-rolled HTTP/1.1 + SSE with the OS's own TLS, keeping
+  dependencies minimal.
 - **Tools:** file read/write/edit, shell commands, long-running jobs, web
   search, skills.
 - **Vision:** attach images to a prompt; image-output models render in the
@@ -79,9 +80,9 @@ Dependencies:
 - **[boba](https://chest.so/boba/)** (required): TUI runtime, text input, styles.
   A separate project, not vendored. Build and install it first; `configure`
   finds it through pkg-config.
-- **TLS** (optional, per OS, never libcurl): Schannel on Windows, Secure
-  Transport on macOS, mbedTLS (>= 2.28) or OpenSSL on Linux. `--with-tls=none`
-  builds a plain-HTTP-only client, which is fine for a local Ollama daemon.
+- **TLS** (optional, per OS): Schannel on Windows, Secure Transport on macOS,
+  mbedTLS (>= 2.28) or OpenSSL on Linux. `--with-tls=none` builds a
+  plain-HTTP-only client, which is fine for a local Ollama daemon.
 - **stb** (image transcoding): single-file headers fetched into
   `third_party/stb/` by the first `configure` of a git checkout (pinned commit,
   needs network, never committed); the source tarball already includes them. By

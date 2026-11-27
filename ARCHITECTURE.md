@@ -48,7 +48,7 @@ at its root (refactor the types and seams), not by patching around it.
   SSE event is a bug. One allocation per tool call or turn is fine.
 - **No regex.** SSE parsing, tool search and command parsing are character-level
   scans and state machines (`strncmp` over literals), never POSIX regex.
-- **No libcurl.** Hand-rolled transport, OS-native TLS.
+- **Minimal dependencies.** Hand-rolled transport, OS-native TLS.
 - **Prefix-cache stability.** The whole session rides every request, because
   a sliding window or a guessed token budget would change the request prefix the
   provider's prompt cache keys on. Anything that would alter earlier bytes

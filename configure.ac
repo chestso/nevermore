@@ -197,7 +197,7 @@ AC_COMPILE_IFELSE(
 CFLAGS="$ac_save_CFLAGS"
 
 dnl ------------------------------------------------------------------
-dnl TLS backend selection (no libcurl, ever).
+dnl TLS backend selection (minimal dependencies, OS-native where possible).
 dnl
 dnl   Windows: Schannel          (Win32 API, always present, -lsecur32)
 dnl   macOS:   Secure Transport  (Security.framework, always present)
