@@ -45,8 +45,6 @@ sixel image attach) and degrades gracefully elsewhere.
 - Provider API notes (live-probed wire behavior): [Ollama Cloud](docs/OLLAMA-CLOUD-API.md),
   [OpenCode](docs/OPENCODE-API.md),
   [OpenRouter](docs/OPENROUTER-API.md)
-- [Ask DeepWiki](https://deepwiki.com/chestso/nevermore): AI-generated wiki and
-  code index
 
 ## Install
 
